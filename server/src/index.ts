@@ -17,11 +17,13 @@ const mockYields = [
 ];
 
 app.get('/api/yields', (req: Request, res: Response) => {
+  void req;
   res.json(mockYields);
 });
 
 app.post('/api/recommend', (req: Request, res: Response) => {
   const { preferences, riskTolerance } = req.body;
+  void preferences;
   // Mock Claude AI recommendation based on inputs
   res.json({
     recommendation: `Based on your ${riskTolerance || 'moderate'} risk tolerance, we recommend the Yield Index vault on DeFindex for diversified, stable returns.`,
