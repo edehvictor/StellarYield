@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["yield_vault", "zap", "options"]
+members = ["yield_vault", "zap", "options", "bridge_relayer"]
 
 [profile.release]
 opt-level = "z"

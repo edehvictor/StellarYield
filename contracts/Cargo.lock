@@ -217,6 +217,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "bridge_relayer"
+version = "0.1.0"
+dependencies = [
+ "ed25519-dalek",
+ "rand 0.8.5",
+ "soroban-sdk",
+ "soroban-token-sdk",
+]
+
+[[package]]
 name = "bumpalo"
 version = "3.20.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
