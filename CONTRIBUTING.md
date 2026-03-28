@@ -51,6 +51,28 @@ If you are adding a "Good First Issue" to the backlog, it should:
 * Include explicit acceptance criteria.
 * Be easily testable in isolation.
 
+### 🧪 Running the Fuzzing Suite
+The vault includes a property-based testing suite built with `proptest`. To run the fuzz tests:
+
+```bash
+cd contracts
+cargo test --test fuzz_tests -- --nocapture
+```
+
+To run with more iterations (recommended before merging security-sensitive changes):
+
+```bash
+PROPTEST_CASES=100000 cargo test --test fuzz_tests -- --nocapture
+```
+
+The fuzzing suite validates the following invariants:
+* `total_shares` and `total_assets` are never negative
+* First depositor receives 1:1 shares
+* Full withdrawal returns the exact deposited amount for a sole depositor
+* Multi-user deposits produce proportional shares
+* Share price never decreases from deposit/withdraw operations
+* Rebalance correctly updates tracked assets
+
 ### ❓ Questions & Scope
 If a change requires touching the client UX, the backend API, *and* the smart contracts, please split that work into separate, sequential Pull Requests to make reviewing easier and safer.
 ```

@@ -34,6 +34,8 @@ enum DataKey {
 }
 
 mod admin;
+mod fees;
+mod keeper;
 mod oracle;
 
 // ── Errors ──────────────────────────────────────────────────────────────
@@ -346,17 +348,22 @@ impl YieldVault {
     }
 
     /// Harvest rewards, swap for base asset, and auto-compound.
-    /// Callable by admin or keeper. No new shares minted.
+    /// Callable by admin, the legacy keeper, or any registered keeper node.
+    /// Registered keepers receive a small fee (in base tokens) to cover gas
+    /// costs and provide a profit incentive for trustless execution.
     pub fn harvest(env: Env, caller: Address, min_amount_out: i128) -> Result<i128, VaultError> {
         Self::require_init(&env)?;
         caller.require_auth();
         let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
-        let keeper: Option<Address> = env.storage().instance().get(&DataKey::Keeper);
-        if caller != admin {
-            match &keeper {
-                Some(k) if k == &caller => {}
-                _ => return Err(VaultError::Unauthorized),
-            }
+        let legacy_keeper: Option<Address> = env.storage().instance().get(&DataKey::Keeper);
+        let is_admin = caller == admin;
+        let is_legacy_keeper = match &legacy_keeper {
+            Some(k) => k == &caller,
+            None => false,
+        };
+        let is_registered = Self::is_registered_keeper(&env, &caller);
+        if !is_admin && !is_legacy_keeper && !is_registered {
+            return Err(VaultError::Unauthorized);
         }
         let base_token: Address = env.storage().instance().get(&DataKey::Token).unwrap();
         let reward_token: Address = env
@@ -402,11 +409,25 @@ impl YieldVault {
         let amount_out: i128 =
             env.invoke_contract(&dex_router, &Symbol::new(&env, "swap"), swap_args);
 
-        // Step 4: Auto-compound (increase TVL, no new shares)
+        // Step 4: Calculate keeper fee (only for non-admin callers)
+        let keeper_fee = if !is_admin {
+            Self::calculate_keeper_fee(&env, amount_out)
+        } else {
+            0i128
+        };
+        let net_amount = amount_out - keeper_fee;
+
+        // Step 5: Pay keeper fee if applicable
+        if keeper_fee > 0 {
+            let base_client = token::Client::new(&env, &base_token);
+            base_client.transfer(&env.current_contract_address(), &caller, &keeper_fee);
+        }
+
+        // Step 6: Auto-compound net amount (increase TVL, no new shares)
         let total_assets: i128 = env.storage().instance().get(&DataKey::TotalAssets).unwrap();
         env.storage()
             .instance()
-            .set(&DataKey::TotalAssets, &(total_assets + amount_out));
+            .set(&DataKey::TotalAssets, &(total_assets + net_amount));
         let total_harvested: i128 = env
             .storage()
             .instance()
@@ -414,13 +435,13 @@ impl YieldVault {
             .unwrap_or(0);
         env.storage()
             .instance()
-            .set(&DataKey::TotalHarvested, &(total_harvested + amount_out));
+            .set(&DataKey::TotalHarvested, &(total_harvested + net_amount));
 
         env.events().publish(
             (symbol_short!("harvest"),),
-            (caller, reward_balance, amount_out),
+            (caller, reward_balance, amount_out, keeper_fee),
         );
-        Ok(amount_out)
+        Ok(net_amount)
     }
 
     /// Return total harvested amount.
@@ -654,5 +675,196 @@ mod tests {
         let (env, client, _, _, _) = setup_env();
         let unknown = Address::generate(&env);
         assert_eq!(client.get_shares(&unknown), 0);
+    }
+}
+
+// ── Fuzz / Invariant Tests ───────────────────────────────────────────────
+
+#[cfg(test)]
+mod fuzz_tests {
+    extern crate std;
+
+    use super::*;
+    use proptest::prelude::*;
+    use soroban_sdk::testutils::Address as _;
+    use soroban_sdk::Env;
+
+    fn setup_env() -> (Env, YieldVaultClient<'static>, Address, Address, Address) {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register(YieldVault, ());
+        let client = YieldVaultClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let token_admin = Address::generate(&env);
+        let token_contract = env.register_stellar_asset_contract_v2(token_admin.clone());
+        let token_addr = token_contract.address();
+
+        client.initialize(&admin, &token_addr);
+
+        (env, client, admin, token_addr, token_admin)
+    }
+
+    fn mint_tokens(env: &Env, token_addr: &Address, to: &Address, amount: i128) {
+        let admin_client = soroban_sdk::token::StellarAssetClient::new(env, token_addr);
+        admin_client.mint(to, &amount);
+    }
+
+    // Invariant 1 & 2: totals never go negative
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(10_000))]
+
+        #[test]
+        fn fuzz_deposit_totals_non_negative(amount in 1i128..=i64::MAX as i128) {
+            let (env, client, _, token_addr, _) = setup_env();
+            let user = Address::generate(&env);
+            mint_tokens(&env, &token_addr, &user, amount);
+
+            client.deposit(&user, &amount);
+
+            prop_assert!(client.total_shares() > 0);
+            prop_assert!(client.total_assets() > 0);
+        }
+    }
+
+    // Invariant 3: first deposit mints 1:1 shares
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(10_000))]
+
+        #[test]
+        fn fuzz_first_deposit_shares_equal_assets(amount in 1i128..=i64::MAX as i128) {
+            let (env, client, _, token_addr, _) = setup_env();
+            let user = Address::generate(&env);
+            mint_tokens(&env, &token_addr, &user, amount);
+
+            let shares = client.deposit(&user, &amount);
+
+            prop_assert_eq!(shares, amount);
+            prop_assert_eq!(client.total_shares(), client.total_assets());
+        }
+    }
+
+    // Invariant 4: deposit then full withdraw roundtrip
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(10_000))]
+
+        #[test]
+        fn fuzz_deposit_withdraw_roundtrip(amount in 1i128..=i64::MAX as i128) {
+            let (env, client, _, token_addr, _) = setup_env();
+            let user = Address::generate(&env);
+            mint_tokens(&env, &token_addr, &user, amount);
+
+            let shares = client.deposit(&user, &amount);
+            let withdrawn = client.withdraw(&user, &shares);
+
+            prop_assert_eq!(withdrawn, amount);
+            prop_assert_eq!(client.total_shares(), 0);
+            prop_assert_eq!(client.total_assets(), 0);
+        }
+    }
+
+    // Invariant 5: proportional shares in multi-depositor scenario
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(5_000))]
+
+        #[test]
+        fn fuzz_multi_deposit_proportional(
+            amount1 in 1i128..=1_000_000_000i128,
+            amount2 in 1i128..=1_000_000_000i128,
+        ) {
+            let (env, client, _, token_addr, _) = setup_env();
+            let user1 = Address::generate(&env);
+            let user2 = Address::generate(&env);
+            mint_tokens(&env, &token_addr, &user1, amount1);
+            mint_tokens(&env, &token_addr, &user2, amount2);
+
+            let shares1 = client.deposit(&user1, &amount1);
+            let shares2 = client.deposit(&user2, &amount2);
+
+            prop_assert_eq!(client.total_shares(), shares1 + shares2);
+            prop_assert_eq!(client.total_assets(), amount1 + amount2);
+            prop_assert!(shares1 > 0);
+            prop_assert!(shares2 > 0);
+
+            let withdrawn1 = client.withdraw(&user1, &shares1);
+            prop_assert!(withdrawn1 > 0);
+            prop_assert!(withdrawn1 <= amount1);
+        }
+    }
+
+    // Invariant 6: rebalance correctly tracks assets
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(5_000))]
+
+        #[test]
+        fn fuzz_rebalance_updates_assets(
+            deposit_amount in 100i128..=1_000_000_000i128,
+            rebalance_pct in 1u32..=100u32,
+        ) {
+            let (env, client, admin, token_addr, _) = setup_env();
+            let user = Address::generate(&env);
+            let target = Address::generate(&env);
+
+            mint_tokens(&env, &token_addr, &user, deposit_amount);
+            client.deposit(&user, &deposit_amount);
+
+            let rebalance_amount = (deposit_amount * rebalance_pct as i128) / 100;
+            if rebalance_amount > 0 {
+                client.rebalance(&admin, &target, &rebalance_amount);
+
+                let remaining = client.total_assets();
+                prop_assert_eq!(remaining, deposit_amount - rebalance_amount);
+                prop_assert!(remaining >= 0);
+
+                let token_client = token::Client::new(&env, &token_addr);
+                prop_assert_eq!(token_client.balance(&target), rebalance_amount);
+            }
+        }
+    }
+
+    // Invariant 7: share price never decreases from deposit/withdraw
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(5_000))]
+
+        #[test]
+        fn fuzz_share_price_monotonic(
+            amount1 in 1000i128..=1_000_000_000i128,
+            amount2 in 1000i128..=1_000_000_000i128,
+            withdraw_shares in 1i128..=500i128,
+        ) {
+            let (env, client, _, token_addr, _) = setup_env();
+            let user1 = Address::generate(&env);
+            let user2 = Address::generate(&env);
+
+            mint_tokens(&env, &token_addr, &user1, amount1);
+            mint_tokens(&env, &token_addr, &user2, amount2);
+
+            client.deposit(&user1, &amount1);
+            let price_before = (client.total_assets() * 1_000_000_000) / client.total_shares();
+
+            client.deposit(&user2, &amount2);
+            let price_after = (client.total_assets() * 1_000_000_000) / client.total_shares();
+
+            prop_assert!(
+                price_after >= price_before,
+                "Share price decreased after deposit: {} -> {}", price_before, price_after
+            );
+
+            let user1_shares = client.get_shares(&user1);
+            let actual_withdraw = withdraw_shares.min(user1_shares - 1).max(1);
+
+            if actual_withdraw > 0 && actual_withdraw < user1_shares {
+                client.withdraw(&user1, &actual_withdraw);
+                let ts = client.total_shares();
+                if ts > 0 {
+                    let price_post_withdraw = (client.total_assets() * 1_000_000_000) / ts;
+                    prop_assert!(
+                        price_post_withdraw >= price_before,
+                        "Share price decreased after withdraw: {} -> {}", price_before, price_post_withdraw
+                    );
+                }
+            }
+        }
     }
 }
