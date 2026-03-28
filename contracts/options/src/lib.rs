@@ -1,19 +1,17 @@
 #![no_std]
 
-use soroban_sdk::{
-    contract, contracterror, contractimpl, symbol_short, token, Address, Env,
-};
+use soroban_sdk::{contract, contracterror, contractimpl, symbol_short, token, Address, Env};
 
-mod storage;
 mod math;
+mod storage;
 #[cfg(test)]
 mod tests;
 
+use math::black_scholes_call;
 use storage::{
-    has_admin, read_admin, read_oracle, read_option, read_option_counter, write_admin,
+    has_admin, read_option, read_option_counter, write_admin,
     write_option, write_option_counter, write_oracle, OptionData, OptionType,
 };
-use math::{black_scholes_call, ONE};
 
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -44,6 +42,7 @@ impl OptionsContract {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn mint(
         env: Env,
         minter: Address,
@@ -89,8 +88,10 @@ impl OptionsContract {
         write_option(&env, counter, &option_data);
         write_option_counter(&env, counter);
 
-        env.events()
-            .publish((symbol_short!("mint"), counter), (minter, strike_price, expiration_time));
+        env.events().publish(
+            (symbol_short!("mint"), counter),
+            (minter, strike_price, expiration_time),
+        );
 
         Ok(counter)
     }
@@ -102,7 +103,7 @@ impl OptionsContract {
         if option.exercised || option.expired {
             return Err(OptionsError::AlreadyExercised);
         }
-        
+
         let current_time = env.ledger().timestamp();
         if current_time < option.expiration_time {
             return Err(OptionsError::NotExpired);
@@ -110,36 +111,46 @@ impl OptionsContract {
 
         // For Call: exerciser pays strike_price * collateral_amount (scaled) of quote_asset, receives collateral_asset (underlying)
         // For Put: exerciser pays strike_price * collateral_amount of underlying, receives collateral_asset (quote)
-        
+
         let quote_client = token::Client::new(&env, &option.quote_asset);
         let underlying_client = token::Client::new(&env, &option.underlying_asset);
 
         if option.option_type == OptionType::Call {
             let total_cost = (option.collateral_amount * option.strike_price) / 10_000_000_i128;
             quote_client.transfer(&exerciser, &option.minter, &total_cost);
-            underlying_client.transfer(&env.current_contract_address(), &exerciser, &option.collateral_amount);
+            underlying_client.transfer(
+                &env.current_contract_address(),
+                &exerciser,
+                &option.collateral_amount,
+            );
         } else {
             let total_cost = (option.collateral_amount * 10_000_000_i128) / option.strike_price;
             underlying_client.transfer(&exerciser, &option.minter, &total_cost);
-            quote_client.transfer(&env.current_contract_address(), &exerciser, &option.collateral_amount);
+            quote_client.transfer(
+                &env.current_contract_address(),
+                &exerciser,
+                &option.collateral_amount,
+            );
         }
 
         option.exercised = true;
         write_option(&env, option_id, &option);
 
-        env.events()
-            .publish((symbol_short!("exercise"), option_id), (exerciser, option.minter.clone()));
+        env.events().publish(
+            (symbol_short!("exercise"), option_id),
+            (exerciser, option.minter.clone()),
+        );
 
         Ok(())
     }
 
     pub fn expire(env: Env, option_id: u32) -> Result<(), OptionsError> {
         let mut option = read_option(&env, option_id);
-        
+
         if option.exercised || option.expired {
             return Err(OptionsError::AlreadyExpired);
         }
-        
+
         let current_time = env.ledger().timestamp();
         if current_time < option.expiration_time {
             return Err(OptionsError::NotExpired);
@@ -151,13 +162,19 @@ impl OptionsContract {
         };
 
         let client = token::Client::new(&env, &collateral_asset);
-        client.transfer(&env.current_contract_address(), &option.minter, &option.collateral_amount);
+        client.transfer(
+            &env.current_contract_address(),
+            &option.minter,
+            &option.collateral_amount,
+        );
 
         option.expired = true;
         write_option(&env, option_id, &option);
 
-        env.events()
-            .publish((symbol_short!("expire"), option_id), (option.minter.clone(),));
+        env.events().publish(
+            (symbol_short!("expire"), option_id),
+            (option.minter.clone(),),
+        );
 
         Ok(())
     }

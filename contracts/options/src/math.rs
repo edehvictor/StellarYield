@@ -59,14 +59,14 @@ pub fn ln(x: i128) -> i128 {
 pub fn normal_cdf(x: i128) -> i128 {
     let coeff = 1_702_000_000; // 1.702 * 1e9
     let exponent = (-coeff * x) / ONE;
-    
+
     // Bounds check to avoid overflow in exp
     if exponent > 10 * ONE {
         return 0;
     } else if exponent < -10 * ONE {
         return ONE;
     }
-    
+
     let e_val = exp(exponent);
     (ONE * ONE) / (ONE + e_val)
 }
@@ -80,29 +80,29 @@ pub fn black_scholes_call(_env: &Env, spot: i128, strike: i128, t: i128, iv: i12
     if t <= 0 {
         return if spot > strike { spot - strike } else { 0 };
     }
-    
+
     let spot_scaled = (spot * ONE) / strike;
     let ln_val = ln(spot_scaled);
     let iv_sq = (iv * iv) / ONE;
     let num = ln_val + (iv_sq / 2 * t) / ONE;
-    
-    let t_sq = t * ONE; 
-    let sqrt_t = isqrt(t_sq); 
-    
+
+    let t_sq = t * ONE;
+    let sqrt_t = isqrt(t_sq);
+
     let den = (iv * sqrt_t) / ONE;
     if den == 0 {
         return if spot > strike { spot - strike } else { 0 };
     }
-    
+
     let d1 = (num * ONE) / den;
     let d2 = d1 - den;
-    
+
     let n_d1 = normal_cdf(d1);
     let n_d2 = normal_cdf(d2);
-    
+
     let term1 = (spot * n_d1) / ONE;
     let term2 = (strike * n_d2) / ONE;
-    
+
     if term1 > term2 {
         term1 - term2
     } else {
@@ -124,7 +124,7 @@ mod tests {
     fn test_exp() {
         // e^0 = 1
         assert_eq!(exp(0), ONE);
-        
+
         // e^1 ≈ 2.718...
         let e1 = exp(ONE);
         assert!((e1 - 2_718_281_828).abs() < 10_000_000); // Allow some margin

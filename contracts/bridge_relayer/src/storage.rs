@@ -21,7 +21,10 @@ pub fn write_admin(e: &Env, id: &Address) {
 }
 
 pub fn read_validators(e: &Env) -> Vec<BytesN<32>> {
-    e.storage().instance().get(&DataKey::Validators).unwrap_or(Vec::new(e))
+    e.storage()
+        .instance()
+        .get(&DataKey::Validators)
+        .unwrap_or(Vec::new(e))
 }
 
 pub fn write_validators(e: &Env, validators: &Vec<BytesN<32>>) {
@@ -37,7 +40,10 @@ pub fn write_threshold(e: &Env, threshold: u32) {
 }
 
 pub fn read_limit(e: &Env) -> i128 {
-    e.storage().instance().get(&DataKey::Limit).unwrap_or(1_000_000_000_000i128)
+    e.storage()
+        .instance()
+        .get(&DataKey::Limit)
+        .unwrap_or(1_000_000_000_000i128)
 }
 
 pub fn write_limit(e: &Env, limit: i128) {
@@ -45,17 +51,27 @@ pub fn write_limit(e: &Env, limit: i128) {
 }
 
 pub fn is_processed(e: &Env, hash: &BytesN<32>) -> bool {
-    e.storage().persistent().has(&DataKey::Processed(hash.clone()))
+    e.storage()
+        .persistent()
+        .has(&DataKey::Processed(hash.clone()))
 }
 
 pub fn mark_processed(e: &Env, hash: &BytesN<32>) {
-    e.storage().persistent().set(&DataKey::Processed(hash.clone()), &true);
+    e.storage()
+        .persistent()
+        .set(&DataKey::Processed(hash.clone()), &true);
 }
 
 pub fn increment_queue_counter(e: &Env) -> u32 {
-    let count: u32 = e.storage().instance().get(&DataKey::QueueCounter).unwrap_or(0);
+    let count: u32 = e
+        .storage()
+        .instance()
+        .get(&DataKey::QueueCounter)
+        .unwrap_or(0);
     let new_count = count + 1;
-    e.storage().instance().set(&DataKey::QueueCounter, &new_count);
+    e.storage()
+        .instance()
+        .set(&DataKey::QueueCounter, &new_count);
     new_count
 }
 

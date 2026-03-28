@@ -1,10 +1,20 @@
 #[cfg(test)]
+#[allow(clippy::module_inception)]
 mod tests {
-    use super::*;
-    use soroban_sdk::{testutils::{Address as _, Ledger}, Address, Env};
-    use crate::{OptionsContract, OptionsContractClient, OptionType};
+    use crate::{OptionType, OptionsContract, OptionsContractClient};
+    use soroban_sdk::{
+        testutils::{Address as _, Ledger},
+        Address, Env,
+    };
 
-    fn setup_env() -> (Env, OptionsContractClient<'static>, Address, Address, Address, Address) {
+    fn setup_env() -> (
+        Env,
+        OptionsContractClient<'static>,
+        Address,
+        Address,
+        Address,
+        Address,
+    ) {
         let env = Env::default();
         env.mock_all_auths();
 
@@ -13,10 +23,14 @@ mod tests {
 
         let admin = Address::generate(&env);
         let oracle = Address::generate(&env);
-        
+
         let token_admin = Address::generate(&env);
-        let underlying_addr = env.register_stellar_asset_contract_v2(token_admin.clone()).address();
-        let quote_addr = env.register_stellar_asset_contract_v2(token_admin.clone()).address();
+        let underlying_addr = env
+            .register_stellar_asset_contract_v2(token_admin.clone())
+            .address();
+        let quote_addr = env
+            .register_stellar_asset_contract_v2(token_admin.clone())
+            .address();
 
         client.initialize(&admin, &oracle);
 
@@ -37,19 +51,19 @@ mod tests {
     fn test_mint_call() {
         let (env, client, _, _, underlying, quote) = setup_env();
         let minter = Address::generate(&env);
-        
+
         mint_tokens(&env, &underlying, &minter, 20_000_000);
-        
+
         let option_id = client.mint(
             &minter,
             &OptionType::Call,
             &underlying,
             &quote,
             &100_000_000_i128, // strike 10 (1e7)
-            &1000u64, // expiry
-            &10_000_000_i128, // collateral (1e7)
+            &1000u64,          // expiry
+            &10_000_000_i128,  // collateral (1e7)
         );
-        
+
         assert_eq!(option_id, 1);
         let client_u = soroban_sdk::token::Client::new(&env, &underlying);
         assert_eq!(client_u.balance(&minter), 10_000_000);
@@ -60,17 +74,17 @@ mod tests {
     fn test_expire() {
         let (env, client, _, _, underlying, quote) = setup_env();
         let minter = Address::generate(&env);
-        
+
         mint_tokens(&env, &underlying, &minter, 20_000_000);
-        
+
         let option_id = client.mint(
             &minter,
             &OptionType::Call,
             &underlying,
             &quote,
             &100_000_000_i128, // strike 10 (1e7)
-            &500u64, // expiry
-            &10_000_000_i128, // collateral (1e7)
+            &500u64,           // expiry
+            &10_000_000_i128,  // collateral (1e7)
         );
 
         // Advance ledger to expire the option
@@ -88,18 +102,18 @@ mod tests {
         let (env, client, _, _, underlying, quote) = setup_env();
         let minter = Address::generate(&env);
         let exerciser = Address::generate(&env);
-        
+
         mint_tokens(&env, &underlying, &minter, 20_000_000);
         mint_tokens(&env, &quote, &exerciser, 200_000_000);
-        
+
         let option_id = client.mint(
             &minter,
             &OptionType::Call,
             &underlying,
             &quote,
             &100_000_000_i128, // strike 10 (1e7)
-            &1500u64, // expiry
-            &10_000_000_i128, // collateral (1e7)
+            &1500u64,          // expiry
+            &10_000_000_i128,  // collateral (1e7)
         );
 
         // Advance ledger past expiry to allow exercise
@@ -112,7 +126,7 @@ mod tests {
 
         // Exerciser received the 10_000_000 underlying
         assert_eq!(client_u.balance(&exerciser), 10_000_000);
-        
+
         // Minter received 10 * 10 = 100_000_000 quote asset
         assert_eq!(client_q.balance(&minter), 100_000_000);
 

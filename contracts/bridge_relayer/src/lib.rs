@@ -5,9 +5,9 @@ use soroban_sdk::{
 };
 
 mod storage;
-mod types;
 #[cfg(test)]
 mod tests;
+mod types;
 
 use soroban_sdk::xdr::ToXdr;
 use storage::{
@@ -79,7 +79,7 @@ impl BridgeRelayer {
         signatures: Vec<(u32, BytesN<64>)>,
     ) -> Result<u32, BridgeError> {
         let payload_hash: BytesN<32> = e.crypto().sha256(&payload.clone().to_xdr(&e)).into();
-        
+
         if is_processed(&e, &payload_hash) {
             return Err(BridgeError::ReplayAttack);
         }
@@ -99,7 +99,8 @@ impl BridgeRelayer {
                 return Err(BridgeError::InvalidValidatorIndex);
             }
             let public_key = validators.get_unchecked(index);
-            e.crypto().ed25519_verify(&public_key, &payload_hash.clone().into(), &signature);
+            e.crypto()
+                .ed25519_verify(&public_key, &payload_hash.clone().into(), &signature);
         }
 
         mark_processed(&e, &payload_hash);
@@ -112,18 +113,28 @@ impl BridgeRelayer {
                 timestamp: e.ledger().timestamp(),
             };
             write_queue(&e, id, &queued);
-            
+
             e.events().publish(
                 (symbol_short!("queued"), id),
-                (payload.src_chain, payload.asset, payload.amount, payload.recipient),
+                (
+                    payload.src_chain,
+                    payload.asset,
+                    payload.amount,
+                    payload.recipient,
+                ),
             );
             Ok(id)
         } else {
             Self::execute_mint(&e, &payload.asset, &payload.amount, &payload.recipient);
-            
+
             e.events().publish(
                 (symbol_short!("minted"),),
-                (payload.src_chain, payload.asset, payload.amount, payload.recipient),
+                (
+                    payload.src_chain,
+                    payload.asset,
+                    payload.amount,
+                    payload.recipient,
+                ),
             );
             Ok(0)
         }
@@ -142,18 +153,27 @@ impl BridgeRelayer {
         }
 
         let queued = read_queue(&e, queue_id).ok_or(BridgeError::QueueEmpty)?;
-        
+
         // 24 hour delay (86400 seconds)
         if e.ledger().timestamp() < queued.timestamp + 86400 {
             return Err(BridgeError::QueueDelayActive);
         }
 
-        Self::execute_mint(&e, &queued.payload.asset, &queued.payload.amount, &queued.payload.recipient);
+        Self::execute_mint(
+            &e,
+            &queued.payload.asset,
+            &queued.payload.amount,
+            &queued.payload.recipient,
+        );
         remove_queue(&e, queue_id);
 
         e.events().publish(
             (symbol_short!("released"), queue_id),
-            (queued.payload.asset, queued.payload.amount, queued.payload.recipient),
+            (
+                queued.payload.asset,
+                queued.payload.amount,
+                queued.payload.recipient,
+            ),
         );
 
         Ok(())
@@ -170,7 +190,12 @@ impl BridgeRelayer {
      * @param validators The new list of validator public keys.
      * @param threshold The new multi-sig threshold.
      */
-    pub fn update_validators(e: Env, caller: Address, validators: Vec<BytesN<32>>, threshold: u32) -> Result<(), BridgeError> {
+    pub fn update_validators(
+        e: Env,
+        caller: Address,
+        validators: Vec<BytesN<32>>,
+        threshold: u32,
+    ) -> Result<(), BridgeError> {
         caller.require_auth();
         if caller != read_admin(&e) {
             return Err(BridgeError::Unauthorized);
