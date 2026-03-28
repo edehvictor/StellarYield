@@ -7,9 +7,9 @@ mod storage;
 #[cfg(test)]
 mod tests;
 
-use math::black_scholes_call;
+use math::{black_scholes_call, ONE};
 use storage::{
-    has_admin, read_option, read_option_counter, write_admin,
+    has_admin, read_admin, read_option, read_option_counter, read_oracle, write_admin,
     write_option, write_option_counter, write_oracle, OptionData, OptionType,
 };
 

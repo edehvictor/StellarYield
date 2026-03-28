@@ -1,6 +1,7 @@
 #[cfg(test)]
 #[allow(clippy::module_inception)]
 mod tests {
+    use super::*;
     use crate::{OptionType, OptionsContract, OptionsContractClient};
     use soroban_sdk::{
         testutils::{Address as _, Ledger},

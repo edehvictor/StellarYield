@@ -10,6 +10,9 @@ crate-type = ["cdylib"]
 soroban-sdk = "22.0.0"
 soroban-token-sdk = "22.0.0"
 
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }
+
 [dev-dependencies]
 soroban-sdk = { version = "22.0.0", features = ["testutils"] }
 proptest = "1.4.0"
