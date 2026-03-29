@@ -8,6 +8,7 @@ import leaderboardRouter from "./routes/leaderboard";
 import notificationsRouter from "./routes/notifications";
 import healthRouter from "./routes/health";
 import onrampRouter from "./routes/onramp";
+import zapRouter from "./routes/zap";
 import {
   createAuthChallenge,
   verifyAuthChallenge,
@@ -58,6 +59,7 @@ export function createApp() {
   app.use("/api/notifications", notificationsRouter);
   app.use("/api/health", healthRouter);
   app.use("/api/onramp", onrampRouter);
+  app.use("/api/zap", zapRouter);
 
   app.get("/api/events", async (req: Request, res: Response) => {
     void req;

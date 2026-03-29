@@ -10,9 +10,11 @@ import freighter from "@stellar/freighter-api";
 
 // ── Configuration ───────────────────────────────────────────────────────
 
-const RPC_URL = import.meta.env.VITE_SOROBAN_RPC_URL ?? "https://soroban-testnet.stellar.org";
-const NETWORK_PASSPHRASE = import.meta.env.VITE_NETWORK_PASSPHRASE ?? "Test SDF Network ; September 2015";
+export const RPC_URL = import.meta.env.VITE_SOROBAN_RPC_URL ?? "https://soroban-testnet.stellar.org";
+export const NETWORK_PASSPHRASE =
+  import.meta.env.VITE_NETWORK_PASSPHRASE ?? "Test SDF Network ; September 2015";
 const CONTRACT_ID = import.meta.env.VITE_CONTRACT_ID ?? "";
+const ZAP_CONTRACT_ID = import.meta.env.VITE_ZAP_CONTRACT_ID ?? "";
 
 const POLL_INTERVAL_MS = 2_000;
 const POLL_TIMEOUT_MS = 30_000;
@@ -40,17 +42,24 @@ function getContract(): StellarSdk.Contract {
   return new StellarSdk.Contract(CONTRACT_ID);
 }
 
+export function getZapContract(): StellarSdk.Contract {
+  if (!ZAP_CONTRACT_ID) {
+    throw new Error("VITE_ZAP_CONTRACT_ID is not configured");
+  }
+  return new StellarSdk.Contract(ZAP_CONTRACT_ID);
+}
+
 /**
  * Build a Soroban contract call transaction, simulate it, and return
  * the assembled (ready-to-sign) XDR.
  */
-async function buildContractCall(
+async function buildContractCallOn(
+  contract: StellarSdk.Contract,
   sourcePublicKey: string,
   method: string,
   ...args: StellarSdk.xdr.ScVal[]
 ): Promise<string> {
   const server = getServer();
-  const contract = getContract();
   const source = await server.getAccount(sourcePublicKey);
 
   const tx = new StellarSdk.TransactionBuilder(source, {
@@ -74,6 +83,14 @@ async function buildContractCall(
   ).build();
 
   return assembled.toXDR();
+}
+
+async function buildContractCall(
+  sourcePublicKey: string,
+  method: string,
+  ...args: StellarSdk.xdr.ScVal[]
+): Promise<string> {
+  return buildContractCallOn(getContract(), sourcePublicKey, method, ...args);
 }
 
 /**
@@ -176,6 +193,90 @@ export async function executeContractCall(
       error: err instanceof Error ? err.message : String(err),
     };
   }
+}
+
+/**
+ * Invoke a method on the Zap contract (swap + `deposit_for` in one tx).
+ *
+ * Uses the same build → sign → submit flow as `executeContractCall`.
+ */
+export async function executeZapContractCall(
+  sourcePublicKey: string,
+  method: string,
+  args: StellarSdk.xdr.ScVal[],
+  onStatus?: (status: TxStatus) => void,
+  useFeeBump: boolean = false
+): Promise<TxResult> {
+  try {
+    onStatus?.("building");
+    const xdr = await buildContractCallOn(getZapContract(), sourcePublicKey, method, ...args);
+
+    onStatus?.("signing");
+    const signedXdr = await signWithFreighter(xdr);
+
+    let finalXdr = signedXdr;
+    if (useFeeBump) {
+      onStatus?.("submitting");
+      const resp = await fetch("/api/relayer/fee-bump", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ innerTxXdr: signedXdr }),
+      });
+      const { feeBumpXdr } = await resp.json();
+      finalXdr = feeBumpXdr;
+    }
+
+    onStatus?.("submitting");
+    const result = await submitAndPoll(finalXdr);
+
+    onStatus?.(result.success ? "success" : "error");
+    return result;
+  } catch (err) {
+    onStatus?.("error");
+    return {
+      success: false,
+      error: err instanceof Error ? err.message : String(err),
+    };
+  }
+}
+
+export interface ZapDepositParams {
+  /** Soroban contract ID of the token the user spends (input). */
+  inputTokenContract: string;
+  /** Soroban contract ID of the vault’s underlying token. */
+  vaultTokenContract: string;
+  /** Yield vault contract ID (same family as `VITE_CONTRACT_ID`). */
+  vaultContractId: string;
+  amountIn: bigint;
+  /** Minimum vault-token amount after swap; enforces slippage on-chain. */
+  minAmountOut: bigint;
+}
+
+/**
+ * Submit a single `zap_deposit` call: pull input token, swap via DEX router, deposit into vault.
+ *
+ * @param userAddress - Account that signs and receives vault shares
+ */
+export async function zapDeposit(
+  userAddress: string,
+  params: ZapDepositParams,
+  onStatus?: (status: TxStatus) => void,
+  useFeeBump: boolean = false
+): Promise<TxResult> {
+  return executeZapContractCall(
+    userAddress,
+    "zap_deposit",
+    [
+      new StellarSdk.Address(userAddress).toScVal(),
+      new StellarSdk.Address(params.inputTokenContract).toScVal(),
+      new StellarSdk.Address(params.vaultTokenContract).toScVal(),
+      new StellarSdk.Address(params.vaultContractId).toScVal(),
+      StellarSdk.nativeToScVal(params.amountIn, { type: "i128" }),
+      StellarSdk.nativeToScVal(params.minAmountOut, { type: "i128" }),
+    ],
+    onStatus,
+    useFeeBump
+  );
 }
 
 /**

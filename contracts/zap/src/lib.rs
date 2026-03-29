@@ -42,6 +42,15 @@ pub struct Zap;
 #[contractimpl]
 impl Zap {
     /// Initialize the Zap contract with an admin and DEX router address.
+    ///
+    /// # Arguments
+    ///
+    /// * `admin`       — Account allowed to update configuration (such as the DEX router).
+    /// * `dex_router`  — Contract implementing `swap(from, to, amount_in, min_out) -> i128`.
+    ///
+    /// # Errors
+    ///
+    /// * [`ZapError::AlreadyInitialized`] — If `initialize` was already called successfully.
     pub fn initialize(env: Env, admin: Address, dex_router: Address) -> Result<(), ZapError> {
         if env.storage().instance().has(&DataKey::Initialized) {
             return Err(ZapError::AlreadyInitialized);
@@ -59,18 +68,30 @@ impl Zap {
         Ok(())
     }
 
-    /// Zap deposit: swap input token for vault token, then deposit into vault.
+    /// Swap `amount_in` of `input_token` into `vault_token` (unless they match), then
+    /// deposit into `vault` so that **vault shares are credited to `user`**.
+    ///
+    /// The entire invocation reverts if the swap would return less than
+    /// `min_amount_out` of `vault_token`, so slippage is enforced on-chain before
+    /// any deposit occurs.
     ///
     /// # Arguments
-    /// * `user` - The depositor (must authorize the call).
-    /// * `input_token` - The token the user wants to deposit (e.g. XLM).
-    /// * `vault_token` - The token the vault requires (e.g. USDC).
-    /// * `vault` - The YieldVault contract address.
-    /// * `amount_in` - Amount of input_token to swap.
-    /// * `min_amount_out` - Minimum vault_token to receive (slippage protection).
+    ///
+    /// * `user` — End user; must authorize this call. Receives vault shares via `deposit_for`.
+    /// * `input_token` — Asset pulled from `user` into this contract (any Stellar SAC).
+    /// * `vault_token` — Asset the vault accepts (must match the vault’s configured token).
+    /// * `vault` — Yield vault contract address.
+    /// * `amount_in` — Amount of `input_token` to use.
+    /// * `min_amount_out` — Minimum `vault_token` amount after swap (0 if `input_token == vault_token`).
     ///
     /// # Returns
-    /// The number of vault shares received.
+    ///
+    /// Vault shares minted to `user`.
+    ///
+    /// # Errors
+    ///
+    /// * [`ZapError::SlippageExceeded`] — Swap output below `min_amount_out`.
+    /// * [`ZapError::ZeroAmount`] — `amount_in` is not positive.
     pub fn zap_deposit(
         env: Env,
         user: Address,
@@ -119,14 +140,14 @@ impl Zap {
             amount_out
         };
 
-        // Step 3: Approve vault to spend the swapped tokens
-        let vault_token_client = token::Client::new(&env, &vault_token);
-        vault_token_client.approve(&zap_addr, &vault, &deposit_amount, &4294967295u32);
-
-        // Step 4: Deposit into YieldVault
-        let deposit_fn = Symbol::new(&env, "deposit");
-        let deposit_args: soroban_sdk::Vec<Val> =
-            vec![&env, zap_addr.into_val(&env), deposit_amount.into_val(&env)];
+        // Step 3: Deposit into YieldVault — shares go to `user` (payer is this contract)
+        let deposit_fn = Symbol::new(&env, "deposit_for");
+        let deposit_args: soroban_sdk::Vec<Val> = vec![
+            &env,
+            zap_addr.into_val(&env),
+            user.clone().into_val(&env),
+            deposit_amount.into_val(&env),
+        ];
         let shares: i128 = env.invoke_contract(&vault, &deposit_fn, deposit_args);
 
         env.events().publish(
@@ -137,7 +158,16 @@ impl Zap {
         Ok(shares)
     }
 
-    /// Update the DEX router address. Admin-only.
+    /// Replace the DEX router contract used for swaps.
+    ///
+    /// # Arguments
+    ///
+    /// * `admin` — Must match the admin set in [`initialize`].
+    /// * `new_router` — New router implementing the expected `swap` interface.
+    ///
+    /// # Errors
+    ///
+    /// * [`ZapError::Unauthorized`] — Caller is not the stored admin.
     pub fn set_dex_router(env: Env, admin: Address, new_router: Address) -> Result<(), ZapError> {
         Self::require_init(&env)?;
         admin.require_auth();

@@ -170,6 +170,87 @@ impl YieldVault {
         Ok(shares)
     }
 
+    /// Deposit vault tokens held by a `payer` contract (for example the Zap
+    /// contract after a DEX swap) and mint shares to `beneficiary`.
+    ///
+    /// # Arguments
+    ///
+    /// * `payer`       — Address that holds the vault token and must authorize
+    ///   (typically a router or Zap contract).
+    /// * `beneficiary` — Receives the newly minted vault shares.
+    /// * `amount`      — Amount of vault token to move from `payer` into the vault.
+    ///
+    /// # Returns
+    ///
+    /// The number of vault shares minted to `beneficiary`.
+    ///
+    /// # Security
+    ///
+    /// Only `payer` may initiate the transfer. Share accounting uses
+    /// `beneficiary`, not `payer`, so end users receive positions when a
+    /// contract routes funds on their behalf.
+    pub fn deposit_for(
+        env: Env,
+        payer: Address,
+        beneficiary: Address,
+        amount: i128,
+    ) -> Result<i128, VaultError> {
+        Self::require_init(&env)?;
+        payer.require_auth();
+        if Self::is_paused(&env) {
+            return Err(VaultError::Paused);
+        }
+
+        if amount <= 0 {
+            return Err(VaultError::ZeroAmount);
+        }
+
+        let token_addr: Address = env.storage().instance().get(&DataKey::Token).unwrap();
+        let total_shares: i128 = env.storage().instance().get(&DataKey::TotalShares).unwrap();
+        let total_assets: i128 = env.storage().instance().get(&DataKey::TotalAssets).unwrap();
+
+        let _price = Self::get_secure_price(&env)?;
+
+        let shares = if total_shares == 0 {
+            amount
+        } else {
+            (amount * total_shares) / total_assets
+        };
+
+        if shares <= 0 {
+            return Err(VaultError::ZeroAmount);
+        }
+
+        let client = token::Client::new(&env, &token_addr);
+        client.transfer(&payer, &env.current_contract_address(), &amount);
+
+        let beneficiary_shares: i128 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Shares(beneficiary.clone()))
+            .unwrap_or(0);
+
+        env.storage()
+            .persistent()
+            .set(
+                &DataKey::Shares(beneficiary.clone()),
+                &(beneficiary_shares + shares),
+            );
+        env.storage()
+            .instance()
+            .set(&DataKey::TotalShares, &(total_shares + shares));
+        env.storage()
+            .instance()
+            .set(&DataKey::TotalAssets, &(total_assets + amount));
+
+        env.events().publish(
+            (symbol_short!("dep_for"),),
+            (payer, beneficiary, amount, shares),
+        );
+
+        Ok(shares)
+    }
+
     // ── Withdrawals ─────────────────────────────────────────────────
 
     /// Burn `shares` vault shares and receive the proportional amount of
