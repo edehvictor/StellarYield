@@ -41,7 +41,7 @@
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM"
                 },
                 {
-                  "bytes": "34ecfa8194afd6e36eb49d33fecc5ac4431d1789c18db1353e07e496df62b127"
+                  "bytes": "06d2d581156c4582f1f6fc052292475a8e9f8721cb37d4da6db6c1c45f91a158"
                 },
                 {
                   "u32": 5000
@@ -67,7 +67,7 @@
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM"
                 },
                 {
-                  "bytes": "34ecfa8194afd6e36eb49d33fecc5ac4431d1789c18db1353e07e496df62b127"
+                  "bytes": "06d2d581156c4582f1f6fc052292475a8e9f8721cb37d4da6db6c1c45f91a158"
                 },
                 {
                   "i128": {
@@ -289,7 +289,7 @@
                         "val": {
                           "vec": [
                             {
-                              "bytes": "34ecfa8194afd6e36eb49d33fecc5ac4431d1789c18db1353e07e496df62b127"
+                              "bytes": "06d2d581156c4582f1f6fc052292475a8e9f8721cb37d4da6db6c1c45f91a158"
                             }
                           ]
                         }
@@ -309,7 +309,7 @@
                               "symbol": "VW"
                             },
                             {
-                              "bytes": "34ecfa8194afd6e36eb49d33fecc5ac4431d1789c18db1353e07e496df62b127"
+                              "bytes": "06d2d581156c4582f1f6fc052292475a8e9f8721cb37d4da6db6c1c45f91a158"
                             }
                           ]
                         },
@@ -363,7 +363,7 @@
                 "symbol": "delegate"
               },
               {
-                "bytes": "34ecfa8194afd6e36eb49d33fecc5ac4431d1789c18db1353e07e496df62b127"
+                "bytes": "06d2d581156c4582f1f6fc052292475a8e9f8721cb37d4da6db6c1c45f91a158"
               }
             ],
             "data": {

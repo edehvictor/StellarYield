@@ -579,6 +579,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "emission_controller"
+version = "0.1.0"
+dependencies = [
+ "soroban-sdk",
+]
+
+[[package]]
 name = "equivalent"
 version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
