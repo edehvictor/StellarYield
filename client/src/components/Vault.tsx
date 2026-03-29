@@ -1,6 +1,14 @@
-import { Landmark } from 'lucide-react';
+import { Landmark } from "lucide-react";
+import { useParams } from "react-router-dom";
+import { useVaultOgMeta } from "../hooks/useVaultOgMeta";
+
+const DEFAULT_VAULT_OG = "StellarYield";
 
 export default function Vault() {
+  const { vaultId } = useParams<{ vaultId?: string }>();
+  const vault = vaultId ?? DEFAULT_VAULT_OG;
+  useVaultOgMeta(vault);
+
   return (
     <div className="flex flex-col items-center justify-center min-h-[60vh] text-center space-y-6">
       <div className="bg-green-500/20 p-6 rounded-full inline-block mb-4">

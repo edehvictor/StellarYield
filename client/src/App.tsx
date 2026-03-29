@@ -112,7 +112,7 @@ const router = createBrowserRouter([
         element: <AIAdvisor />,
       },
       {
-        path: "/vault",
+        path: "/vault/:vaultId?",
         element: <Vault />,
       },
       {
