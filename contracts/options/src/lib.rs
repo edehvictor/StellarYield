@@ -9,8 +9,8 @@ mod tests;
 
 use math::black_scholes_call;
 use storage::{
-    has_admin, read_option, read_option_counter, write_admin,
-    write_option, write_option_counter, write_oracle, OptionData, OptionType,
+    has_admin, read_option, read_option_counter, write_admin, write_option, write_option_counter,
+    write_oracle, OptionData, OptionType,
 };
 
 #[contracterror]
