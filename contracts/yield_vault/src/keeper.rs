@@ -24,10 +24,11 @@ const MAX_KEEPER_FEE_BPS_CAP: i128 = 200;
 const BPS_DENOMINATOR: i128 = 10_000;
 
 impl YieldVault {
-    /// Register a new keeper node. Admin-only.
+    /// Register a new keeper node to the authorized list. Admin-only.
     ///
-    /// Registered keepers can call `harvest` and receive a small fee
-    /// as compensation for gas costs and a profit margin.
+    /// # Arguments
+    /// * `admin` - Current admin address.
+    /// * `keeper` - Address of the keeper node to register.
     pub fn register_keeper(env: Env, admin: Address, keeper: Address) -> Result<(), VaultError> {
         Self::require_admin(&env, &admin)?;
 
@@ -56,7 +57,11 @@ impl YieldVault {
         Ok(())
     }
 
-    /// Remove a keeper from the registry. Admin-only.
+    /// Remove a keeper from the authorized registry. Admin-only.
+    ///
+    /// # Arguments
+    /// * `admin` - Current admin address.
+    /// * `keeper` - Address of the keeper to remove.
     pub fn remove_keeper(env: Env, admin: Address, keeper: Address) -> Result<(), VaultError> {
         Self::require_admin(&env, &admin)?;
 
@@ -81,8 +86,12 @@ impl YieldVault {
         Ok(())
     }
 
-    /// Set the keeper fee in basis points. Admin-only.
-    /// Capped at MAX_KEEPER_FEE_BPS_CAP (200 bps / 2%).
+    /// Set the fee paid to keepers per harvest operation. Admin-only.
+    /// This fee is in basis points and capped to prevent excessive draining.
+    ///
+    /// # Arguments
+    /// * `admin` - Current admin address.
+    /// * `fee_bps` - Fee in basis points (e.g., 50 = 0.5%).
     pub fn set_keeper_fee(env: Env, admin: Address, fee_bps: i128) -> Result<(), VaultError> {
         Self::require_admin(&env, &admin)?;
 
@@ -105,7 +114,7 @@ impl YieldVault {
         Ok(())
     }
 
-    /// Check whether an address is a registered keeper.
+    /// Check whether a given address is a registered and authorized keeper.
     pub fn is_registered_keeper(env: &Env, addr: &Address) -> bool {
         let keepers: Vec<Address> = env
             .storage()
@@ -137,7 +146,7 @@ impl YieldVault {
         (harvest_amount * fee_bps) / BPS_DENOMINATOR
     }
 
-    /// View: return current keeper fee in basis points.
+    /// View: return the current amount of keeper fee in basis points.
     pub fn get_keeper_fee_bps(env: Env) -> i128 {
         env.storage()
             .instance()
@@ -145,7 +154,7 @@ impl YieldVault {
             .unwrap_or(DEFAULT_KEEPER_FEE_BPS)
     }
 
-    /// View: return the list of registered keepers.
+    /// View: return the full list of authorized keeper addresses.
     pub fn get_registered_keepers(env: Env) -> Vec<Address> {
         env.storage()
             .instance()

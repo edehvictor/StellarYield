@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["yield_vault", "zap"]
+members = ["yield_vault", "zap", "ve_tokenomics", "stablecoin_manager"]
 
 [profile.release]
 opt-level = "z"

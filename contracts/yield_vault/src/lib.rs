@@ -274,6 +274,47 @@ impl YieldVault {
         Ok(())
     }
 
+    /// Transfer vault shares from one address to another.
+    ///
+    /// # Arguments
+    /// * `from`   — The sender of shares (must authorise).
+    /// * `to`     — The recipient of shares.
+    /// * `amount` — Number of shares to transfer.
+    pub fn transfer_shares(env: Env, from: Address, to: Address, amount: i128) -> Result<(), VaultError> {
+        from.require_auth();
+        if amount <= 0 {
+            return Err(VaultError::ZeroAmount);
+        }
+
+        let from_shares: i128 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Shares(from.clone()))
+            .unwrap_or(0);
+
+        if from_shares < amount {
+            return Err(VaultError::InsufficientShares);
+        }
+
+        let to_shares: i128 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Shares(to.clone()))
+            .unwrap_or(0);
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::Shares(from.clone()), &(from_shares - amount));
+        env.storage()
+            .persistent()
+            .set(&DataKey::Shares(to.clone()), &(to_shares + amount));
+
+        env.events()
+            .publish((symbol_short!("tr_sh"),), (from, to, amount));
+
+        Ok(())
+    }
+
     // ── View functions ──────────────────────────────────────────────
 
     /// Returns the number of vault shares held by `user`.
