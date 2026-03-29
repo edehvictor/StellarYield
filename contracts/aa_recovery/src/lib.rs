@@ -1,3 +1,4 @@
+#![allow(clippy::too_many_arguments)]
 #![no_std]
 
 //! # Smart Wallet Recovery Module
@@ -28,13 +29,13 @@ use soroban_sdk::{
 enum StorageKey {
     Initialized,
     Owner,
-    Guardians,              // Map<Address, u32> - guardian address -> guardian id
-    GuardianThreshold,      // u32 - number of guardian approvals needed
-    RecoveryRequest,        // RecoveryRequest - current active recovery request
-    GuardianCounter,        // u32 - counter for generating unique guardian ids
-    NewOwner,               // Address - proposed new owner for recovery
-    RecoveryInitiatedAt,    // u64 - timestamp when recovery was initiated
-    RecoveryConfig,         // RecoveryConfig - threshold and timelock settings
+    Guardians,           // Map<Address, u32> - guardian address -> guardian id
+    GuardianThreshold,   // u32 - number of guardian approvals needed
+    RecoveryRequest,     // RecoveryRequest - current active recovery request
+    GuardianCounter,     // u32 - counter for generating unique guardian ids
+    NewOwner,            // Address - proposed new owner for recovery
+    RecoveryInitiatedAt, // u64 - timestamp when recovery was initiated
+    RecoveryConfig,      // RecoveryConfig - threshold and timelock settings
 }
 
 // ── Data Structures ─────────────────────────────────────────────────────
@@ -52,13 +53,13 @@ pub struct Guardian {
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RecoveryRequest {
-    pub wallet: Address,        // The wallet being recovered
-    pub new_owner: Address,     // The proposed new owner address
-    pub initiated_at: u64,      // Timestamp when recovery was initiated
-    pub expires_at: u64,        // Timestamp when recovery expires (if not executed)
+    pub wallet: Address,                  // The wallet being recovered
+    pub new_owner: Address,               // The proposed new owner address
+    pub initiated_at: u64,                // Timestamp when recovery was initiated
+    pub expires_at: u64,                  // Timestamp when recovery expires (if not executed)
     pub guardian_approvals: Vec<Address>, // List of guardians who approved
-    pub executed: bool,         // Whether the recovery has been executed
-    pub cancelled: bool,        // Whether the recovery has been cancelled
+    pub executed: bool,                   // Whether the recovery has been executed
+    pub cancelled: bool,                  // Whether the recovery has been cancelled
 }
 
 /// Recovery configuration for setting up the system
@@ -124,6 +125,7 @@ const DEFAULT_GUARDIAN_THRESHOLD: u32 = 2;
 pub struct RecoveryModule;
 
 #[contractimpl]
+#[allow(clippy::too_many_arguments)]
 impl RecoveryModule {
     // ═══════════════════════════════════════════════════════════════════
     // INITIALIZATION
@@ -160,6 +162,7 @@ impl RecoveryModule {
     /// let guardians = vec![&env, guardian1.clone(), guardian2.clone()];
     /// recovery_module.initialize(&env, &owner, &guardians, &2, &604800)?;
     /// ```
+    #[allow(clippy::too_many_arguments)]
     pub fn initialize(
         env: Env,
         owner: Address,
@@ -178,12 +181,10 @@ impl RecoveryModule {
         }
 
         // Validate threshold
-        if threshold == 0 || threshold > guardians.len() as u32 {
+        if threshold == 0 || threshold > guardians.len() {
             return Err(RecoveryError::InvalidThreshold);
         }
-
-        // Validate guardian count
-        if guardians.len() as u32 > MAX_GUARDIANS {
+        if guardians.len() > MAX_GUARDIANS {
             return Err(RecoveryError::MaxGuardiansReached);
         }
 
@@ -199,7 +200,9 @@ impl RecoveryModule {
             guardian_map.set(guardian.clone(), guardian_id_counter);
         }
 
-        env.storage().instance().set(&StorageKey::Guardians, &guardian_map);
+        env.storage()
+            .instance()
+            .set(&StorageKey::Guardians, &guardian_map);
         env.storage()
             .instance()
             .set(&StorageKey::GuardianCounter, &guardian_id_counter);
@@ -218,7 +221,9 @@ impl RecoveryModule {
             .set(&StorageKey::RecoveryConfig, &config);
 
         // Mark as initialized
-        env.storage().instance().set(&StorageKey::Initialized, &true);
+        env.storage()
+            .instance()
+            .set(&StorageKey::Initialized, &true);
 
         // Emit event
         env.events().publish(
@@ -254,19 +259,18 @@ impl RecoveryModule {
     /// # Events
     ///
     /// Emits `(guard_add, guardian_address, guardian_id)` on success
-    pub fn add_guardian(
-        env: Env,
-        owner: Address,
-        guardian: Address,
-    ) -> Result<(), RecoveryError> {
+    pub fn add_guardian(env: Env, owner: Address, guardian: Address) -> Result<(), RecoveryError> {
         Self::require_initialized(&env)?;
         Self::require_owner(&env, &owner)?;
 
         // Check guardian limit
-        let guardians: Map<Address, u32> =
-            env.storage().instance().get(&StorageKey::Guardians).unwrap();
+        let guardians: Map<Address, u32> = env
+            .storage()
+            .instance()
+            .get(&StorageKey::Guardians)
+            .unwrap();
 
-        if guardians.len() as u32 >= MAX_GUARDIANS {
+        if guardians.len() >= MAX_GUARDIANS {
             return Err(RecoveryError::MaxGuardiansReached);
         }
 
@@ -286,11 +290,16 @@ impl RecoveryModule {
         counter += 1;
         guardian_map.set(guardian.clone(), counter);
 
-        env.storage().instance().set(&StorageKey::Guardians, &guardian_map);
-        env.storage().instance().set(&StorageKey::GuardianCounter, &counter);
+        env.storage()
+            .instance()
+            .set(&StorageKey::Guardians, &guardian_map);
+        env.storage()
+            .instance()
+            .set(&StorageKey::GuardianCounter, &counter);
 
         // Emit event
-        env.events().publish((symbol_short!("guard_add"),), (guardian.clone(), counter));
+        env.events()
+            .publish((symbol_short!("guard_add"),), (guardian.clone(), counter));
 
         Ok(())
     }
@@ -324,8 +333,11 @@ impl RecoveryModule {
         Self::require_initialized(&env)?;
         Self::require_owner(&env, &owner)?;
 
-        let guardians: Map<Address, u32> =
-            env.storage().instance().get(&StorageKey::Guardians).unwrap();
+        let guardians: Map<Address, u32> = env
+            .storage()
+            .instance()
+            .get(&StorageKey::Guardians)
+            .unwrap();
 
         // Check if guardian exists
         if !guardians.contains_key(guardian.clone()) {
@@ -339,7 +351,7 @@ impl RecoveryModule {
             .get(&StorageKey::GuardianThreshold)
             .unwrap();
 
-        if guardians.len() as u32 - 1 < threshold {
+        if guardians.len() - 1 < threshold {
             return Err(RecoveryError::CannotRemoveGuardian);
         }
 
@@ -347,10 +359,13 @@ impl RecoveryModule {
         let mut guardian_map = guardians;
         guardian_map.remove(guardian.clone());
 
-        env.storage().instance().set(&StorageKey::Guardians, &guardian_map);
+        env.storage()
+            .instance()
+            .set(&StorageKey::Guardians, &guardian_map);
 
         // Emit event
-        env.events().publish((symbol_short!("guard_rm"),), (guardian.clone(),));
+        env.events()
+            .publish((symbol_short!("guard_rm"),), (guardian.clone(),));
 
         Ok(())
     }
@@ -383,10 +398,13 @@ impl RecoveryModule {
         Self::require_initialized(&env)?;
         Self::require_owner(&env, &owner)?;
 
-        let guardians: Map<Address, u32> =
-            env.storage().instance().get(&StorageKey::Guardians).unwrap();
+        let guardians: Map<Address, u32> = env
+            .storage()
+            .instance()
+            .get(&StorageKey::Guardians)
+            .unwrap();
 
-        if new_threshold == 0 || new_threshold > guardians.len() as u32 {
+        if new_threshold == 0 || new_threshold > guardians.len() {
             return Err(RecoveryError::InvalidThreshold);
         }
 
@@ -395,7 +413,8 @@ impl RecoveryModule {
             .set(&StorageKey::GuardianThreshold, &new_threshold);
 
         // Emit event
-        env.events().publish((symbol_short!("thresh"),), (new_threshold,));
+        env.events()
+            .publish((symbol_short!("thresh"),), (new_threshold,));
 
         Ok(())
     }
@@ -439,8 +458,11 @@ impl RecoveryModule {
         initiator.require_auth();
 
         // Verify initiator is a guardian
-        let guardians: Map<Address, u32> =
-            env.storage().instance().get(&StorageKey::Guardians).unwrap();
+        let guardians: Map<Address, u32> = env
+            .storage()
+            .instance()
+            .get(&StorageKey::Guardians)
+            .unwrap();
 
         if !guardians.contains_key(initiator.clone()) {
             return Err(RecoveryError::Unauthorized);
@@ -531,8 +553,11 @@ impl RecoveryModule {
         guardian.require_auth();
 
         // Verify guardian
-        let guardians: Map<Address, u32> =
-            env.storage().instance().get(&StorageKey::Guardians).unwrap();
+        let guardians: Map<Address, u32> = env
+            .storage()
+            .instance()
+            .get(&StorageKey::Guardians)
+            .unwrap();
 
         if !guardians.contains_key(guardian.clone()) {
             return Err(RecoveryError::Unauthorized);
@@ -562,14 +587,16 @@ impl RecoveryModule {
         }
 
         // Add approval
-        recovery_request.guardian_approvals.push_back(guardian.clone());
+        recovery_request
+            .guardian_approvals
+            .push_back(guardian.clone());
 
         // Update storage
         env.storage()
             .instance()
             .set(&StorageKey::RecoveryRequest, &recovery_request);
 
-        let approval_count = recovery_request.guardian_approvals.len() as u32;
+        let approval_count = recovery_request.guardian_approvals.len();
 
         // Emit event
         env.events().publish(
@@ -629,7 +656,8 @@ impl RecoveryModule {
             .set(&StorageKey::RecoveryRequest, &recovery_request);
 
         // Emit event
-        env.events().publish((symbol_short!("rec_can"),), (owner.clone(),));
+        env.events()
+            .publish((symbol_short!("rec_can"),), (owner.clone(),));
 
         Ok(recovery_request)
     }
@@ -696,7 +724,7 @@ impl RecoveryModule {
             .get(&StorageKey::GuardianThreshold)
             .unwrap();
 
-        let approval_count = recovery_request.guardian_approvals.len() as u32;
+        let approval_count = recovery_request.guardian_approvals.len();
         if approval_count < threshold {
             return Err(RecoveryError::InsufficientApprovals);
         }
@@ -753,8 +781,11 @@ impl RecoveryModule {
     /// Returns a vector of guardian addresses
     pub fn get_guardians(env: Env) -> Result<Vec<Address>, RecoveryError> {
         Self::require_initialized(&env)?;
-        let guardians: Map<Address, u32> =
-            env.storage().instance().get(&StorageKey::Guardians).unwrap();
+        let guardians: Map<Address, u32> = env
+            .storage()
+            .instance()
+            .get(&StorageKey::Guardians)
+            .unwrap();
 
         let mut guardian_vec = Vec::new(&env);
         for guardian in guardians.keys() {
@@ -807,8 +838,11 @@ impl RecoveryModule {
     ///
     /// Returns true if the address is a registered guardian
     pub fn is_guardian(env: Env, address: Address) -> bool {
-        let guardians: Map<Address, u32> =
-            env.storage().instance().get(&StorageKey::Guardians).unwrap_or(Map::new(&env));
+        let guardians: Map<Address, u32> = env
+            .storage()
+            .instance()
+            .get(&StorageKey::Guardians)
+            .unwrap_or(Map::new(&env));
 
         guardians.contains_key(address)
     }
@@ -862,9 +896,9 @@ impl RecoveryModule {
                     .storage()
                     .instance()
                     .get(&StorageKey::GuardianThreshold)
-                    .unwrap_or(DEFAULT_GUARDIAN_THRESHOLD);
+                    .unwrap_or(7); // Default to something safe or error
 
-                request.guardian_approvals.len() as u32 >= threshold
+                request.guardian_approvals.len() >= threshold
             }
             None => false,
         }
@@ -900,7 +934,7 @@ impl RecoveryModule {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    // Redundant import removed
     use soroban_sdk::testutils::{Address as _, Ledger};
     use soroban_sdk::{vec, Env};
 
@@ -952,10 +986,10 @@ mod tests {
         let guardian1 = Address::generate(&env);
         let guardian2 = Address::generate(&env);
         let guardians = vec![&env, guardian1.clone(), guardian2.clone()];
-        
+
         // First initialization should succeed
         client.initialize(&owner, &guardians, &2, &604800);
-        
+
         // Second initialization should panic
         client.initialize(&owner, &guardians, &1, &604800);
     }

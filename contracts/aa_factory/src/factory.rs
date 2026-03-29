@@ -15,7 +15,7 @@ use soroban_sdk::{
     IntoVal, Map, Val, Vec,
 };
 
-use crate::proxy_wallet::ProxyWalletClient;
+// use crate::proxy_wallet::ProxyWalletClient;
 
 // ── Storage Keys ────────────────────────────────────────────────────────
 
@@ -23,12 +23,12 @@ use crate::proxy_wallet::ProxyWalletClient;
 #[derive(Clone)]
 pub enum StorageKey {
     Initialized,
-    Admin,                  // Factory admin address
-    ProxyCodeHash,          // Hash of the proxy contract code
-    DeployedProxies,        // Vec<Address> - All deployed proxy addresses
-    UserToProxy,            // Map<Address, Address> - User address to proxy mapping
-    Relayer,                // Trusted relayer for gas sponsorship
-    Nonce,                  // Nonce for deterministic address generation
+    Admin,           // Factory admin address
+    ProxyCodeHash,   // Hash of the proxy contract code
+    DeployedProxies, // Vec<Address> - All deployed proxy addresses
+    UserToProxy,     // Map<Address, Address> - User address to proxy mapping
+    Relayer,         // Trusted relayer for gas sponsorship
+    Nonce,           // Nonce for deterministic address generation
 }
 
 // ── Data Structures ─────────────────────────────────────────────────────
@@ -37,9 +37,9 @@ pub enum StorageKey {
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct DeploymentConfig {
-    pub owner: Address,         // The wallet owner's address
+    pub owner: Address,           // The wallet owner's address
     pub relayer: Option<Address>, // Optional trusted relayer
-    pub salt: u64,              // Salt for deterministic address generation
+    pub salt: u64,                // Salt for deterministic address generation
 }
 
 /// Proxy wallet information
@@ -115,13 +115,19 @@ impl WalletFactory {
         }
 
         env.storage().instance().set(&StorageKey::Admin, &admin);
-        env.storage().instance().set(&StorageKey::ProxyCodeHash, &proxy_code_hash);
+        env.storage()
+            .instance()
+            .set(&StorageKey::ProxyCodeHash, &proxy_code_hash);
         env.storage().instance().set(&StorageKey::Nonce, &0u64);
-        env.storage().instance().set(&StorageKey::Initialized, &true);
+        env.storage()
+            .instance()
+            .set(&StorageKey::Initialized, &true);
 
         // Initialize storage collections
         let deployed_proxies: Vec<Address> = Vec::new(&env);
-        env.storage().instance().set(&StorageKey::DeployedProxies, &deployed_proxies);
+        env.storage()
+            .instance()
+            .set(&StorageKey::DeployedProxies, &deployed_proxies);
 
         // Emit event
         env.events().publish((symbol_short!("init"),), (admin,));
@@ -155,10 +161,7 @@ impl WalletFactory {
     ///
     /// - Each user can only have one proxy wallet
     /// - The proxy is initialized with the owner and factory addresses
-    pub fn deploy_proxy(
-        env: Env,
-        config: DeploymentConfig,
-    ) -> Result<Address, FactoryError> {
+    pub fn deploy_proxy(env: Env, config: DeploymentConfig) -> Result<Address, FactoryError> {
         Self::require_initialized(&env)?;
         config.owner.require_auth();
 
@@ -183,18 +186,20 @@ impl WalletFactory {
         //     &proxy_code_hash,
         //     (config.owner.clone(), env.current_contract_address(), config.relayer.clone()),
         // );
-        
+
         // For this implementation, we return the computed address as a placeholder
         // The actual deployment would happen through the Soroban CLI or SDK
         let proxy_id = config.owner.clone(); // Placeholder - in production this would be the deployed contract address
 
         // Initialize the proxy
         // In production: proxy_client.initialize(...)
-        
+
         // Update storage
         let mut updated_mapping = user_to_proxy;
         updated_mapping.set(config.owner.clone(), proxy_id.clone());
-        env.storage().instance().set(&StorageKey::UserToProxy, &updated_mapping);
+        env.storage()
+            .instance()
+            .set(&StorageKey::UserToProxy, &updated_mapping);
 
         // Add to deployed proxies list
         let mut deployed: Vec<Address> = env
@@ -203,11 +208,19 @@ impl WalletFactory {
             .get(&StorageKey::DeployedProxies)
             .unwrap_or(Vec::new(&env));
         deployed.push_back(proxy_id.clone());
-        env.storage().instance().set(&StorageKey::DeployedProxies, &deployed);
+        env.storage()
+            .instance()
+            .set(&StorageKey::DeployedProxies, &deployed);
 
         // Update nonce
-        let nonce: u64 = env.storage().instance().get(&StorageKey::Nonce).unwrap_or(0);
-        env.storage().instance().set(&StorageKey::Nonce, &(nonce + 1));
+        let nonce: u64 = env
+            .storage()
+            .instance()
+            .get(&StorageKey::Nonce)
+            .unwrap_or(0);
+        env.storage()
+            .instance()
+            .set(&StorageKey::Nonce, &(nonce + 1));
 
         // Emit event
         env.events().publish(
@@ -266,18 +279,15 @@ impl WalletFactory {
     /// # Returns
     ///
     /// Returns `Ok(())` on success
-    pub fn set_relayer(
-        env: Env,
-        admin: Address,
-        relayer: Address,
-    ) -> Result<(), FactoryError> {
+    pub fn set_relayer(env: Env, admin: Address, relayer: Address) -> Result<(), FactoryError> {
         Self::require_initialized(&env)?;
         Self::require_admin(&env, &admin)?;
 
         env.storage().instance().set(&StorageKey::Relayer, &relayer);
 
         // Emit event
-        env.events().publish((symbol_short!("set_rel"),), (relayer,));
+        env.events()
+            .publish((symbol_short!("set_rel"),), (relayer,));
 
         Ok(())
     }
@@ -359,7 +369,7 @@ impl WalletFactory {
             .get(&StorageKey::DeployedProxies)
             .unwrap_or(Vec::new(&env));
 
-        Ok(deployed.len() as u32)
+        Ok(deployed.len())
     }
 
     /// Get proxy information by address.
@@ -372,10 +382,7 @@ impl WalletFactory {
     /// # Returns
     ///
     /// Returns ProxyInfo if the proxy exists
-    pub fn get_proxy_info(
-        env: Env,
-        proxy_address: Address,
-    ) -> Result<ProxyInfo, FactoryError> {
+    pub fn get_proxy_info(env: Env, proxy_address: Address) -> Result<ProxyInfo, FactoryError> {
         Self::require_initialized(&env)?;
 
         // Search through user mappings to find owner
@@ -410,7 +417,11 @@ impl WalletFactory {
     /// Returns the stored proxy code hash
     pub fn get_proxy_code_hash(env: Env) -> Result<Bytes, FactoryError> {
         Self::require_initialized(&env)?;
-        Ok(env.storage().instance().get(&StorageKey::ProxyCodeHash).unwrap())
+        Ok(env
+            .storage()
+            .instance()
+            .get(&StorageKey::ProxyCodeHash)
+            .unwrap())
     }
 
     /// Get the factory admin address.

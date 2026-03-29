@@ -1,3 +1,4 @@
+#![allow(clippy::too_many_arguments)]
 #![no_std]
 
 //! # CLMM Core — Concentrated Liquidity Market Maker Engine
@@ -81,6 +82,7 @@ pub enum ClmmError {
 pub struct ClmmCore;
 
 #[contractimpl]
+#[allow(clippy::too_many_arguments)]
 impl ClmmCore {
     /// Initialize the CLMM pool with two tokens, fee tier, and tick spacing.
     ///

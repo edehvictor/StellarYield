@@ -11,8 +11,8 @@
 //! - Multi-signature support via guardians (integrates with aa_recovery)
 
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, symbol_short, Address, Bytes, Env, IntoVal,
-    Map, Symbol, Val, Vec,
+    contract, contracterror, contractimpl, contracttype, symbol_short, Address, Bytes, Env,
+    IntoVal, Map, Symbol, Val, Vec,
 };
 
 // ── Storage Keys ────────────────────────────────────────────────────────
@@ -21,13 +21,13 @@ use soroban_sdk::{
 #[derive(Clone)]
 pub enum StorageKey {
     Initialized,
-    Owner,                  // Primary owner address (can be a public key hash)
-    Nonce,                  // Current nonce for replay protection
-    Factory,                // Factory contract address
-    Relayer,                // Trusted relayer address (stellaryield backend)
-    WebAuthnKey,            // WebAuthn public key for signature verification
-    UsedNonces,             // Map<u64, bool> - Track used nonces
-    VaultAllowances,        // Map<Address, i128> - Approved vault contracts
+    Owner,           // Primary owner address (can be a public key hash)
+    Nonce,           // Current nonce for replay protection
+    Factory,         // Factory contract address
+    Relayer,         // Trusted relayer address (stellaryield backend)
+    WebAuthnKey,     // WebAuthn public key for signature verification
+    UsedNonces,      // Map<u64, bool> - Track used nonces
+    VaultAllowances, // Map<Address, i128> - Approved vault contracts
 }
 
 // ── Data Structures ─────────────────────────────────────────────────────
@@ -36,12 +36,12 @@ pub enum StorageKey {
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct UserOperation {
-    pub sender: Address,        // The proxy wallet address
-    pub nonce: u64,             // Unique nonce for replay protection
-    pub call_data: Bytes,       // Encoded function call data
-    pub call_target: Address,   // Target contract to call
-    pub signature: Bytes,       // User's signature (WebAuthn or ECDSA)
-    pub max_fee: i128,          // Maximum fee user is willing to pay
+    pub sender: Address,      // The proxy wallet address
+    pub nonce: u64,           // Unique nonce for replay protection
+    pub call_data: Bytes,     // Encoded function call data
+    pub call_target: Address, // Target contract to call
+    pub signature: Bytes,     // User's signature (WebAuthn or ECDSA)
+    pub max_fee: i128,        // Maximum fee user is willing to pay
 }
 
 /// WebAuthn signature data structure
@@ -173,13 +173,13 @@ impl ProxyWallet {
         env.storage().instance().set(&StorageKey::Nonce, &0u64);
 
         // Mark as initialized
-        env.storage().instance().set(&StorageKey::Initialized, &true);
+        env.storage()
+            .instance()
+            .set(&StorageKey::Initialized, &true);
 
         // Emit event
-        env.events().publish(
-            (symbol_short!("init"),),
-            (owner.clone(), factory.clone()),
-        );
+        env.events()
+            .publish((symbol_short!("init"),), (owner.clone(), factory.clone()));
 
         Ok(())
     }
@@ -223,12 +223,17 @@ impl ProxyWallet {
         Self::require_owner(&env, &owner)?;
 
         // Store the WebAuthn public key coordinates
-        let key_data = Map::from_array(&env, [
-            (symbol_short!("x"), public_key_x.clone().to_val()),
-            (symbol_short!("y"), public_key_y.clone().to_val()),
-        ]);
+        let key_data = Map::from_array(
+            &env,
+            [
+                (symbol_short!("x"), public_key_x.clone().to_val()),
+                (symbol_short!("y"), public_key_y.clone().to_val()),
+            ],
+        );
 
-        env.storage().instance().set(&StorageKey::WebAuthnKey, &key_data);
+        env.storage()
+            .instance()
+            .set(&StorageKey::WebAuthnKey, &key_data);
 
         // Emit event
         env.events().publish((symbol_short!("wa_reg"),), (owner,));
@@ -289,10 +294,8 @@ impl ProxyWallet {
         let result = Self::execute_call(&env, &op.call_target, &op.call_data)?;
 
         // Emit event
-        env.events().publish(
-            (symbol_short!("exec"),),
-            (op.nonce, result.success),
-        );
+        env.events()
+            .publish((symbol_short!("exec"),), (op.nonce, result.success));
 
         Ok(result)
     }
@@ -341,7 +344,8 @@ impl ProxyWallet {
         }
 
         // Emit event
-        env.events().publish((symbol_short!("batch"),), (results.len(),));
+        env.events()
+            .publish((symbol_short!("batch"),), (results.len(),));
 
         Ok(results)
     }
@@ -424,11 +428,7 @@ impl ProxyWallet {
     /// # Events
     ///
     /// Emits `(withdraw_vault, vault, shares, amount)` on success
-    pub fn withdraw_from_vault(
-        env: Env,
-        vault: Address,
-        shares: i128,
-    ) -> Result<i128, ProxyError> {
+    pub fn withdraw_from_vault(env: Env, vault: Address, shares: i128) -> Result<i128, ProxyError> {
         Self::require_initialized(&env)?;
 
         // Call vault withdraw
@@ -477,10 +477,13 @@ impl ProxyWallet {
             .unwrap_or(Map::new(&env));
 
         allowances.set(vault.clone(), allowance);
-        env.storage().instance().set(&StorageKey::VaultAllowances, &allowances);
+        env.storage()
+            .instance()
+            .set(&StorageKey::VaultAllowances, &allowances);
 
         // Emit event
-        env.events().publish((symbol_short!("approve_v"),), (vault, allowance));
+        env.events()
+            .publish((symbol_short!("approve_v"),), (vault, allowance));
 
         Ok(())
     }
@@ -500,7 +503,11 @@ impl ProxyWallet {
     /// Returns the current nonce value
     pub fn get_nonce(env: Env) -> Result<u64, ProxyError> {
         Self::require_initialized(&env)?;
-        Ok(env.storage().instance().get(&StorageKey::Nonce).unwrap_or(0))
+        Ok(env
+            .storage()
+            .instance()
+            .get(&StorageKey::Nonce)
+            .unwrap_or(0))
     }
 
     /// Mark a nonce as used (for advanced nonce management).
@@ -523,7 +530,9 @@ impl ProxyWallet {
             .unwrap_or(Map::new(&env));
 
         used_nonces.set(nonce, true);
-        env.storage().instance().set(&StorageKey::UsedNonces, &used_nonces);
+        env.storage()
+            .instance()
+            .set(&StorageKey::UsedNonces, &used_nonces);
 
         Ok(())
     }
@@ -565,18 +574,15 @@ impl ProxyWallet {
     /// # Returns
     ///
     /// Returns `Ok(())` on success
-    pub fn set_relayer(
-        env: Env,
-        owner: Address,
-        relayer: Address,
-    ) -> Result<(), ProxyError> {
+    pub fn set_relayer(env: Env, owner: Address, relayer: Address) -> Result<(), ProxyError> {
         Self::require_initialized(&env)?;
         Self::require_owner(&env, &owner)?;
 
         env.storage().instance().set(&StorageKey::Relayer, &relayer);
 
         // Emit event
-        env.events().publish((symbol_short!("set_rel"),), (relayer,));
+        env.events()
+            .publish((symbol_short!("set_rel"),), (relayer,));
 
         Ok(())
     }
@@ -723,7 +729,11 @@ impl ProxyWallet {
         }
 
         // For sequential nonce verification, check against current nonce
-        let current_nonce: u64 = env.storage().instance().get(&StorageKey::Nonce).unwrap_or(0);
+        let current_nonce: u64 = env
+            .storage()
+            .instance()
+            .get(&StorageKey::Nonce)
+            .unwrap_or(0);
 
         // Allow nonces >= current (for out-of-order execution with used nonce tracking)
         if nonce < current_nonce {
@@ -733,11 +743,15 @@ impl ProxyWallet {
         // Mark nonce as used
         let mut updated_nonces = used_nonces;
         updated_nonces.set(nonce, true);
-        env.storage().instance().set(&StorageKey::UsedNonces, &updated_nonces);
+        env.storage()
+            .instance()
+            .set(&StorageKey::UsedNonces, &updated_nonces);
 
         // Update current nonce if this is the next sequential nonce
         if nonce == current_nonce {
-            env.storage().instance().set(&StorageKey::Nonce, &(nonce + 1));
+            env.storage()
+                .instance()
+                .set(&StorageKey::Nonce, &(nonce + 1));
         }
 
         Ok(())
@@ -789,7 +803,7 @@ impl ProxyWallet {
         // full WebAuthn challenge verification
 
         // Create the challenge hash that was signed
-        let challenge_data = Self::create_webauthn_challenge(env, owner, nonce);
+        let _challenge_data = Self::create_webauthn_challenge(env, owner, nonce);
 
         // Parse the signature (simplified - production would parse the full structure)
         // For now, we verify that a signature was provided
@@ -810,28 +824,28 @@ impl ProxyWallet {
         Ok(())
     }
 
-    fn create_webauthn_challenge(env: &Env, owner: &Address, nonce: u64) -> Bytes {
+    fn create_webauthn_challenge(env: &Env, _owner: &Address, nonce: u64) -> Bytes {
         // Create a deterministic challenge for WebAuthn verification
         // In production, this would properly hash the owner and nonce
         // For now, we return a simple bytes representation
-        
+
         let mut challenge_bytes = [0u8; 32];
-        
+
         // Add prefix for domain separation
         let prefix_len = WEBAUTHN_CHALLENGE_PREFIX.len().min(24);
         challenge_bytes[..prefix_len].copy_from_slice(&WEBAUTHN_CHALLENGE_PREFIX[..prefix_len]);
-        
+
         // Add nonce to the end
         let nonce_bytes = nonce.to_be_bytes();
         challenge_bytes[24..].copy_from_slice(&nonce_bytes);
-        
+
         Bytes::from_array(env, &challenge_bytes)
     }
 
     fn execute_call(
         env: &Env,
-        target: &Address,
-        call_data: &Bytes,
+        _target: &Address,
+        _call_data: &Bytes,
     ) -> Result<ExecutionResult, ProxyError> {
         // Execute the contract call with the provided calldata
         // This is a simplified implementation - production would parse
@@ -885,7 +899,8 @@ impl ProxyWallet {
         ];
 
         // Try to call approve function (SAC token standard)
-        let _result: Result<(), soroban_sdk::Error> = env.invoke_contract(token, &symbol_short!("approve"), args);
+        let _result: Result<(), soroban_sdk::Error> =
+            env.invoke_contract(token, &symbol_short!("approve"), args);
 
         Ok(())
     }
@@ -950,7 +965,6 @@ mod tests {
         client.register_webauthn_key(&owner, &public_key_x, &public_key_y);
 
         // Should succeed without panic
-        assert!(true);
     }
 
     #[test]
@@ -1007,7 +1021,6 @@ mod tests {
         client.approve_vault(&owner, &vault, &1000);
 
         // Should succeed without panic
-        assert!(true);
     }
 
     #[test]
@@ -1031,10 +1044,10 @@ mod tests {
         // Mark nonce 0 as used - this should mark it but not increment current nonce
         // until the sequential nonce is used
         client.mark_nonce_used(&0);
-        
+
         // Nonce 0 should be marked as used
         assert!(client.is_nonce_used(&0));
-        
+
         // Current nonce should still be 0 (increment happens when sequential nonce is used)
         assert_eq!(client.get_nonce(), 0);
     }
@@ -1045,10 +1058,10 @@ mod tests {
         let (client, _, _) = setup_proxy_wallet(&env);
 
         client.mark_nonce_used(&0);
-        
+
         // Verify the nonce is marked as used
         assert!(client.is_nonce_used(&0));
-        
+
         // Note: In production, trying to use the same nonce again would fail with NonceAlreadyUsed
         // For testing, we just verify the nonce tracking works
     }
