@@ -42,11 +42,11 @@ pub enum DataKey {
     VaultContract,
     OracleContract,
     // Global parameters
-    MinCollateralRatio,     // e.g. 15000 = 150% (scaled by 10000)
-    AuctionDuration,        // Duration in seconds for full price decay
-    StartPremiumBps,        // Starting premium above oracle price in bps
-    FloorDiscountBps,       // Floor discount below oracle price in bps
-    LiquidationPenaltyBps,  // Penalty kept by protocol in bps
+    MinCollateralRatio,    // e.g. 15000 = 150% (scaled by 10000)
+    AuctionDuration,       // Duration in seconds for full price decay
+    StartPremiumBps,       // Starting premium above oracle price in bps
+    FloorDiscountBps,      // Floor discount below oracle price in bps
+    LiquidationPenaltyBps, // Penalty kept by protocol in bps
     ProtocolFeeRecipient,
 }
 
@@ -70,8 +70,8 @@ pub struct Auction {
     pub debt_token: Address,
     pub collateral_amount: i128,
     pub debt_to_cover: i128,
-    pub start_price: i128,   // Starting price per unit of collateral (scaled 1e7)
-    pub floor_price: i128,   // Floor price per unit of collateral (scaled 1e7)
+    pub start_price: i128, // Starting price per unit of collateral (scaled 1e7)
+    pub floor_price: i128, // Floor price per unit of collateral (scaled 1e7)
     pub start_time: u64,
     pub duration: u64,
     pub status: AuctionStatus,
@@ -167,9 +167,7 @@ impl DutchAuction {
         env.storage()
             .instance()
             .set(&DataKey::ProtocolFeeRecipient, &fee_recipient);
-        env.storage()
-            .instance()
-            .set(&DataKey::NextAuctionId, &1u64);
+        env.storage().instance().set(&DataKey::NextAuctionId, &1u64);
         env.storage().instance().set(&DataKey::Initialized, &true);
 
         env.events().publish(
@@ -250,7 +248,11 @@ impl DutchAuction {
 
         // Transfer collateral from vault owner to auction contract
         let collateral_client = token::Client::new(&env, &collateral_token);
-        collateral_client.transfer(&vault_owner, &env.current_contract_address(), &collateral_amount);
+        collateral_client.transfer(
+            &vault_owner,
+            &env.current_contract_address(),
+            &collateral_amount,
+        );
 
         let auction_id: u64 = env
             .storage()
@@ -543,8 +545,10 @@ impl DutchAuction {
             .instance()
             .set(&DataKey::LiquidationPenaltyBps, &penalty_bps);
 
-        env.events()
-            .publish((symbol_short!("params"),), (min_collateral_ratio, auction_duration));
+        env.events().publish(
+            (symbol_short!("params"),),
+            (min_collateral_ratio, auction_duration),
+        );
 
         Ok(())
     }
@@ -582,7 +586,11 @@ impl DutchAuction {
     }
 
     /// Calculate the cost to buy a given amount of collateral at the current price.
-    pub fn quote_buy(env: Env, auction_id: u64, collateral_amount: i128) -> Result<i128, AuctionError> {
+    pub fn quote_buy(
+        env: Env,
+        auction_id: u64,
+        collateral_amount: i128,
+    ) -> Result<i128, AuctionError> {
         let auction: Auction = env
             .storage()
             .persistent()
@@ -709,7 +717,14 @@ mod tests {
             &fee_recipient,
         );
 
-        (env, client, admin, fee_recipient, collateral_token, debt_token)
+        (
+            env,
+            client,
+            admin,
+            fee_recipient,
+            collateral_token,
+            debt_token,
+        )
     }
 
     fn mint_tokens(env: &Env, token_addr: &Address, to: &Address, amount: i128) {
@@ -730,7 +745,17 @@ mod tests {
         let (_, client, admin, fee_recipient, _, _) = setup_env();
         let vault = Address::generate(&client.address.env());
         let oracle = Address::generate(&client.address.env());
-        client.initialize(&admin, &vault, &oracle, &15000, &3600, &2000, &1000, &500, &fee_recipient);
+        client.initialize(
+            &admin,
+            &vault,
+            &oracle,
+            &15000,
+            &3600,
+            &2000,
+            &1000,
+            &500,
+            &fee_recipient,
+        );
     }
 
     #[test]

@@ -128,12 +128,8 @@ impl IntentSwap {
         }
 
         env.storage().instance().set(&DataKey::Admin, &admin);
-        env.storage()
-            .instance()
-            .set(&DataKey::NextIntentId, &1u64);
-        env.storage()
-            .instance()
-            .set(&DataKey::MinStake, &min_stake);
+        env.storage().instance().set(&DataKey::NextIntentId, &1u64);
+        env.storage().instance().set(&DataKey::MinStake, &min_stake);
         env.storage()
             .instance()
             .set(&DataKey::ProtocolFeeBps, &protocol_fee_bps);
@@ -143,8 +139,10 @@ impl IntentSwap {
         env.storage().instance().set(&DataKey::SolverCount, &0u32);
         env.storage().instance().set(&DataKey::Initialized, &true);
 
-        env.events()
-            .publish((symbol_short!("init"),), (admin, min_stake, protocol_fee_bps));
+        env.events().publish(
+            (symbol_short!("init"),),
+            (admin, min_stake, protocol_fee_bps),
+        );
 
         Ok(())
     }
@@ -455,9 +453,7 @@ impl IntentSwap {
     /// Update minimum solver stake. Admin only.
     pub fn set_min_stake(env: Env, admin: Address, min_stake: i128) -> Result<(), SwapError> {
         Self::require_admin(&env, &admin)?;
-        env.storage()
-            .instance()
-            .set(&DataKey::MinStake, &min_stake);
+        env.storage().instance().set(&DataKey::MinStake, &min_stake);
         Ok(())
     }
 
@@ -602,8 +598,7 @@ impl IntentSwap {
             .instance()
             .set(&DataKey::SolverCount, &(count.saturating_sub(1)));
 
-        env.events()
-            .publish((symbol_short!("unstake"),), (solver,));
+        env.events().publish((symbol_short!("unstake"),), (solver,));
 
         Ok(())
     }
@@ -672,7 +667,15 @@ mod tests {
 
         client.initialize(&admin, &1000, &50, &fee_recipient); // 0.5% fee, 1000 min stake
 
-        (env, client, admin, fee_recipient, token_a, token_b, contract_id)
+        (
+            env,
+            client,
+            admin,
+            fee_recipient,
+            token_a,
+            token_b,
+            contract_id,
+        )
     }
 
     fn mint_tokens(env: &Env, token_addr: &Address, to: &Address, amount: i128) {
@@ -703,11 +706,7 @@ mod tests {
         env.ledger().set_timestamp(100);
 
         let intent_id = client.create_intent(
-            &user,
-            &token_a,
-            &token_b,
-            &10_000,
-            &9_500, // min 9500 buy tokens
+            &user, &token_a, &token_b, &10_000, &9_500, // min 9500 buy tokens
             &200,   // expires at ledger 200
             &false,
         );
@@ -727,7 +726,8 @@ mod tests {
         mint_tokens(&env, &token_a, &user, 10_000);
 
         env.ledger().set_timestamp(100);
-        let intent_id = client.create_intent(&user, &token_a, &token_b, &10_000, &9_500, &200, &false);
+        let intent_id =
+            client.create_intent(&user, &token_a, &token_b, &10_000, &9_500, &200, &false);
 
         client.cancel_intent(&user, &intent_id);
 
@@ -756,7 +756,8 @@ mod tests {
         assert_eq!(client.solver_count(), 1);
 
         // Create intent
-        let intent_id = client.create_intent(&user, &token_a, &token_b, &10_000, &9_500, &200, &false);
+        let intent_id =
+            client.create_intent(&user, &token_a, &token_b, &10_000, &9_500, &200, &false);
 
         // Fill intent — solver provides 10_000 buy tokens
         client.fill_intent(&solver_addr, &intent_id, &10_000, &10_000);
@@ -785,7 +786,8 @@ mod tests {
         client.register_solver(&solver_addr, &token_a, &1_000);
 
         // Create intent with partial fill enabled
-        let intent_id = client.create_intent(&user, &token_a, &token_b, &10_000, &9_500, &200, &true);
+        let intent_id =
+            client.create_intent(&user, &token_a, &token_b, &10_000, &9_500, &200, &true);
 
         // Partial fill — only 5000 of 10000
         client.fill_intent(&solver_addr, &intent_id, &5_000, &5_000);
@@ -809,7 +811,8 @@ mod tests {
         env.ledger().set_timestamp(100);
 
         client.register_solver(&solver_addr, &token_a, &1_000);
-        let intent_id = client.create_intent(&user, &token_a, &token_b, &10_000, &9_500, &200, &false);
+        let intent_id =
+            client.create_intent(&user, &token_a, &token_b, &10_000, &9_500, &200, &false);
 
         // Try to fill with less than min_buy_amount
         client.fill_intent(&solver_addr, &intent_id, &5_000, &10_000);
@@ -823,7 +826,8 @@ mod tests {
         mint_tokens(&env, &token_a, &user, 10_000);
 
         env.ledger().set_timestamp(100);
-        let intent_id = client.create_intent(&user, &token_a, &token_b, &10_000, &9_500, &200, &false);
+        let intent_id =
+            client.create_intent(&user, &token_a, &token_b, &10_000, &9_500, &200, &false);
 
         // Advance time past expiry
         env.ledger().set_timestamp(201);
@@ -848,7 +852,8 @@ mod tests {
         mint_tokens(&env, &token_b, &rando, 20_000);
 
         env.ledger().set_timestamp(100);
-        let intent_id = client.create_intent(&user, &token_a, &token_b, &10_000, &9_500, &200, &false);
+        let intent_id =
+            client.create_intent(&user, &token_a, &token_b, &10_000, &9_500, &200, &false);
 
         // Non-registered solver tries to fill
         client.fill_intent(&rando, &intent_id, &10_000, &10_000);

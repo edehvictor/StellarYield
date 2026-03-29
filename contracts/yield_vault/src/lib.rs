@@ -230,12 +230,10 @@ impl YieldVault {
             .get(&DataKey::Shares(beneficiary.clone()))
             .unwrap_or(0);
 
-        env.storage()
-            .persistent()
-            .set(
-                &DataKey::Shares(beneficiary.clone()),
-                &(beneficiary_shares + shares),
-            );
+        env.storage().persistent().set(
+            &DataKey::Shares(beneficiary.clone()),
+            &(beneficiary_shares + shares),
+        );
         env.storage()
             .instance()
             .set(&DataKey::TotalShares, &(total_shares + shares));
@@ -381,7 +379,12 @@ impl YieldVault {
     /// * `from`   — The sender of shares (must authorise).
     /// * `to`     — The recipient of shares.
     /// * `amount` — Number of shares to transfer.
-    pub fn transfer_shares(env: Env, from: Address, to: Address, amount: i128) -> Result<(), VaultError> {
+    pub fn transfer_shares(
+        env: Env,
+        from: Address,
+        to: Address,
+        amount: i128,
+    ) -> Result<(), VaultError> {
         from.require_auth();
         if amount <= 0 {
             return Err(VaultError::ZeroAmount);
