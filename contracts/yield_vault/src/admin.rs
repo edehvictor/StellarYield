@@ -16,6 +16,15 @@ impl YieldVault {
         Ok(())
     }
 
+    /// Rescue tokens sent to the contract by mistake.
+    ///
+    /// # Arguments
+    /// * `admin`  - The admin address authorizing the rescue.
+    /// * `target` - The address to receive the rescued funds.
+    /// * `amount` - The amount of tokens to rescue.
+    ///
+    /// # Security
+    /// Only the admin can call this. Clamped to actual available balance.
     pub fn rescue_funds(
         env: Env,
         admin: Address,

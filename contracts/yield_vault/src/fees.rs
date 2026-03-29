@@ -40,14 +40,17 @@ const MOVING_AVERAGE_WINDOW: u32 = 10;
 
 impl YieldVault {
     /// Record a new APY observation and recalculate the dynamic fee.
-    /// Callable by admin. The fee adjusts based on a moving average of the
-    /// vault's historical APY: higher yields allow a slightly higher fee,
-    /// lower yields reduce the fee to remain competitive.
+    /// Callable by admin.
     ///
-    /// Fee formula:
-    ///   moving_avg_apy = average of last N APY snapshots
-    ///   raw_fee = moving_avg_apy / 10 (10% of yield as fee)
-    ///   clamped_fee = clamp(raw_fee, min_fee, max_fee)
+    /// # Arguments
+    /// * `admin`           - The admin address authorizing the update.
+    /// * `current_apy_bps` - The latest APY observation in basis points.
+    ///
+    /// # Returns
+    /// The new performance fee in basis points.
+    ///
+    /// # Invariants
+    /// 100 <= performance_fee_bps <= 1000
     pub fn record_apy_and_adjust_fee(
         env: Env,
         admin: Address,
