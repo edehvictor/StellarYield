@@ -1,12 +1,13 @@
 import { Buffer } from "buffer";
-import { getAddress, isConnected, requestAccess } from "@stellar/freighter-api";
 import { Keypair, StrKey } from "@stellar/stellar-sdk";
 import type {
   ConnectWalletOptions,
+  ExtensionWalletProviderId,
   VerificationStatus,
   WalletProviderId,
   WalletSession,
 } from "./types";
+import { getAdapter } from "./walletAdapters";
 
 const STORAGE_KEY = "stellar-yield.wallet-session";
 const API_BASE_URL = import.meta.env.VITE_API_URL ?? "http://localhost:3001";
@@ -25,6 +26,8 @@ interface VerifyResponse {
 
 const providerLabels: Record<WalletProviderId, string> = {
   freighter: "Freighter",
+  xbull: "xBull",
+  albedo: "Albedo",
   email: "Email Smart Wallet",
   google: "Google Smart Wallet",
   github: "GitHub Smart Wallet",
@@ -151,33 +154,21 @@ export async function connectWalletSession(
 ): Promise<WalletSession> {
   const providerId = options.providerId ?? "freighter";
 
-  if (providerId === "freighter") {
-    const connectionResult = await isConnected();
-
-    if (connectionResult.error || !connectionResult.isConnected) {
-      throw new Error(
-        "Freighter extension was not detected. Install it to continue.",
-      );
+  // ── Extension / browser wallet providers ───────────────────────────
+  const EXTENSION_PROVIDERS: ExtensionWalletProviderId[] = ["freighter", "xbull", "albedo"];
+  if ((EXTENSION_PROVIDERS as WalletProviderId[]).includes(providerId)) {
+    const adapter = getAdapter(providerId as ExtensionWalletProviderId);
+    if (!adapter) {
+      throw new Error(`No adapter found for wallet provider: ${providerId}`);
     }
-
-    const accessResult = await requestAccess();
-    if (accessResult.error) {
-      throw new Error(accessResult.error);
-    }
-
-    const addressResult = await getAddress();
-    if (addressResult.error || !addressResult.address) {
-      throw new Error(addressResult.error ?? "Failed to read wallet address.");
-    }
-
+    const walletAddress = await adapter.getPublicKey();
     const session: WalletSession = {
-      walletAddress: addressResult.address,
+      walletAddress,
       walletAddressType: "account",
       providerId,
       providerLabel: getProviderLabel(providerId),
       verificationStatus: "verified",
     };
-
     saveSession(session);
     return session;
   }

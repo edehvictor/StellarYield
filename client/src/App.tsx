@@ -10,6 +10,7 @@ import AIAdvisor from "./components/AIAdvisor";
 import Vault from "./components/Vault";
 import PortfolioPage from "./components/portfolio/PortfolioPage";
 import GovernanceDashboard from "./pages/governance/GovernanceDashboard";
+import QuestsDashboard from "./pages/quests/QuestsDashboard";
 import ConnectWalletButton from "./components/wallet/ConnectWalletButton";
 import NotificationBell from "./components/Navigation/NotificationBell";
 import Leaderboard from "./pages/leaderboard/Leaderboard";
@@ -96,6 +97,12 @@ const RootLayout = () => {
             </Link>
           )}
           <Link
+            to="/quests"
+            className="hover:text-white transition-colors flex items-center gap-2"
+          >
+            <Trophy size={18} /> Quests
+          </Link>
+          <Link
             to="/leaderboard"
             className="hover:text-white transition-colors flex items-center gap-2"
           >
@@ -156,12 +163,17 @@ const router = createBrowserRouter([
         element: <GovernanceDashboard />,
       },
       {
+        path: "/quests",
+        element: <QuestsDashboard />,
+      },
+      {
         path: "/leaderboard",
         element: <Leaderboard />,
       },
     ],
   },
 ]);
+
 
 function App() {
   return <RouterProvider router={router} />;

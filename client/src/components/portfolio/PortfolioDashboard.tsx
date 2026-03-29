@@ -8,6 +8,8 @@ import {
   RefreshCw,
 } from "lucide-react";
 
+import PortfolioVisualizer from "../visualizer/PortfolioVisualizer";
+
 // ── Types ───────────────────────────────────────────────────────────────
 
 interface VaultPosition {
@@ -150,6 +152,9 @@ export default function PortfolioDashboard({ walletAddress }: PortfolioDashboard
           <p className="text-2xl font-bold">{avgApy.toFixed(1)}%</p>
         </div>
       </div>
+
+      {/* 3D Visualizer Integration */}
+      <PortfolioVisualizer />
 
       {/* Positions Table */}
       <div className="glass-panel p-6">

@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { Activity, ArrowUpRight, ShieldCheck, TrendingUp } from "lucide-react";
 import ApyHistoryChart from "./charts/ApyHistoryChart";
+import MempoolVisualizer from "./mempool_graph/MempoolVisualizer";
 
 interface YieldData {
   protocol: string;
@@ -93,7 +94,11 @@ export default function Dashboard() {
 
       <ApyHistoryChart />
 
+      {/* Mempool Visualization Integration */}
+      <MempoolVisualizer />
+
       <div className="glass-panel mt-8 overflow-hidden">
+
         <div className="flex items-center justify-between border-b border-[rgba(255,255,255,0.05)] p-6">
           <h3 className="text-xl font-bold">Top Stellar Yields</h3>
           <button className="text-sm font-medium text-[#6C5DD3] transition-colors hover:text-white">

@@ -6,3 +6,5 @@ dist/
 .env
 .claude/
 .agents/
+issue.md
+pr.md

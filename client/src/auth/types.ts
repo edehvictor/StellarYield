@@ -1,4 +1,7 @@
-export type WalletProviderId = "freighter" | "email" | "google" | "github";
+/** Extension/browser wallet provider IDs */
+export type ExtensionWalletProviderId = "freighter" | "xbull" | "albedo";
+
+export type WalletProviderId = ExtensionWalletProviderId | "email" | "google" | "github";
 
 export type WalletAddressType = "account" | "contract";
 

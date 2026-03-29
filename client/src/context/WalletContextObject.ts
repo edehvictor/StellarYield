@@ -14,6 +14,12 @@ export interface WalletContextValue {
   connectWallet: (options?: ConnectWalletOptions) => Promise<boolean>;
   disconnectWallet: () => void;
   clearError: () => void;
+  /**
+   * Sign a Soroban transaction XDR using the currently connected wallet.
+   * Routes to the correct provider automatically — callers don't need to know
+   * which wallet is active.
+   */
+  signTransaction: (xdr: string, networkPassphrase: string) => Promise<string>;
 }
 
 export const WalletContext = createContext<WalletContextValue | undefined>(
