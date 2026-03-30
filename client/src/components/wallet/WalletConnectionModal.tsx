@@ -1,4 +1,4 @@
-import { ExternalLink, Github, Mail, Shield, Wallet, X } from "lucide-react";
+import { ExternalLink, Github, Mail, Shield, Wallet, X, Zap } from "lucide-react";
 import { useState } from "react";
 import { useWallet } from "../../context/useWallet";
 
@@ -31,7 +31,7 @@ export default function WalletConnectionModal({
   };
 
   const handleConnect = async (
-    providerId: "freighter" | "email" | "google" | "github",
+    providerId: "freighter" | "xbull" | "albedo" | "email" | "google" | "github",
   ) => {
     const didConnect = await connectWallet({
       providerId,
@@ -67,10 +67,8 @@ export default function WalletConnectionModal({
         </div>
 
         <p className="mb-5 text-sm leading-6 text-gray-300">
-          Use Freighter for classic Stellar accounts, or create a session-based
-          smart wallet via email or social login. Smart wallet onboarding
-          derives a contract-style wallet address plus a session key under the
-          hood.
+          Choose a Stellar wallet to connect, or create a session-based smart
+          wallet via email or social login.
         </p>
 
         {errorMessage ? (
@@ -80,27 +78,58 @@ export default function WalletConnectionModal({
         ) : null}
 
         <div className="space-y-3">
-          {isFreighterInstalled === false ? (
-            <a
-              href="https://www.freighter.app/"
-              target="_blank"
-              rel="noreferrer"
-              className="btn-secondary flex w-full items-center justify-center gap-2 py-3"
-            >
-              Install Freighter
-              <ExternalLink size={16} />
-            </a>
-          ) : (
-            <button
-              type="button"
-              onClick={() => void handleConnect("freighter")}
-              disabled={isConnecting}
-              className="btn-primary w-full py-3 disabled:cursor-not-allowed disabled:opacity-70"
-            >
-              {isConnecting ? "Connecting..." : "Connect Freighter"}
-            </button>
-          )}
+          {/* ── Extension wallets ── */}
+          <div className="rounded-2xl border border-white/10 bg-black/20 p-4">
+            <div className="mb-3 flex items-center gap-2 text-sm font-semibold text-[#8f81f5]">
+              <Wallet size={16} />
+              Browser Wallets
+            </div>
+            <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
+              {isFreighterInstalled === false ? (
+                <a
+                  href="https://www.freighter.app/"
+                  target="_blank"
+                  rel="noreferrer"
+                  className="btn-secondary col-span-full flex w-full items-center justify-center gap-2 py-3"
+                >
+                  Install Freighter
+                  <ExternalLink size={16} />
+                </a>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => void handleConnect("freighter")}
+                  disabled={isConnecting}
+                  className="btn-primary flex items-center justify-center gap-2 py-3 disabled:cursor-not-allowed disabled:opacity-70"
+                >
+                  <Wallet size={16} />
+                  Freighter
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={() => void handleConnect("xbull")}
+                disabled={isConnecting}
+                className="btn-secondary flex items-center justify-center gap-2 py-3 disabled:cursor-not-allowed disabled:opacity-70"
+                title="xBull Wallet (opens xBull in-page connector)"
+              >
+                <Zap size={16} />
+                xBull
+              </button>
+              <button
+                type="button"
+                onClick={() => void handleConnect("albedo")}
+                disabled={isConnecting}
+                className="btn-secondary flex items-center justify-center gap-2 py-3 disabled:cursor-not-allowed disabled:opacity-70"
+                title="Albedo (opens Albedo popup)"
+              >
+                <Shield size={16} />
+                Albedo
+              </button>
+            </div>
+          </div>
 
+          {/* ── Smart wallet ── */}
           <div className="rounded-2xl border border-white/10 bg-black/20 p-4">
             <div className="mb-3 flex items-center gap-2 text-sm font-semibold text-cyan-200">
               <Shield size={16} />
@@ -148,15 +177,17 @@ export default function WalletConnectionModal({
             </div>
           </div>
 
-          <div className="rounded-2xl border border-white/5 bg-white/5 px-4 py-3 text-xs leading-5 text-gray-400">
-            Backend session challenge status:{" "}
-            <span className="font-semibold text-white">
-              {verificationStatus === "verified"
-                ? "verified"
-                : "local fallback"}
-            </span>
-            .
-          </div>
+          {verificationStatus ? (
+            <div className="rounded-2xl border border-white/5 bg-white/5 px-4 py-3 text-xs leading-5 text-gray-400">
+              Backend session challenge status:{" "}
+              <span className="font-semibold text-white">
+                {verificationStatus === "verified"
+                  ? "verified"
+                  : "local fallback"}
+              </span>
+              .
+            </div>
+          ) : null}
         </div>
       </div>
     </div>

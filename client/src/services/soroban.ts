@@ -1,7 +1,7 @@
 /**
  * Soroban Transaction Engine
  *
- * Constructs, signs via Freighter, and submits Soroban contract calls.
+ * Constructs, signs via the active wallet adapter, and submits Soroban contract calls.
  * Designed to work with the YieldVault contract for deposit/withdraw.
  */
 
@@ -95,6 +95,7 @@ async function buildContractCall(
 
 /**
  * Sign a transaction XDR with the user's Freighter wallet.
+ * @deprecated Use `signTransaction` parameter in `executeContractCall` instead.
  */
 async function signWithFreighter(xdr: string): Promise<string> {
   const signed = await freighter.signTransaction(xdr, {
@@ -149,25 +150,30 @@ async function submitAndPoll(signedXdr: string): Promise<TxResult> {
 /**
  * Execute a full contract call: build → sign → submit → poll.
  *
- * @param sourcePublicKey - Caller's Stellar public key
- * @param method          - Contract method name (e.g. "deposit")
- * @param args            - ScVal arguments
- * @param onStatus        - Optional callback for status updates
- * @returns Transaction result
+ * @param sourcePublicKey  - Caller's Stellar public key
+ * @param method           - Contract method name (e.g. "deposit")
+ * @param args             - ScVal arguments
+ * @param onStatus         - Optional callback for status updates
+ * @param useFeeBump       - Whether to wrap the tx in a fee-bump via the relayer
+ * @param signTx           - Optional signer function; defaults to Freighter for
+ *                           backwards compatibility. Pass `wallet.signTransaction`
+ *                           from `useWallet()` to use the active wallet adapter.
  */
 export async function executeContractCall(
   sourcePublicKey: string,
   method: string,
   args: StellarSdk.xdr.ScVal[],
   onStatus?: (status: TxStatus) => void,
-  useFeeBump: boolean = false
+  useFeeBump: boolean = false,
+  signTx?: (xdr: string, networkPassphrase: string) => Promise<string>,
 ): Promise<TxResult> {
   try {
     onStatus?.("building");
     const xdr = await buildContractCall(sourcePublicKey, method, ...args);
 
     onStatus?.("signing");
-    const signedXdr = await signWithFreighter(xdr);
+    const signer = signTx ?? ((x: string) => signWithFreighter(x));
+    const signedXdr = await signer(xdr, NETWORK_PASSPHRASE);
 
     let finalXdr = signedXdr;
     if (useFeeBump) {
@@ -285,12 +291,15 @@ export async function zapDeposit(
  * @param userAddress - Depositor's public key
  * @param amount      - Amount in stroops (1 XLM = 10_000_000 stroops)
  * @param onStatus    - Status callback for UI updates
+ * @param useFeeBump  - Whether to wrap the tx in a fee-bump via the relayer
+ * @param signTx      - Optional signer; pass `wallet.signTransaction` to use any wallet adapter
  */
 export async function deposit(
   userAddress: string,
   amount: bigint,
   onStatus?: (status: TxStatus) => void,
-  useFeeBump: boolean = true // Sponsor first deposit by default as per issue
+  useFeeBump: boolean = true,
+  signTx?: (xdr: string, networkPassphrase: string) => Promise<string>,
 ): Promise<TxResult> {
   return executeContractCall(
     userAddress,
@@ -300,7 +309,8 @@ export async function deposit(
       StellarSdk.nativeToScVal(amount, { type: "i128" }),
     ],
     onStatus,
-    useFeeBump
+    useFeeBump,
+    signTx,
   );
 }
 
@@ -310,11 +320,13 @@ export async function deposit(
  * @param userAddress - Withdrawer's public key
  * @param shares      - Number of vault shares to redeem
  * @param onStatus    - Status callback for UI updates
+ * @param signTx      - Optional signer; pass `wallet.signTransaction` to use any wallet adapter
  */
 export async function withdraw(
   userAddress: string,
   shares: bigint,
   onStatus?: (status: TxStatus) => void,
+  signTx?: (xdr: string, networkPassphrase: string) => Promise<string>,
 ): Promise<TxResult> {
   return executeContractCall(
     userAddress,
@@ -324,5 +336,7 @@ export async function withdraw(
       StellarSdk.nativeToScVal(shares, { type: "i128" }),
     ],
     onStatus,
+    false,
+    signTx,
   );
 }

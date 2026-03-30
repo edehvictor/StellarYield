@@ -5,7 +5,8 @@ import {
   connectWalletSession,
   loadStoredSession,
 } from "../auth/session";
-import type { ConnectWalletOptions, WalletSession } from "../auth/types";
+import { getAdapter } from "../auth/walletAdapters";
+import type { ConnectWalletOptions, ExtensionWalletProviderId, WalletSession } from "../auth/types";
 import { WalletContext } from "./WalletContextObject";
 
 export function WalletProvider({ children }: { children: ReactNode }) {
@@ -71,6 +72,22 @@ export function WalletProvider({ children }: { children: ReactNode }) {
     setErrorMessage(null);
   }
 
+  async function signTransaction(xdr: string, networkPassphrase: string): Promise<string> {
+    if (!session) {
+      throw new Error("No wallet connected.");
+    }
+    const EXTENSION_PROVIDERS: ExtensionWalletProviderId[] = ["freighter", "xbull", "albedo"];
+    if ((EXTENSION_PROVIDERS as string[]).includes(session.providerId)) {
+      const adapter = getAdapter(session.providerId as ExtensionWalletProviderId);
+      if (!adapter) {
+        throw new Error(`No adapter for provider: ${session.providerId}`);
+      }
+      return adapter.signTransaction(xdr, networkPassphrase);
+    }
+    // Smart wallet (email / google / github) sessions don't support direct signing
+    throw new Error("signTransaction is not supported for smart wallet sessions.");
+  }
+
   const value = useMemo(
     () => ({
       walletAddress: session?.walletAddress ?? null,
@@ -85,7 +102,11 @@ export function WalletProvider({ children }: { children: ReactNode }) {
       connectWallet,
       disconnectWallet,
       clearError,
+      signTransaction,
     }),
+    // signTransaction is stable: it only captures `session` which is already
+    // in the deps array below.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
     [session, isConnecting, isFreighterInstalled, errorMessage],
   );
 

@@ -1,78 +1,92 @@
-#32 Implement Gasless Transactions (Fee Bumping) for User Onboarding
+#88 Delta-Neutral Basis Trading Strategy Contract
 Repo Avatar
 edehvictor/StellarYield
 📝 Description
-To onboard non-crypto native users, StellarYield will sponsor the transaction fees for their first deposit using Stellar's fee-bumping feature.
+We need an automated strategy that generates yield regardless of market direction by executing a delta-neutral basis trade (going long on spot and short on perpetuals to collect funding rates).
 
 🎯 Acceptance Criteria
- Update the frontend transaction submission logic to utilize the FeeBumpTransaction wrapper.
- Create a secure backend endpoint where the protocol's server signs the inner transaction to pay the network fee.
- Implement rate-limiting and sybil resistance (e.g., only sponsor the first 3 transactions per IP/Wallet).
- Submit the final wrapped transaction to the network.
+ Write a strategy contract that splits a USDC deposit.
+ Uses half to buy an asset on the AMM (Spot Long).
+ Uses half to open a 1x Short position on the Perpetuals exchange.
+ Implements an auto_rebalance function to maintain the delta-neutral peg when prices move.
 🛠 Technical Details
-Stack: Node.js, Stellar SDK, React.
-Location: /server/src/relayer/ and /client/src/services/
-Security: Ensure the backend private key is never exposed and only signs fee-bumps, not arbitrary data.
+Stack: Rust, Soroban Cross-Contract Calls.
+Location: /contracts/strategies/delta_neutral.rs
+Security: Highly susceptible to slippage and impermanent loss during the rebalance phase.
 ⏱ Complexity & Scope
-Drips Complexity: High (200 points)
-Guidelines: Requires careful handling of keypairs and network submission. PR must include Closes #[issue_id].
+Estimated Time: 3-4 weeks.
+Drips Complexity: High (200 points) - Wall Street-level financial engineering.
+📋 Guidelines for Submission
+Minimum 90 percent test coverage required.
+Clear NatSpec-style documentation must be added to public contract functions.
+Timeframe for completion: 2 Wave cycles.
 
-
-
-#28 Build Stellar Horizon Event Indexer Service
+#101 Interactive Web3 Quest & Achievement Engine (Frontend)
 Repo Avatar
 edehvictor/StellarYield
 📝 Description
-Our backend needs to track all on-chain actions (deposits, withdrawals, harvests) in real-time to update the UI without forcing the frontend to query the blockchain for historical data.
+To drive user engagement and protocol TVL, we need an on-chain "Quest" system (similar to Galxe or Layer3) built directly into our UI.
 
 🎯 Acceptance Criteria
- Build a background Node.js service using @stellar/stellar-sdk to listen to the Horizon API.
- Filter for specific events emitted by our Soroban Vault contract.
- Parse the XDR event data and store it securely in our relational database (e.g., PostgreSQL).
- Handle blockchain reorgs or connection drops gracefully by tracking the last processed ledger sequence.
+ Build a React dashboard tracking user actions (e.g., "Deposit 100 USDC", "Hold for 30 Days").
+ The frontend must query the indexer to verify completion of on-chain objectives.
+ Upon completion, allow the user to trigger a Soroban contract call to mint an exclusive "Achievement Badge" NFT.
+ Build celebratory animations using Framer Motion when badges are unlocked.
 🛠 Technical Details
-Stack: Node.js, Stellar SDK, PostgreSQL/Prisma.
-Location: /server/src/indexer/
+Stack: React, Framer Motion, Soroban SDK.
+Location: /frontend/src/pages/quests/
+Security: Ensure the indexer validation cannot be spoofed by client-side tampering.
 ⏱ Complexity & Scope
-Drips Complexity: High (200 points)
-Guidelines: Ensure the indexer is idempotent (processing the same ledger twice won't duplicate database entries). PR must include Closes #[issue_id].
+Estimated Time: 3-4 weeks.
+Drips Complexity: High (200 points) - Full-stack feature involving UI, indexer, and smart contracts.
+📋 Guidelines for Submission
+Minimum 90 percent test coverage required.
+Clear NatSpec-style documentation must be added to public contract functions.
+Timeframe for completion: 2 Wave cycles.
 
 
 
-#27 Emergency Circuit Breaker & Timelock Governance
+#78 WebGL 3D Portfolio Visualizer (Frontend)
 Repo Avatar
 edehvictor/StellarYield
 📝 Description
-Security is paramount. If a vulnerability is found in an underlying protocol, the admin must be able to pause deposits and rescue funds, but we also need a timelock to prevent malicious admin behavior.
+Gamify the DeFi experience by replacing boring line charts with a WebGL interactive 3D universe mapping a user's liquidity positions and yield flows.
 
 🎯 Acceptance Criteria
- Implement an emergency_pause() function that halts all deposits and internal routing immediately.
- Implement a rescue_funds() function that allows the admin to pull funds back to the vault, bypassing standard withdrawal checks.
- Implement a 24-hour Timelock for any contract upgrades or changes to the admin address.
- Emit specific Soroban events when the circuit breaker is tripped.
+ Integrate Three.js or @react-three/fiber into the React frontend.
+ Render liquidity pools as nodes, with sizes representing TVL and emission flows animated as particle streams.
+ Map the user's active deposits visually within this environment.
+ Ensure rendering is optimized for 60FPS on mid-tier mobile devices.
 🛠 Technical Details
-Stack: Rust, Soroban SDK.
-Location: /contracts/yield_vault/src/admin.rs
+Stack: React, Three.js, WebGL.
+Location: /frontend/src/components/visualizer/
+Security: N/A. Focus is heavily on GPU optimization and memory management.
 ⏱ Complexity & Scope
-Drips Complexity: High (200 points)
-Guidelines: Test all edge cases of the timelock state. PR must include Closes #[issue_id].
+Estimated Time: 2-3 weeks.
+Drips Complexity: High (200 points) - Highly specialized frontend graphics rendering.
+📋 Guidelines for Submission
+Minimum 90 percent test coverage required.
+Clear NatSpec-style documentation must be added to public contract functions.
+Timeframe for completion: 2 Wave cycles.
 
-
-#24 Implement Flash-Loan Resistant Price Oracle Integration
+#95 Real-Time Mempool Transaction Visualizer (Frontend)
 Repo Avatar
 edehvictor/StellarYield
 📝 Description
-To safely calculate the value of LP tokens and user shares during deposits and withdrawals, the vault needs accurate asset pricing. Relying solely on spot prices from a DEX makes the vault vulnerable to flash-loan attacks. This issue integrates a secure price oracle.
+Users want to see network activity visually before they submit a trade. We need a frontend dashboard that connects to a stellar-core node and visualizes the mempool in real-time.
 
 🎯 Acceptance Criteria
- Integrate a Soroban-compatible Oracle (e.g., standard Stellar oracle standard) into the vault contract.
- Implement a Time-Weighted Average Price (TWAP) fallback calculation if the oracle is delayed.
- Ensure deposit and withdraw functions use these secure price feeds to calculate share minting/burning.
- Write tests simulating price manipulation attempts to prove the vault remains secure.
+ Integrate a WebSocket connection to a Stellar node to stream pending transactions.
+ Use D3.js or React Flow to visualize pending transactions as floating nodes, clustering them by interacting smart contract.
+ Visually differentiate standard transfers from complex DeFi vault interactions.
 🛠 Technical Details
-Stack: Rust, Soroban SDK.
-Location: /contracts/yield_vault/src/oracle.rs
-Security: Critical priority. Prevent mathematical underflows during price conversions.
+Stack: React, D3.js, WebSockets.
+Location: /frontend/src/components/mempool_graph/
+Security: Handle WebSocket disconnects and high-volume data streams without crashing the browser.
 ⏱ Complexity & Scope
-Drips Complexity: High (200 points)
-Guidelines: Minimum 95% test coverage required. PR must include Closes #[issue_id].
+Estimated Time: 3 weeks.
+Drips Complexity: High (200 points) - Advanced data visualization and state management.
+📋 Guidelines for Submission
+Minimum 90 percent test coverage required.
+Clear NatSpec-style documentation must be added to public contract functions.
+Timeframe for completion: 2 Wave cycles.

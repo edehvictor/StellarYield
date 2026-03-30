@@ -10,10 +10,15 @@ import AIAdvisor from "./components/AIAdvisor";
 import Vault from "./components/Vault";
 import PortfolioPage from "./components/portfolio/PortfolioPage";
 import GovernanceDashboard from "./pages/governance/GovernanceDashboard";
+import QuestsDashboard from "./pages/quests/QuestsDashboard";
 import ConnectWalletButton from "./components/wallet/ConnectWalletButton";
 import NotificationBell from "./components/Navigation/NotificationBell";
 import Leaderboard from "./pages/leaderboard/Leaderboard";
 import OnRampModal from "./features/onramp/OnRampModal";
+import ClaimRewards from "./features/rewards/ClaimRewards";
+import PnLChart from "./features/pnl/PnLChart";
+import TaxExport from "./features/taxes/TaxExport";
+import ReferralDashboard from "./features/referrals/ReferralDashboard";
 import { useWallet } from "./context/useWallet";
 import { useState } from "react";
 import {
@@ -25,6 +30,10 @@ import {
   ShieldCheck,
   Trophy,
   CreditCard,
+  Gift,
+  DollarSign,
+  FileSpreadsheet,
+  Users,
 } from "lucide-react";
 import "./index.css";
 
@@ -96,11 +105,49 @@ const RootLayout = () => {
             </Link>
           )}
           <Link
+            to="/quests"
+            className="hover:text-white transition-colors flex items-center gap-2"
+          >
+            <Trophy size={18} /> Quests
+          </Link>
+          <Link
             to="/leaderboard"
             className="hover:text-white transition-colors flex items-center gap-2"
           >
             <Trophy size={18} /> Leaderboard
           </Link>
+          {isConnected && (
+            <Link
+              to="/rewards"
+              className="hover:text-white transition-colors flex items-center gap-2"
+            >
+              <Gift size={18} /> Rewards
+            </Link>
+          )}
+          {isConnected && (
+            <Link
+              to="/pnl"
+              className="hover:text-white transition-colors flex items-center gap-2"
+            >
+              <DollarSign size={18} /> PnL
+            </Link>
+          )}
+          {isConnected && (
+            <Link
+              to="/taxes"
+              className="hover:text-white transition-colors flex items-center gap-2"
+            >
+              <FileSpreadsheet size={18} /> Tax Export
+            </Link>
+          )}
+          {isConnected && (
+            <Link
+              to="/referrals"
+              className="hover:text-white transition-colors flex items-center gap-2"
+            >
+              <Users size={18} /> Referrals
+            </Link>
+          )}
           {isConnected && (
             <button
               onClick={() => setIsOnRampOpen(true)}
@@ -156,12 +203,33 @@ const router = createBrowserRouter([
         element: <GovernanceDashboard />,
       },
       {
+        path: "/quests",
+        element: <QuestsDashboard />,
+      },
+      {
         path: "/leaderboard",
         element: <Leaderboard />,
+      },
+      {
+        path: "/rewards",
+        element: <ClaimRewards />,
+      },
+      {
+        path: "/pnl",
+        element: <PnLChart />,
+      },
+      {
+        path: "/taxes",
+        element: <TaxExport />,
+      },
+      {
+        path: "/referrals",
+        element: <ReferralDashboard />,
       },
     ],
   },
 ]);
+
 
 function App() {
   return <RouterProvider router={router} />;

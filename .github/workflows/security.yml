@@ -1,0 +1,308 @@
+name: Security Analysis
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - "contracts/**"
+  push:
+    branches:
+      - main
+    paths:
+      - "contracts/**"
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
+jobs:
+  cargo-audit:
+    name: Dependency Audit (cargo-audit)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: contracts
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-audit
+        run: cargo install --locked cargo-audit
+
+      - name: Run cargo-audit
+        id: audit
+        # --json lets us parse findings later; we also allow a non-zero exit so
+        # the step doesn't immediately fail – the PR-comment step handles it.
+        run: |
+          cargo audit --json 2>&1 | tee audit-results.json
+          echo "exit_code=${PIPESTATUS[0]}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload audit results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cargo-audit-results
+          path: contracts/audit-results.json
+          retention-days: 30
+
+      - name: Comment audit results on PR
+        if: github.event_name == 'pull_request' && always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            let body = '## 🔐 Security Audit — `cargo-audit`\n\n';
+            try {
+              const raw = fs.readFileSync('contracts/audit-results.json', 'utf8');
+              const report = JSON.parse(raw);
+              const vulns = report?.vulnerabilities?.list ?? [];
+              if (vulns.length === 0) {
+                body += '✅ No known vulnerabilities found in dependencies.\n';
+              } else {
+                body += `⚠️ **${vulns.length} vulnerabilit${vulns.length === 1 ? 'y' : 'ies'} found:**\n\n`;
+                body += '| Package | Version | Advisory | Severity | Description |\n';
+                body += '|---------|---------|----------|----------|-------------|\n';
+                for (const v of vulns) {
+                  const pkg   = v?.package?.name ?? 'unknown';
+                  const ver   = v?.package?.version ?? '?';
+                  const id    = v?.advisory?.id ?? '?';
+                  const sev   = v?.advisory?.cvss ?? 'unknown';
+                  const desc  = (v?.advisory?.description ?? '').substring(0, 120).replace(/\|/g, '\\|');
+                  body += `| \`${pkg}\` | ${ver} | [${id}](https://rustsec.org/advisories/${id}) | ${sev} | ${desc}… |\n`;
+                }
+              }
+            } catch {
+              body += '_Could not parse audit results._\n';
+            }
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+            const existing = comments.find(c => c.body.startsWith('## 🔐 Security Audit — `cargo-audit`'));
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body,
+              });
+            }
+
+      - name: Fail on vulnerabilities
+        if: steps.audit.outputs.exit_code != '0'
+        run: exit 1
+
+  clippy-security:
+    name: Clippy Lints (security-focused)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: contracts
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Run Clippy with security lints
+        id: clippy
+        # We promote security-relevant lints to errors:
+        #   - clippy::integer_overflow_check   – unchecked arithmetic
+        #   - clippy::unwrap_used              – panics from unwrap
+        #   - clippy::expect_used             – panics from expect
+        #   - clippy::panic                   – explicit panics
+        #   - clippy::arithmetic_side_effects – overflow side-effects
+        run: |
+          cargo clippy --all-targets --message-format=json 2>&1 \
+            -- \
+            -D clippy::unwrap_used \
+            -D clippy::expect_used \
+            -D clippy::panic \
+            -D clippy::arithmetic_side_effects \
+            -D clippy::indexing_slicing \
+          | tee clippy-results.json
+          echo "exit_code=${PIPESTATUS[0]}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload Clippy results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: clippy-results
+          path: contracts/clippy-results.json
+          retention-days: 30
+
+      - name: Comment Clippy findings on PR
+        if: github.event_name == 'pull_request' && always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            let body = '## 🔎 Clippy Security Lints\n\n';
+            try {
+              const raw = fs.readFileSync('contracts/clippy-results.json', 'utf8');
+              // Each line is a separate JSON object (cargo --message-format=json)
+              const lines = raw.trim().split('\n');
+              const diags = [];
+              for (const line of lines) {
+                try {
+                  const msg = JSON.parse(line);
+                  if (msg.reason === 'compiler-message' && msg.message?.level === 'error') {
+                    const m = msg.message;
+                    const code   = m?.code?.code ?? '';
+                    const text   = m?.message ?? '';
+                    const spans  = m?.spans ?? [];
+                    const loc    = spans.length > 0
+                      ? `${spans[0].file_name}:${spans[0].line_start}`
+                      : 'unknown location';
+                    diags.push({ code, text, loc });
+                  }
+                } catch { /* skip malformed line */ }
+              }
+              if (diags.length === 0) {
+                body += '✅ No Clippy security lint violations found.\n';
+              } else {
+                body += `⚠️ **${diags.length} lint violation${diags.length === 1 ? '' : 's'} found:**\n\n`;
+                body += '| Location | Lint | Description |\n';
+                body += '|----------|------|-------------|\n';
+                for (const d of diags) {
+                  const loc  = d.loc.replace(/\|/g, '\\|');
+                  const desc = d.text.substring(0, 100).replace(/\|/g, '\\|');
+                  body += `| \`${loc}\` | \`${d.code}\` | ${desc} |\n`;
+                }
+              }
+            } catch {
+              body += '_Could not parse Clippy results._\n';
+            }
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+            const existing = comments.find(c => c.body.startsWith('## 🔎 Clippy Security Lints'));
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body,
+              });
+            }
+
+      - name: Fail on lint violations
+        if: steps.clippy.outputs.exit_code != '0'
+        run: exit 1
+
+  soroban-unsafe-patterns:
+    name: Soroban Safety Check (custom patterns)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Check for prohibited unsafe patterns
+        id: patterns
+        # Scan for patterns that are dangerous in Soroban contracts:
+        # 1. use of `unsafe` blocks
+        # 2. std::process::abort / panic! (would cause node issues)
+        # 3. unchecked arithmetic operators (wrapping_* is acceptable, but
+        #    bare overflow is not – we enforce checked_* usage via Clippy above)
+        # 4. storage reads without fallback (catch potential panics from .unwrap()
+        #    on storage — covered by Clippy; this step adds a grep-level guard)
+        run: |
+          echo "## 🛡️ Custom Soroban Safety Patterns" >> pr_comment.md
+          echo "" >> pr_comment.md
+
+          FAIL=0
+
+          # 1. unsafe blocks in contract sources
+          UNSAFE=$(grep -rn "unsafe {" contracts/*/src/ 2>/dev/null || true)
+          if [ -n "$UNSAFE" ]; then
+            echo "### ⛔ `unsafe` blocks detected" >> pr_comment.md
+            echo '```' >> pr_comment.md
+            echo "$UNSAFE" >> pr_comment.md
+            echo '```' >> pr_comment.md
+            FAIL=1
+          fi
+
+          # 2. std usage (contracts must be #![no_std])
+          STD_USE=$(grep -rn "^use std::" contracts/*/src/ 2>/dev/null || true)
+          if [ -n "$STD_USE" ]; then
+            echo "### ⛔ \`use std::\` in \`#![no_std]\` contracts" >> pr_comment.md
+            echo '```' >> pr_comment.md
+            echo "$STD_USE" >> pr_comment.md
+            echo '```' >> pr_comment.md
+            FAIL=1
+          fi
+
+          # 3. explicit panics
+          PANICS=$(grep -rn "panic!(" contracts/*/src/ 2>/dev/null || true)
+          if [ -n "$PANICS" ]; then
+            echo "### ⚠️ Explicit \`panic!\` calls (consider returning errors)" >> pr_comment.md
+            echo '```' >> pr_comment.md
+            echo "$PANICS" >> pr_comment.md
+            echo '```' >> pr_comment.md
+            FAIL=1
+          fi
+
+          if [ $FAIL -eq 0 ]; then
+            echo "✅ No prohibited patterns found." >> pr_comment.md
+          fi
+
+          echo "fail=$FAIL" >> "$GITHUB_OUTPUT"
+          cat pr_comment.md
+
+      - name: Comment custom pattern results on PR
+        if: github.event_name == 'pull_request' && always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const body = fs.readFileSync('pr_comment.md', 'utf8');
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+            const existing = comments.find(c => c.body.startsWith('## 🛡️ Custom Soroban Safety Patterns'));
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body,
+              });
+            }
+
+      - name: Fail on prohibited patterns
+        if: steps.patterns.outputs.fail == '1'
+        run: exit 1

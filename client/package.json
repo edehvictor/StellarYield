@@ -12,14 +12,23 @@
     "test:coverage": "vitest run --coverage"
   },
   "dependencies": {
+    "@albedo-link/intent": "^0.13.0",
+    "@creit.tech/xbull-wallet-connect": "^0.4.0",
+    "@react-three/drei": "^10.7.7",
+    "@react-three/fiber": "^9.5.0",
     "@stellar/freighter-api": "^6.0.1",
     "@stellar/stellar-sdk": "^14.6.1",
+    "@types/d3": "^7.4.3",
+    "@types/three": "^0.183.1",
     "buffer": "^6.0.3",
+    "d3": "^7.9.0",
+    "framer-motion": "^12.38.0",
     "lucide-react": "^0.577.0",
     "react": "^19.2.4",
     "react-dom": "^19.2.4",
     "react-router-dom": "^7.13.1",
-    "recharts": "^2.15.0"
+    "recharts": "^2.15.0",
+    "three": "^0.183.2"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.4",
