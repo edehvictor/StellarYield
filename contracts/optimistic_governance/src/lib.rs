@@ -9,8 +9,7 @@
 
 use soroban_sdk::{
     contract, contracterror, contractimpl, contractmeta, contracttype, symbol_short,
-    vec as soroban_vec,
-    Address, Env, IntoVal, Map, Symbol, Val, Vec,
+    vec as soroban_vec, Address, Env, IntoVal, Map, Symbol, Val, Vec,
 };
 
 contractmeta!(key = "name", val = "Optimistic Governance");
@@ -539,13 +538,9 @@ mod test {
         env.ledger().set_timestamp(10);
         client.dispute(&disputer, &id);
 
-        assert_eq!(
-            client.get_proposal(&id).status,
-            ProposalStatus::Disputed
-        );
+        assert_eq!(client.get_proposal(&id).status, ProposalStatus::Disputed);
 
-        env.ledger()
-            .set_timestamp(10 + CHALLENGE_WINDOW_SECS);
+        env.ledger().set_timestamp(10 + CHALLENGE_WINDOW_SECS);
         assert!(client.try_execute(&id).is_err());
 
         assert!(client
@@ -553,10 +548,7 @@ mod test {
             .is_err());
 
         client.resolve_dispute(&dao, &id, &false);
-        assert_eq!(
-            client.get_proposal(&id).status,
-            ProposalStatus::Cancelled
-        );
+        assert_eq!(client.get_proposal(&id).status, ProposalStatus::Cancelled);
         assert!(client.try_execute(&id).is_err());
     }
 
