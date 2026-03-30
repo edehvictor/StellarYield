@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["yield_vault", "zap", "options", "aa_recovery", "aa_factory", "settlement", "intent_swap", "dutch_auction", "liquid_staking", "emission_controller", "strategies/delta_neutral", "stableswap", "stealth_addresses", "merkle_distributor"]
+members = ["yield_vault", "zap", "options", "aa_recovery", "aa_factory", "settlement", "intent_swap", "dutch_auction", "liquid_staking", "emission_controller", "strategies/delta_neutral", "stableswap", "stealth_addresses", "merkle_distributor", "streaming_payments"]
 
 [profile.release]
 opt-level = "z"
