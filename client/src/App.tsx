@@ -19,6 +19,7 @@ import ClaimRewards from "./features/rewards/ClaimRewards";
 import PnLChart from "./features/pnl/PnLChart";
 import TaxExport from "./features/taxes/TaxExport";
 import ReferralDashboard from "./features/referrals/ReferralDashboard";
+import AnalyticsDashboard from "./pages/analytics/AnalyticsDashboard";
 import { useWallet } from "./context/useWallet";
 import { useState } from "react";
 import {
@@ -34,6 +35,7 @@ import {
   DollarSign,
   FileSpreadsheet,
   Users,
+  Database,
 } from "lucide-react";
 import "./index.css";
 
@@ -115,6 +117,12 @@ const RootLayout = () => {
             className="hover:text-white transition-colors flex items-center gap-2"
           >
             <Trophy size={18} /> Leaderboard
+          </Link>
+          <Link
+            to="/analytics"
+            className="hover:text-white transition-colors flex items-center gap-2"
+          >
+            <Database size={18} /> Analytics
           </Link>
           {isConnected && (
             <Link
@@ -209,6 +217,10 @@ const router = createBrowserRouter([
       {
         path: "/leaderboard",
         element: <Leaderboard />,
+      },
+      {
+        path: "/analytics",
+        element: <AnalyticsDashboard />,
       },
       {
         path: "/rewards",

@@ -15,6 +15,7 @@ import zapRouter from "./routes/zap";
 import pnlRouter from "./routes/pnl";
 import exportRouter from "./routes/export";
 import feesRouter from "./routes/fees";
+import analyticsRouter from "./routes/analytics";
 import {
   createAuthChallenge,
   verifyAuthChallenge,
@@ -72,6 +73,7 @@ export function createApp() {
   app.use("/api/notifications", notificationsRouter);
   app.use("/api/health", healthRouter);
   app.use("/api/fees", feesRouter);
+  app.use("/api/analytics", analyticsRouter);
   app.use("/api/onramp", onrampRouter);
   app.use("/api/zap", zapRouter);
   app.use("/api/users", pnlRouter);
