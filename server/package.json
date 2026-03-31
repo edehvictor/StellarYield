@@ -11,6 +11,7 @@
     "test": "jest"
   },
   "dependencies": {
+    "@prisma/client": "^5.22.0",
     "@prisma/client": "^7.6.0",
     "@stellar/stellar-sdk": "^14.6.1",
     "cors": "^2.8.5",
@@ -20,7 +21,8 @@
     "graphql-yoga": "^5.16.0",
     "mongoose": "^9.3.3",
     "node-cache": "^5.1.2",
-    "node-cron": "^4.2.1"
+    "node-cron": "^4.2.1",
+    "prisma": "^5.22.0"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.4",

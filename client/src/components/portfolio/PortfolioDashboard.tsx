@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, Suspense } from "react";
 import {
   Wallet,
   TrendingUp,
@@ -7,6 +7,7 @@ import {
   Clock,
   RefreshCw,
 } from "lucide-react";
+import { YieldFlowCanvas } from "../visualizations";
 
 import PortfolioVisualizer from "../visualizer/PortfolioVisualizer";
 
@@ -153,6 +154,13 @@ export default function PortfolioDashboard({ walletAddress }: PortfolioDashboard
         </div>
       </div>
 
+      <Suspense
+        fallback={
+          <div className="glass-card animate-pulse" style={{ height: 400 }} />
+        }
+      >
+        <YieldFlowCanvas scene="portfolio" positions={positions} />
+      </Suspense>
       {/* 3D Visualizer Integration */}
       <PortfolioVisualizer />
 
