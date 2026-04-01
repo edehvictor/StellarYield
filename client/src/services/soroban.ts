@@ -19,6 +19,12 @@ const ZAP_CONTRACT_ID = import.meta.env.VITE_ZAP_CONTRACT_ID ?? "";
 const POLL_INTERVAL_MS = 2_000;
 const POLL_TIMEOUT_MS = 30_000;
 
+type FeePriority = "low" | "average" | "high";
+
+interface FeeOraclePayload {
+  fees?: Partial<Record<FeePriority, number>>;
+}
+
 // ── Types ───────────────────────────────────────────────────────────────
 
 export interface TxResult {
@@ -33,6 +39,23 @@ export type TxStatus = "idle" | "building" | "signing" | "submitting" | "confirm
 
 function getServer(): StellarSdk.rpc.Server {
   return new StellarSdk.rpc.Server(RPC_URL);
+}
+
+async function getRecommendedBaseFee(priority: FeePriority = "average"): Promise<string> {
+  try {
+    const response = await fetch("/api/fees");
+    if (!response.ok) {
+      return StellarSdk.BASE_FEE;
+    }
+    const payload = (await response.json()) as FeeOraclePayload;
+    const fee = payload.fees?.[priority];
+    if (!fee || !Number.isFinite(fee) || fee <= 0) {
+      return StellarSdk.BASE_FEE;
+    }
+    return String(Math.round(fee));
+  } catch {
+    return StellarSdk.BASE_FEE;
+  }
 }
 
 function getContract(): StellarSdk.Contract {
@@ -61,9 +84,10 @@ async function buildContractCallOn(
 ): Promise<string> {
   const server = getServer();
   const source = await server.getAccount(sourcePublicKey);
+  const baseFee = await getRecommendedBaseFee("average");
 
   const tx = new StellarSdk.TransactionBuilder(source, {
-    fee: StellarSdk.BASE_FEE,
+    fee: baseFee,
     networkPassphrase: NETWORK_PASSPHRASE,
   })
     .addOperation(contract.call(method, ...args))

@@ -1,6 +1,7 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, Suspense } from "react";
 import { Activity, ArrowUpRight, ShieldCheck, TrendingUp } from "lucide-react";
 import ApyHistoryChart from "./charts/ApyHistoryChart";
+import { YieldFlowCanvas } from "./visualizations";
 import MempoolVisualizer from "./mempool_graph/MempoolVisualizer";
 
 interface YieldData {
@@ -91,6 +92,14 @@ export default function Dashboard() {
           </div>
         </div>
       </div>
+
+      <Suspense
+        fallback={
+          <div className="glass-card animate-pulse" style={{ height: 400 }} />
+        }
+      >
+        <YieldFlowCanvas scene="dashboard" />
+      </Suspense>
 
       <ApyHistoryChart />
 

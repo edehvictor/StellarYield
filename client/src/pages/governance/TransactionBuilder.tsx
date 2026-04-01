@@ -15,6 +15,21 @@ const RPC_URL =
 const NETWORK_PASSPHRASE =
   import.meta.env.VITE_NETWORK_PASSPHRASE ?? "Test SDF Network ; September 2015";
 
+async function getRecommendedBaseFee(): Promise<string> {
+  try {
+    const response = await fetch("/api/fees");
+    if (!response.ok) return StellarSdk.BASE_FEE;
+    const payload = (await response.json()) as {
+      fees?: { average?: number };
+    };
+    const fee = payload.fees?.average;
+    if (!fee || !Number.isFinite(fee) || fee <= 0) return StellarSdk.BASE_FEE;
+    return String(Math.round(fee));
+  } catch {
+    return StellarSdk.BASE_FEE;
+  }
+}
+
 export default function TransactionBuilder({
   threshold,
   contractId,
@@ -38,6 +53,7 @@ export default function TransactionBuilder({
       const server = new StellarSdk.rpc.Server(RPC_URL);
       const contract = new StellarSdk.Contract(contractId);
       const source = await server.getAccount(walletAddress);
+      const baseFee = await getRecommendedBaseFee();
 
       // Build ScVal args: admin address + action-specific fields
       const args: StellarSdk.xdr.ScVal[] = [
@@ -61,7 +77,7 @@ export default function TransactionBuilder({
       }
 
       const tx = new StellarSdk.TransactionBuilder(source, {
-        fee: StellarSdk.BASE_FEE,
+        fee: baseFee,
         networkPassphrase: NETWORK_PASSPHRASE,
       })
         .addOperation(contract.call(action.method, ...args))
