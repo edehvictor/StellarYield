@@ -963,9 +963,6 @@ mod tests {
         let public_key_y = Bytes::from_array(&env, &[2u8; 32]);
 
         client.register_webauthn_key(&owner, &public_key_x, &public_key_y);
-
-        // Should succeed without panic
-        assert!(true);
     }
 
     #[test]
@@ -1020,9 +1017,6 @@ mod tests {
 
         let vault = Address::generate(&env);
         client.approve_vault(&owner, &vault, &1000);
-
-        // Should succeed without panic
-        assert!(true);
     }
 
     #[test]

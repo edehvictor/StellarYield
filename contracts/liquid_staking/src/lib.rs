@@ -619,11 +619,11 @@ mod test {
         let user = Address::generate(&env);
 
         // Deploy mock XLM token
-        let token_id = env.register_contract(None, MockToken);
+        let token_id = env.register(MockToken, ());
         let token = MockTokenClient::new(&env, &token_id);
-        token.mint(&user, &1_000_0000);
+        token.mint(&user, &10_000_000);
 
-        let lsd_id = env.register_contract(None, LiquidStaking);
+        let lsd_id = env.register(LiquidStaking, ());
         let client = LiquidStakingClient::new(&env, &lsd_id);
 
         client.init(&admin, &token.address);
@@ -632,16 +632,16 @@ mod test {
         assert_eq!(sh, 0);
         assert_eq!(mbps, 10_000);
 
-        let minted = client.deposit(&user, &1_000_0000); // 1 XLM = 10^7 stroops (example scale)
-        assert_eq!(minted, 1_000_0000);
+        let minted = client.deposit(&user, &10_000_000); // 1 XLM = 10^7 stroops (example scale)
+        assert_eq!(minted, 10_000_000);
         let (ts2, sh2, _) = client.stats();
-        assert_eq!(ts2, 1_000_0000);
-        assert_eq!(sh2, 1_000_0000);
+        assert_eq!(ts2, 10_000_000);
+        assert_eq!(sh2, 10_000_000);
 
         // Token balance moved from user to contract
         let lsd_addr = client.address.clone();
         assert_eq!(token.balance(&user), 0);
-        assert_eq!(token.balance(&lsd_addr), 1_000_0000);
+        assert_eq!(token.balance(&lsd_addr), 10_000_000);
     }
 
     #[test]
@@ -652,42 +652,42 @@ mod test {
         let admin = Address::generate(&env);
         let user = Address::generate(&env);
 
-        let token_id = env.register_contract(None, MockToken);
+        let token_id = env.register(MockToken, ());
         let token = MockTokenClient::new(&env, &token_id);
-        token.mint(&user, &2_000_0000);
+        token.mint(&user, &20_000_000);
 
-        let lsd_id = env.register_contract(None, LiquidStaking);
+        let lsd_id = env.register(LiquidStaking, ());
         let client = LiquidStakingClient::new(&env, &lsd_id);
 
         client.init(&admin, &token.address);
-        client.deposit(&user, &2_000_0000);
+        client.deposit(&user, &20_000_000);
         let (_ts, sh, mbps) = client.stats();
-        assert_eq!(sh, 2_000_0000);
+        assert_eq!(sh, 20_000_000);
         assert_eq!(mbps, 10_000);
 
         // Simulate rewards arriving to the contract (e.g., from validators)
         let lsd_addr = client.address.clone();
-        token.mint(&lsd_addr, &200_0000); // +0.2 XLM
-                                          // Update multiplier for accounting/event (does not change totals directly)
+        token.mint(&lsd_addr, &2_000_000); // +0.2 XLM
+                                           // Update multiplier for accounting/event (does not change totals directly)
         client.rebase(&admin, &11_000);
         // Sync totals to actual token balance
         client.sync(&admin);
         let (ts2, sh2, mbps2) = client.stats();
         assert_eq!(mbps2, 11_000);
-        assert_eq!(sh2, 2_000_0000);
-        assert_eq!(ts2, 2_200_0000); // now equals on-chain balance
+        assert_eq!(sh2, 20_000_000);
+        assert_eq!(ts2, 22_000_000); // now equals on-chain balance
 
         // Redeem half of shares -> should withdraw 1.1 XLM (11_000_000)
-        let out = client.redeem(&user, &1_000_0000);
-        assert_eq!(out, 1_100_0000);
+        let out = client.redeem(&user, &10_000_000);
+        assert_eq!(out, 11_000_000);
         // Token balance received
-        assert_eq!(token.balance(&user), 1_100_0000);
-        assert_eq!(token.balance(&lsd_addr), 1_100_0000);
+        assert_eq!(token.balance(&user), 11_000_000);
+        assert_eq!(token.balance(&lsd_addr), 11_000_000);
 
         // Remaining stats
         let (ts3, sh3, _) = client.stats();
-        assert_eq!(sh3, 1_000_0000);
-        assert_eq!(ts3, 1_100_0000);
+        assert_eq!(sh3, 10_000_000);
+        assert_eq!(ts3, 11_000_000);
         assert!(client.backing_ok());
     }
 
@@ -697,8 +697,8 @@ mod test {
         env.mock_all_auths();
         let admin = Address::generate(&env);
 
-        let token_id = env.register_contract(None, MockToken);
-        let lsd_id = env.register_contract(None, LiquidStaking);
+        let token_id = env.register(MockToken, ());
+        let lsd_id = env.register(LiquidStaking, ());
         let client = LiquidStakingClient::new(&env, &lsd_id);
         let token_client = MockTokenClient::new(&env, &token_id);
         client.init(&admin, &token_client.address);
