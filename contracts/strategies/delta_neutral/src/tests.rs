@@ -156,10 +156,12 @@ fn seed_amm(env: &Env, spot: &Address, amm: &Address, amount: i128) {
     sac.mint(amm, &amount);
 }
 
-fn set_position_entry_price(env: &Env, user: &Address, entry_price: i128) {
-    let mut position = crate::storage::read_position(env, user).unwrap();
-    position.entry_price = entry_price;
-    crate::storage::write_position(env, user, &position);
+fn set_position_entry_price(env: &Env, contract_id: &Address, user: &Address, entry_price: i128) {
+    env.as_contract(contract_id, || {
+        let mut position = crate::storage::read_position(env, user).unwrap();
+        position.entry_price = entry_price;
+        crate::storage::write_position(env, user, &position);
+    });
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────
@@ -325,7 +327,7 @@ fn test_auto_rebalance_with_price_move() {
     seed_amm(&env, &spot, &amm, deposit * 2);
 
     client.open_position(&user, &deposit, &0);
-    set_position_entry_price(&env, &user, 10_000_000);
+    set_position_entry_price(&env, &client.address, &user, 10_000_000);
 
     // Seed AMM with USDC for the rebalance sell
     mint(&env, &usdc, &amm, deposit);
@@ -440,7 +442,7 @@ fn test_admin_can_trigger_rebalance() {
     mint(&env, &usdc, &user, deposit);
     seed_amm(&env, &spot, &amm, deposit * 2);
     client.open_position(&user, &deposit, &0);
-    set_position_entry_price(&env, &user, 10_000_000);
+    set_position_entry_price(&env, &client.address, &user, 10_000_000);
 
     mint(&env, &usdc, &amm, deposit);
 
