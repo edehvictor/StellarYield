@@ -61,9 +61,13 @@ Select all affected areas:
 
 ---
 
-**Deployment Notes:**
-<!-- Explain risks, breaking changes, or special deployment steps -->
+## 🚀 Deployment Notes
+<!-- Explain any deployment steps, risks, or breaking changes -->
 
+---
+
+## 📝 Additional Notes
+<!-- Any extra context for reviewers -->
 ---
 
 ## ✅ Checklist (Author)
