@@ -1,0 +1,36 @@
+name: Dependency Review
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - "package.json"
+      - "package-lock.json"
+      - "client/package.json"
+      - "client/package-lock.json"
+      - "server/package.json"
+      - "server/package-lock.json"
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  dependency-review:
+    name: Review npm dependency changes
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Review dependencies
+        uses: actions/dependency-review-action@v4
+        with:
+          # Fail the job on any vulnerability at High severity or above.
+          # Contributors can still see Moderate/Low findings in the PR summary.
+          fail-on-severity: high
+          # Block common copyleft / unlicensed packages so they don't slip into
+          # the tree without review.
+          deny-licenses: GPL-2.0-only, GPL-2.0-or-later, GPL-3.0-only, GPL-3.0-or-later, AGPL-3.0-only, AGPL-3.0-or-later
+          comment-summary-in-pr: on-failure
