@@ -40,6 +40,7 @@ enum DataKey {
 }
 
 mod admin;
+mod donations;
 mod emergency;
 mod fees;
 mod flashloan;
@@ -64,6 +65,10 @@ pub enum VaultError {
     TimelockActive = 8,
     InvalidPrice = 9,
     SlippageExceeded = 10,
+    /// Invalid donation basis points — must be 0–10_000 (maps to error code 2001).
+    InvalidDonationBps = 2001,
+    /// Charity address is not on the protocol whitelist (maps to error code 2002).
+    CharityNotWhitelisted = 2002,
 }
 
 // ── Contract ────────────────────────────────────────────────────────────

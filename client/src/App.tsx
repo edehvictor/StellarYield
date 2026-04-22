@@ -19,6 +19,9 @@ import ClaimRewards from "./features/rewards/ClaimRewards";
 import PnLChart from "./features/pnl/PnLChart";
 import TaxExport from "./features/taxes/TaxExport";
 import ReferralDashboard from "./features/referrals/ReferralDashboard";
+import VestingDashboard from "./pages/vesting/VestingDashboard";
+import TransparencyDashboard from "./pages/transparency/TransparencyDashboard";
+import YieldForGood from "./features/donations/YieldForGood";
 import { useWallet } from "./context/useWallet";
 import { useState } from "react";
 import {
@@ -34,6 +37,9 @@ import {
   DollarSign,
   FileSpreadsheet,
   Users,
+  Lock,
+  Eye,
+  Heart,
 } from "lucide-react";
 import "./index.css";
 
@@ -46,10 +52,10 @@ const RootLayout = () => {
     <div className="min-h-screen flex flex-col">
       {/* On-Ramp Modal */}
       {isConnected && walletAddress && (
-        <OnRampModal 
-          isOpen={isOnRampOpen} 
-          onClose={() => setIsOnRampOpen(false)} 
-          walletAddress={walletAddress} 
+        <OnRampModal
+          isOpen={isOnRampOpen}
+          onClose={() => setIsOnRampOpen(false)}
+          walletAddress={walletAddress}
         />
       )}
       {/* Navigation Bar */}
@@ -116,6 +122,26 @@ const RootLayout = () => {
           >
             <Trophy size={18} /> Leaderboard
           </Link>
+          <Link
+            to="/vesting"
+            className="hover:text-white transition-colors flex items-center gap-2"
+          >
+            <Lock size={18} /> Vesting
+          </Link>
+          <Link
+            to="/transparency"
+            className="hover:text-white transition-colors flex items-center gap-2"
+          >
+            <Eye size={18} /> Transparency
+          </Link>
+          {isConnected && (
+            <Link
+              to="/yield-for-good"
+              className="hover:text-white transition-colors flex items-center gap-2"
+            >
+              <Heart size={18} /> Yield for Good
+            </Link>
+          )}
           {isConnected && (
             <Link
               to="/rewards"
@@ -225,6 +251,18 @@ const router = createBrowserRouter([
       {
         path: "/referrals",
         element: <ReferralDashboard />,
+      },
+      {
+        path: "/vesting",
+        element: <VestingDashboard />,
+      },
+      {
+        path: "/transparency",
+        element: <TransparencyDashboard />,
+      },
+      {
+        path: "/yield-for-good",
+        element: <YieldForGood />,
       },
     ],
   },
