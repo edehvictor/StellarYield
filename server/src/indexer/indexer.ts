@@ -1,12 +1,47 @@
 import * as StellarSdk from '@stellar/stellar-sdk';
-import { PrismaClient } from '@prisma/client';
-
-const prisma = new PrismaClient();
 const RPC_URL = process.env.RPC_URL || 'https://soroban-testnet.stellar.org';
 const CONTRACT_ID = process.env.VITE_CONTRACT_ID || '';
 const POLL_INTERVAL = 5000; // 5 seconds
 
 const rpcServer = new StellarSdk.rpc.Server(RPC_URL);
+
+type IndexerPrismaClient = {
+  indexerState: {
+    findUnique(args: { where: { id: string } }): Promise<{ id: string; lastLedger: number } | null>;
+    create(args: { data: { id: string; lastLedger: number } }): Promise<{ id: string; lastLedger: number }>;
+    update(args: { where: { id: string }; data: { lastLedger: number } }): Promise<unknown>;
+  };
+  event: {
+    upsert(args: {
+      where: { txHash_topic_data: { txHash: string; topic: string; data: string } };
+      update: Record<string, never>;
+      create: {
+        ledger: number;
+        txHash: string;
+        contractId: string;
+        topic: string;
+        data: string;
+      };
+    }): Promise<unknown>;
+  };
+};
+
+async function loadPrismaClient(): Promise<IndexerPrismaClient | null> {
+  try {
+    const prismaModule = (await import('@prisma/client')) as {
+      PrismaClient?: new () => IndexerPrismaClient;
+    };
+
+    if (!prismaModule.PrismaClient) {
+      return null;
+    }
+
+    return new prismaModule.PrismaClient();
+  } catch (error) {
+    console.warn('[Indexer] Prisma client is unavailable:', error);
+    return null;
+  }
+}
 
 /**
  * Filter for specific events from our Soroban Vault contract.
@@ -14,6 +49,12 @@ const rpcServer = new StellarSdk.rpc.Server(RPC_URL);
  */
 export async function startIndexer() {
   console.log('[Indexer] Starting StellarYield event indexer...');
+  const prisma = await loadPrismaClient();
+
+  if (!prisma) {
+    console.warn('[Indexer] Prisma client has not been generated; skipping indexer startup.');
+    return;
+  }
 
   // 1. Recover last processed ledger
   let state = await prisma.indexerState.findUnique({ where: { id: 'singleton' } });
@@ -65,7 +106,7 @@ export async function startIndexer() {
           create: {
             ledger: event.ledger,
             txHash: event.txHash,
-            contractId: event.contractId,
+            contractId: String(event.contractId ?? CONTRACT_ID),
             topic: topic,
             data: data
           }

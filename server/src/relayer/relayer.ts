@@ -22,7 +22,7 @@ export const signFeeBump = async (req: Request, res: Response) => {
     const feeBump = StellarSdk.TransactionBuilder.buildFeeBumpTransaction(
       relayerKeypair,
       StellarSdk.BASE_FEE.toString(), // Fee to be paid by the relayer
-      innerTx,
+      innerTx as StellarSdk.Transaction,
       NETWORK_PASSPHRASE
     );
 

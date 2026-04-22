@@ -5,18 +5,23 @@
   "main": "dist/index.js",
   "scripts": {
     "start": "node dist/index.js",
-    "dev": "ts-node-dev src/index.ts",
+    "dev": "ts-node-dev src/index.js",
     "build": "tsc",
     "lint": "eslint .",
     "test": "jest"
   },
   "dependencies": {
-    "@prisma/client": "^7.5.0",
+    "@prisma/client": "^5.22.0",
     "@stellar/stellar-sdk": "^14.6.1",
     "cors": "^2.8.5",
     "express": "^4.18.2",
     "express-rate-limit": "^8.3.1",
-    "prisma": "^7.5.0"
+    "graphql": "^16.11.0",
+    "graphql-yoga": "^5.16.0",
+    "mongoose": "^9.3.3",
+    "node-cache": "^5.1.2",
+    "node-cron": "^4.2.1",
+    "prisma": "^5.22.0"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.4",
@@ -24,9 +29,11 @@
     "@types/express": "^4.17.17",
     "@types/jest": "^30.0.0",
     "@types/node": "^20.0.0",
+    "@types/supertest": "^7.2.0",
     "eslint": "^9.39.4",
     "globals": "^17.4.0",
     "jest": "^30.3.0",
+    "supertest": "^7.2.2",
     "ts-jest": "^29.4.6",
     "ts-node-dev": "^2.0.0",
     "typescript": "^5.0.0",

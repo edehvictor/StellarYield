@@ -32,6 +32,32 @@ jobs:
       - name: Run backend tests
         run: npm test
 
+  frontend:
+    name: Frontend (Zap) Checks
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: client
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: client/package-lock.json
+
+      - name: Install client dependencies
+        run: npm ci
+
+      - name: Lint Zap feature sources
+        run: npx eslint src/features/zap
+
+      - name: Run Zap feature tests with coverage
+        run: npm run test:coverage
+
   contracts:
     name: Soroban Contract Checks
     runs-on: ubuntu-latest
@@ -55,3 +81,24 @@ jobs:
 
       - name: Run contract tests
         run: cargo test
+
+  verification:
+    name: Formal Verification (Kani)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: nightly # Kani often requires nightly features
+          components: rustfmt
+
+      - name: Install Kani
+        run: |
+          cargo install --locked kani-verifier
+          cargo kani setup
+
+      - name: Run Kani verification
+        run: cd contracts/yield_vault && cargo kani --harness verification::prove_fee_bounds --harness verification::prove_flash_loan_security --harness verification::prove_deposit_share_calculation

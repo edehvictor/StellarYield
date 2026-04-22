@@ -13,6 +13,8 @@ import {
   ChevronDown,
   ExternalLink,
   Layers,
+  Clock,
+  Info
 } from 'lucide-react';
 
 // ── Types ───────────────────────────────────────────────────────────────
@@ -26,6 +28,7 @@ interface ApyEntry {
   change24h: number;
   rewardTokens: string[];
   category: string;
+  fetchedAt?: string;
 }
 
 type SortField = 'apy' | 'tvl' | 'risk' | 'protocol';
@@ -53,10 +56,10 @@ function formatTvl(value: number): string {
   return `$${value.toLocaleString()}`;
 }
 
-const RISK_CONFIG: Record<string, { color: string; bg: string; border: string; order: number }> = {
-  Low:    { color: 'text-green-400', bg: 'bg-green-500/15', border: 'border-green-500/30', order: 1 },
-  Medium: { color: 'text-yellow-400', bg: 'bg-yellow-500/15', border: 'border-yellow-500/30', order: 2 },
-  High:   { color: 'text-red-400', bg: 'bg-red-500/15', border: 'border-red-500/30', order: 3 },
+const RISK_CONFIG: Record<string, { color: string; bg: string; border: string; order: number; explanation: string }> = {
+  Low:    { color: 'text-green-400', bg: 'bg-green-500/15', border: 'border-green-500/30', order: 1, explanation: 'High TVL, battle-tested protocol, highly liquid.' },
+  Medium: { color: 'text-yellow-400', bg: 'bg-yellow-500/15', border: 'border-yellow-500/30', order: 2, explanation: 'Moderate volatility or newer protocol with steady growth.' },
+  High:   { color: 'text-red-400', bg: 'bg-red-500/15', border: 'border-red-500/30', order: 3, explanation: 'Low TVL, highly volatile assets, or experimental protocol.' },
 };
 
 const PROTOCOL_COLORS: Record<string, string> = {
@@ -348,6 +351,11 @@ export default function ApyDashboard() {
                 const risk = RISK_CONFIG[entry.risk] ?? RISK_CONFIG.Medium;
                 const gradient = PROTOCOL_COLORS[entry.protocol] ?? 'from-gray-500/80 to-gray-600/80';
                 const isPositive = entry.change24h >= 0;
+                
+                const fetchedTime = entry.fetchedAt ? new Date(entry.fetchedAt) : new Date();
+                const diffMins = Math.floor((Date.now() - fetchedTime.getTime()) / 60000);
+                const isStale = diffMins > 5;
+
                 return (
                   <div
                     key={`${entry.protocol}-${entry.asset}`}
@@ -364,9 +372,23 @@ export default function ApyDashboard() {
                           <p className="font-semibold text-white tracking-wide truncate">{entry.protocol}</p>
                           <p className="text-xs text-gray-500">{entry.category}</p>
                         </div>
-                        <span className={`${risk.bg} ${risk.color} ${risk.border} border px-2 py-0.5 rounded-lg text-[10px] font-bold uppercase tracking-wider`}>
-                          {entry.risk}
-                        </span>
+                        <div className="group/risk relative flex cursor-help">
+                          <span className={`${risk.bg} ${risk.color} ${risk.border} border px-2 py-0.5 rounded-lg text-[10px] font-bold uppercase tracking-wider flex items-center gap-1`}>
+                            {entry.risk} <Info size={10} />
+                          </span>
+                          <div className="absolute hidden group-hover/risk:block bottom-full mb-2 right-0 w-48 p-2 bg-[#1A1A24] border border-white/10 rounded-lg text-xs leading-relaxed text-gray-300 shadow-xl z-10 transition-opacity">
+                            {risk.explanation}
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* Freshness Indicator */}
+                      <div className="flex items-center gap-1.5 mb-3 text-[10px] font-medium uppercase tracking-wider">
+                        {isStale ? (
+                          <span className="text-red-400 flex items-center gap-1 bg-red-400/10 px-2 py-0.5 rounded-full"><Clock size={10} /> Stale Data ({diffMins}m old)</span>
+                        ) : (
+                          <span className="text-gray-500 flex items-center gap-1"><Clock size={10} /> Updated just now</span>
+                        )}
                       </div>
 
                       {/* Asset Badge */}
@@ -455,6 +477,11 @@ export default function ApyDashboard() {
                       const risk = RISK_CONFIG[entry.risk] ?? RISK_CONFIG.Medium;
                       const gradient = PROTOCOL_COLORS[entry.protocol] ?? 'from-gray-500/80 to-gray-600/80';
                       const isPositive = entry.change24h >= 0;
+                      
+                      const fetchedTime = entry.fetchedAt ? new Date(entry.fetchedAt) : new Date();
+                      const diffMins = Math.floor((Date.now() - fetchedTime.getTime()) / 60000);
+                      const isStale = diffMins > 5;
+
                       return (
                         <tr
                           key={`${entry.protocol}-${entry.asset}`}
@@ -468,7 +495,10 @@ export default function ApyDashboard() {
                               </div>
                               <div>
                                 <span className="font-semibold text-white tracking-wide">{entry.protocol}</span>
-                                <p className="text-[10px] text-gray-500 mt-0.5">{entry.category}</p>
+                                <div className="flex items-center gap-2 mt-0.5">
+                                  <p className="text-[10px] text-gray-500">{entry.category}</p>
+                                  {isStale && <span className="text-[9px] text-red-400 bg-red-400/10 px-1.5 py-px rounded uppercase">Stale</span>}
+                                </div>
                               </div>
                             </div>
                           </td>
@@ -490,9 +520,14 @@ export default function ApyDashboard() {
                             {formatTvl(entry.tvl)}
                           </td>
                           <td className="px-6 py-5">
-                            <span className={`${risk.bg} ${risk.color} ${risk.border} border px-2.5 py-1.5 rounded text-xs font-bold uppercase tracking-wider`}>
-                              {entry.risk}
-                            </span>
+                            <div className="group/risk relative inline-flex cursor-help">
+                              <span className={`${risk.bg} ${risk.color} ${risk.border} border px-2.5 py-1.5 rounded text-xs font-bold uppercase tracking-wider flex items-center gap-1`}>
+                                {entry.risk} <Info size={12} />
+                              </span>
+                              <div className="absolute hidden group-hover/risk:block bottom-full mb-2 left-1/2 -translate-x-1/2 w-48 p-2 bg-[#1A1A24] border border-white/10 rounded-lg text-xs leading-relaxed text-gray-300 shadow-xl z-10 transition-opacity">
+                                {risk.explanation}
+                              </div>
+                            </div>
                           </td>
                           <td className="px-6 py-5 text-right">
                             <button className="btn-secondary text-sm px-5 py-2 opacity-80 group-hover:opacity-100 group-hover:bg-[#6C5DD3] group-hover:border-[#6C5DD3] group-hover:text-white transition-all shadow-md">

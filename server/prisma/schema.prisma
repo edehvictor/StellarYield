@@ -23,3 +23,90 @@ model IndexerState {
   id              String   @id @default("singleton")
   lastLedger      Int
 }
+
+model VaultBalance {
+  id              String   @id @default(uuid())
+  walletAddress   String   @unique
+  tvl             Float    @default(0)
+  totalYield      Float    @default(0)
+  updatedAt       DateTime @updatedAt
+}
+
+model Notification {
+  id              String   @id @default(uuid())
+  walletAddress   String
+  type            String   // DEPOSIT, WITHDRAWAL, ANNOUNCEMENT, HARVEST
+  title           String
+  message         String
+  isRead          Boolean  @default(false)
+  createdAt       DateTime @default(now())
+}
+
+model OnRampTransaction {
+  id              String   @id @default(uuid())
+  walletAddress   String
+  provider        String   // STRIPE, MOONPAY
+  status          String   // PENDING, COMPLETED, FAILED
+  amountFiat      Float
+  currency        String
+  amountUsdc      Float    @default(0)
+  providerTxId    String   @unique
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+}
+
+// ── PnL Engine Models (Issue #107) ──────────────────────────────────────
+
+model SharePriceSnapshot {
+  id              String   @id @default(uuid())
+  vaultId         String
+  sharePrice      Float    // price per share in USDC (or base asset)
+  totalShares     Float
+  totalAssets     Float
+  snapshotAt      DateTime @default(now())
+
+  @@index([vaultId, snapshotAt])
+}
+
+model UserTransaction {
+  id              String   @id @default(uuid())
+  walletAddress   String
+  vaultId         String
+  action          String   // DEPOSIT, WITHDRAW, HARVEST
+  amount          Float    // amount in base asset (USDC)
+  shares          Float    // shares minted or burned
+  sharePriceAtTx  Float    // share price at time of transaction
+  txHash          String   @unique
+  timestamp       DateTime
+  createdAt       DateTime @default(now())
+
+  @@index([walletAddress, vaultId])
+  @@index([walletAddress, timestamp])
+}
+
+// ── CSV Export Models (Issue #113) ──────────────────────────────────────
+
+model ExportJob {
+  id              String   @id @default(uuid())
+  walletAddress   String
+  status          String   @default("PENDING") // PENDING, PROCESSING, COMPLETED, FAILED
+  fileUrl         String?
+  error           String?
+  createdAt       DateTime @default(now())
+  completedAt     DateTime?
+
+  @@index([walletAddress, createdAt])
+}
+
+// ── Referral System Models (Issue #115) ─────────────────────────────────
+
+model Referral {
+  id              String   @id @default(uuid())
+  referrerAddress String
+  refereeAddress  String   @unique
+  referredTvl     Float    @default(0)
+  totalRewards    Float    @default(0)
+  createdAt       DateTime @default(now())
+
+  @@index([referrerAddress])
+}

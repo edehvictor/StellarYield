@@ -1,4 +1,4 @@
-import { Bot } from 'lucide-react';
+import { Bot, Info } from 'lucide-react';
 
 export default function AIAdvisor() {
   return (
@@ -12,8 +12,33 @@ export default function AIAdvisor() {
       </p>
       
       <div className="glass-panel p-8 mt-12 max-w-3xl w-full text-left">
-        <div className="h-40 border-2 border-dashed border-[#6C5DD3]/30 rounded-xl flex items-center justify-center text-gray-500">
+        <div className="h-40 border-2 border-dashed border-[#6C5DD3]/30 rounded-xl flex items-center justify-center text-gray-500 mb-6">
            Coming Soon: Interactive AI Chatbot Widget
+        </div>
+        
+        {/* Risk Badge Integration Demo */}
+        <div className="p-4 bg-white/5 border border-white/10 rounded-xl">
+          <h3 className="text-sm font-semibold text-white mb-3">AI Advisor Risk Assessment Example</h3>
+          <p className="text-xs text-gray-400 mb-4">When recommending vaults, the AI will evaluate risk across multiple factors:</p>
+          <div className="flex gap-4">
+            <div className="group relative flex cursor-help">
+              <span className="bg-red-500/15 text-red-400 border-red-500/30 border px-2.5 py-1.5 rounded-lg text-xs font-bold uppercase tracking-wider flex items-center gap-1">
+                High Risk <Info size={12} />
+              </span>
+              <div className="absolute hidden group-hover:block bottom-full mb-2 left-1/2 -translate-x-1/2 w-48 p-2 bg-[#1A1A24] border border-white/10 rounded-lg text-xs leading-relaxed text-gray-300 shadow-xl z-10 transition-opacity">
+                Low TVL, highly volatile assets, or experimental protocol.
+              </div>
+            </div>
+            
+            <div className="group relative flex cursor-help">
+              <span className="bg-green-500/15 text-green-400 border-green-500/30 border px-2.5 py-1.5 rounded-lg text-xs font-bold uppercase tracking-wider flex items-center gap-1">
+                Low Risk <Info size={12} />
+              </span>
+              <div className="absolute hidden group-hover:block bottom-full mb-2 left-1/2 -translate-x-1/2 w-48 p-2 bg-[#1A1A24] border border-white/10 rounded-lg text-xs leading-relaxed text-gray-300 shadow-xl z-10 transition-opacity">
+                High TVL, battle-tested protocol, highly liquid.
+              </div>
+            </div>
+          </div>
         </div>
       </div>
     </div>

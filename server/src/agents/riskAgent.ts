@@ -161,8 +161,8 @@ function validateCategory(cat: string): "low" | "medium" | "high" | "critical" {
 function fallbackRiskAssessment(input: ProtocolInput): RiskReport {
   const { score, label } = calculateRiskScore({
     tvlUsd: input.tvlUsd,
-    ilVolatility: input.audited ? 0.05 : 0.15,
-    protocolAgeMonths: input.ageMonths,
+    ilVolatilityPct: input.audited ? 5 : 15,
+    protocolAgeDays: input.ageMonths * 30,
   });
 
   // Convert 1-10 scale to 1-100

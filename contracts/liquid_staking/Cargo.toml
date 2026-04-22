@@ -1,0 +1,20 @@
+[package]
+name = "liquid_staking"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+soroban-sdk = { version = "22.0.0", default-features = false }
+# We may use token utilities in a follow-up edit when wiring native XLM transfers
+# soroban-token-sdk = { version = "22.0.0", default-features = false }
+
+[dev-dependencies]
+soroban-sdk = { version = "22.0.0", features = ["testutils"] }
+
+[features]
+default = []
+testutils = ["soroban-sdk/testutils"]

@@ -13,8 +13,8 @@ export default function PortfolioPage() {
         </div>
         <h2 className="text-xl font-bold mb-2">Connect Your Wallet</h2>
         <p className="text-gray-400 max-w-md">
-          Connect your Freighter wallet to view your portfolio, deposits,
-          yield earnings, and transaction history.
+          Connect Freighter or spin up a session-managed smart wallet to view
+          your portfolio, deposits, yield earnings, and transaction history.
         </p>
       </div>
     );
