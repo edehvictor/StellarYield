@@ -1,0 +1,66 @@
+name: Decentralized Hosting (IPFS/IPNS)
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  deploy:
+    name: Build and Pin to IPFS
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+          cache-dependency-path: client/package-lock.json
+
+      - name: Install Client Dependencies
+        run: cd client && npm ci
+
+      - name: Build Frontend
+        run: cd client && npm run build
+
+      - name: Pin to IPFS (Pinata)
+        id: pinata
+        uses: aquiladev/ipfs-action@v0.3.1
+        with:
+          path: client/dist
+          service: pinata
+          pinataKey: ${{ secrets.PINATA_API_KEY }}
+          pinataSecret: ${{ secrets.PINATA_API_SECRET }}
+          pinataPinName: "Stellar Yield Frontend - ${{ github.sha }}"
+
+      - name: Update IPNS record
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          # Note: Real IPNS update requires an IPFS node or a service like Web3.Storage Name.
+          # For Pinata, it's often handled via DNSLink or their Gateway API.
+          # We use a placeholder here for the IPNS update step.
+          echo "New IPFS CID: ${{ steps.pinata.outputs.cid }}"
+          echo "Please ensure your DNSLink/ENS/IPNS record is updated to point to this CID."
+
+      - name: PR Deployment Comment
+        if: github.event_name == 'pull_request'
+        uses: thollander/actions-comment-pull-request@v2
+        with:
+          message: |
+            🚀 **Stellar Yield Frontend Decentralized Preview**
+            
+            The frontend has been successfully pinned to IPFS!
+            
+            **IPFS CID:** `${{ steps.pinata.outputs.cid }}`
+            
+            **Gateway Links:**
+            - [ipfs.io](https://ipfs.io/ipfs/${{ steps.pinata.outputs.cid }})
+            - [cloudflare-ipfs.com](https://cloudflare-ipfs.com/ipfs/${{ steps.pinata.outputs.cid }})
+            - [dweb.link](https://dweb.link/ipfs/${{ steps.pinata.outputs.cid }})
+            
+            _Note: Decentralized gateways can take a few minutes to propagate._
+          comment_tag: ipfs-preview
