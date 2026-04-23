@@ -56,7 +56,36 @@ jobs:
         run: npx eslint src/features/zap
 
       - name: Run Zap feature tests with coverage
-        run: npm run test:coverage
+        id: frontend_tests
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+          npm run test:coverage 2>&1 | tee frontend-test.log
+
+      - name: Build frontend and capture logs
+        id: frontend_build
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+          npm run build 2>&1 | tee frontend-build.log
+
+      - name: Upload frontend failure artifacts
+        if: steps.frontend_tests.outcome == 'failure' || steps.frontend_build.outcome == 'failure'
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-failure-artifacts-${{ github.run_id }}
+          path: |
+            client/frontend-test.log
+            client/frontend-build.log
+            client/dist
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Fail frontend job if Zap tests failed
+        if: steps.frontend_tests.outcome == 'failure'
+        run: exit 1
 
   contracts:
     name: Soroban Contract Checks
@@ -74,13 +103,46 @@ jobs:
           components: rustfmt, clippy
 
       - name: Check formatting
-        run: cargo fmt --check
+        run: cargo fmt --all -- --check
 
       - name: Run Clippy
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets -- -D warnings
 
       - name: Run contract tests
-        run: cargo test
+        id: contract_tests
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test --workspace 2>&1 | tee contract-test.log
+
+      - name: Upload contract test logs
+        if: steps.contract_tests.outcome == 'failure'
+        uses: actions/upload-artifact@v4
+        with:
+          name: contract-test-logs-${{ github.run_id }}
+          path: contracts/contract-test.log
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Fail contracts job if tests failed
+        if: steps.contract_tests.outcome == 'failure'
+        run: exit 1
+
+  readme-commands:
+    name: README Command Verification
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Verify documented README commands
+        run: node scripts/verify-readme-commands.js
 
   verification:
     name: Formal Verification (Kani)
@@ -92,7 +154,7 @@ jobs:
       - name: Set up Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: nightly # Kani often requires nightly features
+          toolchain: nightly
           components: rustfmt
 
       - name: Install Kani
