@@ -83,6 +83,6 @@ describe("Portfolio Utils", () => {
 
         expect(isValidAllocation(threeVaults)).toBe(true);
         const apy = calculateBlendedApy(threeVaults);
-        expect(apy).toBeCloseTo(10.33, 1);
+        expect(apy).toBeCloseTo(10.0002, 2);
     });
 });

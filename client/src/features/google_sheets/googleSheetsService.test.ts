@@ -18,7 +18,7 @@ describe("GoogleSheetsService", () => {
 
         expect(url).toContain("https://accounts.google.com/o/oauth2/v2/auth");
         expect(url).toContain("client_id=client-id");
-        expect(url).toContain("scope=https://www.googleapis.com/auth/spreadsheets");
+        expect(url).toContain("scope=https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fspreadsheets");
     });
 
     it("should return null for unconfigured service", () => {

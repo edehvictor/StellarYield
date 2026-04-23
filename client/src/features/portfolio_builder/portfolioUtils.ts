@@ -49,6 +49,7 @@ export function distributeAmount(
     if (remainder !== 0n) {
         const largestIdx = distributed.reduce((maxIdx, a, i) =>
             a.amount > distributed[maxIdx].amount ? i : maxIdx,
+            0,
         );
         distributed[largestIdx].amount += remainder;
     }

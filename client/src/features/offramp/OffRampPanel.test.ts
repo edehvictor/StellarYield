@@ -12,9 +12,17 @@ describe("OffRampService", () => {
     beforeEach(() => {
         service = new OffRampService("moonpay", "test-key", "https://api.test.com");
         localStorage.clear();
+
+        // Mock fetch
+        global.fetch = vi.fn();
     });
 
     it("should generate valid memo", async () => {
+        (global.fetch as any).mockResolvedValueOnce({
+            ok: true,
+            json: async () => ({ id: "tx-123", memo: "SY:test" }),
+        });
+
         const request: WithdrawalRequest = {
             vaultContractId: "test-vault",
             shares: 1000n,
@@ -44,6 +52,11 @@ describe("OffRampService", () => {
     });
 
     it("should persist transactions", async () => {
+        (global.fetch as any).mockResolvedValueOnce({
+            ok: true,
+            json: async () => ({ id: "tx-456", memo: "SY:test2" }),
+        });
+
         const request: WithdrawalRequest = {
             vaultContractId: "test-vault",
             shares: 1000n,
@@ -61,6 +74,11 @@ describe("OffRampService", () => {
     });
 
     it("should map provider status correctly", async () => {
+        (global.fetch as any).mockResolvedValueOnce({
+            ok: true,
+            json: async () => ({ id: "tx-789", memo: "SY:test3" }),
+        });
+
         const request: WithdrawalRequest = {
             vaultContractId: "test-vault",
             shares: 1000n,
