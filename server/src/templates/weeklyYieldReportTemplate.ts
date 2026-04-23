@@ -10,7 +10,7 @@ export interface WeeklyYieldReportData {
   weeklyYieldPercentage: number;
   totalYield: number;
   topVaults: Array<{
-    name: string;
+    vaultName: string;
     yield: number;
     yieldPercentage: number;
     apy: number;
@@ -32,7 +32,7 @@ export function renderWeeklyYieldReport(data: WeeklyYieldReportData): string {
         #${index + 1}
       </td>
       <td style="padding: 12px; font-weight: 500; color: #333;">
-        ${escapeHtml(vault.name)}
+        ${escapeHtml(vault.vaultName)}
       </td>
       <td style="padding: 12px; text-align: right; color: #4caf50; font-weight: bold;">
         $${vault.yield.toFixed(2)}

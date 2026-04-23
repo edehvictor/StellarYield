@@ -165,7 +165,7 @@ describe("Weekly Yield Report Service", () => {
 
   describe("getUserVaultYields", () => {
     it("should return vault yields for user", async () => {
-      const yields = await getUserVaultYields("user-123");
+      const yields = await getUserVaultYields();
 
       expect(Array.isArray(yields)).toBe(true);
       expect(yields.length).toBeGreaterThan(0);

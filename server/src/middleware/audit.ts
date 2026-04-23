@@ -45,6 +45,14 @@ const AUDIT_LOG_DIR = process.env.AUDIT_LOG_DIR || "./audit-logs";
 const AUDIT_LOG_FILE = path.join(AUDIT_LOG_DIR, "audit-trail.jsonl");
 
 /**
+ * Reset in-memory state (used in tests)
+ */
+export function resetAuditLog(): void {
+  auditLog = [];
+  previousHash = crypto.createHash("sha256").update("GENESIS").digest("hex");
+}
+
+/**
  * Initialize audit log directory and load existing logs
  */
 export async function initializeAuditLog(): Promise<void> {
@@ -115,7 +123,7 @@ function extractUserInfo(req: Request): {
   userEmail?: string;
 } {
   // Assuming user info is attached to request by auth middleware
-  const user = (req as Record<string, unknown>).user as
+  const user = (req as unknown as Record<string, unknown>).user as
     | { id?: string; email?: string }
     | undefined;
   return {
@@ -150,7 +158,7 @@ export async function createAuditEntry(
   const entryData: Omit<AuditLogEntry, "hash" | "signature"> = {
     id,
     timestamp,
-    userId: context.userId || userId,
+    userId: context.userId ?? userId ?? "ANONYMOUS",
     userEmail: context.userEmail || userEmail,
     action: context.action || "UNKNOWN",
     resource: context.resource || "UNKNOWN",
@@ -308,9 +316,8 @@ export function auditMiddleware(
   // Override send to capture response
   res.send = function (data: unknown) {
     // Attach audit context to request for later use
-    const auditContext = (req as Record<string, unknown>).auditContext as
-      | AuditContext
-      | undefined;
+    const auditContext = (req as unknown as Record<string, unknown>)
+      .auditContext as AuditContext | undefined;
 
     if (auditContext) {
       // Create audit entry asynchronously
@@ -330,7 +337,7 @@ export function auditMiddleware(
  * Helper function to attach audit context to request
  */
 export function setAuditContext(req: Request, context: AuditContext): void {
-  (req as Record<string, unknown>).auditContext = context;
+  (req as unknown as Record<string, unknown>).auditContext = context;
 }
 
 /**

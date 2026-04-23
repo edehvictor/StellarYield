@@ -13,7 +13,7 @@ const adminRouter = Router();
  * Admin authentication middleware (implement based on your auth system)
  */
 function requireAdmin(req: Request, res: Response, next: () => void): void {
-  const user = (req as Record<string, unknown>).user as
+  const user = (req as unknown as Record<string, unknown>).user as
     | { role?: string }
     | undefined;
 

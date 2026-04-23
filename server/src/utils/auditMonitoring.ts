@@ -34,7 +34,7 @@ export interface AuditMonitoringConfig {
 }
 
 const alerts: AuditAlert[] = [];
-let monitoringJobs: NodeJS.Timeout[] = [];
+let monitoringJobs: ReturnType<typeof cron.schedule>[] = [];
 
 /**
  * Create and store an alert
@@ -282,7 +282,7 @@ export function startAuditMonitoring(config: AuditMonitoringConfig = {}): void {
       console.log("Running audit trail integrity check...");
       await checkAuditTrailIntegrity();
     });
-    monitoringJobs.push(integrityJob as unknown as NodeJS.Timeout);
+    monitoringJobs.push(integrityJob );
   }
 
   // Anomaly detection job (every 15 minutes)
@@ -291,7 +291,7 @@ export function startAuditMonitoring(config: AuditMonitoringConfig = {}): void {
       console.log("Running anomaly detection...");
       await detectAnomalies();
     });
-    monitoringJobs.push(anomalyJob as unknown as NodeJS.Timeout);
+    monitoringJobs.push(anomalyJob );
   }
 
   // Suspicious activity detection job (every 5 minutes)
@@ -300,7 +300,7 @@ export function startAuditMonitoring(config: AuditMonitoringConfig = {}): void {
       console.log("Running suspicious activity detection...");
       await detectSuspiciousActivity();
     });
-    monitoringJobs.push(suspiciousJob as unknown as NodeJS.Timeout);
+    monitoringJobs.push(suspiciousJob );
   }
 
   console.log(`Audit monitoring started with ${monitoringJobs.length} jobs`);
@@ -311,9 +311,7 @@ export function startAuditMonitoring(config: AuditMonitoringConfig = {}): void {
  */
 export function stopAuditMonitoring(): void {
   for (const job of monitoringJobs) {
-    if (job && typeof job.stop === "function") {
-      job.stop();
-    }
+    job.stop();
   }
   monitoringJobs = [];
   console.log("Audit monitoring stopped");

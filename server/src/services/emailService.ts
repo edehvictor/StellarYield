@@ -120,7 +120,7 @@ export async function sendWeeklyYieldReportEmail(
     weeklyYieldPercentage: number;
     totalYield: number;
     topVaults: Array<{
-      name: string;
+      vaultName: string;
       yield: number;
       yieldPercentage: number;
       apy: number;
@@ -139,16 +139,16 @@ export async function sendWeeklyYieldReportEmail(
     to: userEmail,
     subject: `Your Weekly Yield Report - ${reportData.period.startDate} to ${reportData.period.endDate}`,
     html,
-    text: `Weekly Yield Report\n\nHello ${reportData.userName},\n\nYour weekly yield: $${reportData.weeklyYield.toFixed(2)} (${reportData.weeklyYieldPercentage.toFixed(2)}%)\n\nTop performing vaults:\n${reportData.topVaults.map((v) => `- ${v.name}: $${v.yield.toFixed(2)}`).join("\n")}\n\nView your full report on the dashboard.`,
+    text: `Weekly Yield Report\n\nHello ${reportData.userName},\n\nYour weekly yield: $${reportData.weeklyYield.toFixed(2)} (${reportData.weeklyYieldPercentage.toFixed(2)}%)\n\nTop performing vaults:\n${reportData.topVaults.map((v) => `- ${v.vaultName}: $${v.yield.toFixed(2)}`).join("\n")}\n\nView your full report on the dashboard.`,
   });
 }
 
 /**
  * Send batch emails
  */
-export async function sendBatchEmails(
-  recipients: Array<{ email: string; data: Record<string, unknown> }>,
-  emailGenerator: (data: Record<string, unknown>) => EmailOptions,
+export async function sendBatchEmails<T extends object>(
+  recipients: Array<{ email: string; data: T }>,
+  emailGenerator: (data: T) => EmailOptions,
 ): Promise<{
   sent: number;
   failed: number;
