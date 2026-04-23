@@ -111,3 +111,29 @@ Check our open issues labeled Stellar Wave, apply via the Drips App, and submit 
 
 Would you like me to walk you through how to connect this finished repository to the Drips Wave App so you can start adding those issues?
 
+---
+
+## ✅ Post-deploy smoke test
+
+After merge/deploy, you can quickly verify the public app + API are reachable:
+
+```bash
+npm run smoke-test
+```
+
+### Configuration
+
+Override targets via environment variables:
+
+```bash
+FRONTEND_URL="https://stellaryield.vercel.app" \
+BACKEND_URL="https://your-backend.example.com" \
+npm run smoke-test
+```
+
+Optional path overrides:
+
+- `BACKEND_HEALTH_PATH` (default: `/api/health`)
+- `BACKEND_YIELDS_PATH` (default: `/api/yields`)
+- `FRONTEND_ASSET_PATH` (default: `/favicon.ico`)
+
