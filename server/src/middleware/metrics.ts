@@ -13,6 +13,21 @@ export const metrics: Metrics = {
   cacheMisses: 0,
 };
 
+function isMetricsAuthorized(req: Request): boolean {
+  const token = process.env.METRICS_TOKEN;
+  const nodeEnv = process.env.NODE_ENV;
+
+  // Safe-by-default: in production, require an explicit token.
+  if (nodeEnv === 'production' && !token) return false;
+  if (!token) return true; // dev/test default
+
+  const headerToken =
+    (req.get('x-metrics-token') ?? '').trim() ||
+    (req.get('authorization') ?? '').replace(/^Bearer\s+/i, '').trim();
+
+  return headerToken.length > 0 && headerToken === token;
+}
+
 // Middleware to track latency
 export const metricsMiddleware = (req: Request, res: Response, next: NextFunction) => {
   const start = Date.now();
@@ -39,6 +54,12 @@ export const metricsMiddleware = (req: Request, res: Response, next: NextFunctio
 };
 
 export const getMetrics = async (req: Request, res: Response) => {
+  if (!isMetricsAuthorized(req)) {
+    // Avoid advertising the endpoint when locked down.
+    res.status(404).json({ error: 'Not found' });
+    return;
+  }
+
   const latencies = metrics.requestLatencies;
   const avgLatency = latencies.length > 0 
     ? latencies.reduce((a, b) => a + b, 0) / latencies.length 

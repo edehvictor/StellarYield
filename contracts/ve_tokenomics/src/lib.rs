@@ -1,17 +1,15 @@
 #![no_std]
 
-use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, symbol_short, token, Address, Env,
-};
+use soroban_sdk::{contract, contracterror, contractimpl, symbol_short, token, Address, Env};
 
-mod storage;
 mod math;
+mod storage;
 
 #[cfg(test)]
 mod test;
 
-use storage::{DataKey, UserLock, MAX_TIME, WEEK};
 use math::calculate_voting_power;
+use storage::{DataKey, UserLock, MAX_TIME, WEEK};
 
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -44,7 +42,9 @@ impl VeTokenomics {
             return Err(Error::AlreadyInitialized);
         }
         env.storage().instance().set(&DataKey::Admin, &admin);
-        env.storage().instance().set(&DataKey::YieldToken, &yield_token);
+        env.storage()
+            .instance()
+            .set(&DataKey::YieldToken, &yield_token);
         env.storage().instance().set(&DataKey::Initialized, &true);
         Ok(())
     }
@@ -57,9 +57,14 @@ impl VeTokenomics {
     /// # Arguments
     /// * `from` — The address of the user creating the lock (must authorize).
     /// * `amount` — The quantity of $YIELD tokens to lock.
-    /// * `unlock_time` — The timestamp (in seconds) when the lock expires. 
+    /// * `unlock_time` — The timestamp (in seconds) when the lock expires.
     ///                   Must be between 1 week and 4 years from now.
-    pub fn create_lock(env: Env, from: Address, amount: i128, unlock_time: u64) -> Result<(), Error> {
+    pub fn create_lock(
+        env: Env,
+        from: Address,
+        amount: i128,
+        unlock_time: u64,
+    ) -> Result<(), Error> {
         Self::require_init(&env)?;
         from.require_auth();
 
@@ -72,7 +77,11 @@ impl VeTokenomics {
             return Err(Error::InvalidUnlockTime);
         }
 
-        if env.storage().persistent().has(&DataKey::UserLock(from.clone())) {
+        if env
+            .storage()
+            .persistent()
+            .has(&DataKey::UserLock(from.clone()))
+        {
             return Err(Error::LockUnderway);
         }
 
@@ -86,12 +95,12 @@ impl VeTokenomics {
             end: unlock_time,
         };
 
-        env.storage().persistent().set(&DataKey::UserLock(from.clone()), &lock);
+        env.storage()
+            .persistent()
+            .set(&DataKey::UserLock(from.clone()), &lock);
 
-        env.events().publish(
-            (symbol_short!("lock"), from),
-            (amount, unlock_time),
-        );
+        env.events()
+            .publish((symbol_short!("lock"), from), (amount, unlock_time));
 
         Ok(())
     }
@@ -128,12 +137,12 @@ impl VeTokenomics {
         // Update lock
         lock.amount += amount;
 
-        env.storage().persistent().set(&DataKey::UserLock(from.clone()), &lock);
+        env.storage()
+            .persistent()
+            .set(&DataKey::UserLock(from.clone()), &lock);
 
-        env.events().publish(
-            (symbol_short!("inc_amt"), from),
-            (amount, lock.amount),
-        );
+        env.events()
+            .publish((symbol_short!("inc_amt"), from), (amount, lock.amount));
 
         Ok(())
     }
@@ -165,12 +174,12 @@ impl VeTokenomics {
         // Update lock
         lock.end = unlock_time;
 
-        env.storage().persistent().set(&DataKey::UserLock(from.clone()), &lock);
+        env.storage()
+            .persistent()
+            .set(&DataKey::UserLock(from.clone()), &lock);
 
-        env.events().publish(
-            (symbol_short!("inc_time"), from),
-            (unlock_time,),
-        );
+        env.events()
+            .publish((symbol_short!("inc_time"), from), (unlock_time,));
 
         Ok(())
     }
@@ -200,12 +209,12 @@ impl VeTokenomics {
         client.transfer(&env.current_contract_address(), &from, &lock.amount);
 
         // Remove lock
-        env.storage().persistent().remove(&DataKey::UserLock(from.clone()));
+        env.storage()
+            .persistent()
+            .remove(&DataKey::UserLock(from.clone()));
 
-        env.events().publish(
-            (symbol_short!("withdraw"), from),
-            (lock.amount,),
-        );
+        env.events()
+            .publish((symbol_short!("withdraw"), from), (lock.amount,));
 
         Ok(())
     }
@@ -226,7 +235,7 @@ impl VeTokenomics {
             return Err(Error::InvalidWeight);
         }
 
-        let lock : UserLock = env
+        let lock: UserLock = env
             .storage()
             .persistent()
             .get(&DataKey::UserLock(from.clone()))
@@ -239,10 +248,8 @@ impl VeTokenomics {
 
         // For this task, we emit an event. A full gauge system would store
         // these in an instance map.
-        env.events().publish(
-            (symbol_short!("vote"), from),
-            (pool, weight),
-        );
+        env.events()
+            .publish((symbol_short!("vote"), from), (pool, weight));
 
         Ok(())
     }
@@ -269,7 +276,6 @@ impl VeTokenomics {
             0
         }
     }
-
 
     // ── Internal Helpers ────────────────────────────────────────────
 

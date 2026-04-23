@@ -7,6 +7,7 @@ import { signFeeBump } from "./relayer/relayer";
 import { context } from "./graphql/context";
 import { graphqlSchema } from "./graphql/schema";
 import { metricsMiddleware, getMetrics } from "./middleware/metrics";
+import { auditMiddleware } from "./middleware/audit";
 import yieldsRouter from "./routes/yields";
 import leaderboardRouter from "./routes/leaderboard";
 import notificationsRouter from "./routes/notifications";
@@ -18,10 +19,11 @@ import exportRouter from "./routes/export";
 import feesRouter from "./routes/fees";
 import transparencyRouter from "./routes/transparency";
 import donationsRouter from "./routes/donations";
-import {
-  createAuthChallenge,
-  verifyAuthChallenge,
-} from "./utils/stellarAuth";
+import referralsRouter from "./routes/referrals";
+import adminRouter from "./routes/admin";
+import auditMonitoringRouter from "./routes/auditMonitoring";
+import weeklyReportsRouter from "./routes/weeklyReports";
+import { createAuthChallenge, verifyAuthChallenge } from "./utils/stellarAuth";
 
 type EventsPrismaClient = {
   event: {
@@ -62,6 +64,7 @@ export function createApp() {
   app.use(cors());
   app.use(express.json());
   app.use(metricsMiddleware);
+  app.use(auditMiddleware);
   app.use(yoga.graphqlEndpoint, yoga);
 
   const relayerLimiter = rateLimit({
@@ -78,11 +81,14 @@ export function createApp() {
   app.use("/api/fees", feesRouter);
   app.use("/api/transparency", transparencyRouter);
   app.use("/api/donations", donationsRouter);
+  app.use("/api/referrals", referralsRouter);
   app.use("/api/onramp", onrampRouter);
   app.use("/api/zap", zapRouter);
   app.use("/api/users", pnlRouter);
   app.use("/api/users", exportRouter);
-  app.use("/api/contacts", contactsRouter);
+  app.use("/api/admin", adminRouter);
+  app.use("/api/audit-monitoring", auditMonitoringRouter);
+  app.use("/api/weekly-reports", weeklyReportsRouter);
 
   app.get("/api/metrics", getMetrics);
 
@@ -92,7 +98,8 @@ export function createApp() {
 
     if (!prisma) {
       res.status(503).json({
-        error: "Events database is unavailable until Prisma client is generated.",
+        error:
+          "Events database is unavailable until Prisma client is generated.",
       });
       return;
     }

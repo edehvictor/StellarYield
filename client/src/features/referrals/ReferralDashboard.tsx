@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import React, { useState, useEffect, useCallback } from "react";
 import { useWallet } from "../../context/useWallet";
 import {
   Users,
@@ -8,6 +8,7 @@ import {
   Gift,
   AlertCircle,
   Link as LinkIcon,
+  UserPlus,
 } from "lucide-react";
 
 interface ReferralData {
@@ -34,6 +35,11 @@ export default function ReferralDashboard() {
   const [copied, setCopied] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [claimSuccess, setClaimSuccess] = useState(false);
+
+  const [submitting, setSubmitting] = useState(false);
+  const [submitError, setSubmitError] = useState<string | null>(null);
+  const [submitSuccess, setSubmitSuccess] = useState(false);
+  const [referralCodeInput, setReferralCodeInput] = useState("");
 
   const referralLink = walletAddress
     ? `${APP_URL}/?ref=${encodeURIComponent(walletAddress)}`
@@ -108,6 +114,45 @@ export default function ReferralDashboard() {
       setError(err instanceof Error ? err.message : "Claim failed");
     } finally {
       setClaiming(false);
+    }
+  };
+
+  const handleApplyReferral = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!walletAddress) return;
+    
+    setSubmitError(null);
+    setSubmitSuccess(false);
+    
+    if (!/^[GC][A-Z2-7]{55}$/.test(referralCodeInput)) {
+      setSubmitError("Invalid referral code format. Must be a valid Stellar address.");
+      return;
+    }
+    
+    if (referralCodeInput === walletAddress) {
+      setSubmitError("Self-referral is not allowed.");
+      return;
+    }
+    
+    setSubmitting(true);
+    
+    try {
+      const res = await fetch(`${API_BASE}/api/referrals/submit`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ address: walletAddress, referralCode: referralCodeInput }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(data.error || "Submission failed");
+      }
+      setSubmitSuccess(true);
+      setReferralCodeInput("");
+      void fetchReferralData();
+    } catch (err) {
+      setSubmitError(err instanceof Error ? err.message : "Submission failed");
+    } finally {
+      setSubmitting(false);
     }
   };
 
@@ -231,6 +276,46 @@ export default function ReferralDashboard() {
           </>
         )}
       </button>
+
+      {/* Apply Referral Code Section */}
+      <div className="bg-white/5 rounded-xl p-4 mt-6">
+        <div className="flex items-center gap-2 mb-4">
+          <UserPlus className="text-indigo-400" size={16} />
+          <h3 className="text-sm font-medium text-white">Have a referral code?</h3>
+        </div>
+        
+        {submitError && (
+          <div className="flex items-center gap-2 bg-red-500/10 border border-red-500/20 rounded-xl p-3 mb-4">
+            <AlertCircle className="text-red-400 shrink-0" size={18} />
+            <p className="text-red-400 text-sm">{submitError}</p>
+          </div>
+        )}
+
+        {submitSuccess && (
+          <div className="flex items-center gap-2 bg-green-500/10 border border-green-500/20 rounded-xl p-3 mb-4">
+            <CheckCircle className="text-green-400 shrink-0" size={18} />
+            <p className="text-green-400 text-sm">Referral code applied successfully!</p>
+          </div>
+        )}
+
+        <form onSubmit={handleApplyReferral} className="flex gap-2">
+          <input
+            type="text"
+            value={referralCodeInput}
+            onChange={(e) => setReferralCodeInput(e.target.value)}
+            placeholder="Enter Stellar address (G...)"
+            className="flex-1 bg-black/30 border border-white/10 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-indigo-500 transition-colors"
+            disabled={submitting}
+          />
+          <button
+            type="submit"
+            disabled={submitting || !referralCodeInput}
+            className="px-4 py-2 bg-white/10 hover:bg-white/20 text-white rounded-lg text-sm font-medium transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center min-w-[100px]"
+          >
+            {submitting ? <Loader2 className="animate-spin" size={16} /> : "Apply"}
+          </button>
+        </form>
+      </div>
     </div>
   );
 }

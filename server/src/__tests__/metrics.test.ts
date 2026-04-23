@@ -26,4 +26,36 @@ describe('Metrics Endpoint', () => {
     // requestCount should be > 0 since we made a request
     expect(response.body.requestCount).toBeGreaterThan(0);
   });
+
+  it('should hide metrics in production without token', async () => {
+    const prevEnv = process.env.NODE_ENV;
+    const prevToken = process.env.METRICS_TOKEN;
+    process.env.NODE_ENV = 'production';
+    delete process.env.METRICS_TOKEN;
+
+    const response = await request(app).get('/api/metrics');
+    expect(response.status).toBe(404);
+
+    process.env.NODE_ENV = prevEnv;
+    if (prevToken) process.env.METRICS_TOKEN = prevToken;
+  });
+
+  it('should require token when configured', async () => {
+    const prevEnv = process.env.NODE_ENV;
+    const prevToken = process.env.METRICS_TOKEN;
+    process.env.NODE_ENV = 'production';
+    process.env.METRICS_TOKEN = 'test-token';
+
+    const denied = await request(app).get('/api/metrics');
+    expect(denied.status).toBe(404);
+
+    const allowed = await request(app)
+      .get('/api/metrics')
+      .set('x-metrics-token', 'test-token');
+    expect(allowed.status).toBe(200);
+
+    process.env.NODE_ENV = prevEnv;
+    if (prevToken) process.env.METRICS_TOKEN = prevToken;
+    else delete process.env.METRICS_TOKEN;
+  });
 });
