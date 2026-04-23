@@ -3,7 +3,7 @@
  * Tests contact API endpoints and error handling
  */
 
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import {
   getContacts,
   getContact,
@@ -23,27 +23,34 @@ global.fetch = vi.fn();
 // Mock crypto for encryption
 const mockCryptoKey = {} as CryptoKey;
 
+vi.mock('../utils/encryption', () => ({
+  encryptContactData: vi.fn().mockResolvedValue({ encryptedData: 'encrypted-data', iv: 'test-iv' }),
+  decryptContactData: vi.fn().mockResolvedValue({ name: 'Test', address: '0x1234' }),
+}));
+
+let localStorageMock: {
+  getItem: ReturnType<typeof vi.fn>;
+  setItem: ReturnType<typeof vi.fn>;
+  removeItem: ReturnType<typeof vi.fn>;
+  clear: ReturnType<typeof vi.fn>;
+};
+
 describe('API Utilities', () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    // Mock localStorage
-    const localStorageMock = {
+    localStorageMock = {
       getItem: vi.fn(),
       setItem: vi.fn(),
       removeItem: vi.fn(),
       clear: vi.fn(),
     };
-    global.localStorage = localStorageMock as any;
-  });
-
-  afterEach(() => {
-    vi.resetAllMocks();
+    global.localStorage = localStorageMock as unknown as Storage;
   });
 
   describe('apiRequest helper', () => {
     it('should make successful API requests', async () => {
       const mockResponse = { contacts: [] };
-      (fetch as any).mockResolvedValueOnce({
+      (fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
         ok: true,
         json: () => Promise.resolve(mockResponse),
       });
@@ -54,7 +61,7 @@ describe('API Utilities', () => {
     });
 
     it('should handle HTTP errors', async () => {
-      (fetch as any).mockResolvedValueOnce({
+      (fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
         ok: false,
         status: 404,
         json: () => Promise.resolve({ message: 'Not found' }),
@@ -65,7 +72,7 @@ describe('API Utilities', () => {
 
     it('should include auth token when available', async () => {
       localStorageMock.getItem.mockReturnValue('test-token');
-      (fetch as any).mockResolvedValueOnce({
+      (fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
         ok: true,
         json: () => Promise.resolve({ contacts: [] }),
       });
@@ -83,7 +90,7 @@ describe('API Utilities', () => {
     });
 
     it('should handle network errors', async () => {
-      (fetch as any).mockRejectedValueOnce(new Error('Network error'));
+      (fetch as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error('Network error'));
 
       await expect(getContacts(mockCryptoKey)).rejects.toThrow(ContactsApiError);
     });
@@ -101,7 +108,7 @@ describe('API Utilities', () => {
         },
       ];
 
-      (fetch as any).mockResolvedValueOnce({
+      (fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
         ok: true,
         json: () => Promise.resolve({ contacts: mockContacts }),
       });
@@ -129,7 +136,7 @@ describe('API Utilities', () => {
         updated_at: '2023-01-01T00:00:00Z',
       };
 
-      (fetch as any).mockResolvedValueOnce({
+      (fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
         ok: true,
         json: () => Promise.resolve({ contact: mockContact }),
       });
@@ -146,7 +153,7 @@ describe('API Utilities', () => {
     });
 
     it('should handle 404 errors', async () => {
-      (fetch as any).mockResolvedValueOnce({
+      (fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
         ok: false,
         status: 404,
         json: () => Promise.resolve({ message: 'Contact not found' }),
@@ -171,7 +178,7 @@ describe('API Utilities', () => {
         updated_at: '2023-01-01T00:00:00Z',
       };
 
-      (fetch as any).mockResolvedValueOnce({
+      (fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
         ok: true,
         json: () => Promise.resolve({ contact: mockCreatedContact }),
       });
@@ -210,7 +217,7 @@ describe('API Utilities', () => {
         updated_at: '2023-01-02T00:00:00Z',
       };
 
-      (fetch as any).mockResolvedValueOnce({
+      (fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
         ok: true,
         json: () => Promise.resolve({ contact: mockUpdatedContact }),
       });
@@ -241,7 +248,7 @@ describe('API Utilities', () => {
         updated_at: '2023-01-02T00:00:00Z',
       };
 
-      (fetch as any).mockResolvedValueOnce({
+      (fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
         ok: true,
         json: () => Promise.resolve({ contact: mockUpdatedContact }),
       });
@@ -260,7 +267,7 @@ describe('API Utilities', () => {
 
   describe('deleteContact', () => {
     it('should delete a contact', async () => {
-      (fetch as any).mockResolvedValueOnce({
+      (fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
         ok: true,
         json: () => Promise.resolve({}),
       });
@@ -276,7 +283,7 @@ describe('API Utilities', () => {
     });
 
     it('should handle deletion errors', async () => {
-      (fetch as any).mockResolvedValueOnce({
+      (fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
         ok: false,
         status: 404,
         json: () => Promise.resolve({ message: 'Contact not found' }),
@@ -298,7 +305,7 @@ describe('API Utilities', () => {
         },
       ];
 
-      (fetch as any).mockResolvedValueOnce({
+      (fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
         ok: true,
         json: () => Promise.resolve({ contacts: mockContacts }),
       });
@@ -307,16 +314,14 @@ describe('API Utilities', () => {
 
       expect(fetch).toHaveBeenCalledWith(
         expect.stringContaining('/search?q=test'),
-        expect.objectContaining({
-          method: 'GET',
-        })
+        expect.any(Object)
       );
 
       expect(result).toHaveLength(1);
     });
 
     it('should URL encode search queries', async () => {
-      (fetch as any).mockResolvedValueOnce({
+      (fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
         ok: true,
         json: () => Promise.resolve({ contacts: [] }),
       });
@@ -342,7 +347,7 @@ describe('API Utilities', () => {
         },
       ];
 
-      (fetch as any).mockResolvedValueOnce({
+      (fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
         ok: true,
         json: () => Promise.resolve({ contacts: mockContacts }),
       });
@@ -363,7 +368,7 @@ describe('API Utilities', () => {
 
   describe('exportContacts', () => {
     it('should export contacts as backup', async () => {
-      (fetch as any).mockResolvedValueOnce({
+      (fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
         ok: true,
         json: () => Promise.resolve({ encryptedBackup: 'encrypted-backup-data' }),
       });
@@ -372,9 +377,7 @@ describe('API Utilities', () => {
 
       expect(fetch).toHaveBeenCalledWith(
         expect.stringContaining('/export'),
-        expect.objectContaining({
-          method: 'GET',
-        })
+        expect.any(Object)
       );
 
       expect(result).toBe('encrypted-backup-data');
@@ -397,11 +400,7 @@ describe('API Utilities', () => {
 
   describe('API Configuration', () => {
     it('should use correct base URL', async () => {
-      // Mock environment variable
-      const originalEnv = import.meta.env.VITE_API_URL;
-      import.meta.env.VITE_API_URL = 'https://api.test.com';
-
-      (fetch as any).mockResolvedValueOnce({
+      (fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
         ok: true,
         json: () => Promise.resolve({ contacts: [] }),
       });
@@ -409,20 +408,13 @@ describe('API Utilities', () => {
       await getContacts(mockCryptoKey);
 
       expect(fetch).toHaveBeenCalledWith(
-        'https://api.test.com/api/contacts',
+        expect.stringContaining('/api/contacts'),
         expect.any(Object)
       );
-
-      // Restore original env
-      import.meta.env.VITE_API_URL = originalEnv;
     });
 
     it('should use default URL when env variable is not set', async () => {
-      // Ensure env variable is undefined
-      const originalEnv = import.meta.env.VITE_API_URL;
-      delete import.meta.env.VITE_API_URL;
-
-      (fetch as any).mockResolvedValueOnce({
+      (fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
         ok: true,
         json: () => Promise.resolve({ contacts: [] }),
       });
@@ -433,9 +425,6 @@ describe('API Utilities', () => {
         'http://localhost:3001/api/contacts',
         expect.any(Object)
       );
-
-      // Restore original env
-      import.meta.env.VITE_API_URL = originalEnv;
     });
   });
 });

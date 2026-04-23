@@ -274,7 +274,7 @@ router.put("/:id", async (req: Request, res: Response) => {
       }
     }
 
-    const updateData: any = {};
+    const updateData: { encryptedName?: string; encryptedAddress?: string } = {};
     if (encryptedName) updateData.encryptedName = encryptedName;
     if (encryptedAddress) updateData.encryptedAddress = encryptedAddress;
 

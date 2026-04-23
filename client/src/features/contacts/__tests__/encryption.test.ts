@@ -228,7 +228,7 @@ describe('Encryption Utilities', () => {
 
     it('should generate IDs with correct prefix', () => {
       const id = generateContactId();
-      expect(id).toStartWith('contact_');
+      expect(id).toMatch(/^contact_/);
     });
   });
 
