@@ -100,6 +100,22 @@ When the pull request workflow fails, GitHub Actions uploads frontend failure ar
 
 ## Contributor and Release Docs
 
+   The mock API will be available at http://localhost:3001
+
+## 🧪 Post-deploy smoke test
+After deploying the frontend + backend, run the included smoke test to validate basic reachability.
+
+```bash
+FRONTEND_URL="https://your-frontend-url" \
+BACKEND_URL="https://your-backend-url" \
+bash scripts/smoke-test.sh
+```
+
+- **Checks**: `GET /api/yields`, `GET /api/metrics`, and the frontend root.
+- **Config**: `FRONTEND_URL` and `BACKEND_URL` environment variables.
+🌊 Contributing via Drips Wave
+We are proudly participating in the Stellar Wave Program via Drips! We are actively looking for Web3 full-stack and Rust developers.
+Check our open issues labeled Stellar Wave, apply via the Drips App, and submit your PR to earn rewards funded by the Stellar Development Foundation!
 - [Contributing Guide](./CONTRIBUTING.md)
 - [Pre-commit Formatting and Verification Guide](./docs/contributor-guide.md)
 - [Release Checklist](./docs/release-checklist.md)

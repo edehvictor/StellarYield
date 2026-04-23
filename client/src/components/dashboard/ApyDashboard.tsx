@@ -372,11 +372,19 @@ export default function ApyDashboard() {
                           <p className="font-semibold text-white tracking-wide truncate">{entry.protocol}</p>
                           <p className="text-xs text-gray-500">{entry.category}</p>
                         </div>
-                        <div className="group/risk relative flex cursor-help">
+                        <div
+                          className="group/risk relative flex cursor-help outline-none"
+                          tabIndex={0}
+                          aria-describedby={`risk-tip-grid-${entry.protocol}-${entry.asset}`}
+                        >
                           <span className={`${risk.bg} ${risk.color} ${risk.border} border px-2 py-0.5 rounded-lg text-[10px] font-bold uppercase tracking-wider flex items-center gap-1`}>
                             {entry.risk} <Info size={10} />
                           </span>
-                          <div className="absolute hidden group-hover/risk:block bottom-full mb-2 right-0 w-48 p-2 bg-[#1A1A24] border border-white/10 rounded-lg text-xs leading-relaxed text-gray-300 shadow-xl z-10 transition-opacity">
+                          <div
+                            id={`risk-tip-grid-${entry.protocol}-${entry.asset}`}
+                            role="tooltip"
+                            className="absolute hidden group-hover/risk:block group-focus-within/risk:block bottom-full mb-2 right-0 w-48 p-2 bg-[#1A1A24] border border-white/10 rounded-lg text-xs leading-relaxed text-gray-300 shadow-xl z-10 transition-opacity"
+                          >
                             {risk.explanation}
                           </div>
                         </div>
@@ -520,11 +528,19 @@ export default function ApyDashboard() {
                             {formatTvl(entry.tvl)}
                           </td>
                           <td className="px-6 py-5">
-                            <div className="group/risk relative inline-flex cursor-help">
+                            <div
+                              className="group/risk relative inline-flex cursor-help outline-none"
+                              tabIndex={0}
+                              aria-describedby={`risk-tip-table-${entry.protocol}-${entry.asset}`}
+                            >
                               <span className={`${risk.bg} ${risk.color} ${risk.border} border px-2.5 py-1.5 rounded text-xs font-bold uppercase tracking-wider flex items-center gap-1`}>
                                 {entry.risk} <Info size={12} />
                               </span>
-                              <div className="absolute hidden group-hover/risk:block bottom-full mb-2 left-1/2 -translate-x-1/2 w-48 p-2 bg-[#1A1A24] border border-white/10 rounded-lg text-xs leading-relaxed text-gray-300 shadow-xl z-10 transition-opacity">
+                              <div
+                                id={`risk-tip-table-${entry.protocol}-${entry.asset}`}
+                                role="tooltip"
+                                className="absolute hidden group-hover/risk:block group-focus-within/risk:block bottom-full mb-2 left-1/2 -translate-x-1/2 w-48 p-2 bg-[#1A1A24] border border-white/10 rounded-lg text-xs leading-relaxed text-gray-300 shadow-xl z-10 transition-opacity"
+                              >
                                 {risk.explanation}
                               </div>
                             </div>

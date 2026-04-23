@@ -23,8 +23,15 @@ jobs:
           cache: npm
           cache-dependency-path: server/package-lock.json
 
+      - name: Harden npm network settings
+        run: |
+          npm config set fetch-retries 5
+          npm config set fetch-retry-mintimeout 20000
+          npm config set fetch-retry-maxtimeout 120000
+          npm config set fetch-timeout 120000
+
       - name: Install backend dependencies
-        run: npm ci
+        run: npm ci --no-audit --prefer-offline
 
       - name: Lint backend
         run: npm run lint
@@ -49,8 +56,15 @@ jobs:
           cache: npm
           cache-dependency-path: client/package-lock.json
 
+      - name: Harden npm network settings
+        run: |
+          npm config set fetch-retries 5
+          npm config set fetch-retry-mintimeout 20000
+          npm config set fetch-retry-maxtimeout 120000
+          npm config set fetch-timeout 120000
+
       - name: Install client dependencies
-        run: npm ci
+        run: npm ci --no-audit --prefer-offline
 
       - name: Lint Zap feature sources
         run: npx eslint src/features/zap
