@@ -1,0 +1,46 @@
+name: Contract Task
+description: Propose a change to on-chain contracts or related infrastructure
+labels: [contracts]
+body:
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: What contract change is needed?
+    validations:
+      required: true
+  - type: textarea
+    id: motivation
+    attributes:
+      label: Motivation
+      description: Why is this change necessary?
+    validations:
+      required: false
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance Criteria
+      description: What must be true for this task to be complete?
+      placeholder: |
+        - [ ] Criterion 1
+        - [ ] Criterion 2
+    validations:
+      required: false
+  - type: textarea
+    id: risks
+    attributes:
+      label: Risks / Considerations
+      description: Any security or compatibility concerns?
+    validations:
+      required: false
+  - type: dropdown
+    id: priority
+    attributes:
+      label: Priority
+      options:
+        - low
+        - medium
+        - high
+        - critical
+    validations:
+      required: false

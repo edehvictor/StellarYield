@@ -1,0 +1,42 @@
+name: Feature Request
+description: Suggest a new feature or improvement
+labels: [enhancement]
+body:
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: What feature would you like to see?
+      placeholder: Describe the feature and its benefits.
+    validations:
+      required: true
+  - type: textarea
+    id: use_case
+    attributes:
+      label: Use Case
+      description: Describe the scenario where this feature would be useful.
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance Criteria
+      description: What conditions must be met for this feature to be considered complete?
+      placeholder: |
+        - [ ] Criterion 1
+        - [ ] Criterion 2
+    validations:
+      required: false
+  - type: dropdown
+    id: affected
+    attributes:
+      label: Affected Package
+      description: Which package is this for?
+      options:
+        - frontend
+        - backend
+        - contracts
+        - docs
+        - other
+    validations:
+      required: false
