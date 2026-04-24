@@ -40,13 +40,16 @@ import {
   Lock,
   Eye,
   Heart,
+  Settings,
 } from "lucide-react";
 import "./index.css";
+import SettingsModal from "./features/settings/SettingsModal";
 
 // Layout Component
 const RootLayout = () => {
   const { isConnected, walletAddress } = useWallet();
   const [isOnRampOpen, setIsOnRampOpen] = useState(false);
+  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
 
   return (
     <div className="min-h-screen flex flex-col">
@@ -58,6 +61,8 @@ const RootLayout = () => {
           walletAddress={walletAddress}
         />
       )}
+      {/* Settings Modal */}
+      <SettingsModal isOpen={isSettingsOpen} onClose={() => setIsSettingsOpen(false)} />
       {/* Navigation Bar */}
       <nav className="glass-panel mx-4 mt-6 px-6 py-4 flex justify-between items-center mb-8 sticky top-4 z-50 shadow-2xl">
         <div className="flex items-center gap-3">
@@ -194,6 +199,14 @@ const RootLayout = () => {
 
         <div className="flex items-center gap-4">
           <NotificationBell />
+          <button
+            type="button"
+            onClick={() => setIsSettingsOpen(true)}
+            aria-label="Open transaction settings"
+            className="p-2 rounded-lg bg-white/10 hover:bg-white/20 text-gray-300 hover:text-white transition-colors"
+          >
+            <Settings size={18} />
+          </button>
           <ConnectWalletButton />
         </div>
       </nav>

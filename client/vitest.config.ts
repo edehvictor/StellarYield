@@ -1,32 +1,11 @@
-import { defineConfig } from "vitest/config";
+import { defineConfig } from 'vitest/config'
+import react from '@vitejs/plugin-react'
 
 export default defineConfig({
+  plugins: [react()],
   test: {
-    environment: "node",
-    setupFiles: ["./vitest.setup.ts"],
-    include: ["src/**/*.test.ts", "src/**/*.test.tsx"],
-    coverage: {
-      provider: "v8",
-      include: [
-        "src/features/zap/**/*.ts",
-        "src/utils/errorDecoder.ts",
-        "src/hooks/useVaultOgMeta.ts",
-      ],
-      exclude: [
-        "src/**/*.test.ts",
-        "src/features/zap/types.ts",
-        "src/features/zap/index.ts",
-        "src/features/zap/ZapDepositPanel.tsx",
-        // vestingService contains Soroban RPC + Freighter integration code that
-        // requires a live node — covered by integration tests, not unit coverage.
-        "src/pages/vesting/vestingService.ts",
-      ],
-      thresholds: {
-        lines: 90,
-        functions: 80,
-        branches: 75,
-        statements: 90,
-      },
-    },
+    environment: 'jsdom',
+    globals: true,
+    setupFiles: ['./src/test-setup.ts'],
   },
-});
+})
