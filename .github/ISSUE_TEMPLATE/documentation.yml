@@ -1,0 +1,39 @@
+name: Documentation
+description: Report a documentation issue or request an improvement
+labels: [documentation]
+body:
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: What is missing or incorrect in the documentation?
+    validations:
+      required: true
+  - type: textarea
+    id: location
+    attributes:
+      label: Location
+      description: Where did you encounter the issue? (file, URL, section)
+      placeholder: e.g. README.md, API docs, inline comments
+    validations:
+      required: false
+  - type: textarea
+    id: suggestion
+    attributes:
+      label: Suggested Change
+      description: What should the documentation say instead?
+    validations:
+      required: false
+  - type: dropdown
+    id: affected
+    attributes:
+      label: Affected Package
+      description: Which package is this for?
+      options:
+        - frontend
+        - backend
+        - contracts
+        - docs
+        - other
+    validations:
+      required: false
