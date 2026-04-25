@@ -11,7 +11,7 @@ crate-type = ["cdylib", "rlib"]
 soroban-sdk = "22.0.0"
 
 # Libp2p for peer-to-peer networking
-libp2p = { version = "0.54", features = ["tokio", "gossipsub", "mdns", "noise", "tcp", "yamux"] }
+libp2p = { version = "0.54", features = ["tokio", "gossipsub", "mdns", "noise", "tcp", "yamux", "macros"] }
 
 # Async runtime
 tokio = { version = "1.35", features = ["full"] }
@@ -43,13 +43,12 @@ uuid = { version = "1.6", features = ["v4"] }
 # Futures for async
 futures = "0.3"
 
-# BTreeMap for ordered data structures
-# (already in std)
+# Random number generation (used in bin/node.rs for key generation)
+rand = "0.8"
 
 [dev-dependencies]
 tokio-test = "0.4"
 criterion = "0.5"
-rand = "0.8"
 
 [[bin]]
 name = "matching_engine_node"

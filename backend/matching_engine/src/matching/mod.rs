@@ -3,8 +3,7 @@
 //! Implements the core order matching algorithm with price-time priority.
 //! Matches buy and sell orders and generates trade executions.
 
-use crate::orderbook::{Order, OrderBook, OrderStatus, Side, OrderType, Trade};
-use std::collections::VecDeque;
+use crate::orderbook::{Order, OrderBook, OrderStatus, OrderType, Side, Trade};
 
 /// Matching engine result
 #[derive(Debug, Clone)]
@@ -47,7 +46,12 @@ impl MatchingEngine {
     }
 
     /// Get or create order book for a pair
-    pub fn get_or_create_book(&mut self, pair_id: String, token0: String, token1: String) -> &mut OrderBook {
+    pub fn get_or_create_book(
+        &mut self,
+        pair_id: String,
+        token0: String,
+        token1: String,
+    ) -> &mut OrderBook {
         use std::collections::hash_map::Entry;
         match self.order_books.entry(pair_id.clone()) {
             Entry::Vacant(entry) => entry.insert(OrderBook::new(pair_id, token0, token1)),
@@ -68,10 +72,13 @@ impl MatchingEngine {
     /// Submit a new order and attempt to match
     pub fn submit_order(&mut self, mut order: Order) -> MatchResult {
         let pair_id = format!("{}-{}", order.token0, order.token1);
-        
+
+        // Ensure the order book exists before matching
+        self.get_or_create_book(pair_id.clone(), order.token0.clone(), order.token1.clone());
+
         // Try to match the order
         let mut result = self.match_order(&mut order);
-        
+
         // If there's remaining amount, add to order book
         if order.remaining() > 0 && order.order_type == OrderType::Limit {
             if let Some(book) = self.get_book_mut(&pair_id) {
@@ -86,7 +93,11 @@ impl MatchingEngine {
             order.status = OrderStatus::Filled;
         }
 
-        result.remaining_order = if order.remaining() > 0 { Some(order) } else { None };
+        result.remaining_order = if order.remaining() > 0 {
+            Some(order)
+        } else {
+            None
+        };
         result
     }
 
@@ -133,7 +144,7 @@ impl MatchingEngine {
 
                     // Create trade
                     let trade = Trade::new(maker_order, order, match_amount, match_price);
-                    
+
                     // Update maker order
                     maker_order.filled = maker_order.filled.saturating_add(match_amount);
                     if maker_order.filled >= maker_order.amount {
@@ -218,14 +229,18 @@ impl MatchingEngine {
     }
 
     /// Get all trades for a user
-    pub fn get_user_trades(&self, user: &str, pair_id: &str) -> Vec<&Trade> {
+    pub fn get_user_trades(&self, _user: &str, _pair_id: &str) -> Vec<&Trade> {
         // This would require storing trade history
         // For now, return empty vector
         Vec::new()
     }
 
     /// Get order book depth
-    pub fn get_depth(&self, pair_id: &str, levels: usize) -> Option<crate::orderbook::OrderBookDepth> {
+    pub fn get_depth(
+        &self,
+        pair_id: &str,
+        levels: usize,
+    ) -> Option<crate::orderbook::OrderBookDepth> {
         self.get_book(pair_id).map(|book| book.depth(levels))
     }
 }
@@ -263,9 +278,9 @@ mod tests {
     fn test_submit_buy_order_no_match() {
         let mut engine = MatchingEngine::new();
         let order = create_test_order(Side::Buy, 100, 1000);
-        
+
         let result = engine.submit_order(order);
-        
+
         // Should have remaining order added to book
         assert!(result.remaining_order.is_some());
         assert_eq!(result.trades.len(), 0);
@@ -275,9 +290,9 @@ mod tests {
     fn test_submit_sell_order_no_match() {
         let mut engine = MatchingEngine::new();
         let order = create_test_order(Side::Sell, 100, 1000);
-        
+
         let result = engine.submit_order(order);
-        
+
         assert!(result.remaining_order.is_some());
         assert_eq!(result.trades.len(), 0);
     }
@@ -285,15 +300,15 @@ mod tests {
     #[test]
     fn test_simple_match() {
         let mut engine = MatchingEngine::new();
-        
+
         // Add sell order at 100
         let sell_order = create_test_order(Side::Sell, 100, 1000);
         engine.submit_order(sell_order);
-        
+
         // Add buy order at 100 (should match)
         let buy_order = create_test_order(Side::Buy, 100, 500);
         let result = engine.submit_order(buy_order);
-        
+
         // Should have executed a trade
         assert_eq!(result.trades.len(), 1);
         assert_eq!(result.trades[0].price, 100);
@@ -303,16 +318,16 @@ mod tests {
     #[test]
     fn test_price_time_priority() {
         let mut engine = MatchingEngine::new();
-        
+
         // Add multiple sell orders at different prices
         engine.submit_order(create_test_order(Side::Sell, 105, 1000));
         engine.submit_order(create_test_order(Side::Sell, 100, 1000)); // Best price
         engine.submit_order(create_test_order(Side::Sell, 103, 1000));
-        
+
         // Add buy order that should match at best price
         let buy_order = create_test_order(Side::Buy, 110, 500);
         let result = engine.submit_order(buy_order);
-        
+
         // Should match at 100 (best price)
         assert_eq!(result.trades.len(), 1);
         assert_eq!(result.trades[0].price, 100);
@@ -321,14 +336,14 @@ mod tests {
     #[test]
     fn test_partial_fill() {
         let mut engine = MatchingEngine::new();
-        
+
         // Add small sell order
         engine.submit_order(create_test_order(Side::Sell, 100, 500));
-        
+
         // Add larger buy order
         let buy_order = create_test_order(Side::Buy, 100, 1000);
         let result = engine.submit_order(buy_order);
-        
+
         // Should partially fill
         assert_eq!(result.trades.len(), 1);
         assert_eq!(result.trades[0].amount, 500);
@@ -339,14 +354,14 @@ mod tests {
     #[test]
     fn test_limit_order_price_check() {
         let mut engine = MatchingEngine::new();
-        
+
         // Add sell order at 100
         engine.submit_order(create_test_order(Side::Sell, 100, 1000));
-        
+
         // Add buy order at 90 (shouldn't match)
         let buy_order = create_test_order(Side::Buy, 90, 1000);
         let result = engine.submit_order(buy_order);
-        
+
         // Should not match due to price
         assert_eq!(result.trades.len(), 0);
         assert!(result.remaining_order.is_some());

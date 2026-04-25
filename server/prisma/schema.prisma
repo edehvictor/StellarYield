@@ -111,6 +111,24 @@ model Referral {
   @@index([referrerAddress])
 }
 
+// ── APY Alert Models ─────────────────────────────────────────────────────────
+
+model UserAlert {
+  id              String   @id @default(uuid())
+  walletAddress   String
+  vaultId         String   // protocol name / vault identifier
+  condition       String   // "above" | "below"
+  thresholdValue  Float    // APY percentage threshold (e.g. 10.0 for 10%)
+  email           String   // destination email for notifications
+  status          String   @default("active") // "active" | "triggered" | "deleted"
+  triggeredAt     DateTime?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([walletAddress])
+  @@index([status, vaultId])
+}
+
 // ── Encrypted Address Book Models (Issue #140) ───────────────────────────────
 
 model Contact {

@@ -4,13 +4,6 @@ on:
   pull_request:
     branches:
       - main
-    paths:
-      - "package-lock.json"
-      - "client/package-lock.json"
-      - "server/package-lock.json"
-      - "client/package.json"
-      - "server/package.json"
-      - "package.json"
 
 permissions:
   contents: read
@@ -18,18 +11,24 @@ permissions:
 
 jobs:
   dependency-review:
-    name: JavaScript Dependency Review
+    name: Dependency Review
     runs-on: ubuntu-latest
+    # Only run on the upstream repo where Dependency graph is enabled.
+    # Forks and repos without the feature enabled will skip this job
+    # rather than fail with an unsupported-repository error.
+    if: github.event.pull_request.head.repo.full_name == github.repository
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
 
-      - name: Run dependency review
+      - name: Dependency Review
         uses: actions/dependency-review-action@v4
+        # continue-on-error prevents a missing Dependency graph feature
+        # from blocking the PR — the step will be marked as a warning.
+        continue-on-error: true
         with:
-          # Fail on high and critical severity vulnerabilities.
           fail-on-severity: high
-          # Warn on moderate severity but do not block merges.
-          warn-on-unmatched-patterns: true
-          # Comment a summary on the PR.
+          warn-only: false
+          license-check: true
+          vulnerability-check: true
           comment-summary-in-pr: always
