@@ -1,0 +1,705 @@
+openapi: 3.0.0
+info:
+  title: StellarYield API
+  description: Backend API for the StellarYield yield farming and portfolio management platform
+  version: 1.0.0
+  contact:
+    name: StellarYield Team
+
+servers:
+  - url: http://localhost:3001
+    description: Local development server
+  - url: https://api.stellaryield.com
+    description: Production server
+
+tags:
+  - name: Health
+    description: System health monitoring
+  - name: Yields
+    description: Yield data and APY information
+  - name: Portfolio
+    description: User portfolio and PnL tracking
+  - name: Leaderboard
+    description: User leaderboard rankings
+  - name: Notifications
+    description: User notifications
+  - name: Referrals
+    description: Referral program endpoints
+  - name: PnL
+    description: Profit and loss calculations
+  - name: Export
+    description: Data export endpoints
+  - name: Zap
+    description: Zap feature for token swaps
+
+paths:
+  /api/health:
+    get:
+      summary: Check system health status
+      description: Returns the health status of all system components including database, indexer, and Horizon server
+      tags:
+        - Health
+      responses:
+        '200':
+          description: System is healthy
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  database:
+                    type: string
+                    enum: [up, down]
+                    description: Database connection status
+                  redis:
+                    type: string
+                    enum: [up]
+                    description: Redis cache status
+                  indexer:
+                    type: string
+                    enum: [up, down, warning]
+                    description: Blockchain indexer status
+                  horizon:
+                    type: string
+                    enum: [up, down]
+                    description: Stellar Horizon server status
+                  timestamp:
+                    type: string
+                    format: date-time
+                    description: Response timestamp
+                  latestLedger:
+                    type: integer
+                    description: Latest ledger number from Horizon
+                  syncedLedger:
+                    type: integer
+                    description: Latest synced ledger by indexer
+        '503':
+          description: System has critical issues
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthStatus'
+
+  /api/yields:
+    get:
+      summary: Get current yield data
+      description: Returns current yield information for all available vaults with APY, TVL, and risk ratings
+      tags:
+        - Yields
+      responses:
+        '200':
+          description: Successful response with yields data
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/YieldData'
+        '500':
+          description: Failed to fetch yield data
+
+  /api/yields/history:
+    get:
+      summary: Get historical APY data
+      description: Returns historical APY data points for analysis
+      tags:
+        - Yields
+      responses:
+        '200':
+          description: Successful response with APY history
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/HistoricalApyPoint'
+
+  /api/users/{walletAddress}/pnl:
+    get:
+      summary: Get user's PnL data
+      description: Returns profit and loss calculations for a specific user's portfolio
+      tags:
+        - Portfolio
+        - PnL
+      parameters:
+        - name: walletAddress
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Stellar wallet address (G...)
+      responses:
+        '200':
+          description: PnL data retrieved successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PnLData'
+        '404':
+          description: User not found
+        '500':
+          description: Failed to fetch PnL data
+
+  /api/users/{walletAddress}/export/csv:
+    get:
+      summary: Export user data as CSV
+      description: Exports user's portfolio transactions and yield history as CSV file
+      tags:
+        - Export
+      parameters:
+        - name: walletAddress
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Stellar wallet address (G...)
+      responses:
+        '200':
+          description: CSV file exported successfully
+          content:
+            text/csv:
+              schema:
+                type: string
+        '404':
+          description: User not found
+        '500':
+          description: Failed to export data
+
+  /api/leaderboard:
+    get:
+      summary: Get user leaderboard
+      description: Returns ranked list of users by TVL, yield earned, or other metrics
+      tags:
+        - Leaderboard
+      parameters:
+        - name: metric
+          in: query
+          schema:
+            type: string
+            enum: [tvl, yield, roi]
+            default: tvl
+          description: Metric to rank by
+        - name: timeframe
+          in: query
+          schema:
+            type: string
+            enum: [week, month, all]
+            default: month
+          description: Time period for ranking
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 100
+          description: Number of results to return
+        - name: offset
+          in: query
+          schema:
+            type: integer
+            default: 0
+          description: Pagination offset
+      responses:
+        '200':
+          description: Leaderboard data retrieved successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  entries:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/LeaderboardEntry'
+                  total:
+                    type: integer
+        '400':
+          description: Invalid parameters
+
+  /api/notifications/{walletAddress}:
+    get:
+      summary: Get user notifications
+      description: Retrieves all notifications for a user, ordered by most recent
+      tags:
+        - Notifications
+      parameters:
+        - name: walletAddress
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Stellar wallet address (G...)
+      responses:
+        '200':
+          description: Notifications retrieved successfully
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Notification'
+        '500':
+          description: Failed to fetch notifications
+
+    delete:
+      summary: Clear all notifications
+      description: Deletes all notifications for a user
+      tags:
+        - Notifications
+      parameters:
+        - name: walletAddress
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Stellar wallet address (G...)
+      responses:
+        '204':
+          description: Notifications cleared successfully
+        '500':
+          description: Failed to clear notifications
+
+  /api/notifications/{notificationId}/read:
+    patch:
+      summary: Mark notification as read
+      description: Marks a specific notification as read
+      tags:
+        - Notifications
+      parameters:
+        - name: notificationId
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Notification ID
+      responses:
+        '204':
+          description: Notification marked as read
+        '500':
+          description: Failed to update notification
+
+  /api/referrals/{walletAddress}:
+    get:
+      summary: Get referral data
+      description: Returns referral statistics and unclaimed rewards for a user
+      tags:
+        - Referrals
+      parameters:
+        - name: walletAddress
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Stellar wallet address (G...)
+      responses:
+        '200':
+          description: Referral data retrieved successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReferralData'
+        '500':
+          description: Failed to fetch referral data
+
+  /api/referrals/claim:
+    post:
+      summary: Claim referral rewards
+      description: Claims accumulated referral rewards for a user
+      tags:
+        - Referrals
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                address:
+                  type: string
+                  description: Stellar wallet address (G...)
+      responses:
+        '200':
+          description: Rewards claimed successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  amount:
+                    type: string
+                  txHash:
+                    type: string
+        '400':
+          description: Invalid request
+        '500':
+          description: Failed to claim rewards
+
+  /api/referrals/submit:
+    post:
+      summary: Apply a referral code
+      description: Applies a referral code from another user
+      tags:
+        - Referrals
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                address:
+                  type: string
+                  description: User's Stellar wallet address
+                referralCode:
+                  type: string
+                  description: Referral code (Stellar address of referrer)
+              required:
+                - address
+                - referralCode
+      responses:
+        '200':
+          description: Referral code applied successfully
+        '400':
+          description: Invalid referral code or self-referral attempt
+        '500':
+          description: Failed to apply referral code
+
+  /api/rewards/proof/{walletAddress}:
+    get:
+      summary: Get reward claim proof
+      description: Returns Merkle proof for claiming $YIELD rewards
+      tags:
+        - Yields
+      parameters:
+        - name: walletAddress
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Stellar wallet address (G...)
+      responses:
+        '200':
+          description: Claim proof retrieved successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ClaimProof'
+        '404':
+          description: No rewards available for this address
+        '500':
+          description: Failed to fetch claim proof
+
+  /api/rewards/claim:
+    post:
+      summary: Claim YIELD rewards
+      description: Executes reward claim transaction with provided proof
+      tags:
+        - Yields
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ClaimRequest'
+      responses:
+        '200':
+          description: Rewards claimed successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  txHash:
+                    type: string
+                  amount:
+                    type: string
+        '400':
+          description: Invalid claim data
+        '500':
+          description: Failed to claim rewards
+
+  /api/zap/quote:
+    post:
+      summary: Get token swap quote
+      description: Returns a quote for swapping tokens via the Zap feature
+      tags:
+        - Zap
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                fromAsset:
+                  type: string
+                  description: Source asset code or address
+                toAsset:
+                  type: string
+                  description: Destination asset code or address
+                amount:
+                  type: string
+                  description: Amount to swap (in stroops for native assets)
+      responses:
+        '200':
+          description: Quote retrieved successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SwapQuote'
+        '400':
+          description: Invalid swap parameters
+        '500':
+          description: Failed to generate quote
+
+  /api/zap/supported-assets:
+    get:
+      summary: Get supported assets for Zap
+      description: Returns list of assets available for token swaps
+      tags:
+        - Zap
+      responses:
+        '200':
+          description: Supported assets retrieved successfully
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    code:
+                      type: string
+                    issuer:
+                      type: string
+                    name:
+                      type: string
+
+  /api/auth/challenge:
+    post:
+      summary: Request authentication challenge
+      description: Generates a challenge for wallet signing
+      tags:
+        - Auth
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                walletAddress:
+                  type: string
+                  description: User's Stellar wallet address
+      responses:
+        '200':
+          description: Challenge generated successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  challenge:
+                    type: string
+                  walletAddressType:
+                    type: string
+                    enum: [account, contract]
+
+components:
+  schemas:
+    HealthStatus:
+      type: object
+      properties:
+        database:
+          type: string
+          enum: [up, down]
+        redis:
+          type: string
+          enum: [up]
+        indexer:
+          type: string
+          enum: [up, down, warning]
+        horizon:
+          type: string
+          enum: [up, down]
+        timestamp:
+          type: string
+          format: date-time
+        latestLedger:
+          type: integer
+        syncedLedger:
+          type: integer
+
+    YieldData:
+      type: object
+      properties:
+        protocol:
+          type: string
+          example: Blend
+        asset:
+          type: string
+          example: USDC
+        apy:
+          type: number
+          format: double
+          example: 6.5
+        tvl:
+          type: number
+          format: double
+          example: 12000000
+        risk:
+          type: string
+          enum: [Low, Medium, High]
+        fetchedAt:
+          type: string
+          format: date-time
+
+    HistoricalApyPoint:
+      type: object
+      properties:
+        date:
+          type: string
+          format: date
+        apy:
+          type: number
+          format: double
+
+    PnLData:
+      type: object
+      properties:
+        totalDeposited:
+          type: number
+          format: double
+        totalWithdrawn:
+          type: number
+          format: double
+        currentValue:
+          type: number
+          format: double
+        costBasis:
+          type: number
+          format: double
+        absolutePnL:
+          type: number
+          format: double
+        twrPercent:
+          type: number
+          format: double
+        dailySnapshots:
+          type: array
+          items:
+            $ref: '#/components/schemas/DailyPnLSnapshot'
+
+    DailyPnLSnapshot:
+      type: object
+      properties:
+        date:
+          type: string
+          format: date
+        cumulativePnL:
+          type: number
+          format: double
+        portfolioValue:
+          type: number
+          format: double
+        sharePrice:
+          type: number
+          format: double
+
+    LeaderboardEntry:
+      type: object
+      properties:
+        rank:
+          type: integer
+        walletAddress:
+          type: string
+        tvl:
+          type: number
+          format: double
+        yieldEarned:
+          type: number
+          format: double
+        roi:
+          type: number
+          format: double
+
+    Notification:
+      type: object
+      properties:
+        id:
+          type: string
+        walletAddress:
+          type: string
+        title:
+          type: string
+        message:
+          type: string
+        type:
+          type: string
+          enum: [deposit, withdrawal, reward, alert]
+        isRead:
+          type: boolean
+        createdAt:
+          type: string
+          format: date-time
+
+    ReferralData:
+      type: object
+      properties:
+        referredTvl:
+          type: number
+          format: double
+        unclaimedRewards:
+          type: number
+          format: double
+        totalReferrals:
+          type: integer
+        referralLink:
+          type: string
+
+    ClaimProof:
+      type: object
+      properties:
+        index:
+          type: integer
+        amount:
+          type: string
+        proof:
+          type: array
+          items:
+            type: string
+
+    ClaimRequest:
+      type: object
+      properties:
+        address:
+          type: string
+        index:
+          type: integer
+        amount:
+          type: string
+        proof:
+          type: array
+          items:
+            type: string
+
+    SwapQuote:
+      type: object
+      properties:
+        fromAsset:
+          type: string
+        toAsset:
+          type: string
+        fromAmount:
+          type: string
+        toAmount:
+          type: string
+        price:
+          type: number
+          format: double
+        minimumReceived:
+          type: string
+        priceImpact:
+          type: number
+          format: double
+        estimatedFee:
+          type: string

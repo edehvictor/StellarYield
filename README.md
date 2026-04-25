@@ -53,6 +53,15 @@ The backend runs on `http://localhost:3001`.
 The example env files document required and optional values. Keep real secrets
 out of git; frontend values must be public `VITE_` values only.
 
+### API Documentation
+
+The backend provides OpenAPI documentation:
+
+- **Interactive Swagger UI**: http://localhost:3001/api/openapi/docs
+- **Raw OpenAPI spec (YAML)**: http://localhost:3001/api/openapi
+
+These are automatically available when the backend is running. The Swagger UI provides a visual, interactive interface to explore all API endpoints, request parameters, and response schemas.
+
 ### Contract Verification
 
 ```bash

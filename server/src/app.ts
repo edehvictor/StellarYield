@@ -27,6 +27,7 @@ import auditMonitoringRouter from "./routes/auditMonitoring";
 import weeklyReportsRouter from "./routes/weeklyReports";
 import prometheusMetricsRouter from "./routes/prometheusMetrics";
 import alertsRouter from "./routes/alerts";
+import openapiRouter from "./routes/openapi";
 import { createAuthChallenge, verifyAuthChallenge } from "./utils/stellarAuth";
 
 type EventsPrismaClient = {
@@ -96,6 +97,7 @@ export function createApp() {
   app.use("/api/audit-monitoring", auditMonitoringRouter);
   app.use("/api/weekly-reports", weeklyReportsRouter);
   app.use("/api/alerts", alertsRouter);
+  app.use("/api/openapi", openapiRouter);
 
   // Legacy JSON metrics (internal tooling)
   app.get("/api/metrics", getMetrics);
