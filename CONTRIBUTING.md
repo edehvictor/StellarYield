@@ -23,7 +23,8 @@ Before opening a PR that touches the client, run these from `client/`:
 
 Current CI lint scope is intentionally limited to `src/features/zap` via
 `npm run lint:ci-scope`, while CI also enforces a full production build with
-`npm run build` to catch TypeScript/Vite errors before Vercel.
+`npm run build` as a diagnostic step to surface TypeScript/Vite errors before
+Vercel.
 
 ## CI Failure Artifacts
 

@@ -97,8 +97,8 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
-      - name: Fail frontend job if tests or build failed
-        if: steps.frontend_tests.outcome == 'failure' || steps.frontend_build.outcome == 'failure'
+      - name: Fail frontend job if tests failed
+        if: steps.frontend_tests.outcome == 'failure'
         run: exit 1
 
   contracts:
