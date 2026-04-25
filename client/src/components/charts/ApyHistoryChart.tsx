@@ -116,9 +116,7 @@ export default function ApyHistoryChart() {
 
       <div className="h-[320px] w-full sm:h-[360px]">
         {loading ? (
-          <div className="flex h-full items-center justify-center text-gray-400">
-            Loading APY history...
-          </div>
+          <div className="h-full w-full animate-pulse bg-gradient-to-r from-gray-700/30 via-gray-600/30 to-gray-700/30 rounded-lg" />
         ) : (
           <ResponsiveContainer width="100%" height="100%">
             <LineChart
