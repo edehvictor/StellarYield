@@ -12,11 +12,12 @@ import {
   ContactsResponse 
 } from '../types';
 import { decryptContactData, encryptContactData } from './encryption';
+import { getApiBaseUrl } from '../../../lib/api';
 
 /**
  * API configuration
  */
-const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:3001';
+const API_BASE_URL = getApiBaseUrl();
 
 /**
  * API error class

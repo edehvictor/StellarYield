@@ -2,6 +2,8 @@
 client/node_modules/
 server/node_modules/
 contracts/target/
+**/target/
+**/test_snapshots/
 dist/
 .env
 .claude/

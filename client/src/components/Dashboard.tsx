@@ -3,6 +3,7 @@ import { Activity, ArrowUpRight, ShieldCheck, TrendingUp } from "lucide-react";
 import ApyHistoryChart from "./charts/ApyHistoryChart";
 import { YieldFlowCanvas } from "./visualizations";
 import MempoolVisualizer from "./mempool_graph/MempoolVisualizer";
+import { apiUrl } from "../lib/api";
 
 interface YieldData {
   protocol: string;
@@ -17,7 +18,7 @@ export default function Dashboard() {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    fetch("http://localhost:3001/api/yields")
+    fetch(apiUrl("/api/yields"))
       .then((res) => res.json())
       .then((data) => {
         setYields(data);

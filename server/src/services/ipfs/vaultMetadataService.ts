@@ -50,12 +50,16 @@ function makeDeterministicCid(seed: string): string {
   return crypto.createHash("sha256").update(seed).digest("hex").slice(0, 46);
 }
 
-function buildMetadata(input: VaultMetadataInput, iconCid: string): VaultMetadataPayload {
+function buildMetadata(
+  input: VaultMetadataInput,
+  iconCid: string,
+  createdAt = new Date().toISOString(),
+): VaultMetadataPayload {
   return {
     name: requireNonEmpty(input.vaultName, "vaultName"),
     description: requireNonEmpty(input.description, "description"),
     icon: `ipfs://${iconCid}`,
-    createdAt: new Date().toISOString(),
+    createdAt,
   };
 }
 
@@ -121,7 +125,7 @@ export async function uploadVaultMetadata(
 
   if (!pinataJwt) {
     const iconCid = makeDeterministicCid(`icon:${sanitizedSvg}`);
-    const metadata = buildMetadata(input, iconCid);
+    const metadata = buildMetadata(input, iconCid, "1970-01-01T00:00:00.000Z");
     const metadataCid = makeDeterministicCid(
       `meta:${JSON.stringify(metadata)}:${sanitizedSvg}`,
     );

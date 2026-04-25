@@ -10,6 +10,7 @@ import {
   Link as LinkIcon,
   UserPlus,
 } from "lucide-react";
+import { getApiBaseUrl } from "../../lib/api";
 
 interface ReferralData {
   referredTvl: number;
@@ -18,7 +19,7 @@ interface ReferralData {
   referralLink: string;
 }
 
-const API_BASE = import.meta.env.VITE_API_URL || "http://localhost:3001";
+const API_BASE = getApiBaseUrl();
 const APP_URL = import.meta.env.VITE_APP_URL || "https://stellaryield.vercel.app";
 
 /**

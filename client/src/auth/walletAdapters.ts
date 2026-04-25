@@ -27,6 +27,142 @@ export interface WalletAdapter {
   signTransaction(xdr: string, networkPassphrase: string): Promise<string>;
 }
 
+type FreighterConnectionResponse = {
+  error?: string;
+  isConnected: boolean;
+};
+
+type FreighterAddressResponse = {
+  error?: string;
+  address: string;
+};
+
+type FreighterSignedTransactionResponse = {
+  error?: string;
+  signedTxXdr: string;
+};
+
+type XBullConnectResponse = {
+  publicKey: string;
+};
+
+type XBullSignedTransactionResponse = {
+  signedXDR: string;
+};
+
+type AlbedoPublicKeyResponse = {
+  pubkey: string;
+};
+
+type AlbedoSignedTransactionResponse = {
+  signed_envelope_xdr: string;
+};
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function optionalError(value: Record<string, unknown>): string | undefined {
+  return typeof value.error === "string" && value.error.trim() ? value.error : undefined;
+}
+
+function requireString(value: unknown, message: string): string {
+  if (typeof value !== "string" || !value.trim()) {
+    throw new Error(message);
+  }
+  return value;
+}
+
+export function parseFreighterConnectionResponse(value: unknown): FreighterConnectionResponse {
+  if (!isRecord(value)) {
+    throw new Error("Freighter returned an unsupported connection response.");
+  }
+
+  const error = optionalError(value);
+  if (error) {
+    return { error, isConnected: false };
+  }
+
+  if (typeof value.isConnected !== "boolean") {
+    throw new Error("Freighter returned an unsupported connection state.");
+  }
+
+  return { isConnected: value.isConnected };
+}
+
+export function parseFreighterAddressResponse(value: unknown): FreighterAddressResponse {
+  if (!isRecord(value)) {
+    throw new Error("Freighter returned an unsupported address response.");
+  }
+
+  const error = optionalError(value);
+  if (error) {
+    return { error, address: "" };
+  }
+
+  return {
+    address: requireString(value.address, "Freighter did not return a public key."),
+  };
+}
+
+export function parseFreighterSignedTransactionResponse(value: unknown): FreighterSignedTransactionResponse {
+  if (!isRecord(value)) {
+    throw new Error("Freighter returned an unsupported signing response.");
+  }
+
+  const error = optionalError(value);
+  if (error) {
+    return { error, signedTxXdr: "" };
+  }
+
+  return {
+    signedTxXdr: requireString(value.signedTxXdr, "Freighter did not return a signed transaction."),
+  };
+}
+
+export function parseXBullConnectResponse(value: unknown): XBullConnectResponse {
+  if (!isRecord(value)) {
+    throw new Error("xBull returned an unsupported connection response.");
+  }
+
+  return {
+    publicKey: requireString(value.publicKey, "xBull did not return a public key."),
+  };
+}
+
+export function parseXBullSignedTransactionResponse(value: unknown): XBullSignedTransactionResponse {
+  if (!isRecord(value)) {
+    throw new Error("xBull returned an unsupported signing response.");
+  }
+
+  return {
+    signedXDR: requireString(value.signedXDR, "xBull did not return a signed transaction."),
+  };
+}
+
+export function parseAlbedoPublicKeyResponse(value: unknown): AlbedoPublicKeyResponse {
+  if (!isRecord(value)) {
+    throw new Error("Albedo returned an unsupported public key response.");
+  }
+
+  return {
+    pubkey: requireString(value.pubkey, "Albedo did not return a public key."),
+  };
+}
+
+export function parseAlbedoSignedTransactionResponse(value: unknown): AlbedoSignedTransactionResponse {
+  if (!isRecord(value)) {
+    throw new Error("Albedo returned an unsupported signing response.");
+  }
+
+  return {
+    signed_envelope_xdr: requireString(
+      value.signed_envelope_xdr,
+      "Albedo did not return a signed transaction.",
+    ),
+  };
+}
+
 // ── Freighter adapter ─────────────────────────────────────────────────────
 
 class FreighterAdapter implements WalletAdapter {
@@ -35,7 +171,7 @@ class FreighterAdapter implements WalletAdapter {
 
   async isAvailable(): Promise<boolean> {
     try {
-      const result = await isConnected();
+      const result = parseFreighterConnectionResponse(await isConnected());
       return !result.error && result.isConnected;
     } catch {
       return false;
@@ -43,26 +179,27 @@ class FreighterAdapter implements WalletAdapter {
   }
 
   async getPublicKey(): Promise<string> {
-    const connectionResult = await isConnected();
+    const connectionResult = parseFreighterConnectionResponse(await isConnected());
     if (connectionResult.error || !connectionResult.isConnected) {
-      throw new Error("Freighter extension was not detected. Install it to continue.");
+      throw new Error(connectionResult.error ?? "Freighter extension was not detected. Install it to continue.");
     }
     const accessResult = await requestAccess();
     if (accessResult.error) {
       throw new Error(accessResult.error);
     }
-    const addressResult = await getAddress();
+    const addressResult = parseFreighterAddressResponse(await getAddress());
     if (addressResult.error || !addressResult.address) {
-      throw new Error(addressResult.error ?? "Failed to read wallet address.");
+      throw new Error(addressResult.error ?? "Freighter did not return a public key.");
     }
     return addressResult.address;
   }
 
   async signTransaction(xdr: string, networkPassphrase: string): Promise<string> {
-    const signed = await freighterSign(xdr, { networkPassphrase });
-    const signedXdr = signed?.signedTxXdr;
-    if (!signedXdr) throw new Error("Transaction was rejected by Freighter.");
-    return signedXdr;
+    const signed = parseFreighterSignedTransactionResponse(await freighterSign(xdr, { networkPassphrase }));
+    if (signed.error || !signed.signedTxXdr) {
+      throw new Error(signed.error ?? "Transaction was rejected by Freighter.");
+    }
+    return signed.signedTxXdr;
   }
 }
 
@@ -85,9 +222,8 @@ class XBullAdapter implements WalletAdapter {
     const wallet = this.getInstance();
     try {
       await wallet.openWallet();
-      const result = (await wallet.connect()) as unknown as { publicKey: string };
+      const result = parseXBullConnectResponse(await wallet.connect());
       wallet.closeWallet();
-      if (!result?.publicKey) throw new Error("xBull did not return a public key.");
       return result.publicKey;
     } finally {
       wallet.closeConnections();
@@ -98,11 +234,10 @@ class XBullAdapter implements WalletAdapter {
     const wallet = this.getInstance();
     try {
       await wallet.openWallet();
-      const result = (await wallet.sign({ xdr, publicKey: undefined, network: networkPassphrase })) as unknown as {
-        signedXDR: string;
-      };
+      const result = parseXBullSignedTransactionResponse(
+        await wallet.sign({ xdr, publicKey: undefined, network: networkPassphrase }),
+      );
       wallet.closeWallet();
-      if (!result?.signedXDR) throw new Error("xBull rejected the transaction.");
       return result.signedXDR;
     } finally {
       wallet.closeConnections();
@@ -121,19 +256,15 @@ class AlbedoAdapter implements WalletAdapter {
   }
 
   async getPublicKey(): Promise<string> {
-    const result = (await (albedo as AlbedoInstance).publicKey({})) as {
-      pubkey: string;
-    };
-    if (!result?.pubkey) throw new Error("Albedo did not return a public key.");
+    const result = parseAlbedoPublicKeyResponse(await (albedo as AlbedoInstance).publicKey({}));
     return result.pubkey;
   }
 
   async signTransaction(xdr: string, networkPassphrase: string): Promise<string> {
-    const result = (await (albedo as AlbedoInstance).tx({
+    const result = parseAlbedoSignedTransactionResponse(await (albedo as AlbedoInstance).tx({
       xdr,
       network_passphrase: networkPassphrase,
-    })) as { signed_envelope_xdr: string };
-    if (!result?.signed_envelope_xdr) throw new Error("Albedo rejected the transaction.");
+    }));
     return result.signed_envelope_xdr;
   }
 }

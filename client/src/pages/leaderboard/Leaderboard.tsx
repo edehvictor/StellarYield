@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from "react";
 import { Trophy, Medal, Star, Wallet } from "lucide-react";
+import { apiUrl } from "../../lib/api";
 
 interface LeaderboardEntry {
   rank: number;
@@ -14,7 +15,7 @@ const Leaderboard: React.FC = () => {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    fetch("http://localhost:3001/api/leaderboard")
+    fetch(apiUrl("/api/leaderboard"))
       .then((res) => res.json())
       .then((data) => {
         setLeaderboard(data);

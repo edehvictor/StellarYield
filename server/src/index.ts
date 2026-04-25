@@ -4,10 +4,12 @@ import { startIndexer } from "./indexer/indexer";
 import { startHistoricalYieldAggregationJob } from "./jobs/historicalYieldAggregation";
 import { startSharePriceSnapshotJob } from "./jobs/sharePriceSnapshot";
 import { startHealthMonitor } from "./monitoring/healthMonitor";
+import { assertValidServerEnv } from "./config/env";
 import express, { Request, Response } from 'express';
 import cors from 'cors';
 import { metricsMiddleware, getMetrics } from './middleware/metrics';
 
+assertValidServerEnv();
 initializeZapSupportedAssetsCache();
 
 const app = createApp();

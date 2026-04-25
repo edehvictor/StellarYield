@@ -33,6 +33,7 @@ cd StellarYield
 ```bash
 cd client
 npm ci
+cp .env.example .env.local
 npm run dev
 ```
 
@@ -43,10 +44,14 @@ The frontend runs on `http://localhost:5173`.
 ```bash
 cd server
 npm ci
+cp .env.example .env
 npm run dev
 ```
 
 The backend runs on `http://localhost:3001`.
+
+The example env files document required and optional values. Keep real secrets
+out of git; frontend values must be public `VITE_` values only.
 
 ### Contract Verification
 

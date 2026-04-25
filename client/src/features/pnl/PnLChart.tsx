@@ -10,6 +10,7 @@ import {
 } from "recharts";
 import { useWallet } from "../../context/useWallet";
 import { TrendingUp, TrendingDown, Loader2, DollarSign } from "lucide-react";
+import { getApiBaseUrl } from "../../lib/api";
 
 interface DailyPnLSnapshot {
   date: string;
@@ -28,7 +29,7 @@ interface PnLData {
   dailySnapshots: DailyPnLSnapshot[];
 }
 
-const API_BASE = import.meta.env.VITE_API_URL || "http://localhost:3001";
+const API_BASE = getApiBaseUrl();
 
 /**
  * PnLChart — Visualizes a user's historical profit & loss with an area chart.

@@ -8,9 +8,10 @@ import type {
   WalletSession,
 } from "./types";
 import { getAdapter } from "./walletAdapters";
+import { getApiBaseUrl } from "../lib/api";
 
 const STORAGE_KEY = "stellar-yield.wallet-session";
-const API_BASE_URL = import.meta.env.VITE_API_URL ?? "http://localhost:3001";
+const API_BASE_URL = getApiBaseUrl();
 
 interface ChallengeResponse {
   challenge: string;

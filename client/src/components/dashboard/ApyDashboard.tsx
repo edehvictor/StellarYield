@@ -16,6 +16,7 @@ import {
   Clock,
   Info
 } from 'lucide-react';
+import { apiUrl } from '../../lib/api';
 
 // ── Types ───────────────────────────────────────────────────────────────
 
@@ -134,7 +135,7 @@ export default function ApyDashboard() {
   const fetchApyData = async () => {
     try {
       setError(null);
-      const res = await fetch('http://localhost:3001/api/yields');
+      const res = await fetch(apiUrl('/api/yields'));
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
       // Map backend data and augment with comparison fields

@@ -8,6 +8,7 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
+import { apiUrl } from "../../lib/api";
 
 type TimeRange = "1W" | "1M" | "All";
 
@@ -61,9 +62,7 @@ export default function ApyHistoryChart() {
   useEffect(() => {
     async function loadHistory() {
       try {
-        const response = await fetch(
-          "http://localhost:3001/api/yields/history",
-        );
+        const response = await fetch(apiUrl("/api/yields/history"));
 
         if (!response.ok) {
           throw new Error("History endpoint unavailable");
