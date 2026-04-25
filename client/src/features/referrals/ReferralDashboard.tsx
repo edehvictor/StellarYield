@@ -238,26 +238,35 @@ export default function ReferralDashboard() {
       </div>
 
       {/* Stats */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-        <div className="bg-white/5 rounded-xl p-4">
-          <p className="text-gray-400 text-xs mb-1">Referred TVL</p>
-          <p className="text-2xl font-bold text-white">
-            ${fmtUsd(referralData?.referredTvl ?? 0)}
-          </p>
+      {referralData && referralData.totalReferrals === 0 ? (
+        <div className="bg-gradient-to-br from-indigo-500/10 to-purple-500/10 rounded-xl p-8 text-center border border-indigo-500/20">
+          <UserPlus className="mx-auto mb-4 text-gray-400" size={48} />
+          <h3 className="text-lg font-bold mb-2">No Referrals Yet</h3>
+          <p className="text-gray-400 mb-4">Share your referral link to start earning rewards.</p>
+          <p className="text-sm text-gray-500">Each successful referral gives you a percentage of protocol fees.</p>
         </div>
-        <div className="bg-white/5 rounded-xl p-4">
-          <p className="text-gray-400 text-xs mb-1">Total Referrals</p>
-          <p className="text-2xl font-bold text-white">
-            {referralData?.totalReferrals ?? 0}
-          </p>
+      ) : (
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+          <div className="bg-white/5 rounded-xl p-4">
+            <p className="text-gray-400 text-xs mb-1">Referred TVL</p>
+            <p className="text-2xl font-bold text-white">
+              ${fmtUsd(referralData?.referredTvl ?? 0)}
+            </p>
+          </div>
+          <div className="bg-white/5 rounded-xl p-4">
+            <p className="text-gray-400 text-xs mb-1">Total Referrals</p>
+            <p className="text-2xl font-bold text-white">
+              {referralData?.totalReferrals ?? 0}
+            </p>
+          </div>
+          <div className="bg-white/5 rounded-xl p-4">
+            <p className="text-gray-400 text-xs mb-1">Unclaimed Rewards</p>
+            <p className="text-2xl font-bold text-green-400">
+              ${fmtUsd(referralData?.unclaimedRewards ?? 0)}
+            </p>
+          </div>
         </div>
-        <div className="bg-white/5 rounded-xl p-4">
-          <p className="text-gray-400 text-xs mb-1">Unclaimed Rewards</p>
-          <p className="text-2xl font-bold text-green-400">
-            ${fmtUsd(referralData?.unclaimedRewards ?? 0)}
-          </p>
-        </div>
-      </div>
+      )}
 
       {/* Claim Button */}
       <button
