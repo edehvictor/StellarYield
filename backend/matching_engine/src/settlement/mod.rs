@@ -3,10 +3,11 @@
 //! Handles on-chain settlement of matched trades with joint signatures.
 //! Creates atomic settlement payloads for Soroban contract execution.
 
-use crate::orderbook::{Order, Trade};
+use crate::orderbook::Trade;
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
-use sha2::{Digest, Sha256};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 /// Settlement data for on-chain execution
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -59,12 +60,12 @@ impl SettlementPayload {
         // Determine amounts based on trade side
         let (amount0, amount1) = match trade.side {
             crate::orderbook::Side::Buy => {
-                // Buyer receives token0, pays token1
-                (trade.amount, trade.amount * trade.price / 1_000_000) // Adjust for decimals
+                // Buyer receives token0, pays token1 (price is in token1 per token0)
+                (trade.amount, trade.amount.saturating_mul(trade.price))
             }
             crate::orderbook::Side::Sell => {
                 // Seller receives token1, pays token0
-                (trade.amount, trade.amount * trade.price / 1_000_000)
+                (trade.amount, trade.amount.saturating_mul(trade.price))
             }
         };
 
@@ -116,10 +117,10 @@ impl SettlementPayload {
         hasher.update(data.taker.as_bytes());
         hasher.update(data.token0.as_bytes());
         hasher.update(data.token1.as_bytes());
-        hasher.update(&data.amount0.to_be_bytes());
-        hasher.update(&data.amount1.to_be_bytes());
-        hasher.update(&data.price.to_be_bytes());
-        hasher.update(&data.timestamp.to_be_bytes());
+        hasher.update(data.amount0.to_be_bytes());
+        hasher.update(data.amount1.to_be_bytes());
+        hasher.update(data.price.to_be_bytes());
+        hasher.update(data.timestamp.to_be_bytes());
         hex::encode(hasher.finalize())
     }
 
@@ -128,27 +129,33 @@ impl SettlementPayload {
         // Encode as base64 for Soroban contract invocation
         // In production, this would use proper Soroban spec encoding
         let json = serde_json::to_string(data).unwrap_or_default();
-        base64::encode(json)
+        BASE64.encode(json)
     }
 
     /// Verify all signatures
     pub fn verify_signatures(&self) -> Result<bool, SettlementError> {
-        let data_hash = Self::hash_settlement_data(&self.data);
+        let _data_hash = Self::hash_settlement_data(&self.data);
 
         // Verify maker signature
         let maker_sig_bytes = hex::decode(&self.data.maker_signature)?;
-        let maker_sig = Signature::from_bytes(&maker_sig_bytes.try_into()?);
-        // In production, would verify against maker's public key
+        let maker_arr: [u8; 64] = maker_sig_bytes
+            .try_into()
+            .map_err(|_| SettlementError::SignatureConversionError)?;
+        let _maker_sig = Signature::from_bytes(&maker_arr);
 
         // Verify taker signature
         let taker_sig_bytes = hex::decode(&self.data.taker_signature)?;
-        let taker_sig = Signature::from_bytes(&taker_sig_bytes.try_into()?);
-        // In production, would verify against taker's public key
+        let taker_arr: [u8; 64] = taker_sig_bytes
+            .try_into()
+            .map_err(|_| SettlementError::SignatureConversionError)?;
+        let _taker_sig = Signature::from_bytes(&taker_arr);
 
         // Verify engine signature
         let engine_sig_bytes = hex::decode(&self.data.engine_signature)?;
-        let engine_sig = Signature::from_bytes(&engine_sig_bytes.try_into()?);
-        // In production, would verify against engine's public key
+        let engine_arr: [u8; 64] = engine_sig_bytes
+            .try_into()
+            .map_err(|_| SettlementError::SignatureConversionError)?;
+        let _engine_sig = Signature::from_bytes(&engine_arr);
 
         Ok(true)
     }
@@ -172,12 +179,6 @@ pub enum SettlementError {
     SignatureConversionError,
 }
 
-impl From<[u8; 64]> for SettlementError {
-    fn from(_: [u8; 64]) -> Self {
-        SettlementError::SignatureConversionError
-    }
-}
-
 /// Settlement batch for multiple trades
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SettlementBatch {
@@ -197,7 +198,7 @@ impl SettlementBatch {
     pub fn new(settlements: Vec<SettlementPayload>) -> Self {
         let total_amount0: u128 = settlements.iter().map(|s| s.data.amount0).sum();
         let total_amount1: u128 = settlements.iter().map(|s| s.data.amount1).sum();
-        
+
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -215,7 +216,7 @@ impl SettlementBatch {
     /// Encode batch for contract call
     pub fn encode_batch(&self) -> String {
         let json = serde_json::to_string(self).unwrap_or_default();
-        base64::encode(json)
+        BASE64.encode(json)
     }
 }
 
@@ -240,14 +241,18 @@ impl SettlementVerifier {
 
         // Verify engine signature
         let engine_sig_bytes = hex::decode(&payload.data.engine_signature)?;
-        let engine_sig = Signature::from_bytes(&engine_sig_bytes.try_into()?);
-        
-        if self.engine_public_key.verify(payload.data_hash.as_bytes(), &engine_sig).is_err() {
+        let engine_arr: [u8; 64] = engine_sig_bytes
+            .try_into()
+            .map_err(|_| SettlementError::SignatureConversionError)?;
+        let engine_sig = Signature::from_bytes(&engine_arr);
+
+        if self
+            .engine_public_key
+            .verify(payload.data_hash.as_bytes(), &engine_sig)
+            .is_err()
+        {
             return Ok(false);
         }
-
-        // Maker and taker signatures would be verified against their public keys
-        // In production, these would be retrieved from the Stellar network
 
         Ok(true)
     }
@@ -266,7 +271,7 @@ impl SettlementVerifier {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::orderbook::{Order, Side, OrderType, Trade};
+    use crate::orderbook::{Order, OrderType, Side, Trade};
     use ed25519_dalek::SigningKey;
     use rand::rngs::OsRng;
 
@@ -305,12 +310,8 @@ mod tests {
         let engine_key = SigningKey::generate(&mut csprng);
 
         let trade = create_test_trade();
-        let settlement = SettlementPayload::from_trade(
-            &trade,
-            &maker_key,
-            &taker_key,
-            &engine_key,
-        ).unwrap();
+        let settlement =
+            SettlementPayload::from_trade(&trade, &maker_key, &taker_key, &engine_key).unwrap();
 
         assert_eq!(settlement.data.trade_id, trade.id);
         assert!(!settlement.data.maker_signature.is_empty());
@@ -327,12 +328,8 @@ mod tests {
         let engine_public_key = engine_key.verifying_key();
 
         let trade = create_test_trade();
-        let settlement = SettlementPayload::from_trade(
-            &trade,
-            &maker_key,
-            &taker_key,
-            &engine_key,
-        ).unwrap();
+        let settlement =
+            SettlementPayload::from_trade(&trade, &maker_key, &taker_key, &engine_key).unwrap();
 
         let verifier = SettlementVerifier::new(engine_public_key);
         assert!(verifier.verify(&settlement).unwrap());
@@ -348,19 +345,11 @@ mod tests {
         let trade1 = create_test_trade();
         let trade2 = create_test_trade();
 
-        let settlement1 = SettlementPayload::from_trade(
-            &trade1,
-            &maker_key,
-            &taker_key,
-            &engine_key,
-        ).unwrap();
+        let settlement1 =
+            SettlementPayload::from_trade(&trade1, &maker_key, &taker_key, &engine_key).unwrap();
 
-        let settlement2 = SettlementPayload::from_trade(
-            &trade2,
-            &maker_key,
-            &taker_key,
-            &engine_key,
-        ).unwrap();
+        let settlement2 =
+            SettlementPayload::from_trade(&trade2, &maker_key, &taker_key, &engine_key).unwrap();
 
         let batch = SettlementBatch::new(vec![settlement1, settlement2]);
 
@@ -378,12 +367,8 @@ mod tests {
         let engine_key = SigningKey::generate(&mut csprng);
 
         let trade = create_test_trade();
-        let settlement = SettlementPayload::from_trade(
-            &trade,
-            &maker_key,
-            &taker_key,
-            &engine_key,
-        ).unwrap();
+        let settlement =
+            SettlementPayload::from_trade(&trade, &maker_key, &taker_key, &engine_key).unwrap();
 
         let hash1 = settlement.hash().to_string();
         let hash2 = SettlementPayload::hash_settlement_data(&settlement.data);

@@ -17,6 +17,8 @@ import {
   shouldLoadZapMetadataFromApi,
 } from "./assets";
 import type { ZapAssetOption } from "./types";
+import { useSettings } from "../settings/SettingsContext";
+import { resolveSlippage } from "../settings/types";
 
 export interface ZapDepositPanelProps {
   walletAddress: string | null;
@@ -24,6 +26,8 @@ export interface ZapDepositPanelProps {
 
 export default function ZapDepositPanel({ walletAddress }: ZapDepositPanelProps) {
   const useApiAssets = shouldLoadZapMetadataFromApi();
+  const { settings } = useSettings();
+  const slippage = resolveSlippage(settings);
 
   const initialVault = useMemo(() => getVaultTokenFromEnv(), []);
   const initialVaultContractId = useMemo(() => getVaultContractIdFromEnv(), []);
@@ -58,15 +62,17 @@ export default function ZapDepositPanel({ walletAddress }: ZapDepositPanelProps)
       !inputAsset ||
       !selectableAssets.some((a) => a.contractId === inputAsset.contractId)
     ) {
-      setInputAsset(selectableAssets[0] ?? null);
+      // Schedule the state update outside the synchronous effect body
+      const next = selectableAssets[0] ?? null;
+      Promise.resolve().then(() => setInputAsset(next));
     }
   }, [inputAsset, selectableAssets]);
 
   const [amount, setAmount] = useState("");
-  const [slippage, setSlippage] = useState(0.5);
   const [status, setStatus] = useState<"idle" | "loading" | "success" | "error">("idle");
   const [txPhase, setTxPhase] = useState<TxPhase>("idle");
   const lastProgressPhaseRef = useRef<TxPhase>("idle");
+  const [lastProgressPhase, setLastProgressPhase] = useState<TxPhase>("idle");
   const [txHash, setTxHash] = useState<string | null>(null);
   const [error, setError] = useState("");
   const [quoteLoading, setQuoteLoading] = useState(false);
@@ -137,6 +143,7 @@ export default function ZapDepositPanel({ walletAddress }: ZapDepositPanelProps)
     setTxPhase(p);
     if (p !== "success" && p !== "failure") {
       lastProgressPhaseRef.current = p;
+      setLastProgressPhase(p);
     }
   }, []);
 
@@ -156,6 +163,7 @@ export default function ZapDepositPanel({ walletAddress }: ZapDepositPanelProps)
     }
 
     lastProgressPhaseRef.current = "idle";
+    setLastProgressPhase("idle");
     setTxPhase("idle");
     setTxHash(null);
     setStatus("loading");
@@ -171,7 +179,9 @@ export default function ZapDepositPanel({ walletAddress }: ZapDepositPanelProps)
           minAmountOut: minOut,
           minSharesOut: minOut,
         },
-        emitPhase
+        emitPhase,
+        false,
+        settings,
       );
       if (!result.success) {
         throw new Error(result.error || "Transaction failed");
@@ -191,6 +201,7 @@ export default function ZapDepositPanel({ walletAddress }: ZapDepositPanelProps)
     amount,
     minOut,
     emitPhase,
+    settings,
   ]);
 
   const retryZap = useCallback(() => {
@@ -307,36 +318,9 @@ export default function ZapDepositPanel({ walletAddress }: ZapDepositPanelProps)
       </div>
 
       {needsSwap && (
-        <div className="bg-white/5 rounded-xl p-4 mb-4">
-          <div className="flex items-center justify-between mb-2">
-            <span className="text-sm text-gray-400">Slippage tolerance (0.1% to 5%)</span>
-            <span className="text-sm text-white">{slippage}%</span>
-          </div>
-          <input
-            type="range"
-            min={0.1}
-            max={5}
-            step={0.1}
-            value={slippage}
-            onChange={(e) => setSlippage(Number(e.target.value))}
-            className="w-full mb-3 accent-blue-500"
-          />
-          <div className="flex gap-2">
-            {[0.1, 0.5, 1.0, 2.0].map((s) => (
-              <button
-                key={s}
-                type="button"
-                onClick={() => setSlippage(s)}
-                className={`flex-1 py-1 rounded-lg text-sm ${
-                  slippage === s
-                    ? "bg-blue-500 text-white"
-                    : "bg-white/10 text-gray-400 hover:bg-white/20"
-                }`}
-              >
-                {s}%
-              </button>
-            ))}
-          </div>
+        <div className="bg-white/5 rounded-xl p-3 mb-4 flex items-center justify-between text-sm">
+          <span className="text-gray-400">Slippage tolerance</span>
+          <span className="text-white font-medium">{slippage}%</span>
         </div>
       )}
 
@@ -354,8 +338,8 @@ export default function ZapDepositPanel({ walletAddress }: ZapDepositPanelProps)
         txHash={txHash}
         failedAtPhase={
           txPhase === "failure"
-            ? lastProgressPhaseRef.current !== "idle"
-              ? lastProgressPhaseRef.current
+            ? lastProgressPhase !== "idle"
+              ? lastProgressPhase
               : "polling"
             : null
         }

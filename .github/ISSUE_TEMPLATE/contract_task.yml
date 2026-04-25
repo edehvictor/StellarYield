@@ -1,0 +1,68 @@
+name: Contract Task
+description: Propose a change or addition to the Soroban smart contracts
+labels: ["contract"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this template for tasks that involve changes to the Soroban smart contracts in `contracts/`.
+
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: One-sentence description of the contract change.
+    validations:
+      required: true
+
+  - type: textarea
+    id: motivation
+    attributes:
+      label: Motivation
+      description: Why is this change needed?
+    validations:
+      required: true
+
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope
+      description: Which contracts and functions are affected?
+      placeholder: |
+        - contracts/yield_vault/src/lib.rs — `deposit()`
+        - contracts/strategies/...
+
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: List testable criteria for this task.
+      placeholder: |
+        - [ ] ...
+        - [ ] ...
+    validations:
+      required: true
+
+  - type: dropdown
+    id: change_type
+    attributes:
+      label: Change type
+      options:
+        - New entrypoint / function
+        - Logic change to existing entrypoint
+        - Storage / data model change
+        - Error handling
+        - Tests only
+        - Refactor
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: Pre-submission checklist
+      options:
+        - label: Tests are included or updated
+        - label: "`cargo clippy` passes with no warnings"
+        - label: "`cargo fmt` applied"
+        - label: No `unsafe` blocks introduced

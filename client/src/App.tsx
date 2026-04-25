@@ -22,6 +22,7 @@ import ReferralDashboard from "./features/referrals/ReferralDashboard";
 import VestingDashboard from "./pages/vesting/VestingDashboard";
 import TransparencyDashboard from "./pages/transparency/TransparencyDashboard";
 import YieldForGood from "./features/donations/YieldForGood";
+import YieldCalculator from "./components/calculator/YieldCalculator";
 import { useWallet } from "./context/useWallet";
 import { useState } from "react";
 import {
@@ -40,13 +41,23 @@ import {
   Lock,
   Eye,
   Heart,
+  Settings,
+  Bell,
+  Calculator,
 } from "lucide-react";
 import "./index.css";
+import SettingsModal from "./features/settings/SettingsModal";
+import AlertsModal from "./features/alerts/AlertsModal";
+
+// Vault IDs available for APY alerts (matches protocol names from yieldService)
+const VAULT_OPTIONS = ["Blend", "Soroswap", "DeFindex"];
 
 // Layout Component
 const RootLayout = () => {
   const { isConnected, walletAddress } = useWallet();
   const [isOnRampOpen, setIsOnRampOpen] = useState(false);
+  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [isAlertsOpen, setIsAlertsOpen] = useState(false);
 
   return (
     <div className="min-h-screen flex flex-col">
@@ -56,6 +67,17 @@ const RootLayout = () => {
           isOpen={isOnRampOpen}
           onClose={() => setIsOnRampOpen(false)}
           walletAddress={walletAddress}
+        />
+      )}
+      {/* Settings Modal */}
+      <SettingsModal isOpen={isSettingsOpen} onClose={() => setIsSettingsOpen(false)} />
+      {/* APY Alerts Modal */}
+      {isConnected && walletAddress && (
+        <AlertsModal
+          isOpen={isAlertsOpen}
+          onClose={() => setIsAlertsOpen(false)}
+          walletAddress={walletAddress}
+          vaultOptions={VAULT_OPTIONS}
         />
       )}
       {/* Navigation Bar */}
@@ -194,6 +216,24 @@ const RootLayout = () => {
 
         <div className="flex items-center gap-4">
           <NotificationBell />
+          {isConnected && (
+            <button
+              type="button"
+              onClick={() => setIsAlertsOpen(true)}
+              aria-label="Open APY alerts"
+              className="p-2 rounded-lg bg-white/10 hover:bg-white/20 text-gray-300 hover:text-white transition-colors"
+            >
+              <Bell size={18} />
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={() => setIsSettingsOpen(true)}
+            aria-label="Open transaction settings"
+            className="p-2 rounded-lg bg-white/10 hover:bg-white/20 text-gray-300 hover:text-white transition-colors"
+          >
+            <Settings size={18} />
+          </button>
           <ConnectWalletButton />
         </div>
       </nav>
@@ -226,6 +266,10 @@ const router = createBrowserRouter([
       },
       {
         path: "/vault",
+        element: <Vault />,
+      },
+      {
+        path: "/vault/:slug",
         element: <Vault />,
       },
       {

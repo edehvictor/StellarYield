@@ -150,6 +150,7 @@ export function ContactsModal({ isOpen, onClose, onSelectContact }: ContactsModa
           </h2>
           <button
             onClick={onClose}
+            aria-label="Close"
             className="text-gray-400 hover:text-white transition-colors"
           >
             <X size={24} />

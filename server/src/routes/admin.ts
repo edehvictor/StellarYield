@@ -6,6 +6,7 @@ import {
   exportAuditLogsToCSV,
   verifyAuditTrailIntegrity,
 } from "../middleware/audit";
+import { uploadVaultMetadata } from "../services/ipfs/vaultMetadataService";
 
 const adminRouter = Router();
 
@@ -60,6 +61,73 @@ adminRouter.post(
           error instanceof Error
             ? error.message
             : "Failed to update vault parameters",
+      });
+    }
+  },
+);
+
+/**
+ * Upload vault metadata to IPFS and return metadata URI for contract updates
+ * POST /api/admin/vaults/:vaultId/metadata
+ */
+adminRouter.post(
+  "/vaults/:vaultId/metadata",
+  requireAdmin,
+  async (req: Request, res: Response): Promise<void> => {
+    try {
+      const { vaultId } = req.params;
+      const { vaultName, description, iconSvg } = req.body as {
+        vaultName?: string;
+        description?: string;
+        iconSvg?: string;
+      };
+
+      if (!vaultName || !description || !iconSvg) {
+        res.status(400).json({
+          error: "vaultName, description, and iconSvg are required",
+        });
+        return;
+      }
+
+      const uploadResult = await uploadVaultMetadata({
+        vaultName,
+        description,
+        iconSvg,
+      });
+
+      setAuditContext(req, {
+        action: "UPDATE_VAULT_METADATA_URI",
+        resource: "VAULT",
+        resourceId: vaultId,
+        changes: {
+          metadataUri: uploadResult.metadataUri,
+          cid: uploadResult.cid,
+          uploadMode: uploadResult.uploadMode,
+        },
+      });
+
+      res.json({
+        success: true,
+        vaultId,
+        cid: uploadResult.cid,
+        metadataUri: uploadResult.metadataUri,
+        iconUri: uploadResult.iconUri,
+        uploadMode: uploadResult.uploadMode,
+        metadata: uploadResult.metadata,
+        transactionPayload: {
+          method: "set_metadata_uri",
+          args: {
+            vaultId,
+            metadataUri: uploadResult.metadataUri,
+          },
+        },
+      });
+    } catch (error) {
+      res.status(500).json({
+        error:
+          error instanceof Error
+            ? error.message
+            : "Failed to upload vault metadata",
       });
     }
   },

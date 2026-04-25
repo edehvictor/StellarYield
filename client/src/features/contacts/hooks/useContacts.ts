@@ -3,16 +3,13 @@
  * Provides state management and CRUD operations for contacts
  */
 
-import { useState, useEffect, useCallback, useMemo } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { useWallet } from '../../context/useWallet';
-import { Contact, ContactData, ContactSuggestion } from '../types';
+import type { Contact, ContactData, ContactSuggestion } from '../types';
 import { 
   deriveEncryptionKey, 
-  encryptContactData, 
-  decryptContactData,
   isValidWalletAddress,
   isValidContactName,
-  generateContactId
 } from '../utils/encryption';
 import {
   getContacts,
@@ -103,7 +100,7 @@ export function useContacts(): UseContactsReturn {
     }
 
     const query = state.searchQuery.toLowerCase();
-    const filtered = state.contacts.filter(contact => {
+    const filtered = state.contacts.filter(_contact => {
       // Note: We can't filter by decrypted data here without the key
       // This would need to be done on the decrypted data after loading
       return true; // Placeholder - actual filtering would happen after decryption
