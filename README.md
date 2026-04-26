@@ -163,3 +163,10 @@ Optional path overrides:
 - `FRONTEND_ASSET_PATH` (default: `/favicon.ico`)
 
 StellarYield is participating in the Stellar Wave Program via Drips. Contributors can pick up open issues, submit focused pull requests, and validate their work locally with the commands above before opening a PR.
+
+
+---
+
+## Auto-generated contribution
+
+Added by bounty bot.
