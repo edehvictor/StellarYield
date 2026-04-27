@@ -52,6 +52,12 @@ jobs:
       - name: Lint backend
         run: npm run lint
 
+      - name: Generate Prisma client
+        run: npx prisma generate
+
+      - name: Push Prisma schema
+        run: npx prisma db push
+
       - name: Run backend tests
         run: npm test
 
