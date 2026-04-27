@@ -3,6 +3,7 @@ import {
   getLatestRebalance,
   computeChanges,
 } from "../services/rebalanceFeedService";
+import { connectToDatabase } from "../db/database";
 
 jest.mock("../db/database", () => ({
   connectToDatabase: jest.fn().mockResolvedValue(true),
@@ -128,7 +129,6 @@ describe("rebalanceFeedService", () => {
 
   describe("getRebalanceFeed", () => {
     it("returns empty array when no database", async () => {
-      const { connectToDatabase } = require("../db/database");
       (connectToDatabase as jest.Mock).mockResolvedValueOnce(null);
 
       const result = await getRebalanceFeed();
@@ -151,7 +151,6 @@ describe("rebalanceFeedService", () => {
 
   describe("getLatestRebalance", () => {
     it("returns null when no database", async () => {
-      const { connectToDatabase } = require("../db/database");
       (connectToDatabase as jest.Mock).mockResolvedValueOnce(null);
 
       const result = await getLatestRebalance("vault1");

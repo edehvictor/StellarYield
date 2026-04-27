@@ -16,10 +16,11 @@ jest.mock("../models/WatchlistRule", () => ({
 
 import {
   validateRuleInput,
-  createWatchlistRule,
   evaluateWatchlistRules,
   checkCondition,
 } from "../services/watchlistService";
+import { getYieldData } from "../services/yieldService";
+import { WatchlistRuleModel } from "../models/WatchlistRule";
 
 const mockYieldData = [
   {
@@ -37,8 +38,6 @@ const mockYieldData = [
     },
   },
 ];
-
-import { getYieldData } from "../services/yieldService";
 
 describe("watchlistService", () => {
   beforeEach(() => {
@@ -159,7 +158,6 @@ describe("watchlistService", () => {
 
   describe("evaluateWatchlistRules", () => {
     it("filters yields correctly by targetId", async () => {
-      const { WatchlistRuleModel } = require("../models/WatchlistRule");
       (WatchlistRuleModel.find as jest.Mock).mockResolvedValue([
         {
           _id: "rule-1",

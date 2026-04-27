@@ -207,18 +207,18 @@ export async function getHistoricalRange(
       query.protocolName = protocol;
     }
 
-    const hourlyQuery = HourlyRollupModel.find(query) as unknown;
+    const hourlyQuery = HourlyRollupModel.find(query);
     const sortedHourlyQuery =
-      typeof (hourlyQuery as any).sort === "function"
-        ? (hourlyQuery as any).sort({ hourStart: -1 })
+      "sort" in hourlyQuery
+        ? (hourlyQuery as ReturnType<typeof HourlyRollupModel.find>).sort({ hourStart: -1 })
         : hourlyQuery;
     const limitedHourlyQuery =
-      typeof (sortedHourlyQuery as any).limit === "function"
-        ? (sortedHourlyQuery as any).limit(limit)
+      "limit" in sortedHourlyQuery
+        ? (sortedHourlyQuery as ReturnType<typeof HourlyRollupModel.find>).limit(limit)
         : sortedHourlyQuery;
 
-    return typeof (limitedHourlyQuery as any).lean === "function"
-      ? (limitedHourlyQuery as any).lean()
+    return "lean" in limitedHourlyQuery
+      ? (limitedHourlyQuery as ReturnType<typeof HourlyRollupModel.find>).lean()
       : (limitedHourlyQuery as Promise<IHourlyRollup[]>);
   }
 
@@ -229,18 +229,18 @@ export async function getHistoricalRange(
     query.protocolName = protocol;
   }
 
-  const dailyQuery = DailyRollupModel.find(query) as unknown;
+  const dailyQuery = DailyRollupModel.find(query);
   const sortedDailyQuery =
-    typeof (dailyQuery as any).sort === "function"
-      ? (dailyQuery as any).sort({ date: -1 })
+    "sort" in dailyQuery
+      ? (dailyQuery as ReturnType<typeof DailyRollupModel.find>).sort({ date: -1 })
       : dailyQuery;
   const limitedDailyQuery =
-    typeof (sortedDailyQuery as any).limit === "function"
-      ? (sortedDailyQuery as any).limit(limit)
+    "limit" in sortedDailyQuery
+      ? (sortedDailyQuery as ReturnType<typeof DailyRollupModel.find>).limit(limit)
       : sortedDailyQuery;
 
-  return typeof (limitedDailyQuery as any).lean === "function"
-    ? (limitedDailyQuery as any).lean()
+  return "lean" in limitedDailyQuery
+    ? (limitedDailyQuery as ReturnType<typeof DailyRollupModel.find>).lean()
     : (limitedDailyQuery as Promise<IDailyRollup[]>);
 }
 

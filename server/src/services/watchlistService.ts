@@ -214,11 +214,12 @@ export function checkCondition(
       return currentValue > condition.value;
     case "below":
       return currentValue < condition.value;
-    case "change_above":
+    case "change_above": {
       const changePct = previousValue > 0
         ? Math.abs((currentValue - previousValue) / previousValue) * 100
         : 0;
       return changePct >= condition.value;
+    }
     default:
       return false;
   }

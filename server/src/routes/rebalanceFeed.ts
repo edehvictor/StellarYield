@@ -57,7 +57,6 @@ rebalanceFeedRouter.get("/:eventId", async (req, res) => {
     const event = await getRebalanceById(req.params.eventId);
 
     if (!event) {
-      rebalanceFeedRouter.stack;
       res.status(404).json({ error: "Rebalance event not found" });
       return;
     }

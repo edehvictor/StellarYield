@@ -91,6 +91,8 @@ jest.mock("../models/YieldSnapshot", () => ({
 }));
 
 import { getYieldData } from "../services/yieldService";
+import { connectToDatabase } from "../db/database";
+import { YieldSnapshotModel, HourlyRollupModel } from "../models/YieldSnapshot";
 
 describe("yieldWarehouseService", () => {
   beforeEach(() => {
@@ -99,7 +101,6 @@ describe("yieldWarehouseService", () => {
 
   describe("computeHourlyRollups", () => {
     it("returns 0 when no database", async () => {
-      const { connectToDatabase } = require("../db/database");
       (connectToDatabase as jest.Mock).mockResolvedValueOnce(null);
 
       const result = await computeHourlyRollups();
@@ -114,7 +115,6 @@ describe("yieldWarehouseService", () => {
     });
 
     it("computes rollups correctly from snapshots", async () => {
-      const { YieldSnapshotModel } = require("../models/YieldSnapshot");
       const mockSnapshots = [
         {
           protocolName: "Blend",
@@ -141,7 +141,6 @@ describe("yieldWarehouseService", () => {
 
   describe("computeDailyRollups", () => {
     it("returns 0 when no database", async () => {
-      const { connectToDatabase } = require("../db/database");
       (connectToDatabase as jest.Mock).mockResolvedValueOnce(null);
 
       const result = await computeDailyRollups();
@@ -156,7 +155,6 @@ describe("yieldWarehouseService", () => {
     });
 
     it("computes daily rollups correctly", async () => {
-      const { HourlyRollupModel } = require("../models/YieldSnapshot");
       const mockHourly = [
         { protocolName: "Blend", avgApy: 6.5, avgTvl: 12_000_000, sampleCount: 10, hourStart: new Date() },
         { protocolName: "Blend", avgApy: 6.7, avgTvl: 12_200_000, sampleCount: 10, hourStart: new Date() },
@@ -173,7 +171,6 @@ describe("yieldWarehouseService", () => {
 
   describe("getHistoricalRange", () => {
     it("returns empty array when no database", async () => {
-      const { connectToDatabase } = require("../db/database");
       (connectToDatabase as jest.Mock).mockResolvedValueOnce(null);
 
       const result = await getHistoricalRange({
@@ -219,7 +216,6 @@ describe("yieldWarehouseService", () => {
 
   describe("getProtocolStats", () => {
     it("returns null when no database", async () => {
-      const { connectToDatabase } = require("../db/database");
       (connectToDatabase as jest.Mock).mockResolvedValueOnce(null);
 
       const result = await getProtocolStats("Blend");

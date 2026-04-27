@@ -1,6 +1,5 @@
 import NodeCache from "node-cache";
 import { getYieldData } from "./yieldService";
-import type { NormalizedYield } from "../types/yields";
 
 export interface RankingWeights {
   apy: number;

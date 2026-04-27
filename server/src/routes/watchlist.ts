@@ -28,7 +28,8 @@ watchlistRouter.post("/", async (req, res) => {
 
     res.status(201).json(rule);
   } catch (error) {
-    console.error("Failed to create watchlist rule.", error);
+    const errorMessage = error instanceof Error ? error.message : "Unknown error";
+    console.error("Failed to create watchlist rule.", errorMessage.replace(/[\n\r]/g, " "));
     res.status(400).json({
       error: error instanceof Error ? error.message : "Failed to create watchlist rule",
       requestId: (req as unknown as { requestId?: string }).requestId,
@@ -70,7 +71,8 @@ watchlistRouter.put("/:ruleId", async (req, res) => {
 
     res.json(rule);
   } catch (error) {
-    console.error("Failed to update watchlist rule.", error);
+    const errorMessage = error instanceof Error ? error.message : "Unknown error";
+    console.error("Failed to update watchlist rule.", errorMessage.replace(/[\n\r]/g, " "));
     res.status(400).json({
       error: error instanceof Error ? error.message : "Failed to update rule",
       requestId: (req as unknown as { requestId?: string }).requestId,
