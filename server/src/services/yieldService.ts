@@ -46,6 +46,7 @@ function buildProtocolSnapshot(
     network,
     source: config.source,
     fetchedAt,
+    rewards: config.rewardStreams,
     attribution: {
       baseYield: config.baseApyBps / 100 * 0.8,
       incentives: config.baseApyBps / 100 * 0.1,
@@ -101,6 +102,7 @@ export async function getYieldData(): Promise<NormalizedYield[]> {
         network: "mainnet",
         source: protocol.source,
         fetchedAt: new Date().toISOString(),
+        rewards: protocol.rewardStreams,
       })),
     );
 

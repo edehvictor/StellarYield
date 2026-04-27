@@ -10,6 +10,7 @@ import {
 import { YieldFlowCanvas } from "../visualizations";
 
 import PortfolioVisualizer from "../visualizer/PortfolioVisualizer";
+import { ExposureMap } from "../../portfolio/ExposureMap";
 
 // ── Types ───────────────────────────────────────────────────────────────
 
@@ -172,6 +173,25 @@ export default function PortfolioDashboard({ walletAddress }: PortfolioDashboard
       >
         <YieldFlowCanvas scene="portfolio" positions={positions} />
       </Suspense>
+
+      {/* Exposure Map */}
+      <ExposureMap 
+        data={{
+          byAsset: positions.reduce((acc, p) => {
+            acc[p.asset] = (acc[p.asset] || 0) + p.currentValue;
+            return acc;
+          }, {} as Record<string, number>),
+          byProtocol: positions.reduce((acc, p) => {
+            acc[p.protocol] = (acc[p.protocol] || 0) + p.currentValue;
+            return acc;
+          }, {} as Record<string, number>),
+          totalValue: totalValue,
+          warnings: totalValue > 0 && positions.some(p => p.currentValue / totalValue > 0.5) 
+            ? ["High concentration (>50%) detected in a single position."] 
+            : []
+        }}
+      />
+
       {/* 3D Visualizer Integration */}
       <PortfolioVisualizer />
 

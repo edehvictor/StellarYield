@@ -1,3 +1,5 @@
+import { RewardStream } from "../types/yields";
+
 export interface ProtocolConfig {
   protocolName: string;
   protocolType: "blend" | "soroswap";
@@ -6,6 +8,7 @@ export interface ProtocolConfig {
   volatilityPct: number;
   protocolAgeDays: number;
   source: string;
+  rewardStreams?: RewardStream[];
 }
 
 export const PROTOCOLS: ProtocolConfig[] = [
@@ -17,6 +20,13 @@ export const PROTOCOLS: ProtocolConfig[] = [
     volatilityPct: 2.4,
     protocolAgeDays: 540,
     source: "stellar://blend",
+    rewardStreams: [
+      {
+        tokenSymbol: "BLND",
+        emissionPerYear: 1_000_000,
+        tokenPrice: 0.25,
+      },
+    ],
   },
   {
     protocolName: "Soroswap",
@@ -26,5 +36,12 @@ export const PROTOCOLS: ProtocolConfig[] = [
     volatilityPct: 5.2,
     protocolAgeDays: 420,
     source: "stellar://soroswap",
+    rewardStreams: [
+      {
+        tokenSymbol: "SORO",
+        emissionPerYear: 500_000,
+        tokenPrice: 0.15,
+      },
+    ],
   },
 ];
