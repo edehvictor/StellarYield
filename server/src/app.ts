@@ -29,6 +29,10 @@ import prometheusMetricsRouter from "./routes/prometheusMetrics";
 import alertsRouter from "./routes/alerts";
 import openapiRouter from "./routes/openapi";
 import incidentsRouter from "./routes/incidents";
+import rankingRouter from "./routes/rankings";
+import watchlistRouter from "./routes/watchlist";
+import rebalanceFeedRouter from "./routes/rebalanceFeed";
+import warehouseRouter from "./routes/warehouse";
 import { createAuthChallenge, verifyAuthChallenge } from "./utils/stellarAuth";
 
 type EventsPrismaClient = {
@@ -99,6 +103,10 @@ export function createApp() {
   app.use("/api/weekly-reports", weeklyReportsRouter);
   app.use("/api/alerts", alertsRouter);
   app.use("/api/incidents", incidentsRouter);
+  app.use("/api/rankings", rankingRouter);
+  app.use("/api/watchlist", watchlistRouter);
+  app.use("/api/rebalance-feed", rebalanceFeedRouter);
+  app.use("/api/warehouse", warehouseRouter);
   app.use("/api/openapi", openapiRouter);
 
   // Legacy JSON metrics (internal tooling)
