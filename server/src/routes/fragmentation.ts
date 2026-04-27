@@ -283,8 +283,11 @@ export function getFragmentationServiceForTesting(): MockFragmentationService {
 export function resetFragmentationServiceForTesting(): void {
   fragmentationService.setTestMode({});
   // Clear cache by setting it to null
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   (fragmentationService as any).cachedMetrics = null;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   (fragmentationService as any).lastCalculation = 0;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   (fragmentationService as any).lastSuccessfulUpdate = null;
 }
 

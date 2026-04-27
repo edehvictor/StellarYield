@@ -58,7 +58,7 @@ describe('GET /api/liquidity/fragmentation', () => {
       expect(Array.isArray(protocolBreakdown)).toBe(true);
       expect(protocolBreakdown.length).toBeGreaterThan(0);
       
-      protocolBreakdown.forEach((protocol: any) => {
+      protocolBreakdown.forEach((protocol: { protocol: string; tvlShare: number; executionImpact: number; isDeepest: boolean }) => {
         expect(protocol).toHaveProperty('protocol');
         expect(protocol).toHaveProperty('tvlShare');
         expect(protocol).toHaveProperty('executionImpact');
@@ -480,7 +480,7 @@ describe('GET /api/liquidity/fragmentation', () => {
         expect(res.body.data.protocolBreakdown.length).toBeGreaterThan(0);
         
         // Should not include the missing protocol in breakdown
-        const protocols = res.body.data.protocolBreakdown.map((p: any) => p.protocol);
+        const protocols = res.body.data.protocolBreakdown.map((p: { protocol: string }) => p.protocol);
         expect(protocols).not.toContain('Aquarius');
       });
     });
@@ -688,7 +688,7 @@ describe('GET /api/liquidity/fragmentation', () => {
         resetFragmentationServiceForTesting();
         service = getFragmentationServiceForTesting();
         service.setTestMode({ simulateCalculationError: true });
-        let res = await request(app).get('/api/liquidity/fragmentation');
+        const res = await request(app).get('/api/liquidity/fragmentation');
         if (res.body.error) {
           errorCodes.add(res.body.error.code);
         }

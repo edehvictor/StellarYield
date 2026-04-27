@@ -56,8 +56,8 @@ const digestDeliveryService = new DigestDeliveryService(
     console.log(`[DigestDeliveryService] emailLookup stub called for ${walletAddress}`);
     return null;
   },
-  async (to, subject, html) => {
-    console.log(`[DigestDeliveryService] sendEmail stub called: to=${to}, subject=${subject}`);
+  async (_to, _subject, _html) => {
+    console.log(`[DigestDeliveryService] sendEmail stub called: to=${_to}, subject=${_subject}`);
   },
 );
 const digestGenerationQueue = new Queue(QUEUE_NAMES.DIGEST_GENERATION, {
