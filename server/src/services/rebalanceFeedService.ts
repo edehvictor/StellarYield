@@ -6,7 +6,10 @@ import {
   type AllocationBreakdown,
 } from "../models/VaultRebalanceEvent";
 
-const cache = new NodeCache({ stdTTL: 60, checkperiod: 30 });
+const cache = new NodeCache({
+  stdTTL: 60,
+  checkperiod: process.env.NODE_ENV === "test" ? 0 : 30,
+});
 const REBALANCE_FEED_CACHE_KEY = "rebalance-feed";
 const LATEST_REBALANCE_CACHE_KEY = "rebalance-latest";
 

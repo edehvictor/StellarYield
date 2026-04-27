@@ -1,7 +1,9 @@
 import NodeCache from "node-cache";
 
 // Using NodeCache for persistence during runtime. In production, this would be in Redis/Postgres.
-const cache = new NodeCache();
+const cache = new NodeCache({
+  checkperiod: process.env.NODE_ENV === "test" ? 0 : 600,
+});
 
 export interface FreezeState {
     isFrozen: boolean;

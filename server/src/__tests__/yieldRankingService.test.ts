@@ -1,3 +1,7 @@
+jest.mock("../services/yieldService", () => ({
+  getYieldData: jest.fn(),
+}));
+
 import {
   calculateRankings,
   getOpportunityByRank,
@@ -8,11 +12,8 @@ import {
   scoreMaturity,
   scoreVolatility,
   validateWeights,
+  clearRankingCache,
 } from "../services/yieldRankingService";
-
-jest.mock("../services/yieldService", () => ({
-  getYieldData: jest.fn(),
-}));
 
 import { getYieldData } from "../services/yieldService";
 
@@ -50,6 +51,7 @@ const mockYields = [
 describe("yieldRankingService", () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    clearRankingCache();
   });
 
   describe("scoreApy", () => {

@@ -44,10 +44,13 @@ export interface RankingResult {
   warnings: string[];
 }
 
-const cache = new NodeCache({ stdTTL: 300, checkperiod: 60 });
+const cache = new NodeCache({
+  stdTTL: 300,
+  checkperiod: process.env.NODE_ENV === "test" ? 0 : 60,
+});
 const RANKING_CACHE_KEY = "yield-rankings";
 
-function validateWeights(weights: Partial<RankingWeights>): RankingWeights {
+export function validateWeights(weights: Partial<RankingWeights>): RankingWeights {
   const total =
     (weights.apy || 0) +
     (weights.tvl || 0) +
@@ -74,24 +77,24 @@ function normalizeToZeroOne(value: number, min: number, max: number): number {
   return Math.max(0, Math.min(1, (value - min) / (max - min)));
 }
 
-function scoreApy(apy: number, minApy: number, maxApy: number): number {
+export function scoreApy(apy: number, minApy: number, maxApy: number): number {
   return normalizeToZeroOne(apy, minApy, maxApy) * 100;
 }
 
-function scoreTvl(tvl: number, minTvl: number, maxTvl: number): number {
+export function scoreTvl(tvl: number, minTvl: number, maxTvl: number): number {
   if (tvl <= 0) return 0;
   return normalizeToZeroOne(Math.log10(tvl + 1), Math.log10(minTvl + 1), Math.log10(maxTvl + 1)) * 100;
 }
 
-function scoreLiquidity(tvl: number, minTvl: number, maxTvl: number): number {
+export function scoreLiquidity(tvl: number, minTvl: number, maxTvl: number): number {
   return scoreTvl(tvl, minTvl, maxTvl);
 }
 
-function scoreMaturity(riskScore: number): number {
+export function scoreMaturity(riskScore: number): number {
   return riskScore * 10;
 }
 
-function scoreVolatility(riskScore: number): number {
+export function scoreVolatility(riskScore: number): number {
   return (10 - riskScore) * 10;
 }
 
@@ -218,6 +221,10 @@ export async function calculateRankings(
   }
 
   return result;
+}
+
+export function clearRankingCache(): void {
+  cache.flushAll();
 }
 
 export async function getOpportunityByRank(

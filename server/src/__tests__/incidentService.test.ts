@@ -1,7 +1,53 @@
 
-import { incidentService } from "../services/incidentService";
-import { PrismaClient } from "@prisma/client";
+jest.mock("@prisma/client", () => ({
+  PrismaClient: jest.fn().mockImplementation(() => ({
+    incident: {
+      create: jest.fn().mockResolvedValue({
+        id: "incident-123",
+        protocol: "TestProtocol",
+        severity: "HIGH",
+        type: "PAUSE",
+        title: "Test Incident",
+        description: "A test incident for verification",
+        affectedVaults: ["Vault1"],
+        startedAt: new Date(),
+        resolved: false,
+        resolvedAt: null,
+      }),
+      findMany: jest.fn().mockResolvedValue([{
+        id: "incident-123",
+        protocol: "TestProtocol",
+        severity: "HIGH",
+        type: "PAUSE",
+        title: "Test Incident",
+        description: "A test incident for verification",
+        affectedVaults: ["Vault1"],
+        startedAt: new Date(),
+        resolved: false,
+        resolvedAt: null,
+      }]),
+      update: jest.fn().mockResolvedValue({
+        id: "incident-123",
+        protocol: "TestProtocol",
+        severity: "HIGH",
+        type: "PAUSE",
+        title: "Test Incident",
+        description: "A test incident for verification",
+        affectedVaults: ["Vault1"],
+        startedAt: new Date(),
+        resolved: true,
+        resolvedAt: new Date(),
+      }),
+      delete: jest.fn().mockResolvedValue({
+        id: "incident-123",
+      }),
+    },
+  })),
+}));
 
+import { incidentService } from "../services/incidentService";
+
+const { PrismaClient } = require("@prisma/client");
 const prisma = new PrismaClient();
 
 describe("IncidentService", () => {

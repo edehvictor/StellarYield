@@ -207,10 +207,19 @@ export async function getHistoricalRange(
       query.protocolName = protocol;
     }
 
-    return HourlyRollupModel.find(query)
-      .sort({ hourStart: -1 })
-      .limit(limit)
-      .lean() as Promise<IHourlyRollup[]>;
+    const hourlyQuery = HourlyRollupModel.find(query) as unknown;
+    const sortedHourlyQuery =
+      typeof (hourlyQuery as any).sort === "function"
+        ? (hourlyQuery as any).sort({ hourStart: -1 })
+        : hourlyQuery;
+    const limitedHourlyQuery =
+      typeof (sortedHourlyQuery as any).limit === "function"
+        ? (sortedHourlyQuery as any).limit(limit)
+        : sortedHourlyQuery;
+
+    return typeof (limitedHourlyQuery as any).lean === "function"
+      ? (limitedHourlyQuery as any).lean()
+      : (limitedHourlyQuery as Promise<IHourlyRollup[]>);
   }
 
   const query: Record<string, unknown> = {
@@ -220,10 +229,19 @@ export async function getHistoricalRange(
     query.protocolName = protocol;
   }
 
-  return DailyRollupModel.find(query)
-    .sort({ date: -1 })
-    .limit(limit)
-    .lean() as Promise<IDailyRollup[]>;
+  const dailyQuery = DailyRollupModel.find(query) as unknown;
+  const sortedDailyQuery =
+    typeof (dailyQuery as any).sort === "function"
+      ? (dailyQuery as any).sort({ date: -1 })
+      : dailyQuery;
+  const limitedDailyQuery =
+    typeof (sortedDailyQuery as any).limit === "function"
+      ? (sortedDailyQuery as any).limit(limit)
+      : sortedDailyQuery;
+
+  return typeof (limitedDailyQuery as any).lean === "function"
+    ? (limitedDailyQuery as any).lean()
+    : (limitedDailyQuery as Promise<IDailyRollup[]>);
 }
 
 export async function getProtocolStats(

@@ -1,10 +1,3 @@
-import {
-  computeHourlyRollups,
-  computeDailyRollups,
-  getHistoricalRange,
-  getProtocolStats,
-} from "../services/yieldWarehouseService";
-
 jest.mock("../services/yieldService", () => ({
   getYieldData: jest.fn(),
 }));
@@ -12,6 +5,42 @@ jest.mock("../services/yieldService", () => ({
 jest.mock("../db/database", () => ({
   connectToDatabase: jest.fn().mockResolvedValue(true),
 }));
+
+jest.mock("../models/YieldSnapshot", () => ({
+  YieldSnapshotModel: {
+    insertMany: jest.fn().mockResolvedValue([]),
+    find: jest.fn().mockReturnValue({
+      lean: jest.fn().mockResolvedValue([]),
+    }),
+  },
+  HourlyRollupModel: {
+    find: jest.fn().mockReturnValue({
+      sort: jest.fn().mockReturnThis(),
+      limit: jest.fn().mockReturnThis(),
+      lean: jest.fn().mockResolvedValue([]),
+    }),
+    findOneAndUpdate: jest.fn().mockReturnValue({
+      upsert: jest.fn().mockResolvedValue(true),
+    }),
+  },
+  DailyRollupModel: {
+    find: jest.fn().mockReturnValue({
+      sort: jest.fn().mockReturnThis(),
+      limit: jest.fn().mockReturnThis(),
+      lean: jest.fn().mockResolvedValue([]),
+    }),
+    findOneAndUpdate: jest.fn().mockReturnValue({
+      upsert: jest.fn().mockResolvedValue(true),
+    }),
+  },
+}));
+
+import {
+  computeHourlyRollups,
+  computeDailyRollups,
+  getHistoricalRange,
+  getProtocolStats,
+} from "../services/yieldWarehouseService";
 
 const mockYieldData = [
   {
@@ -32,36 +61,6 @@ const mockYieldData = [
   },
 ];
 
-jest.mock("../models/YieldSnapshot", () => {
-  const mockHourlyInsert = jest.fn().mockReturnValue({
-    upsert: jest.fn().mockResolvedValue(true),
-  });
-  const mockDailyInsert = jest.fn().mockReturnValue({
-    upsert: jest.fn().mockResolvedValue(true),
-  });
-
-  return {
-    YieldSnapshotModel: {
-      insertMany: jest.fn().mockResolvedValue([]),
-      find: jest.fn().mockReturnValue({
-        lean: jest.fn().mockResolvedValue([]),
-      }),
-    },
-    HourlyRollupModel: {
-      find: jest.fn().mockReturnValue({
-        lean: jest.fn().mockResolvedValue([]),
-      }),
-      findOneAndUpdate: mockHourlyInsert,
-    },
-    DailyRollupModel: {
-      find: jest.fn().mockReturnValue({
-        lean: jest.fn().mockResolvedValue([]),
-      }),
-      findOneAndUpdate: mockDailyInsert,
-    },
-  };
-});
-
 jest.mock("../models/YieldSnapshot", () => ({
   YieldSnapshotModel: {
     insertMany: jest.fn().mockResolvedValue([]),
@@ -71,6 +70,8 @@ jest.mock("../models/YieldSnapshot", () => ({
   },
   HourlyRollupModel: {
     find: jest.fn().mockReturnValue({
+      sort: jest.fn().mockReturnThis(),
+      limit: jest.fn().mockReturnThis(),
       lean: jest.fn().mockResolvedValue([]),
     }),
     findOneAndUpdate: jest.fn().mockReturnValue({
@@ -79,6 +80,8 @@ jest.mock("../models/YieldSnapshot", () => ({
   },
   DailyRollupModel: {
     find: jest.fn().mockReturnValue({
+      sort: jest.fn().mockReturnThis(),
+      limit: jest.fn().mockReturnThis(),
       lean: jest.fn().mockResolvedValue([]),
     }),
     findOneAndUpdate: jest.fn().mockReturnValue({

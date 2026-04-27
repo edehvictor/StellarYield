@@ -2,9 +2,11 @@ import NodeCache from "node-cache";
 import { connectToDatabase } from "../db/database";
 import { WatchlistRuleModel, type WatchlistRule, type WatchlistCondition } from "../models/WatchlistRule";
 import { getYieldData } from "./yieldService";
-import { sendNotification } from "./notificationService";
 
-const cache = new NodeCache({ stdTTL: 60, checkperiod: 30 });
+const cache = new NodeCache({
+  stdTTL: 60,
+  checkperiod: process.env.NODE_ENV === "test" ? 0 : 30,
+});
 
 const WATCHLIST_CACHE_PREFIX = "watchlist:user:";
 const RULE_TRIGGER_PREFIX = "watchlist:rule-triggered:";
@@ -15,7 +17,7 @@ export interface WatchlistRuleInput {
   targetId: string;
   targetName: string;
   conditions: Omit<WatchlistCondition, "cooldownMinutes">[];
-  notificationChannels: ("email" | "webhook" | "push")[];
+  notificationChannels: readonly ("email" | "webhook" | "push")[];
 }
 
 export interface RuleEvaluationResult {
@@ -202,7 +204,7 @@ async function getCurrentMetrics(targetId: string, targetType: "protocol" | "poo
   return null;
 }
 
-function checkCondition(
+export function checkCondition(
   currentValue: number,
   previousValue: number,
   condition: WatchlistCondition,
@@ -216,7 +218,7 @@ function checkCondition(
       const changePct = previousValue > 0
         ? Math.abs((currentValue - previousValue) / previousValue) * 100
         : 0;
-      return changePct > condition.value;
+      return changePct >= condition.value;
     default:
       return false;
   }
@@ -292,7 +294,7 @@ async function sendNotification(
   userId: string,
   title: string,
   message: string,
-  channels: ("email" | "webhook" | "push")[],
+  channels: readonly ("email" | "webhook" | "push")[],
 ): Promise<void> {
   console.log(`[Watchlist Notification] User: ${userId}, Title: ${title}, Message: ${message}, Channels: ${channels.join(", ")}`);
 }

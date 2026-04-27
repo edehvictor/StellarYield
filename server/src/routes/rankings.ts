@@ -70,12 +70,12 @@ rankingRouter.get("/top/:rank", async (req, res) => {
 
     res.json(opportunity);
   } catch (error) {
-    console.error("Failed to serve /api/rankings/top/:rank.", error);
-    res.status(500).json({
-      error: "Unable to fetch opportunity right now.",
-      requestId: (_req as unknown as { requestId?: string }).requestId,
-    });
-  }
-});
+      console.error("Failed to serve /api/rankings/top/:rank.", error);
+      res.status(500).json({
+        error: "Unable to fetch opportunity right now.",
+        requestId: (req as unknown as { requestId?: string }).requestId,
+      });
+    }
+  });
 
 export default rankingRouter;
