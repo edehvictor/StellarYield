@@ -8,6 +8,11 @@ import { assertValidServerEnv } from "./config/env";
 import express, { Request, Response } from 'express';
 import cors from 'cors';
 import { metricsMiddleware, getMetrics } from './middleware/metrics';
+import Redis from 'ioredis';
+import { Queue } from 'bullmq';
+import { DigestBuilder, DigestDeliveryService } from './services/digest';
+import { createDigestGenerationWorker, createDigestThresholdCheckWorker } from './jobs/digestSchedulerJob';
+import { QUEUE_NAMES } from './queues/types';
 
 assertValidServerEnv();
 initializeZapSupportedAssetsCache();
@@ -40,6 +45,27 @@ startIndexer().catch(console.error);
 startHistoricalYieldAggregationJob();
 startSharePriceSnapshotJob();
 startHealthMonitor().catch(console.error);
+
+// ─── Digest workers ───────────────────────────────────────────────────────────
+const digestRedis = new Redis(process.env.REDIS_URL || 'redis://localhost:6379', {
+  maxRetriesPerRequest: null,
+});
+const digestBuilder = new DigestBuilder(digestRedis);
+const digestDeliveryService = new DigestDeliveryService(
+  async (walletAddress) => {
+    console.log(`[DigestDeliveryService] emailLookup stub called for ${walletAddress}`);
+    return null;
+  },
+  async (to, subject, html) => {
+    console.log(`[DigestDeliveryService] sendEmail stub called: to=${to}, subject=${subject}`);
+  },
+);
+const digestGenerationQueue = new Queue(QUEUE_NAMES.DIGEST_GENERATION, {
+  connection: digestRedis,
+});
+createDigestGenerationWorker(digestRedis, digestBuilder, digestDeliveryService);
+createDigestThresholdCheckWorker(digestRedis, digestBuilder, digestGenerationQueue);
+console.log('[digest] Workers registered: digest-generation, digest-threshold-check');
 
 app.listen(PORT, () => {
   console.log(`Server is running on http://localhost:${PORT}`);
