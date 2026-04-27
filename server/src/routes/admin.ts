@@ -495,7 +495,7 @@ adminRouter.post(
   async (req: Request, res: Response): Promise<void> => {
     try {
       const { protocol, reason } = req.body;
-      const actor = (req as any).user?.id || "admin";
+      const actor = (req as unknown as { user?: { id: string } }).user?.id || "admin";
 
       let state;
       if (protocol) {
@@ -512,7 +512,7 @@ adminRouter.post(
       });
 
       res.json({ success: true, state });
-    } catch (error) {
+    } catch (_error) {
       res.status(500).json({ error: "Failed to freeze recommendations" });
     }
   },
@@ -528,7 +528,7 @@ adminRouter.post(
   async (req: Request, res: Response): Promise<void> => {
     try {
       const { protocol } = req.body;
-      const actor = (req as any).user?.id || "admin";
+      const actor = (req as unknown as { user?: { id: string } }).user?.id || "admin";
 
       let state;
       if (protocol) {
@@ -544,7 +544,7 @@ adminRouter.post(
       });
 
       res.json({ success: true, state });
-    } catch (error) {
+    } catch (_error) {
       res.status(500).json({ error: "Failed to resume recommendations" });
     }
   },

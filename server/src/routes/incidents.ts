@@ -13,7 +13,7 @@ router.get("/", async (req: Request, res: Response) => {
         };
         const incidents = await incidentService.getIncidents(filter);
         res.json(incidents);
-    } catch (error) {
+    } catch (_error) {
         res.status(500).json({ error: "Failed to fetch incidents" });
     }
 });
@@ -26,7 +26,7 @@ router.get("/:id", async (req: Request, res: Response) => {
             return;
         }
         res.json(incident);
-    } catch (error) {
+    } catch (_error) {
         res.status(500).json({ error: "Failed to fetch incident" });
     }
 });
@@ -48,7 +48,7 @@ router.post("/", async (req: Request, res: Response) => {
             startedAt: new Date(startedAt),
         });
         res.status(201).json(incident);
-    } catch (error) {
+    } catch (_error) {
         res.status(500).json({ error: "Failed to create incident" });
     }
 });
@@ -57,7 +57,7 @@ router.patch("/:id/resolve", async (req: Request, res: Response) => {
     try {
         const incident = await incidentService.resolveIncident(req.params.id);
         res.json(incident);
-    } catch (error) {
+    } catch (_error) {
         res.status(500).json({ error: "Failed to resolve incident" });
     }
 });
