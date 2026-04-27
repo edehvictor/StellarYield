@@ -162,3 +162,18 @@ model Incident {
   @@index([protocol, severity])
   @@index([startedAt])
 }
+
+// ── Drift Detection Models ──────────────────────────────────────────────────
+
+model DriftEvent {
+  id              String   @id @default(uuid())
+  vaultId         String
+  targetWeight    Float
+  actualWeight    Float
+  driftAmount     Float    // actualWeight - targetWeight
+  isRecovered     Boolean  @default(false)
+  createdAt       DateTime @default(now())
+  resolvedAt      DateTime?
+
+  @@index([vaultId, isRecovered])
+}

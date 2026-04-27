@@ -22,6 +22,7 @@ import ReferralDashboard from "./features/referrals/ReferralDashboard";
 import VestingDashboard from "./pages/vesting/VestingDashboard";
 import TransparencyDashboard from "./pages/transparency/TransparencyDashboard";
 import RiskChronology from "./pages/transparency/RiskChronology";
+import StrategyComparison from "./pages/strategy/StrategyComparison";
 import YieldForGood from "./features/donations/YieldForGood";
 import YieldCalculator from "./components/calculator/YieldCalculator";
 import { useWallet } from "./context/useWallet";
@@ -45,6 +46,7 @@ import {
   Settings,
   Bell,
   Calculator,
+  Zap,
 } from "lucide-react";
 import "./index.css";
 import SettingsModal from "./features/settings/SettingsModal";
@@ -116,6 +118,12 @@ const RootLayout = () => {
             className="hover:text-white transition-colors flex items-center gap-2"
           >
             <Landmark size={18} /> Vaults
+          </Link>
+          <Link
+            to="/strategy"
+            className="hover:text-white transition-colors flex items-center gap-2"
+          >
+            <Zap size={18} /> Strategies
           </Link>
           {isConnected && (
             <Link
@@ -272,6 +280,10 @@ const router = createBrowserRouter([
       {
         path: "/vault/:slug",
         element: <Vault />,
+      },
+      {
+        path: "/strategy",
+        element: <StrategyComparison />,
       },
       {
         path: "/portfolio",

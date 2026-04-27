@@ -13,7 +13,7 @@ export interface ApyAttribution {
 
 export interface RawProtocolYield {
   protocolName: string;
-  protocolType: "blend" | "soroswap";
+  protocolType: "blend" | "soroswap" | "defindex";
   apyBps: number;
   tvlUsd: number;
   volatilityPct: number;
@@ -21,6 +21,11 @@ export interface RawProtocolYield {
   network: "mainnet" | "testnet";
   source: string;
   fetchedAt: string;
+  liquidityUsd: number;
+  rebalancingBehavior: string;
+  managementFeeBps: number;
+  performanceFeeBps: number;
+  capitalEfficiencyPct: number;
   rewards?: RewardStream[];
   attribution?: ApyAttribution;
 }
@@ -34,6 +39,11 @@ export interface NormalizedYield {
   riskScore: number;
   source: string;
   fetchedAt: string;
+  liquidityUsd: number;
+  rebalancingBehavior: string;
+  managementFeeBps: number;
+  performanceFeeBps: number;
+  capitalEfficiencyPct: number;
   rewards?: {
     symbol: string;
     apy: number;

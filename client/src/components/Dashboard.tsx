@@ -3,6 +3,7 @@ import { Activity, ArrowUpRight, ShieldCheck, TrendingUp } from "lucide-react";
 import ApyHistoryChart from "./charts/ApyHistoryChart";
 import { YieldFlowCanvas } from "./visualizations";
 import MempoolVisualizer from "./mempool_graph/MempoolVisualizer";
+import CorrelationHeatmap from "./charts/CorrelationHeatmap";
 import { apiUrl } from "../lib/api";
 import ApyAttribution from "../features/yields/ApyAttribution";
 
@@ -115,6 +116,8 @@ export default function Dashboard() {
       </Suspense>
 
       <ApyHistoryChart />
+
+      <CorrelationHeatmap />
 
       {/* Mempool Visualization Integration */}
       <MempoolVisualizer />

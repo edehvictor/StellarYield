@@ -4,6 +4,7 @@ import { startIndexer } from "./indexer/indexer";
 import { startHistoricalYieldAggregationJob } from "./jobs/historicalYieldAggregation";
 import { startSharePriceSnapshotJob } from "./jobs/sharePriceSnapshot";
 import { startHealthMonitor } from "./monitoring/healthMonitor";
+import { startDriftDetectionJob } from "./jobs/driftDetectionJob";
 import { assertValidServerEnv } from "./config/env";
 import express, { Request, Response } from 'express';
 import cors from 'cors';
@@ -39,6 +40,7 @@ app.get('/api/yields', (req: Request, res: Response) => {
 startIndexer().catch(console.error);
 startHistoricalYieldAggregationJob();
 startSharePriceSnapshotJob();
+startDriftDetectionJob();
 startHealthMonitor().catch(console.error);
 
 app.listen(PORT, () => {

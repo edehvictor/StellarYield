@@ -42,6 +42,11 @@ export function normalizeYield(rawYield: RawProtocolYield): NormalizedYield {
     riskScore: risk.score,
     source: rawYield.source,
     fetchedAt: rawYield.fetchedAt,
+    liquidityUsd: rawYield.liquidityUsd,
+    rebalancingBehavior: rawYield.rebalancingBehavior,
+    managementFeeBps: rawYield.managementFeeBps,
+    performanceFeeBps: rawYield.performanceFeeBps,
+    capitalEfficiencyPct: rawYield.capitalEfficiencyPct,
     rewards,
     attribution: rawYield.attribution || {
       baseYield: roundTo(rawYield.apyBps / 100 * 0.7, 2),
