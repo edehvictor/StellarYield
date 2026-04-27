@@ -2,6 +2,8 @@ export interface RewardStream {
   tokenSymbol: string;
   emissionPerYear: number;
   tokenPrice: number;
+}
+
 export interface ApyAttribution {
   baseYield: number;
   incentives: number;

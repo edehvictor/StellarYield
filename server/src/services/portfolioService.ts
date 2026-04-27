@@ -1,4 +1,4 @@
-import { getYieldData } from "./yieldService";
+// import removed: getYieldData unused
 
 export interface VaultPosition {
   protocol: string;
