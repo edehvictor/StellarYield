@@ -203,12 +203,11 @@ export class StrategyHealthEngine {
 
     // Filter by reliability threshold
     return signals.filter(signal => signal.reliability >= this.config.signalReliabilityThreshold);
-  }
 
   /**
    * Get contract safety signals
    */
-  private async getContractSafetySignals(strategyId: string): Promise<HealthSignal[]> {
+  private async getContractSafetySignals(_strategyId: string): Promise<HealthSignal[]> {
     // Mock implementation - would query contract monitoring
     return [
       {
@@ -235,7 +234,7 @@ export class StrategyHealthEngine {
   /**
    * Get backend signals
    */
-  private async getBackendSignals(strategyId: string): Promise<HealthSignal[]> {
+  private async getBackendSignals(_strategyId: string): Promise<HealthSignal[]> {
     // Mock implementation - would query backend metrics
     return [
       {
@@ -262,7 +261,7 @@ export class StrategyHealthEngine {
   /**
    * Get monitoring signals
    */
-  private async getMonitoringSignals(strategyId: string): Promise<HealthSignal[]> {
+  private async getMonitoringSignals(_strategyId: string): Promise<HealthSignal[]> {
     // Mock implementation - would query monitoring systems
     return [
       {
@@ -289,7 +288,7 @@ export class StrategyHealthEngine {
   /**
    * Get market signals
    */
-  private async getMarketSignals(strategyId: string): Promise<HealthSignal[]> {
+  private async getMarketSignals(_strategyId: string): Promise<HealthSignal[]> {
     // Mock implementation - would query market data
     return [
       {
@@ -311,141 +310,6 @@ export class StrategyHealthEngine {
         reliability: 0.85,
       },
     ];
-  }
-
-  /**
-   * Calculate individual metrics from signals
-   */
-  private async calculateMetrics(signals: HealthSignal[]): Promise<StrategyHealthMetrics> {
-    const metrics = this.getDefaultMetrics();
-
-    // Calculate weighted averages for each metric category
-    signals.forEach(signal => {
-      const normalizedValue = this.normalizeSignalValue(signal);
-      
-      switch (signal.source) {
-        case 'contract':
-          if (signal.metric === 'audit_score') {
-            metrics.contractSafety = Math.max(metrics.contractSafety, normalizedValue);
-          }
-          break;
-        case 'backend':
-          if (signal.metric === 'api_response_time') {
-            metrics.latency = signal.value;
-          } else if (signal.metric === 'error_rate') {
-            metrics.errorRate = signal.value;
-          }
-          break;
-        case 'monitoring':
-          if (signal.metric === 'uptime_percentage') {
-            metrics.providerUptime = normalizedValue;
-          } else if (signal.metric === 'data_freshness') {
-            metrics.dataFreshness = normalizedValue;
-          }
-          break;
-        case 'market':
-          if (signal.metric === 'liquidity_depth') {
-            metrics.liquidityConditions = normalizedValue;
-          } else if (signal.metric === 'volatility_index') {
-            metrics.volatilityIndex = signal.value;
-          }
-          break;
-      }
-    });
-
-    // Calculate execution outcomes from historical data
-    metrics.executionOutcomes = await this.calculateExecutionOutcomes();
-
-    return metrics;
-  }
-
-  /**
-   * Normalize signal value to 0-1 scale
-   */
-  private normalizeSignalValue(signal: HealthSignal): number {
-    const { value, threshold } = signal;
-    
-    if (value >= threshold.good) return 1.0;
-    if (value <= threshold.critical) return 0.0;
-    
-    // Linear interpolation between critical and good
-    const range = threshold.good - threshold.critical;
-    const position = (value - threshold.critical) / range;
-    return Math.max(0, Math.min(1, position));
-  }
-
-  /**
-   * Calculate execution outcomes metric
-   */
-  private async calculateExecutionOutcomes(): Promise<number> {
-    // Mock implementation - would analyze historical execution results
-    return 0.92; // 92% success rate
-  }
-
-  /**
-   * Get default metrics
-   */
-  private getDefaultMetrics(): StrategyHealthMetrics {
-    return {
-      contractSafety: 0.8,
-      dataFreshness: 0.8,
-      providerUptime: 0.8,
-      liquidityConditions: 0.8,
-      executionOutcomes: 0.8,
-      volatilityIndex: 0.5,
-      errorRate: 0.05,
-      latency: 300,
-    };
-  }
-
-  /**
-   * Calculate overall health score
-   */
-  private calculateOverallScore(metrics: StrategyHealthMetrics, signals: HealthSignal[]): number {
-    // Weighted scoring
-    const weights = {
-      contractSafety: 0.25,
-      dataFreshness: 0.15,
-      providerUptime: 0.15,
-      liquidityConditions: 0.2,
-      executionOutcomes: 0.2,
-      volatilityIndex: 0.05, // Lower weight for volatility
-    };
-
-    let score = 0;
-    let totalWeight = 0;
-
-    Object.entries(weights).forEach(([metric, weight]) => {
-      const value = metrics[metric as keyof StrategyHealthMetrics] as number;
-      
-      // Invert metrics where lower is better
-      let normalizedValue = value;
-      if (metric === 'errorRate' || metric === 'latency') {
-        normalizedValue = 1 - Math.min(1, value);
-      }
-      if (metric === 'volatilityIndex') {
-        normalizedValue = 1 - value; // Lower volatility is better
-      }
-
-      score += normalizedValue * weight;
-      totalWeight += weight;
-    });
-
-    // Apply signal reliability weighting
-    const avgReliability = signals.reduce((sum, s) => sum + s.reliability, 0) / (signals.length || 1);
-    score *= avgReliability;
-
-    return Math.round((score / totalWeight) * 100);
-  }
-
-  /**
-   * Determine health status
-   */
-  private determineHealthStatus(score: number, metrics: StrategyHealthMetrics): 'healthy' | 'degraded' | 'critical' | 'disabled' {
-    if (score < this.thresholds.disableThreshold) return 'disabled';
-    if (score < this.thresholds.critical) return 'critical';
-    if (score < this.thresholds.degraded) return 'degraded';
-    return 'healthy';
   }
 
   /**
@@ -472,14 +336,13 @@ export class StrategyHealthEngine {
   private generateRecommendations(
     status: 'healthy' | 'degraded' | 'critical' | 'disabled',
     metrics: StrategyHealthMetrics,
-    signals: HealthSignal[],
+    _signals: HealthSignal[],
   ): string[] {
     const recommendations: string[] = [];
 
     if (status === 'disabled') {
       recommendations.push('Strategy auto-disabled due to poor health');
       recommendations.push('Manual review required before re-enabling');
-      return recommendations;
     }
 
     if (status === 'critical') {

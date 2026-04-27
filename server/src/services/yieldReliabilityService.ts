@@ -221,7 +221,7 @@ export class YieldReliabilityEngine {
     metrics.anomalyRate = Math.min(1, signals.varianceFromMean + recentAnomalyPenalty);
 
     // Latency (normalized)
-    const maxAcceptableLatency = 2000; // 2 seconds
+    const maxAcceptableLatency = this.config.maxAcceptableLatency;
     metrics.latency = signals.averageResponseTime;
     
     // Error rate
@@ -268,8 +268,7 @@ export class YieldReliabilityEngine {
       
       // Normalize latency (convert to 0-1 scale)
       if (metric === 'latency') {
-        const maxLatency = 5000; // 5 seconds
-        value = Math.max(0, 1 - (value / maxLatency));
+        value = Math.max(0, 1 - (value / maxAcceptableLatency));
       }
 
       score += value * weight;

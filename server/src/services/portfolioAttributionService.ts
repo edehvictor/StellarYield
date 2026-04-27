@@ -1,6 +1,5 @@
-import NodeCache from "node-cache";
-import { fetchNetworkSnapshot } from "./stellarNetworkService";
-import { freezeService } from "./freezeService";
+import { NodeCache } from 'node-cache';
+import { freezeService } from '../freezeService';
 
 // ── Types ───────────────────────────────────────────────────────────────
 

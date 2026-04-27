@@ -1,8 +1,12 @@
 import { Router } from 'express';
-import { portfolioAttributionEngine, validateAttributionRequest, formatAttributionReport } from '../services/portfolioAttributionService';
-import { protocolCompatibilityEngine, formatCompatibilityReport, isProtocolSafeForExecution } from '../services/protocolCompatibilityService';
-import { strategyHealthEngine, formatHealthScore, isStrategySafeForExecution, getCriticalHealthAlerts } from '../services/strategyHealthService';
-import { yieldReliabilityEngine, formatReliabilityScore, isProviderReliable, getWeightedProviderSelection } from '../services/yieldReliabilityService';
+import { 
+  portfolioAttributionEngine,
+  protocolCompatibilityEngine,
+  strategyHealthEngine,
+  yieldReliabilityEngine,
+  // _isStrategySafeForExecution,
+  // _isProviderReliable,
+} from '../services';
 
 const router = Router();
 
@@ -411,7 +415,7 @@ router.get('/reliability/recommendations', async (req, res) => {
  */
 router.post('/reliability/config', async (req, res) => {
   try {
-    const config = req.body;
+    const config = req.body as Record<string, unknown>;
     yieldReliabilityEngine.updateConfig(config);
     
     res.json({

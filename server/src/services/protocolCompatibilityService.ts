@@ -229,26 +229,9 @@ export class ProtocolCompatibilityEngine {
         recommendations,
         autoUpdateAvailable,
       };
-    } catch (error) {
-      console.error(`Failed to check ${protocolName}:`, error);
-      
-      return {
-        protocolName,
-        currentVersion: 'unknown',
-        latestVersion: 'unknown',
-        status: 'incompatible',
-        issues: [{
-          severity: 'critical',
-          component: 'system',
-          issue: 'Version check failed',
-          impact: 'Unable to verify protocol compatibility',
-          recommendation: 'Manual investigation required',
-          affectedStrategies: ['all'],
-        }],
-        lastChecked: new Date().toISOString(),
-        recommendations: ['Investigate protocol connectivity'],
-        autoUpdateAvailable: false,
-      };
+    } catch (_error) {
+      console.error('Failed to fetch protocol version:', { protocolName });
+      return null;
     }
   }
 
@@ -290,7 +273,7 @@ export class ProtocolCompatibilityEngine {
       }
 
       // Breaking changes check
-      const breakingChangesCheck = await this.checkBreakingChanges(protocolName, requirement, currentVersion);
+      const breakingChangesCheck = await this.checkBreakingChanges(protocolName, currentVersion, requirement);
       if (breakingChangesCheck.hasBreakingChanges) {
         issues.push({
           severity: breakingChangesCheck.affectsCriticalPath ? 'critical' : 'high',
@@ -302,7 +285,7 @@ export class ProtocolCompatibilityEngine {
         });
       }
 
-    } catch (error) {
+    } catch (_error) {
       issues.push({
         severity: 'medium',
         component: requirement.component,
@@ -386,8 +369,8 @@ export class ProtocolCompatibilityEngine {
    */
   private async checkBreakingChanges(
     protocolName: string,
+    currentVersion: string,
     requirement: CompatibilityRequirement,
-    currentVersion: ProtocolVersion,
   ): Promise<{ hasBreakingChanges: boolean; affectsCriticalPath: boolean; changes: string[] }> {
     // Mock implementation - in reality, this would analyze changelogs or contract diffs
     const mockBreakingChanges = ['fee_structure_change'];

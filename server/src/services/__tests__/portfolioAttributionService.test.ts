@@ -196,7 +196,7 @@ describe('PortfolioAttributionService', () => {
         ];
 
         // Access private method through reflection for testing
-        const contribution = (engine as any).calculateContribution(decisions);
+        const contribution = (engine as unknown as { calculateContribution: (decisions: unknown[]) => number }).calculateContribution(decisions);
         
         expect(contribution).toBeGreaterThan(0);
         expect(typeof contribution).toBe('number');
@@ -231,8 +231,8 @@ describe('PortfolioAttributionService', () => {
           }
         ];
 
-        const contributionHigh = (engine as any).calculateContribution(decisionsHigh);
-        const contributionLow = (engine as any).calculateContribution(decisionsLow);
+        const contributionHigh = (engine as unknown as { calculateContribution: (decisions: unknown[]) => number }).calculateContribution(decisionsHigh);
+        const contributionLow = (engine as unknown as { calculateContribution: (decisions: unknown[]) => number }).calculateContribution(decisionsLow);
 
         expect(contributionHigh).toBeGreaterThan(contributionLow);
       });
@@ -241,7 +241,7 @@ describe('PortfolioAttributionService', () => {
     describe('edge cases', () => {
       it('should handle empty decisions array', async () => {
         // Mock empty decisions
-        jest.spyOn(engine as any, 'fetchStrategyDecisions').mockResolvedValue([]);
+        jest.spyOn(engine as unknown as { fetchStrategyDecisions: () => Promise<unknown[]> }, 'fetchStrategyDecisions').mockResolvedValue([]);
 
         const report = await engine.generateAttributionReport(
           'GD5XQ2Z7WLOLF5SKDJU5LJY45JFIOE2M5M2Y6QPEXGA5RYKQZTUKY2U',
@@ -269,7 +269,7 @@ describe('PortfolioAttributionService', () => {
           }
         ];
 
-        jest.spyOn(engine as any, 'fetchStrategyDecisions').mockResolvedValue(decisionsWithMissingApy);
+        jest.spyOn(engine as unknown as { fetchStrategyDecisions: () => Promise<unknown[]> }, 'fetchStrategyDecisions').mockResolvedValue(decisionsWithMissingApy);
 
         const report = await engine.generateAttributionReport(
           'GD5XQ2Z7WLOLF5SKDJU5LJY45JFIOE2M5M2Y6QPEXGA5RYKQZTUKY2U',
