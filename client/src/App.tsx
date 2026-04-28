@@ -22,6 +22,7 @@ import ReferralDashboard from "./features/referrals/ReferralDashboard";
 import VestingDashboard from "./pages/vesting/VestingDashboard";
 import TransparencyDashboard from "./pages/transparency/TransparencyDashboard";
 import RiskChronology from "./pages/transparency/RiskChronology";
+import StressTestDashboard from "./pages/StressTestDashboard";
 import YieldForGood from "./features/donations/YieldForGood";
 import YieldCalculator from "./components/calculator/YieldCalculator";
 import { useWallet } from "./context/useWallet";
@@ -45,6 +46,7 @@ import {
   Settings,
   Bell,
   Calculator,
+  AlertTriangle,
 } from "lucide-react";
 import "./index.css";
 import SettingsModal from "./features/settings/SettingsModal";
@@ -110,6 +112,12 @@ const RootLayout = () => {
             className="hover:text-white transition-colors flex items-center gap-2"
           >
             <BrainCircuit size={18} /> AI Advisor
+          </Link>
+          <Link
+            to="/stress"
+            className="hover:text-white transition-colors flex items-center gap-2"
+          >
+            <AlertTriangle size={18} /> Stress Test
           </Link>
           <Link
             to="/vault"
@@ -264,6 +272,10 @@ const router = createBrowserRouter([
       {
         path: "/ai-advisor",
         element: <AIAdvisor />,
+      },
+      {
+        path: "/stress",
+        element: <StressTestDashboard />,
       },
       {
         path: "/vault",

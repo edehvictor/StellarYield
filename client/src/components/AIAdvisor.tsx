@@ -1,6 +1,30 @@
-import { Bot, Info } from 'lucide-react';
+import { useEffect, useState } from "react";
+import { Bot, Info, History } from "lucide-react";
+import { apiUrl } from "../lib/api";
+
+interface RecommendationTimelineEntry {
+  id: string;
+  recommendation: string;
+  rationale: string;
+  targetVault: string;
+  changedInputs: string[];
+  timestamp: string;
+}
 
 export default function AIAdvisor() {
+  const [timeline, setTimeline] = useState<RecommendationTimelineEntry[]>([]);
+
+  useEffect(() => {
+    fetch(apiUrl("/api/recommend/timeline?userId=anonymous"))
+      .then((res) => (res.ok ? res.json() : Promise.resolve({ timeline: [] })))
+      .then((data: { timeline?: RecommendationTimelineEntry[] }) => {
+        setTimeline(data.timeline ?? []);
+      })
+      .catch(() => {
+        setTimeline([]);
+      });
+  }, []);
+
   return (
     <div className="flex flex-col items-center justify-center min-h-[60vh] text-center space-y-6">
       <div className="bg-[#6C5DD3]/20 p-6 rounded-full inline-block mb-4 shadow-lg shadow-[#6C5DD3]/20">
@@ -55,6 +79,30 @@ export default function AIAdvisor() {
               </div>
             </div>
           </div>
+        </div>
+        <div className="p-4 mt-5 bg-white/5 border border-white/10 rounded-xl">
+          <div className="flex items-center gap-2 mb-3">
+            <History size={16} className="text-[#6C5DD3]" />
+            <h3 className="text-sm font-semibold text-white">Recommendation Timeline</h3>
+          </div>
+          {timeline.length === 0 ? (
+            <p className="text-xs text-gray-400">
+              No recommendation history yet. Run recommendations to inspect reasoning evolution.
+            </p>
+          ) : (
+            <div className="space-y-3">
+              {timeline.map((entry) => (
+                <div key={entry.id} className="rounded-lg border border-white/10 bg-black/20 p-3">
+                  <p className="text-sm text-white font-medium">{entry.targetVault}</p>
+                  <p className="text-xs text-gray-400 mt-1">{entry.recommendation}</p>
+                  <p className="text-xs text-gray-500 mt-1">{entry.rationale}</p>
+                  <p className="text-[11px] text-[#6C5DD3] mt-2">
+                    Changed inputs: {entry.changedInputs.join(", ")}
+                  </p>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
       </div>
     </div>
