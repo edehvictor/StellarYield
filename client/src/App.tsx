@@ -48,6 +48,9 @@ import {
   Settings,
   Bell,
   Calculator,
+  TrendingUp,
+  AlertTriangle,
+  Vault as VaultIcon,
 } from "lucide-react";
 import "./index.css";
 import SettingsModal from "./features/settings/SettingsModal";
@@ -173,7 +176,7 @@ const RootLayout = () => {
               to="/treasury"
               className="hover:text-white transition-colors flex items-center gap-2"
             >
-              <Vault size={18} /> Treasury
+              <VaultIcon size={18} /> Treasury
             </Link>
           )}
           <Link
