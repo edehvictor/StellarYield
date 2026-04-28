@@ -44,7 +44,7 @@ export default function AIAdvisor() {
         <div className="p-4 bg-white/5 border border-white/10 rounded-xl">
           <h3 className="text-sm font-semibold text-white mb-3">AI Advisor Risk Assessment Example</h3>
           <p className="text-xs text-gray-400 mb-4">When recommending vaults, the AI will evaluate risk across multiple factors:</p>
-          <div className="flex gap-4">
+          <div className="flex gap-4 flex-wrap">
             <div
               className="group relative flex cursor-help outline-none"
               tabIndex={0}
@@ -58,7 +58,24 @@ export default function AIAdvisor() {
                 role="tooltip"
                 className="absolute hidden group-hover:block group-focus-within:block bottom-full mb-2 left-1/2 -translate-x-1/2 w-48 p-2 bg-[#1A1A24] border border-white/10 rounded-lg text-xs leading-relaxed text-gray-300 shadow-xl z-10 transition-opacity"
               >
-                Low TVL, highly volatile assets, or experimental protocol.
+                Low TVL, highly volatile assets, limited protocol maturity, or stale data signals.
+              </div>
+            </div>
+
+            <div
+              className="group relative flex cursor-help outline-none"
+              tabIndex={0}
+              aria-describedby="ai-risk-tip-medium"
+            >
+              <span className="bg-yellow-500/15 text-yellow-400 border-yellow-500/30 border px-2.5 py-1.5 rounded-lg text-xs font-bold uppercase tracking-wider flex items-center gap-1">
+                Medium Risk <Info size={12} />
+              </span>
+              <div
+                id="ai-risk-tip-medium"
+                role="tooltip"
+                className="absolute hidden group-hover:block group-focus-within:block bottom-full mb-2 left-1/2 -translate-x-1/2 w-48 p-2 bg-[#1A1A24] border border-white/10 rounded-lg text-xs leading-relaxed text-gray-300 shadow-xl z-10 transition-opacity"
+              >
+                Moderate TVL and volatility with improving maturity and acceptable data freshness.
               </div>
             </div>
             
@@ -75,7 +92,7 @@ export default function AIAdvisor() {
                 role="tooltip"
                 className="absolute hidden group-hover:block group-focus-within:block bottom-full mb-2 left-1/2 -translate-x-1/2 w-48 p-2 bg-[#1A1A24] border border-white/10 rounded-lg text-xs leading-relaxed text-gray-300 shadow-xl z-10 transition-opacity"
               >
-                High TVL, battle-tested protocol, highly liquid.
+                High TVL, battle-tested protocol, high liquidity, and consistently fresh data.
               </div>
             </div>
           </div>

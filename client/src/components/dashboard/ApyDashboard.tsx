@@ -81,6 +81,30 @@ const PROTOCOL_COLORS: Record<string, string> = {
   Aquarius:  'from-emerald-500/80 to-teal-600/80',
 };
 
+const FRESHNESS_WINDOW_MINUTES = 5;
+
+type Freshness = {
+  isMissing: boolean;
+  isStale: boolean;
+  ageMinutes: number;
+};
+
+function getFreshness(fetchedAt?: string): Freshness {
+  if (!fetchedAt) {
+    return { isMissing: true, isStale: false, ageMinutes: 0 };
+  }
+  const fetchedTime = new Date(fetchedAt);
+  if (Number.isNaN(fetchedTime.getTime())) {
+    return { isMissing: true, isStale: false, ageMinutes: 0 };
+  }
+  const ageMinutes = Math.floor((Date.now() - fetchedTime.getTime()) / 60000);
+  return {
+    isMissing: false,
+    isStale: ageMinutes > FRESHNESS_WINDOW_MINUTES,
+    ageMinutes,
+  };
+}
+
 // ── Skeleton Components ─────────────────────────────────────────────────
 
 function SkeletonCard() {
@@ -379,9 +403,7 @@ export default function ApyDashboard() {
                 const gradient = PROTOCOL_COLORS[entry.protocol] ?? 'from-gray-500/80 to-gray-600/80';
                 const isPositive = entry.change24h >= 0;
                 
-                const fetchedTime = entry.fetchedAt ? new Date(entry.fetchedAt) : new Date();
-                const diffMins = Math.floor((Date.now() - fetchedTime.getTime()) / 60000);
-                const isStale = diffMins > 5;
+                const freshness = getFreshness(entry.fetchedAt);
 
                 return (
                   <div
@@ -419,10 +441,14 @@ export default function ApyDashboard() {
 
                       {/* Freshness Indicator */}
                       <div className="flex items-center gap-1.5 mb-3 text-[10px] font-medium uppercase tracking-wider">
-                        {isStale ? (
-                          <span className="text-red-400 flex items-center gap-1 bg-red-400/10 px-2 py-0.5 rounded-full"><Clock size={10} /> Stale Data ({diffMins}m old)</span>
+                        {freshness.isMissing ? (
+                          <span className="text-amber-300 flex items-center gap-1 bg-amber-300/10 px-2 py-0.5 rounded-full">
+                            <Clock size={10} /> Timestamp unavailable
+                          </span>
+                        ) : freshness.isStale ? (
+                          <span className="text-red-400 flex items-center gap-1 bg-red-400/10 px-2 py-0.5 rounded-full"><Clock size={10} /> Stale Data ({freshness.ageMinutes}m old)</span>
                         ) : (
-                          <span className="text-gray-500 flex items-center gap-1"><Clock size={10} /> Updated just now</span>
+                          <span className="text-gray-500 flex items-center gap-1"><Clock size={10} /> Updated {freshness.ageMinutes}m ago</span>
                         )}
                       </div>
 
@@ -535,9 +561,7 @@ export default function ApyDashboard() {
                       const gradient = PROTOCOL_COLORS[entry.protocol] ?? 'from-gray-500/80 to-gray-600/80';
                       const isPositive = entry.change24h >= 0;
                       
-                      const fetchedTime = entry.fetchedAt ? new Date(entry.fetchedAt) : new Date();
-                      const diffMins = Math.floor((Date.now() - fetchedTime.getTime()) / 60000);
-                      const isStale = diffMins > 5;
+                      const freshness = getFreshness(entry.fetchedAt);
 
                       return (
                         <tr
@@ -554,7 +578,11 @@ export default function ApyDashboard() {
                                 <span className="font-semibold text-white tracking-wide">{entry.protocol}</span>
                                 <div className="flex items-center gap-2 mt-0.5">
                                   <p className="text-[10px] text-gray-500">{entry.category}</p>
-                                  {isStale && <span className="text-[9px] text-red-400 bg-red-400/10 px-1.5 py-px rounded uppercase">Stale</span>}
+                                  {freshness.isMissing ? (
+                                    <span className="text-[9px] text-amber-300 bg-amber-300/10 px-1.5 py-px rounded uppercase">No timestamp</span>
+                                  ) : freshness.isStale ? (
+                                    <span className="text-[9px] text-red-400 bg-red-400/10 px-1.5 py-px rounded uppercase">Stale</span>
+                                  ) : null}
                                 </div>
                               </div>
                             </div>

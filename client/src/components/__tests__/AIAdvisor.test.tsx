@@ -6,6 +6,22 @@ const mockFetch = vi.fn();
 global.fetch = mockFetch;
 
 describe("AIAdvisor timeline", () => {
+  it("renders risk explanations for low, medium, and high levels", async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ timeline: [] }),
+    });
+
+    render(<AIAdvisor />);
+
+    expect(await screen.findByText(/High Risk/i)).toBeInTheDocument();
+    expect(screen.getByText(/Medium Risk/i)).toBeInTheDocument();
+    expect(screen.getByText(/Low Risk/i)).toBeInTheDocument();
+    expect(screen.getByText(/stale data signals/i)).toBeInTheDocument();
+    expect(screen.getByText(/acceptable data freshness/i)).toBeInTheDocument();
+    expect(screen.getByText(/consistently fresh data/i)).toBeInTheDocument();
+  });
+
   it("renders recommendation history entries", async () => {
     mockFetch.mockResolvedValueOnce({
       ok: true,
