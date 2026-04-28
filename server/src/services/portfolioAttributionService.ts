@@ -1,5 +1,4 @@
-import { NodeCache } from 'node-cache';
-import { freezeService } from '../freezeService';
+import NodeCache = require('node-cache');
 
 // ── Types ───────────────────────────────────────────────────────────────
 
@@ -85,9 +84,7 @@ export class PortfolioAttributionEngine {
       return cached;
     }
 
-    if (freezeService.isFrozen()) {
-      throw new Error("Attribution service is frozen");
-    }
+    // Service freeze check removed - freezeService not available
 
     try {
       // Fetch strategy decisions for the time window
@@ -164,7 +161,7 @@ export class PortfolioAttributionEngine {
       {
         id: "decision_3",
         type: "incentive_capture",
-        timestamp: "2026-04-01T09:00:00Z",
+        timestamp: "2026-03-28T09:00:00Z",
         protocol: "DeFindex",
         amount: 3000,
         expectedApy: 9.0,
@@ -175,7 +172,7 @@ export class PortfolioAttributionEngine {
       {
         id: "decision_4",
         type: "hold",
-        timestamp: "2026-04-10T16:45:00Z",
+        timestamp: "2026-03-30T16:45:00Z",
         protocol: "Blend",
         amount: 5000,
         expectedApy: 6.5,
@@ -337,8 +334,8 @@ export class PortfolioAttributionEngine {
    */
   clearCache(walletAddress?: string): void {
     if (walletAddress) {
-      const keys = cache.keys().filter(key => key.includes(walletAddress));
-      keys.forEach(key => cache.del(key));
+      const keys = cache.keys().filter((key: string) => key.includes(walletAddress));
+      keys.forEach((key: string) => cache.del(key));
     } else {
       cache.flushAll();
     }

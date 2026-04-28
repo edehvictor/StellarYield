@@ -4,9 +4,17 @@ import {
   protocolCompatibilityEngine,
   strategyHealthEngine,
   yieldReliabilityEngine,
-  // _isStrategySafeForExecution,
-  // _isProviderReliable,
 } from '../services';
+import {
+  validateAttributionRequest,
+  formatAttributionReport,
+  formatCompatibilityReport,
+  formatHealthScore,
+  getCriticalHealthAlerts,
+  formatReliabilityScore,
+  getWeightedProviderSelection,
+  isProtocolSafeForExecution,
+} from './analyticsUtils';
 
 const router = Router();
 
@@ -23,14 +31,19 @@ router.get('/attribution/:walletAddress', async (req, res) => {
 
     if (!startTime || !endTime) {
       return res.status(400).json({
+        success: false,
         error: 'Missing required parameters: startTime and endTime',
         example: '/api/analytics/attribution/:walletAddress?startTime=2026-03-01T00:00:00Z&endTime=2026-04-01T00:00:00Z'
       });
     }
 
     const validation = validateAttributionRequest(walletAddress, startTime as string, endTime as string);
+    
     if (!validation.valid) {
-      return res.status(400).json({ error: validation.error });
+      return res.status(400).json({
+        success: false,
+        error: validation.error || 'Invalid request parameters',
+      });
     }
 
     const report = await portfolioAttributionEngine.generateAttributionReport(
@@ -158,7 +171,7 @@ router.get('/compatibility/safe/:protocolName', async (req, res) => {
       data: {
         protocolName,
         isSafe,
-        status: report.protocols.find(p => p.protocolName === protocolName)?.status || 'unknown'
+        status: report.protocols.find((p: any) => p.protocolName === protocolName)?.status || 'unknown'
       }
     });
   } catch (error) {
@@ -442,7 +455,7 @@ router.get('/dashboard', async (req, res) => {
     const { walletAddress, strategyIds, providerIds } = req.query;
     
     // Initialize results
-    const dashboardData: Record<string, unknown> = {
+    const dashboardData: any = {
       attribution: null,
       compatibility: null,
       healthScores: [],
@@ -453,7 +466,7 @@ router.get('/dashboard', async (req, res) => {
         criticalIssues: 0,
         recommendations: [],
         lastUpdated: new Date().toISOString(),
-      }
+      },
     };
 
     // Get attribution if wallet address provided
