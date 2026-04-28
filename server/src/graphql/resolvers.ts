@@ -23,7 +23,7 @@ export const resolvers = {
         take: Math.min(args.limit ?? 50, 100),
         orderBy: { updatedAt: "desc" },
       });
-      return rows.map((row: { walletAddress: string }) => ({ id: toUserId(row.walletAddress), walletAddress: row.walletAddress }));
+      return rows.map((row) => ({ id: toUserId(row.walletAddress), walletAddress: row.walletAddress }));
     },
     transactions: async (
       _: unknown,
