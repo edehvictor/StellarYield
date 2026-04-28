@@ -50,8 +50,26 @@ describe('ApyDashboard Data Freshness & Risk Badges', () => {
 
     render(<ApyDashboard />);
 
-    const freshText = await screen.findAllByText(/Updated just now/i);
+    const freshText = await screen.findAllByText(/Updated 0m ago/i);
     expect(freshText.length).toBeGreaterThan(0);
+  });
+
+  it('handles missing timestamps gracefully', async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => [{
+        protocol: 'NoTimeProtocol',
+        asset: 'USDT',
+        apy: 7.0,
+        tvl: 2500,
+        risk: 'High'
+      }]
+    });
+
+    render(<ApyDashboard />);
+
+    const missingTimestamp = await screen.findAllByText(/Timestamp unavailable|No timestamp/i);
+    expect(missingTimestamp.length).toBeGreaterThan(0);
   });
 
   it('renders risk explanations', async () => {
