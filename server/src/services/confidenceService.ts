@@ -55,6 +55,65 @@ export function computeFreshnessScore(ageMs: number): number {
   return 1.0 - (ageMs - FRESH_MS) / (MAX_AGE_MS - FRESH_MS);
 }
 
+export type DecayCurve = "linear" | "exponential" | "stepwise";
+
+export interface FreshnessPolicy {
+  provider: string;
+  metric: string;
+  curve: DecayCurve;
+  freshWindowMs: number;
+  softStaleMs: number;
+  hardStaleMs: number;
+  decayK?: number;
+}
+
+export interface DecayedFreshnessResult {
+  confidence: number;
+  unusable: boolean;
+}
+
+export const DEFAULT_FRESHNESS_POLICY: FreshnessPolicy = {
+  provider: "default",
+  metric: "apy",
+  curve: "exponential",
+  freshWindowMs: 60_000,
+  softStaleMs: 10 * 60_000,
+  hardStaleMs: 45 * 60_000,
+  decayK: 3.5,
+};
+
+export function computeDecayedFreshnessConfidence(
+  ageMs: number,
+  policy: FreshnessPolicy = DEFAULT_FRESHNESS_POLICY,
+): DecayedFreshnessResult {
+  if (ageMs <= policy.freshWindowMs) {
+    return { confidence: 1, unusable: false };
+  }
+  if (ageMs >= policy.hardStaleMs) {
+    return { confidence: 0, unusable: true };
+  }
+
+  const normalized = Math.max(
+    0,
+    Math.min(1, (ageMs - policy.freshWindowMs) / (policy.softStaleMs - policy.freshWindowMs || 1)),
+  );
+
+  let confidence = 1;
+  if (policy.curve === "linear") {
+    confidence = 1 - normalized;
+  } else if (policy.curve === "stepwise") {
+    confidence = normalized < 0.33 ? 0.85 : normalized < 0.66 ? 0.55 : 0.25;
+  } else {
+    const k = policy.decayK ?? 3.5;
+    confidence = Math.exp(-k * normalized);
+  }
+
+  return {
+    confidence: Math.max(0, Math.min(1, confidence)),
+    unusable: ageMs >= policy.hardStaleMs,
+  };
+}
+
 /** Compute provider-agreement score from an array of yield values. */
 export function computeProviderAgreement(yields: number[]): number {
   if (yields.length === 0) return 0;
