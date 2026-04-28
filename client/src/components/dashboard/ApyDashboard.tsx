@@ -18,6 +18,7 @@ import {
 } from 'lucide-react';
 import { apiUrl } from '../../lib/api';
 import { LiquidityBufferPanel } from './LiquidityBufferPanel';
+import { computeDecayedFreshnessConfidence } from './freshnessDecay';
 
 // ── Types ───────────────────────────────────────────────────────────────
 
@@ -42,6 +43,8 @@ interface ApyEntry {
   rewardTokens: string[];
   category: string;
   fetchedAt?: string;
+  freshnessConfidence?: number;
+  unusableDueToStale?: boolean;
 }
 
 type SortField = 'apy' | 'tvl' | 'risk' | 'protocol';
@@ -162,12 +165,17 @@ export default function ApyDashboard() {
         capitalEfficiency?: { score: number; grade: "A" | "B" | "C" | "D" };
         tvl: number;
         risk: string;
-      }) => ({
-        ...d,
+      }) => {
+        const fetchedTime = d.fetchedAt ? new Date(d.fetchedAt).getTime() : Date.now();
+        const freshness = computeDecayedFreshnessConfidence(Date.now() - fetchedTime);
+        return {
+          ...d,
         change24h: parseFloat((Math.random() * 4 - 1).toFixed(2)),
         rewardTokens: [d.protocol.slice(0, 4).toUpperCase()],
         category: d.protocol === 'Soroswap' ? 'DEX LP' : d.protocol === 'Blend' ? 'Lending' : 'Index',
-      }));
+        freshnessConfidence: freshness.confidence,
+        unusableDueToStale: freshness.unusable,
+      }});
       setApyData(augmented);
     } catch {
       // Fallback to mock data if API is unavailable
@@ -193,6 +201,7 @@ export default function ApyDashboard() {
 
   const filtered = apyData
     .filter((d) => {
+      if (d.unusableDueToStale) return false;
       const q = searchQuery.toLowerCase();
       const matchesSearch = d.protocol.toLowerCase().includes(q) ||
         d.asset.toLowerCase().includes(q) ||
@@ -204,7 +213,9 @@ export default function ApyDashboard() {
       const dir = sortDirection === 'asc' ? 1 : -1;
       if (sortField === 'protocol') return dir * a.protocol.localeCompare(b.protocol);
       if (sortField === 'risk') return dir * ((RISK_CONFIG[a.risk]?.order ?? 0) - (RISK_CONFIG[b.risk]?.order ?? 0));
-      return dir * ((a[sortField] as number) - (b[sortField] as number));
+      const scoreA = (a[sortField] as number) * (a.freshnessConfidence ?? 1);
+      const scoreB = (b[sortField] as number) * (b.freshnessConfidence ?? 1);
+      return dir * (scoreA - scoreB);
     });
 
   const bestApy = apyData.length ? Math.max(...apyData.map((d) => d.netApy ?? d.apy)) : 0;
@@ -382,7 +393,7 @@ export default function ApyDashboard() {
                 
                 const fetchedTime = entry.fetchedAt ? new Date(entry.fetchedAt) : new Date();
                 const diffMins = Math.floor((Date.now() - fetchedTime.getTime()) / 60000);
-                const isStale = diffMins > 5;
+                const isStale = (entry.freshnessConfidence ?? 1) < 0.5;
 
                 return (
                   <div
@@ -423,7 +434,7 @@ export default function ApyDashboard() {
                         {isStale ? (
                           <span className="text-red-400 flex items-center gap-1 bg-red-400/10 px-2 py-0.5 rounded-full"><Clock size={10} /> Stale Data ({diffMins}m old)</span>
                         ) : (
-                          <span className="text-gray-500 flex items-center gap-1"><Clock size={10} /> Updated just now</span>
+                          <span className="text-gray-500 flex items-center gap-1"><Clock size={10} /> Updated just now ({Math.round((entry.freshnessConfidence ?? 1) * 100)}% confidence)</span>
                         )}
                       </div>
 

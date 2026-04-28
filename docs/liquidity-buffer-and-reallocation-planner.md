@@ -12,3 +12,10 @@
 - Each step must allocate exactly 100% across vaults.
 - Plan updates are blocked once a plan is cancelled.
 - Expected fee and recovery window values are informational outputs for staging decisions.
+
+## Yield Confidence Decay Model for Stale Data (#368)
+- Confidence now decays continuously (linear, exponential, or stepwise) rather than dropping at one fixed cutoff.
+- Policies are configurable per provider/metric through freshness policy fields:
+  `freshWindowMs`, `softStaleMs`, `hardStaleMs`, and curve parameters.
+- Ranking and recommendation confidence should multiply by freshness confidence so stale entries naturally lose priority.
+- Data older than `hardStaleMs` becomes unusable (`confidence=0`, excluded from actionable views).

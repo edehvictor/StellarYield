@@ -4,6 +4,7 @@ import {
   computeLiquidityScore,
   computeModelCompleteness,
   computeConfidenceScore,
+  computeDecayedFreshnessConfidence,
 } from "../confidenceService";
 
 describe("computeFreshnessScore", () => {
@@ -132,5 +133,25 @@ describe("computeConfidenceScore", () => {
     const high = computeConfidenceScore({ freshness: 1, providerAgreement: 1, liquidityQuality: 1, modelCompleteness: 1 });
     const low  = computeConfidenceScore({ freshness: 0, providerAgreement: 0, liquidityQuality: 0, modelCompleteness: 0 });
     expect(high.uncertaintyBand).toBeLessThan(low.uncertaintyBand);
+  });
+});
+
+describe("computeDecayedFreshnessConfidence", () => {
+  it("returns full confidence in fresh window", () => {
+    const result = computeDecayedFreshnessConfidence(30_000);
+    expect(result.confidence).toBe(1);
+    expect(result.unusable).toBe(false);
+  });
+
+  it("decays confidence over time", () => {
+    const earlier = computeDecayedFreshnessConfidence(2 * 60_000);
+    const later = computeDecayedFreshnessConfidence(8 * 60_000);
+    expect(earlier.confidence).toBeGreaterThan(later.confidence);
+  });
+
+  it("becomes unusable at hard stale threshold", () => {
+    const stale = computeDecayedFreshnessConfidence(50 * 60_000);
+    expect(stale.confidence).toBe(0);
+    expect(stale.unusable).toBe(true);
   });
 });
