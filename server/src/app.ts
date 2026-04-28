@@ -34,6 +34,11 @@ import treasuryRouter from "./routes/treasury";
 import governanceRouter from "./routes/governance";
 import presetsRouter from "./routes/presets";
 import { createAuthChallenge, verifyAuthChallenge } from "./utils/stellarAuth";
+import {
+  getRecommendationTimeline,
+  recordRecommendation,
+} from "./services/recommendationTimelineService";
+import { runStressScenario, StressScenarioType } from "./services/stressScenarioService";
 
 type EventsPrismaClient = {
   event: {
@@ -135,13 +140,67 @@ export function createApp() {
   });
 
   app.post("/api/recommend", (req: Request, res: Response) => {
-    const { preferences, riskTolerance } = req.body;
+    const { preferences, riskTolerance, expectedApy, liquidityDepthUsd, volatilityPct } = req.body;
     void preferences;
-    res.json({
+    const recommendation = {
       recommendation: `Based on your ${riskTolerance || "moderate"} risk tolerance, we recommend the Yield Index vault on DeFindex for diversified, stable returns.`,
       targetVault: "DeFindex Yield Index",
-      expectedApy: 8.9,
+      expectedApy: typeof expectedApy === "number" ? expectedApy : 8.9,
+      rationale:
+        "The recommendation balances projected yield, risk tolerance, and liquidity depth while minimizing fee drag.",
+    };
+    const userId = String(req.body.userId || "anonymous");
+    const timelineEntry = recordRecommendation(userId, {
+      recommendation: recommendation.recommendation,
+      targetVault: recommendation.targetVault,
+      rationale: recommendation.rationale,
+      inputSnapshot: {
+        riskTolerance: String(riskTolerance || "moderate"),
+        expectedApy:
+          typeof expectedApy === "number" && Number.isFinite(expectedApy) ? expectedApy : 8.9,
+        liquidityDepthUsd:
+          typeof liquidityDepthUsd === "number" && Number.isFinite(liquidityDepthUsd)
+            ? liquidityDepthUsd
+            : 1_000_000,
+        volatilityPct:
+          typeof volatilityPct === "number" && Number.isFinite(volatilityPct) ? volatilityPct : 5,
+      },
     });
+    res.json({
+      ...recommendation,
+      timelineEntry,
+    });
+  });
+
+  app.get("/api/recommend/timeline", (req: Request, res: Response) => {
+    const userId = String(req.query.userId || "anonymous");
+    res.json({
+      userId,
+      timeline: getRecommendationTimeline(userId),
+    });
+  });
+
+  app.post("/api/stress-scenarios/run", (req: Request, res: Response) => {
+    const scenario = String(req.body.scenario || "") as StressScenarioType;
+    const allowedScenarios: StressScenarioType[] = [
+      "apy-collapse",
+      "liquidity-drain",
+      "oracle-shock",
+    ];
+    if (!allowedScenarios.includes(scenario)) {
+      res.status(400).json({
+        error: "Scenario must be one of: apy-collapse, liquidity-drain, oracle-shock.",
+      });
+      return;
+    }
+
+    const result = runStressScenario({
+      scenario,
+      initialValueUsd: Number(req.body.initialValueUsd ?? 10_000),
+      baseApyPct: Number(req.body.baseApyPct ?? 8),
+      days: Number(req.body.days ?? 90),
+    });
+    res.json(result);
   });
 
   app.get("/api/yields/predict", (req: Request, res: Response) => {
