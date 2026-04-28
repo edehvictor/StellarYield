@@ -1,3 +1,6 @@
+import { assessConversionRisk } from "./conversionRiskService";
+import { ZapQuoteBody } from "./zapQuote";
+
 export interface RecommendationInputSnapshot {
   riskTolerance: string;
   expectedApy: number;
@@ -13,6 +16,7 @@ export interface RecommendationTimelineEntry {
   changedInputs: string[];
   inputSnapshot: RecommendationInputSnapshot;
   timestamp: string;
+  conversionRisk?: unknown;
 }
 
 const MAX_ENTRIES_PER_USER = 20;
@@ -30,26 +34,47 @@ function diffInputs(
   current: RecommendationInputSnapshot,
 ): string[] {
   if (!previous) return ["initial-baseline"];
+
   const changed: string[] = [];
-  if (previous.riskTolerance !== current.riskTolerance) changed.push("riskTolerance");
-  if (Math.abs(previous.expectedApy - current.expectedApy) >= 0.5) changed.push("expectedApy");
+
+  if (previous.riskTolerance !== current.riskTolerance) {
+    changed.push("riskTolerance");
+  }
+
+  if (Math.abs(previous.expectedApy - current.expectedApy) >= 0.5) {
+    changed.push("expectedApy");
+  }
+
   if (Math.abs(previous.liquidityDepthUsd - current.liquidityDepthUsd) >= 50_000) {
     changed.push("liquidityDepthUsd");
   }
+
   if (Math.abs(previous.volatilityPct - current.volatilityPct) >= 1) {
     changed.push("volatilityPct");
   }
+
   return changed;
 }
 
-export function recordRecommendation(
+export async function recordRecommendation(
   userId: string,
-  payload: Omit<RecommendationTimelineEntry, "id" | "timestamp" | "changedInputs"> & {
+  payload: Omit<
+    RecommendationTimelineEntry,
+    "id" | "timestamp" | "changedInputs" | "conversionRisk"
+  > & {
     inputSnapshot: RecommendationInputSnapshot;
   },
-): RecommendationTimelineEntry {
+  zapBody?: ZapQuoteBody,
+  strategyId?: string,
+): Promise<RecommendationTimelineEntry> {
   const existing = historyStore.get(userId) ?? [];
   const previous = existing[0]?.inputSnapshot ?? null;
+
+  const conversionRisk =
+    zapBody && strategyId
+      ? await assessConversionRisk(zapBody, strategyId)
+      : undefined;
+
   const entry: RecommendationTimelineEntry = {
     id: `${Date.now()}-${Math.random().toString(16).slice(2, 8)}`,
     recommendation: sanitizeText(payload.recommendation),
@@ -58,13 +83,19 @@ export function recordRecommendation(
     changedInputs: diffInputs(previous, payload.inputSnapshot),
     inputSnapshot: payload.inputSnapshot,
     timestamp: new Date().toISOString(),
+    conversionRisk,
   };
+
   const next = [entry, ...existing].slice(0, MAX_ENTRIES_PER_USER);
+
   historyStore.set(userId, next);
+
   return entry;
 }
 
-export function getRecommendationTimeline(userId: string): RecommendationTimelineEntry[] {
+export function getRecommendationTimeline(
+  userId: string,
+): RecommendationTimelineEntry[] {
   return historyStore.get(userId) ?? [];
 }
 
