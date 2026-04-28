@@ -35,19 +35,19 @@ interface ApyEntry {
 type SortField = 'apy' | 'tvl' | 'risk' | 'protocol';
 type SortDirection = 'asc' | 'desc';
 type ViewMode = 'grid' | 'table';
+type RiskLevel = 'Low' | 'Medium' | 'High';
 
-// ── Mock fallback data ──────────────────────────────────────────────────
-
-const MOCK_APY_DATA: ApyEntry[] = [
-  { protocol: 'Blend',     asset: 'USDC',       apy: 8.42,  tvl: 2_450_000, risk: 'Low',    change24h: 0.32,  rewardTokens: ['BLND'],          category: 'Lending' },
-  { protocol: 'Blend',     asset: 'XLM',        apy: 5.18,  tvl: 1_820_000, risk: 'Low',    change24h: -0.14, rewardTokens: ['BLND'],          category: 'Lending' },
-  { protocol: 'Soroswap',  asset: 'XLM-USDC',   apy: 14.75, tvl: 3_100_000, risk: 'Medium', change24h: 1.23,  rewardTokens: ['SSWP', 'XLM'],  category: 'DEX LP' },
-  { protocol: 'Soroswap',  asset: 'XLM-ETH',    apy: 18.32, tvl: 980_000,   risk: 'High',   change24h: 2.45,  rewardTokens: ['SSWP'],          category: 'DEX LP' },
-  { protocol: 'DeFindex',  asset: 'Yield Index', apy: 10.89, tvl: 1_540_000, risk: 'Medium', change24h: -0.58, rewardTokens: ['DFX'],           category: 'Index' },
-  { protocol: 'DeFindex',  asset: 'Blue Chip',   apy: 6.25,  tvl: 2_210_000, risk: 'Low',    change24h: 0.08,  rewardTokens: ['DFX'],           category: 'Index' },
-  { protocol: 'Aquarius',  asset: 'XLM-yXLM',   apy: 11.54, tvl: 1_350_000, risk: 'Low',    change24h: 0.76,  rewardTokens: ['AQUA', 'ICE'],   category: 'Staking' },
-  { protocol: 'Aquarius',  asset: 'USDC-yUSDC',  apy: 7.88,  tvl: 890_000,   risk: 'Low',    change24h: -0.22, rewardTokens: ['AQUA'],          category: 'Staking' },
-];
+interface ApiApyEntry {
+  protocol?: unknown;
+  asset?: unknown;
+  apy?: unknown;
+  tvl?: unknown;
+  risk?: unknown;
+  change24h?: unknown;
+  rewardTokens?: unknown;
+  category?: unknown;
+  fetchedAt?: unknown;
+}
 
 // ── Helpers ─────────────────────────────────────────────────────────────
 
@@ -69,6 +69,70 @@ const PROTOCOL_COLORS: Record<string, string> = {
   DeFindex:  'from-amber-500/80 to-orange-600/80',
   Aquarius:  'from-emerald-500/80 to-teal-600/80',
 };
+
+function normalizeNumber(value: unknown, fallback = 0): number {
+  const parsed = typeof value === 'number' ? value : Number(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function normalizeRisk(value: unknown): RiskLevel {
+  return value === 'Low' || value === 'Medium' || value === 'High' ? value : 'Medium';
+}
+
+function deriveCategory(protocol: string): string {
+  if (protocol === 'Soroswap') return 'DEX LP';
+  if (protocol === 'Blend') return 'Lending';
+  if (protocol === 'Aquarius') return 'Staking';
+  if (protocol === 'DeFindex') return 'Index';
+  return 'Other';
+}
+
+function normalizeFetchedAt(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? undefined : value;
+}
+
+function normalizeRewardTokens(tokens: unknown, protocol: string): string[] {
+  if (Array.isArray(tokens)) {
+    const cleaned = tokens.filter((token): token is string => typeof token === 'string' && token.trim().length > 0);
+    if (cleaned.length > 0) return cleaned;
+  }
+  return [protocol.slice(0, 4).toUpperCase()];
+}
+
+function normalizeApyEntry(entry: ApiApyEntry): ApyEntry {
+  const protocol = typeof entry.protocol === 'string' && entry.protocol.trim().length > 0
+    ? entry.protocol
+    : 'Unknown Protocol';
+  const asset = typeof entry.asset === 'string' && entry.asset.trim().length > 0
+    ? entry.asset
+    : 'Unknown Asset';
+
+  return {
+    protocol,
+    asset,
+    apy: normalizeNumber(entry.apy),
+    tvl: normalizeNumber(entry.tvl),
+    risk: normalizeRisk(entry.risk),
+    change24h: normalizeNumber(entry.change24h, parseFloat((Math.random() * 4 - 1).toFixed(2))),
+    rewardTokens: normalizeRewardTokens(entry.rewardTokens, protocol),
+    category: typeof entry.category === 'string' && entry.category.trim().length > 0
+      ? entry.category
+      : deriveCategory(protocol),
+    fetchedAt: normalizeFetchedAt(entry.fetchedAt),
+  };
+}
+
+function getErrorMessage(error: unknown): string {
+  if (error instanceof Error && error.message) {
+    if (error.message.startsWith('HTTP')) {
+      return `Yield API request failed (${error.message})`;
+    }
+    return error.message;
+  }
+  return 'Unable to fetch live APY data right now';
+}
 
 // ── Skeleton Components ─────────────────────────────────────────────────
 
@@ -132,23 +196,24 @@ export default function ApyDashboard() {
   const [selectedCategory, setSelectedCategory] = useState<string>('All');
   const [refreshing, setRefreshing] = useState(false);
 
-  const fetchApyData = async () => {
+  const fetchApyData = async (showLoadingState = true) => {
+    if (showLoadingState) {
+      setLoading(true);
+    }
+
     try {
       setError(null);
       const res = await fetch(apiUrl('/api/yields'));
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const data = await res.json();
-      // Map backend data and augment with comparison fields
-      const augmented: ApyEntry[] = data.map((d: { protocol: string; asset: string; apy: number; tvl: number; risk: string }) => ({
-        ...d,
-        change24h: parseFloat((Math.random() * 4 - 1).toFixed(2)),
-        rewardTokens: [d.protocol.slice(0, 4).toUpperCase()],
-        category: d.protocol === 'Soroswap' ? 'DEX LP' : d.protocol === 'Blend' ? 'Lending' : 'Index',
-      }));
-      setApyData(augmented);
-    } catch {
-      // Fallback to mock data if API is unavailable
-      setApyData(MOCK_APY_DATA);
+      const raw = await res.json();
+      const data = Array.isArray(raw) ? raw : [];
+      const normalized = data.map((entry) => normalizeApyEntry(entry as ApiApyEntry));
+      setApyData(normalized);
+    } catch (err) {
+      setError(getErrorMessage(err));
+
+      // Preserve already-rendered data so users can still browse stale rates.
+      setApyData((prev) => (prev.length > 0 ? prev : []));
     } finally {
       setLoading(false);
       setRefreshing(false);
@@ -156,12 +221,12 @@ export default function ApyDashboard() {
   };
 
   useEffect(() => {
-    fetchApyData();
+    void fetchApyData();
   }, []);
 
   const handleRefresh = () => {
     setRefreshing(true);
-    fetchApyData();
+    void fetchApyData(false);
   };
 
   // ── Derived state ───────────────────────────────────────────────────
@@ -222,7 +287,7 @@ export default function ApyDashboard() {
           </div>
           <h3 className="text-xl font-bold mb-2">Failed to Load APY Data</h3>
           <p className="text-gray-400 max-w-md mx-auto mb-6">
-            {error}. Please check your connection and try again.
+            {error}. Please try again.
           </p>
           <button onClick={handleRefresh} className="btn-primary inline-flex items-center gap-2">
             <RefreshCw size={16} /> Retry
@@ -257,9 +322,32 @@ export default function ApyDashboard() {
         </button>
       </header>
 
+      {error && (
+        <div
+          className="glass-panel border border-amber-500/30 bg-amber-500/10 p-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3"
+          role="status"
+        >
+          <div className="flex items-start gap-2 text-amber-200">
+            <AlertTriangle size={16} className="mt-0.5" />
+            <p className="text-sm">
+              Live APY refresh failed. Showing the last available rates.
+            </p>
+          </div>
+          <button onClick={handleRefresh} className="btn-secondary inline-flex items-center gap-2 text-sm self-start sm:self-auto">
+            <RefreshCw size={14} className={refreshing ? 'animate-spin' : ''} />
+            Retry
+          </button>
+        </div>
+      )}
+
       {/* Summary Stats */}
       {loading ? (
-        <SkeletonSummary />
+        <div>
+          <p className="text-sm text-gray-400 mb-3" role="status">
+            Loading latest APY data...
+          </p>
+          <SkeletonSummary />
+        </div>
       ) : (
         <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-4">
           <div className="glass-card p-5 border-l-4 border-[#6C5DD3]">
@@ -443,8 +531,20 @@ export default function ApyDashboard() {
         </div>
       )}
 
+      {!loading && apyData.length === 0 && (
+        <div className="glass-panel p-16 text-center" data-testid="apy-empty-state">
+          <AlertTriangle size={32} className="text-gray-500 mx-auto mb-4" />
+          <p className="text-gray-300 font-medium">No APY data available yet</p>
+          <p className="text-gray-500 text-sm mt-1">Try refreshing to load the latest rates.</p>
+          <button onClick={handleRefresh} className="btn-secondary inline-flex items-center gap-2 mt-6">
+            <RefreshCw size={14} className={refreshing ? 'animate-spin' : ''} />
+            Retry
+          </button>
+        </div>
+      )}
+
       {/* Table View */}
-      {viewMode === 'table' && (
+      {viewMode === 'table' && apyData.length > 0 && (
         <div className="glass-panel overflow-hidden">
           <div className="overflow-x-auto">
             <table className="w-full text-left border-collapse">
@@ -571,7 +671,7 @@ export default function ApyDashboard() {
       )}
 
       {/* Card Grid Empty State */}
-      {viewMode === 'grid' && !loading && filtered.length === 0 && (
+      {viewMode === 'grid' && !loading && apyData.length > 0 && filtered.length === 0 && (
         <div className="glass-panel p-16 text-center">
           <Search size={32} className="text-gray-600 mx-auto mb-4" />
           <p className="text-gray-400 font-medium">No matching yields found</p>
