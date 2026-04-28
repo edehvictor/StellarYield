@@ -73,7 +73,7 @@ describe("smart wallet auth routes", () => {
     });
 
     expect(response.status).toBe(400);
-    expect(response.body.error).toBe("Invalid wallet address.");
+    expect(response.body.message).toBe("Invalid wallet address.");
   });
 
   it("accepts signatures from session keys bound to contract wallets", async () => {

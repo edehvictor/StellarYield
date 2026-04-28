@@ -46,6 +46,11 @@ function buildProtocolSnapshot(
     network,
     source: config.source,
     fetchedAt,
+    liquidityUsd: config.liquidityUsd,
+    rebalancingBehavior: config.rebalancingBehavior,
+    managementFeeBps: config.managementFeeBps,
+    performanceFeeBps: config.performanceFeeBps,
+    capitalEfficiencyPct: config.capitalEfficiencyPct,
     rewards: config.rewardStreams,
     attribution: {
       baseYield: config.baseApyBps / 100 * 0.8,
@@ -102,6 +107,11 @@ export async function getYieldData(): Promise<NormalizedYield[]> {
         network: "mainnet",
         source: protocol.source,
         fetchedAt: new Date().toISOString(),
+        liquidityUsd: protocol.liquidityUsd,
+        rebalancingBehavior: protocol.rebalancingBehavior,
+        managementFeeBps: protocol.managementFeeBps,
+        performanceFeeBps: protocol.performanceFeeBps,
+        capitalEfficiencyPct: protocol.capitalEfficiencyPct,
         rewards: protocol.rewardStreams,
       })),
     );

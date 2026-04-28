@@ -1,0 +1,37 @@
+
+> server@1.0.0 lint
+> eslint .
+
+
+/Users/anu/StellarYield/server/src/__tests__/health.test.ts
+  4:10  error  'PrismaClient' is defined but never used. Allowed unused vars must match /^_/u  @typescript-eslint/no-unused-vars
+  5:10  error  'Horizon' is defined but never used. Allowed unused vars must match /^_/u       @typescript-eslint/no-unused-vars
+
+/Users/anu/StellarYield/server/src/__tests__/stellarNetworkService.test.ts
+    1:10  error  'Horizon' is defined but never used. Allowed unused vars must match /^_/u  @typescript-eslint/no-unused-vars
+    6:1   error  Unexpected var, use let or const instead                                   no-var
+    6:22  error  Unexpected any. Specify a different type                                   @typescript-eslint/no-explicit-any
+    7:1   error  Unexpected var, use let or const instead                                   no-var
+    7:24  error  Unexpected any. Specify a different type                                   @typescript-eslint/no-explicit-any
+   62:22  error  Unexpected any. Specify a different type                                   @typescript-eslint/no-explicit-any
+   90:22  error  Unexpected any. Specify a different type                                   @typescript-eslint/no-explicit-any
+  100:21  error  Unexpected any. Specify a different type                                   @typescript-eslint/no-explicit-any
+  110:21  error  Unexpected any. Specify a different type                                   @typescript-eslint/no-explicit-any
+
+/Users/anu/StellarYield/server/src/__tests__/zapQuote.test.ts
+  48:11  error  'prevRouter' is assigned a value but never used. Allowed unused vars must match /^_/u  @typescript-eslint/no-unused-vars
+  77:24  error  A `require()` style import is forbidden                                                @typescript-eslint/no-require-imports
+  78:87  error  Unexpected any. Specify a different type                                               @typescript-eslint/no-explicit-any
+
+/Users/anu/StellarYield/server/src/services/stellarNetworkService.ts
+  16:34  error  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  34:18  error  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+
+/Users/anu/StellarYield/server/src/types/error.ts
+  4:13  error  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+
+/Users/anu/StellarYield/server/src/utils/errorResponse.ts
+  9:13  error  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+
+✖ 18 problems (18 errors, 0 warnings)
+

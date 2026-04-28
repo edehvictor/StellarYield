@@ -1,5 +1,7 @@
 import { Router, Request, Response } from "express";
 import { PrismaClient } from "@prisma/client";
+import { sendError } from "../utils/errorResponse";
+import { validatePagination } from "../middleware/validation";
 
 const router = Router();
 const prisma = new PrismaClient();
@@ -64,7 +66,7 @@ function timeframeToSince(timeframe: string): Date | null {
  * @param minTvl Optional minimum TVL.
  * @param maxTvl Optional maximum TVL.
  */
-router.get("/", async (req: Request, res: Response) => {
+router.get("/", validatePagination, async (req: Request, res: Response) => {
   try {
     if (req.query.protocol) {
       badRequest(res, "protocol filter is not supported by this dataset");
@@ -169,6 +171,7 @@ router.get("/", async (req: Request, res: Response) => {
     res.json(response);
   } catch (error) {
     console.error("Leaderboard query failed", error);
+    sendError(res, 500, "LEADERBOARD_FAILED", "Failed to fetch leaderboard.");
     res.status(500).json({
       error: "Failed to fetch leaderboard.",
       requestId: (req as unknown as { requestId?: string }).requestId,

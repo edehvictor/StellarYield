@@ -1,11 +1,13 @@
 import { Router, Request, Response } from "express";
 import { PrismaClient } from "@prisma/client";
+import { sendError } from "../utils/errorResponse";
+import { validateWalletAddress } from "../middleware/validation";
 
 const router = Router();
 const prisma = new PrismaClient();
 
 // FETCH notifications for a user
-router.get("/:walletAddress", async (req: Request, res: Response) => {
+router.get("/:walletAddress", validateWalletAddress, async (req: Request, res: Response) => {
   const { walletAddress } = req.params;
   try {
     const notifications = await prisma.notification.findMany({
@@ -14,7 +16,7 @@ router.get("/:walletAddress", async (req: Request, res: Response) => {
     });
     res.json(notifications);
   } catch {
-    res.status(500).json({ error: "Failed to fetch notifications." });
+    sendError(res, 500, "FETCH_NOTIFICATIONS_FAILED", "Failed to fetch notifications.");
   }
 });
 
@@ -28,7 +30,7 @@ router.patch("/:id/read", async (req: Request, res: Response) => {
     });
     res.sendStatus(204);
   } catch {
-    res.status(500).json({ error: "Failed to mark as read." });
+    sendError(res, 500, "MARK_READ_FAILED", "Failed to mark as read.");
   }
 });
 
@@ -41,7 +43,7 @@ router.delete("/:walletAddress", async (req: Request, res: Response) => {
     });
     res.sendStatus(204);
   } catch {
-    res.status(500).json({ error: "Failed to clear notifications." });
+    sendError(res, 500, "CLEAR_NOTIFICATIONS_FAILED", "Failed to clear notifications.");
   }
 });
 

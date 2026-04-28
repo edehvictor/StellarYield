@@ -166,3 +166,51 @@ async function dispatchAlertEmail(
     console.error("[alertsService] Failed to send alert email", err);
   }
 }
+
+export async function dispatchDriftAlert(
+  vaultId: string,
+  targetWeight: number,
+  actualWeight: number,
+  driftAmt: number,
+  state: "underweight" | "overweight" | "recovered"
+): Promise<void> {
+  const operatorEmails = ["operator@stellaryield.com"]; // Fixed operator email
+  const subject = `StellarYield Drift Alert: ${vaultId} is ${state}`;
+  
+  const statusMsg = state === "recovered" 
+    ? `The vault ${vaultId} has recovered to its target allocation weight.`
+    : `The vault ${vaultId} has drifted from its target allocation weight and is currently ${state}.`;
+
+  const html = `
+    <div style="font-family:sans-serif;max-width:480px;margin:0 auto">
+      <h2 style="color:#6366f1">Drift Alert</h2>
+      <p>${statusMsg}</p>
+      <table style="width:100%;border-collapse:collapse;margin:16px 0">
+        <tr>
+          <td style="padding:8px;color:#6b7280">Vault</td>
+          <td style="padding:8px;font-weight:600">${vaultId}</td>
+        </tr>
+        <tr style="background:#f9fafb">
+          <td style="padding:8px;color:#6b7280">Target Weight</td>
+          <td style="padding:8px">${(targetWeight * 100).toFixed(2)}%</td>
+        </tr>
+        <tr>
+          <td style="padding:8px;color:#6b7280">Actual Weight</td>
+          <td style="padding:8px;font-weight:600">${(actualWeight * 100).toFixed(2)}%</td>
+        </tr>
+        <tr style="background:#f9fafb">
+          <td style="padding:8px;color:#6b7280">Drift Amount</td>
+          <td style="padding:8px;font-weight:600">${(driftAmt * 100).toFixed(2)}%</td>
+        </tr>
+      </table>
+    </div>
+  `;
+
+  for (const to of operatorEmails) {
+    try {
+      await sendEmail({ to, subject, html });
+    } catch (err) {
+      console.error("[alertsService] Failed to send drift alert email", err);
+    }
+  }
+}

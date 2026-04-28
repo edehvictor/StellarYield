@@ -10,7 +10,7 @@ const HORIZON_URL =
 const SOROBAN_RPC_URL =
   process.env.SOROBAN_RPC_URL ?? "https://soroban-testnet.stellar.org";
 const HEALTH_TIMEOUT_MS = Number(process.env.HEALTH_CHECK_TIMEOUT_MS ?? "5000");
-const INDEXER_LAG_WARN = Number(process.env.INDEXER_LAG_WARN_LEDGERS ?? "50");
+const _INDEXER_LAG_WARN_THRESHOLD = Number(process.env.INDEXER_LAG_WARN_LEDGERS ?? "50");
 
 type ComponentStatus = "up" | "down" | "warning";
 
@@ -70,25 +70,22 @@ async function checkSorobanRpc(): Promise<ComponentStatus> {
 }
 
 async function checkIndexer(
-  latestLedger?: number,
+  _latestLedger?: number,
 ): Promise<{
   status: ComponentStatus;
   syncedLedger?: number;
   lag?: number;
 }> {
   try {
-    const state = await withTimeout(
-      prisma.indexerState.findFirst(),
-      HEALTH_TIMEOUT_MS,
-    );
+    const state = await prisma.indexerState.findFirst();
     const syncedLedger = state?.lastLedger ?? 0;
-    if (!latestLedger) return { status: "warning", syncedLedger };
-    const lag = latestLedger - syncedLedger;
-    return {
-      status: lag < INDEXER_LAG_WARN ? "up" : "warning",
-      syncedLedger,
-      lag,
-    };
+    const lag = _latestLedger ? _latestLedger - syncedLedger : undefined;
+
+    if (!lag || lag < 50) {
+      return { status: "up", syncedLedger, lag };
+    } else {
+      return { status: "warning", syncedLedger, lag };
+    }
   } catch {
     return { status: "down" };
   }

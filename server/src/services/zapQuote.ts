@@ -70,7 +70,14 @@ export async function quoteViaRouterSimulation(
       .setTimeout(30)
       .build();
 
-    const simulated = await server.simulateTransaction(tx);
+    const timeoutMs = parseInt(process.env.SOROBAN_RPC_TIMEOUT_MS ?? "10000", 10);
+    const simulated = await Promise.race([
+      server.simulateTransaction(tx),
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error("Timeout")), timeoutMs)
+      ),
+    ]);
+
     if (StellarSdk.rpc.Api.isSimulationError(simulated)) {
       return null;
     }

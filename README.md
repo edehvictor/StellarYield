@@ -50,6 +50,10 @@ npm run dev
 
 The backend runs on `http://localhost:3001`.
 
+#### Environment Variables
+
+- `STELLAR_HORIZON_TIMEOUT_MS`: Timeout for Horizon API calls in milliseconds (default: `10000`)
+- `SOROBAN_RPC_TIMEOUT_MS`: Timeout for Soroban RPC API calls in milliseconds (default: `10000`)
 The example env files document required and optional values. Keep real secrets
 out of git; frontend values must be public `VITE_` values only.
 

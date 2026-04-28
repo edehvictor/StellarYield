@@ -5,6 +5,8 @@ import {
   createExportFilename,
   type TransactionRecord,
 } from "../services/export";
+import { sendError } from "../utils/errorResponse";
+import { validateWalletAddress } from "../middleware/validation";
 
 type ExportPrismaClient = {
   userTransaction: {
@@ -62,20 +64,14 @@ const exportLimiter = rateLimit({
 exportRouter.get(
   "/:address/export",
   exportLimiter,
+  validateWalletAddress,
   async (req: Request, res: Response) => {
     const { address } = req.params;
-
-    if (!address || typeof address !== "string" || address.length < 10) {
-      res.status(400).json({ error: "Invalid wallet address." });
-      return;
-    }
 
     const prisma = await loadPrismaClient();
 
     if (!prisma) {
-      res.status(503).json({
-        error: "Export database is unavailable.",
-      });
+      sendError(res, 503, "DB_UNAVAILABLE", "Export database is unavailable.");
       return;
     }
 
@@ -87,9 +83,7 @@ exportRouter.get(
 
       if (count === 0) {
         await prisma.$disconnect?.();
-        res.status(404).json({
-          error: "No transactions found for this address.",
-        });
+        sendError(res, 404, "NO_TRANSACTIONS", "No transactions found for this address.");
         return;
       }
 
@@ -124,7 +118,7 @@ exportRouter.get(
       csvStream.pipe(res);
     } catch (error) {
       console.error(`[export] Failed to export data for ${address}`, error);
-      res.status(500).json({ error: "Failed to generate export." });
+      sendError(res, 500, "EXPORT_FAILED", "Failed to generate export.");
     }
   },
 );
