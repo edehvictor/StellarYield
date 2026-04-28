@@ -5,6 +5,11 @@ import { startHistoricalYieldAggregationJob } from "./jobs/historicalYieldAggreg
 import { startSharePriceSnapshotJob } from "./jobs/sharePriceSnapshot";
 import { startHealthMonitor } from "./monitoring/healthMonitor";
 import { startDriftDetectionJob } from "./jobs/driftDetectionJob";
+import { startStrategyRotationJob } from "./jobs/strategyRotationJob";
+import { PROTOCOLS } from "./config/protocols";
+import { calculateRiskScore } from "./utils/riskScoring";
+import { computeRiskAdjustedYield } from "./services/riskAdjustedYieldService";
+import type { RotationCandidate } from "./services/strategyRotationService";
 import { assertValidServerEnv } from "./config/env";
 import express, { Request, Response } from 'express';
 import cors from 'cors';
@@ -47,6 +52,40 @@ startHistoricalYieldAggregationJob();
 startSharePriceSnapshotJob();
 startDriftDetectionJob();
 startHealthMonitor().catch(console.error);
+
+// Autonomous strategy rotation: evaluate every 6h using current protocol
+// metrics. The fetcher is intentionally kept on-host (no network calls)
+// so the job is robust to provider outages — it consumes the same data
+// that powers the strategies leaderboard.
+startStrategyRotationJob({
+  fetchCandidates: async (): Promise<RotationCandidate[]> => {
+    const now = new Date().toISOString();
+    return PROTOCOLS.map((p) => {
+      const risk = calculateRiskScore({
+        tvlUsd: p.baseTvlUsd,
+        ilVolatilityPct: p.volatilityPct,
+        protocolAgeDays: p.protocolAgeDays,
+      });
+      const score = computeRiskAdjustedYield({
+        id: p.protocolName.toLowerCase(),
+        name: p.protocolName,
+        strategyType: p.protocolType,
+        apy: p.baseApyBps / 100,
+        tvlUsd: p.baseTvlUsd,
+        ilVolatilityPct: p.volatilityPct,
+        riskScore: risk.score,
+      });
+      return {
+        id: p.protocolName.toLowerCase(),
+        name: p.protocolName,
+        score,
+        volatility: p.volatilityPct,
+        confidence: 0.9,
+        fetchedAt: now,
+      };
+    });
+  },
+});
 
 // ─── Digest workers ───────────────────────────────────────────────────────────
 const digestRedis = new Redis(process.env.REDIS_URL || 'redis://localhost:6379', {
