@@ -12,6 +12,23 @@ export interface StrategyDecision {
   actualApy?: number;
   duration: number; // days
   confidence: number; // 0-1
+
+  /**
+   * Input completeness hints.
+   * - If `actualApy` is missing, we treat price inputs as incomplete by default.
+   * - For incentive emissions, callers may set `hasEmissionsInputs=false` when emissions data is missing.
+   */
+  hasPriceInputs?: boolean;
+  hasEmissionsInputs?: boolean;
+}
+
+export type RewardSource = 'base_protocol_yield' | 'incentive_emissions' | 'fees' | 'tactical_routing';
+
+export interface RewardSourceMixEntry {
+  rewardSource: RewardSource;
+  contribution: number; // USD value contribution (already confidence-weighted)
+  percentage: number; // of total return
+  confidence: number; // 0-1 (weighted by contribution)
 }
 
 export interface AttributionBreakdown {
@@ -28,6 +45,7 @@ export interface AttributionReport {
   totalReturn: number;
   totalDeposited: number;
   attributionBreakdown: AttributionBreakdown[];
+  rewardSourceMix: RewardSourceMixEntry[];
   timeWindow: {
     start: string;
     end: string;
@@ -52,6 +70,21 @@ const DEFAULT_CONFIG: AttributionConfig = {
   requireMinDecisions: 3,
   weightByAmount: true,
   includeIncompleteData: false,
+};
+
+const INCOMPLETE_INPUT_CONFIDENCE_MULTIPLIER = 0.85;
+
+const REWARD_SOURCE_SHARES: Record<
+  string,
+  Array<{ rewardSource: RewardSource; share: number }>
+> = {
+  initial_routing: [{ rewardSource: 'base_protocol_yield', share: 1 }],
+  hold: [{ rewardSource: 'base_protocol_yield', share: 1 }],
+  rotation: [
+    { rewardSource: 'tactical_routing', share: 0.7 },
+    { rewardSource: 'fees', share: 0.3 },
+  ],
+  incentive_capture: [{ rewardSource: 'incentive_emissions', share: 1 }],
 };
 
 const cache = new NodeCache({
@@ -93,18 +126,33 @@ export class PortfolioAttributionEngine {
       // Calculate returns and attribution
       const attributionBreakdown = this.calculateAttribution(decisions);
       
+      // Assess data completeness.
+      // If we have very few decisions, we treat the overall view as less precise,
+      // but we still return a breakdown so dashboards can explain "incomplete" signals.
+      let dataCompleteness = this.assessDataCompleteness(decisions, startTime, endTime);
+      if (!this.config.includeIncompleteData && decisions.length < this.config.requireMinDecisions) {
+        const scarcityFactor = decisions.length / Math.max(1, this.config.requireMinDecisions);
+        dataCompleteness = Math.min(dataCompleteness, scarcityFactor);
+      }
+
       // Calculate total metrics
-      const totalReturn = attributionBreakdown.reduce((sum, breakdown) => sum + breakdown.contribution, 0);
-      const totalDeposited = decisions.reduce((sum, decision) => sum + decision.amount, 0);
-      
-      // Assess data completeness
-      const dataCompleteness = this.assessDataCompleteness(decisions, startTime, endTime);
+      const totalReturn = attributionBreakdown.reduce(
+        (sum, breakdown) => sum + breakdown.contribution,
+        0,
+      );
+      const totalDeposited = decisions.reduce(
+        (sum, decision) => sum + decision.amount,
+        0,
+      );
+
+      const rewardSourceMix = this.calculateRewardSourceMix(attributionBreakdown);
 
       const report: AttributionReport = {
         walletAddress,
         totalReturn,
         totalDeposited,
         attributionBreakdown,
+        rewardSourceMix,
         timeWindow: { start: startTime, end: endTime },
         generatedAt: new Date().toISOString(),
         dataCompleteness,
@@ -146,6 +194,8 @@ export class PortfolioAttributionEngine {
         actualApy: 6.8,
         duration: 30,
         confidence: 0.85,
+        hasPriceInputs: true,
+        hasEmissionsInputs: true,
       },
       {
         id: "decision_2", 
@@ -157,6 +207,8 @@ export class PortfolioAttributionEngine {
         actualApy: 12.2,
         duration: 25,
         confidence: 0.75,
+        hasPriceInputs: true,
+        hasEmissionsInputs: true,
       },
       {
         id: "decision_3",
@@ -168,6 +220,8 @@ export class PortfolioAttributionEngine {
         actualApy: 8.9,
         duration: 20,
         confidence: 0.90,
+        hasPriceInputs: true,
+        hasEmissionsInputs: true,
       },
       {
         id: "decision_4",
@@ -179,6 +233,8 @@ export class PortfolioAttributionEngine {
         actualApy: 6.7,
         duration: 15,
         confidence: 0.95,
+        hasPriceInputs: true,
+        hasEmissionsInputs: true,
       },
     ];
 
@@ -187,11 +243,33 @@ export class PortfolioAttributionEngine {
       const decisionTime = new Date(decision.timestamp);
       const start = new Date(startTime);
       const end = new Date(endTime);
+      const effectiveConfidence = this.getDecisionEffectiveConfidence(decision);
       
       return decisionTime >= start && 
              decisionTime <= end && 
-             decision.confidence >= this.config.minConfidenceThreshold;
+             (effectiveConfidence >= this.config.minConfidenceThreshold || this.config.includeIncompleteData);
     });
+  }
+
+  private getDecisionEffectiveConfidence(decision: StrategyDecision): number {
+    const baseConfidence = decision.confidence;
+
+    // If we had to fall back to expected APY, price inputs are incomplete by definition.
+    const hasPriceInputs = decision.hasPriceInputs ?? decision.actualApy !== undefined;
+
+    // Incentive capture decisions depend on emissions inputs.
+    const hasEmissionsInputs = decision.hasEmissionsInputs ?? true;
+
+    let effective = baseConfidence;
+    if (!hasPriceInputs) {
+      effective *= INCOMPLETE_INPUT_CONFIDENCE_MULTIPLIER;
+    }
+    if (!hasEmissionsInputs) {
+      effective *= INCOMPLETE_INPUT_CONFIDENCE_MULTIPLIER;
+    }
+
+    // Always clamp to a valid range so UI math stays safe.
+    return Math.max(0, Math.min(1, effective));
   }
 
   /**
@@ -248,8 +326,9 @@ export class PortfolioAttributionEngine {
       const durationFactor = decision.duration / 365; // Convert days to years
       const contribution = annualReturn * durationFactor;
       
-      // Apply confidence weighting
-      const weightedContribution = contribution * decision.confidence;
+      // Apply confidence weighting (but don't overstate precision when inputs are incomplete).
+      const effectiveConfidence = this.getDecisionEffectiveConfidence(decision);
+      const weightedContribution = contribution * effectiveConfidence;
       
       // Apply amount weighting if configured
       return this.config.weightByAmount ? weightedContribution : weightedContribution / decision.amount;
@@ -264,10 +343,11 @@ export class PortfolioAttributionEngine {
     
     const totalWeightedApy = decisions.reduce((sum, decision) => {
       const actualApy = decision.actualApy || decision.expectedApy;
-      return sum + (actualApy * decision.confidence);
+      const effectiveConfidence = this.getDecisionEffectiveConfidence(decision);
+      return sum + (actualApy * effectiveConfidence);
     }, 0);
     
-    const totalConfidence = decisions.reduce((sum, decision) => sum + decision.confidence, 0);
+    const totalConfidence = decisions.reduce((sum, decision) => sum + this.getDecisionEffectiveConfidence(decision), 0);
     
     return totalConfidence > 0 ? totalWeightedApy / totalConfidence : 0;
   }
@@ -278,8 +358,59 @@ export class PortfolioAttributionEngine {
   private calculateAverageConfidence(decisions: StrategyDecision[]): number {
     if (decisions.length === 0) return 0;
     
-    const totalConfidence = decisions.reduce((sum, decision) => sum + decision.confidence, 0);
+    const totalConfidence = decisions.reduce((sum, decision) => sum + this.getDecisionEffectiveConfidence(decision), 0);
     return totalConfidence / decisions.length;
+  }
+
+  private calculateRewardSourceMix(
+    attributionBreakdown: AttributionBreakdown[],
+  ): RewardSourceMixEntry[] {
+    const contributionBySource: Record<RewardSource, number> = {
+      base_protocol_yield: 0,
+      incentive_emissions: 0,
+      fees: 0,
+      tactical_routing: 0,
+    };
+
+    const weightedConfidenceBySource: Record<RewardSource, number> = {
+      base_protocol_yield: 0,
+      incentive_emissions: 0,
+      fees: 0,
+      tactical_routing: 0,
+    };
+
+    for (const breakdown of attributionBreakdown) {
+      const decisionType = breakdown.decisionType;
+      const shares = REWARD_SOURCE_SHARES[decisionType] ?? [
+        { rewardSource: 'tactical_routing' as RewardSource, share: 1 },
+      ];
+
+      for (const { rewardSource, share } of shares) {
+        const shareContribution = breakdown.contribution * share;
+        contributionBySource[rewardSource] += shareContribution;
+        weightedConfidenceBySource[rewardSource] += breakdown.confidence * shareContribution;
+      }
+    }
+
+    const totalContribution = Object.values(contributionBySource).reduce((s, v) => s + v, 0);
+    if (totalContribution <= 0) {
+      return [];
+    }
+
+    const result: RewardSourceMixEntry[] = [];
+    (Object.keys(contributionBySource) as RewardSource[]).forEach((source) => {
+      const contribution = contributionBySource[source];
+      if (contribution <= 0) return;
+      result.push({
+        rewardSource: source,
+        contribution,
+        percentage: (contribution / totalContribution) * 100,
+        confidence:
+          contribution > 0 ? weightedConfidenceBySource[source] / contribution : 0,
+      });
+    });
+
+    return result.sort((a, b) => b.contribution - a.contribution);
   }
 
   /**
@@ -396,6 +527,12 @@ export function formatAttributionReport(report: AttributionReport): AttributionR
       percentage: Math.round(breakdown.percentage * 100) / 100,
       apyImpact: Math.round(breakdown.apyImpact * 100) / 100,
       confidence: Math.round(breakdown.confidence * 100) / 100,
+    })),
+    rewardSourceMix: report.rewardSourceMix.map((entry) => ({
+      ...entry,
+      contribution: Math.round(entry.contribution * 100) / 100,
+      percentage: Math.round(entry.percentage * 100) / 100,
+      confidence: Math.round(entry.confidence * 100) / 100,
     })),
     totalReturn: Math.round(report.totalReturn * 100) / 100,
     totalDeposited: Math.round(report.totalDeposited * 100) / 100,

@@ -132,6 +132,7 @@ describe('PortfolioAttributionService', () => {
         expect(report).toHaveProperty('walletAddress', walletAddress);
         expect(report).toHaveProperty('timeWindow');
         expect(report).toHaveProperty('attributionBreakdown');
+        expect(report).toHaveProperty('rewardSourceMix');
         expect(report).toHaveProperty('totalReturn');
         expect(report).toHaveProperty('totalDeposited');
         expect(report).toHaveProperty('dataCompleteness');
@@ -159,6 +160,13 @@ describe('PortfolioAttributionService', () => {
         const report = await engine.generateAttributionReport(walletAddress, startTime, endTime);
 
         const totalPercentage = report.attributionBreakdown.reduce((sum, b) => sum + b.percentage, 0);
+        expect(totalPercentage).toBeCloseTo(100, 2);
+      });
+
+      it('should calculate rewardSourceMix percentages that sum to ~100', async () => {
+        const report = await engine.generateAttributionReport(walletAddress, startTime, endTime);
+
+        const totalPercentage = report.rewardSourceMix.reduce((sum, b) => sum + b.percentage, 0);
         expect(totalPercentage).toBeCloseTo(100, 2);
       });
 
@@ -279,6 +287,15 @@ describe('PortfolioAttributionService', () => {
 
         expect(report.attributionBreakdown).toHaveLength(1);
         expect(report.totalReturn).toBeGreaterThan(0);
+
+        // Missing actual APY is treated as incomplete price inputs.
+        // Confidence should be reduced by the incomplete-input multiplier.
+        const expectedEffective = 0.85 * 0.85;
+        expect(report.attributionBreakdown[0].confidence).toBeCloseTo(expectedEffective, 4);
+
+        expect(report.rewardSourceMix).toHaveLength(1);
+        expect(report.rewardSourceMix[0].rewardSource).toBe('base_protocol_yield');
+        expect(report.rewardSourceMix[0].confidence).toBeCloseTo(expectedEffective, 4);
       });
     });
   });
@@ -305,6 +322,14 @@ describe('PortfolioAttributionService', () => {
         },
         generatedAt: '2026-04-01T12:00:00Z',
         dataCompleteness: 0.856789,
+        rewardSourceMix: [
+          {
+            rewardSource: 'base_protocol_yield' as const,
+            contribution: 50.123456,
+            percentage: 40.123456,
+            confidence: 0.856789,
+          },
+        ],
       };
 
       const formatted = formatAttributionReport(mockReport);

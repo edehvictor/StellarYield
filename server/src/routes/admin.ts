@@ -8,6 +8,8 @@ import {
 } from "../middleware/audit";
 import { uploadVaultMetadata } from "../services/ipfs/vaultMetadataService";
 import { freezeService } from "../services/freezeService";
+import { PROTOCOLS } from "../config/protocols";
+import { strategyStateTransitionAuditService } from "../services/strategyStateTransitionAuditService";
 
 const adminRouter = Router();
 
@@ -500,8 +502,34 @@ adminRouter.post(
       let state;
       if (protocol) {
         state = await freezeService.freezeProtocol(protocol, reason, actor);
+
+        // #371 operator intervention: record lifecycle transition to frozen.
+        try {
+          strategyStateTransitionAuditService.recordOperatorIntervention(
+            String(protocol).toLowerCase(),
+            "frozen",
+            `freeze_reason=${reason}`,
+            actor,
+          );
+        } catch (err) {
+          console.warn("Failed to record frozen transition:", err);
+        }
       } else {
         state = await freezeService.freezeGlobal(reason, actor);
+
+        // #371 operator intervention: record frozen transition for all known strategies.
+        for (const p of PROTOCOLS) {
+          try {
+            strategyStateTransitionAuditService.recordOperatorIntervention(
+              p.protocolName.toLowerCase(),
+              "frozen",
+              `freeze_reason=${reason}`,
+              actor,
+            );
+          } catch {
+            // Best-effort only; never break the admin endpoint.
+          }
+        }
       }
 
       setAuditContext(req, {
@@ -533,8 +561,33 @@ adminRouter.post(
       let state;
       if (protocol) {
         state = await freezeService.resumeProtocol(protocol, actor);
+
+        // #371 operator intervention: record lifecycle transition to recovered.
+        try {
+          strategyStateTransitionAuditService.recordOperatorIntervention(
+            String(protocol).toLowerCase(),
+            "recovered",
+            "resume_reason=operator",
+            actor,
+          );
+        } catch (err) {
+          console.warn("Failed to record recovered transition:", err);
+        }
       } else {
         state = await freezeService.resumeGlobal(actor);
+
+        for (const p of PROTOCOLS) {
+          try {
+            strategyStateTransitionAuditService.recordOperatorIntervention(
+              p.protocolName.toLowerCase(),
+              "recovered",
+              "resume_reason=operator",
+              actor,
+            );
+          } catch {
+            // Best-effort only; never break the admin endpoint.
+          }
+        }
       }
 
       setAuditContext(req, {

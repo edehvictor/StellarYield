@@ -1,3 +1,10 @@
+import {
+  computeConfidenceScore,
+  computeDecayedFreshnessConfidence,
+  type ConfidenceFactors,
+  type ConfidenceScore,
+} from "./confidenceService";
+
 /**
  * Autonomous Strategy Rotation Service
  *
@@ -34,6 +41,11 @@ export interface RotationCandidate {
   volatility?: number;
   /** Confidence in [0,1]. Defaults to 1 when missing. */
   confidence?: number;
+  /**
+   * Optional factor hints used to render a confidence decomposition.
+   * If omitted, the service will estimate factors from what it has.
+   */
+  confidenceFactors?: Partial<ConfidenceFactors>;
   /** ISO-8601 timestamp of when the score was computed. */
   fetchedAt: string;
 }
@@ -79,6 +91,21 @@ export interface RotationDecision {
   scoreDelta: number | null;
   /** Human-readable detail safe to surface to operators. */
   detail: string;
+  /**
+   * Confidence decomposition for the winning candidate.
+   * Present only when `action === "rotate"` and a candidate was selected.
+   */
+  confidenceBreakdown?: ConfidenceScore;
+  /**
+   * Interprets how “close” the winner was to the min confidence bar.
+   * Present only when `confidenceBreakdown` exists.
+   */
+  confidenceStrength?: "borderline" | "strongly_favored";
+  /**
+   * Short list of driver strings explaining the borderline/strongly-favored
+   * interpretation (safe for UI; no secrets).
+   */
+  confidenceWhy?: string[];
   /** ISO-8601 decision timestamp. */
   evaluatedAt: string;
 }
@@ -196,7 +223,53 @@ export function evaluateRotation(
 
   const best = eligible[0];
 
+  const buildConfidenceInterpretation = (candidate: RotationCandidate): {
+    confidenceBreakdown: ConfidenceScore;
+    confidenceStrength: "borderline" | "strongly_favored";
+    confidenceWhy: string[];
+  } => {
+    const ageMs = now - Date.parse(candidate.fetchedAt);
+    const freshness = computeDecayedFreshnessConfidence(Math.max(0, ageMs)).confidence;
+
+    const defaultOtherFactor = candidate.confidence ?? 1;
+    const liquidityQualityEstimate =
+      candidate.volatility === undefined
+        ? defaultOtherFactor
+        : Math.max(0, Math.min(1, 1 - candidate.volatility / 10));
+
+    const factors: ConfidenceFactors = {
+      freshness,
+      providerAgreement:
+        candidate.confidenceFactors?.providerAgreement ?? defaultOtherFactor,
+      liquidityQuality:
+        candidate.confidenceFactors?.liquidityQuality ?? liquidityQualityEstimate,
+      modelCompleteness:
+        candidate.confidenceFactors?.modelCompleteness ?? defaultOtherFactor,
+    };
+
+    const confidenceBreakdown = computeConfidenceScore(factors);
+    const delta = confidenceBreakdown.score - policy.minConfidence;
+
+    const confidenceStrength =
+      delta < 0.15 ? "borderline" : "strongly_favored";
+
+    // Prefer “why” strings derived from the caveats; this ensures we
+    // explain drivers users can understand without implying guarantees.
+    const confidenceWhy = [
+      `Confidence label: ${confidenceBreakdown.label}.`,
+      ...(confidenceBreakdown.caveats.length > 0
+        ? confidenceBreakdown.caveats.map((c) => c)
+        : [
+            "All confidence factors look strong for this rotation evaluation.",
+          ]),
+    ];
+
+    return { confidenceBreakdown, confidenceStrength, confidenceWhy };
+  };
+
   if (context.currentId === null || context.currentScore === null) {
+    const { confidenceBreakdown, confidenceStrength, confidenceWhy } =
+      buildConfidenceInterpretation(best);
     return {
       action: "rotate",
       reason: "no_current_strategy",
@@ -204,6 +277,9 @@ export function evaluateRotation(
       toId: best.id,
       scoreDelta: best.score,
       detail: `No incumbent strategy; allocating into ${best.id} (score=${best.score}).`,
+      confidenceBreakdown,
+      confidenceStrength,
+      confidenceWhy,
       evaluatedAt: ts,
     };
   }
@@ -221,6 +297,8 @@ export function evaluateRotation(
     };
   }
 
+  const { confidenceBreakdown, confidenceStrength, confidenceWhy } =
+    buildConfidenceInterpretation(best);
   return {
     action: "rotate",
     reason: "candidate_better",
@@ -228,6 +306,9 @@ export function evaluateRotation(
     toId: best.id,
     scoreDelta: delta,
     detail: `Rotating ${context.currentId} → ${best.id} (delta=${delta.toFixed(3)}).`,
+    confidenceBreakdown,
+    confidenceStrength,
+    confidenceWhy,
     evaluatedAt: ts,
   };
 }
