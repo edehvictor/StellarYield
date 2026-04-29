@@ -5,7 +5,9 @@
  * and fee behavior. Forecasts are modeled outcomes, not guaranteed results.
  */
 
-export type ProposalType = "fee_change" | "allocation_limit" | "strategy_param";
+import { RewardScheduleRegistry } from "./rewardScheduleRegistry";
+
+export type ProposalType = "fee_change" | "allocation_limit" | "strategy_param" | "reward_change";
 
 export interface GovernanceForecastInput {
   proposalType: ProposalType;
@@ -141,6 +143,33 @@ function forecastStrategyParam(
   };
 }
 
+function forecastRewardChange(
+  params: Record<string, number>,
+  baseline: GovernanceForecastInput["baseline"],
+): { delta: ForecastDelta; warnings: string[] } {
+  const warnings: string[] = [];
+  const rewardApyDelta = params.rewardApyDelta ?? 0;
+  const isHighConfidence = params.isHighConfidence === 1;
+
+  if (!isHighConfidence) {
+    warnings.push("Unknown or incomplete schedules must not be treated as high-confidence positive yield.");
+  }
+
+  const projectedYield = baseline.yieldPct + rewardApyDelta;
+
+  return {
+    delta: {
+      yieldDeltaPct: Math.round(rewardApyDelta * 10000) / 10000,
+      exposureDeltaPct: 0,
+      feeRevenueDeltaUsd: 0,
+      projectedYieldPct: Math.round(projectedYield * 10000) / 10000,
+      projectedExposurePct: baseline.exposurePct,
+      projectedFeeRatePct: baseline.feeRatePct,
+    },
+    warnings,
+  };
+}
+
 export function forecastGovernanceProposal(
   input: GovernanceForecastInput,
 ): GovernanceForecastResult {
@@ -155,6 +184,9 @@ export function forecastGovernanceProposal(
       break;
     case "strategy_param":
       result = forecastStrategyParam(input.parameters, input.baseline);
+      break;
+    case "reward_change":
+      result = forecastRewardChange(input.parameters, input.baseline);
       break;
     default:
       result = {

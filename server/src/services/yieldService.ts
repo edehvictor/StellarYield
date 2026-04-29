@@ -3,7 +3,8 @@ import { PROTOCOLS } from "../config/protocols";
 import { normalizeYields } from "../utils/yieldNormalization";
 import { fetchNetworkSnapshot } from "./stellarNetworkService";
 import { freezeService } from "./freezeService";
-import type { NormalizedYield, RawProtocolYield } from "../types/yields";
+import { RewardScheduleRegistry } from "./rewardScheduleRegistry";
+import type { NormalizedYield, RawProtocolYield, RewardStream } from "../types/yields";
 
 const cache = new NodeCache({
   stdTTL: 300,
@@ -27,20 +28,33 @@ export async function getYieldDataWithCacheStatus(): Promise<{
   return { data: await getYieldData(), cacheStatus: "MISS" };
 }
 
-function buildProtocolSnapshot(
+async function buildProtocolSnapshot(
   config: (typeof PROTOCOLS)[number],
   ledgerSequence: number,
   fetchedAt: string,
   network: "mainnet" | "testnet",
-): RawProtocolYield {
+): Promise<RawProtocolYield> {
   const apyVarianceBps = ledgerSequence % 25;
   const tvlVarianceUsd = (ledgerSequence % 10) * 12_500;
+
+  const currentTvl = config.baseTvlUsd + tvlVarianceUsd;
+  
+  // Fetch additional rewards from registry
+  const registrySchedules = await RewardScheduleRegistry.getActiveSchedules(config.protocolName);
+  const extraRewards: RewardStream[] = registrySchedules.map(s => ({
+    tokenSymbol: s.tokenSymbol,
+    emissionPerYear: RewardScheduleRegistry.calculateEmissionAt(s, new Date()) * 365,
+    tokenPrice: 1.0, // Default price, should be fetched from price oracle in production
+    confidence: s.confidence,
+  }));
+
+  const rewards = [...(config.rewardStreams || []), ...extraRewards];
 
   return {
     protocolName: config.protocolName,
     protocolType: config.protocolType,
     apyBps: config.baseApyBps + apyVarianceBps,
-    tvlUsd: config.baseTvlUsd + tvlVarianceUsd,
+    tvlUsd: currentTvl,
     volatilityPct: config.volatilityPct,
     protocolAgeDays: config.protocolAgeDays,
     network,
@@ -51,7 +65,7 @@ function buildProtocolSnapshot(
     managementFeeBps: config.managementFeeBps,
     performanceFeeBps: config.performanceFeeBps,
     capitalEfficiencyPct: config.capitalEfficiencyPct,
-    rewards: config.rewardStreams,
+    rewards,
     attribution: {
       baseYield: config.baseApyBps / 100 * 0.8,
       incentives: config.baseApyBps / 100 * 0.1,
@@ -74,14 +88,14 @@ export async function getYieldData(): Promise<NormalizedYield[]> {
 
   try {
     const snapshot = await fetchNetworkSnapshot();
-    const rawYields = PROTOCOLS.map((protocol) =>
+    const rawYields = await Promise.all(PROTOCOLS.map((protocol) =>
       buildProtocolSnapshot(
         protocol,
         snapshot.ledgerSequence,
         snapshot.closedAt,
         snapshot.network,
       ),
-    );
+    ));
 
     const normalized = normalizeYields(rawYields);
     cache.set(CACHE_KEY, normalized, CURRENT_YIELDS_TTL_SECONDS);

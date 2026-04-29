@@ -27,10 +27,13 @@ export function normalizeYield(rawYield: RawProtocolYield): NormalizedYield {
       }
       const apy = (reward.emissionPerYear * reward.tokenPrice) / rawYield.tvlUsd;
       const roundedApy = roundTo(apy * 100, 2);
+      
+      // If confidence is low, we still include it but it's marked
       rewardApy += roundedApy;
       rewards.push({
         symbol: reward.tokenSymbol,
         apy: roundedApy,
+        confidence: reward.confidence,
       });
     }
   }
