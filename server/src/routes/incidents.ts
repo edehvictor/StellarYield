@@ -62,4 +62,13 @@ router.patch("/:id/resolve", async (req: Request, res: Response) => {
     }
 });
 
+router.get("/:id/recommendations", async (req: Request, res: Response) => {
+    try {
+        const recommendations = await incidentService.getRecommendationsForIncident(req.params.id);
+        res.json(recommendations);
+    } catch (error) {
+        res.status(500).json({ error: "Failed to fetch recommendations" });
+    }
+});
+
 export default router;

@@ -1,4 +1,5 @@
 import { PrismaClient, Incident } from "@prisma/client"; // Type verified via tsc
+import { recoveryRecommendationService, RecoveryRecommendation, ShockEvent } from "./recoveryRecommendationService";
 
 const prisma = new PrismaClient();
 
@@ -7,6 +8,10 @@ export interface IncidentFilter {
     severity?: string;
     type?: string;
     resolved?: boolean;
+}
+
+export interface IncidentWithRecommendations extends Incident {
+    recommendations: RecoveryRecommendation[];
 }
 
 export class IncidentService {
@@ -52,6 +57,45 @@ export class IncidentService {
         return prisma.incident.findUnique({
             where: { id },
         });
+    }
+
+    async getRecommendationsForIncident(id: string): Promise<RecoveryRecommendation[]> {
+        const incident = await this.getIncidentById(id);
+        if (!incident) return [];
+
+        const recommendations: RecoveryRecommendation[] = [];
+        
+        for (const vaultId of incident.affectedVaults) {
+            const shockEvent: ShockEvent = {
+                type: this.mapIncidentTypeToShockType(incident.type),
+                severity: incident.severity as ShockEvent["severity"],
+                vaultId,
+                protocol: incident.protocol,
+                description: incident.description,
+                timestamp: incident.startedAt.getTime(),
+            };
+            
+            const vaultRecs = await recoveryRecommendationService.evaluateRecoveryOptions(shockEvent);
+            recommendations.push(...vaultRecs);
+        }
+
+        return recommendations;
+    }
+
+    private mapIncidentTypeToShockType(incidentType: string): ShockEventType {
+        switch (incidentType) {
+            case "PAUSE":
+            case "ANOMALY":
+                return "ORACLE_ANOMALY";
+            case "DEPEG":
+            case "LIQUIDITY":
+                return "LIQUIDITY_EVENT";
+            case "YIELD_CRASH":
+            case "APY_DROP":
+                return "APY_CRASH";
+            default:
+                return "APY_CRASH"; // Fallback
+        }
     }
 }
 
