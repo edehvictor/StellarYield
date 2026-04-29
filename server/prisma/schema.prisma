@@ -110,3 +110,193 @@ model Referral {
 
   @@index([referrerAddress])
 }
+
+// ── APY Alert Models ─────────────────────────────────────────────────────────
+
+model UserAlert {
+  id              String   @id @default(uuid())
+  walletAddress   String
+  vaultId         String   // protocol name / vault identifier
+  condition       String   // "above" | "below"
+  thresholdValue  Float    // APY percentage threshold (e.g. 10.0 for 10%)
+  email           String   // destination email for notifications
+  status          String   @default("active") // "active" | "triggered" | "deleted"
+  triggeredAt     DateTime?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([walletAddress])
+  @@index([status, vaultId])
+}
+
+// ── Encrypted Address Book Models (Issue #140) ───────────────────────────────
+
+model Contact {
+  id                String   @id @default(uuid())
+  walletAddress     String   // Owner's wallet address
+  encryptedName     String   // Base64 encrypted contact name
+  encryptedAddress  String   // Base64 encrypted contact address
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  @@index([walletAddress, createdAt])
+  @@unique([walletAddress, encryptedAddress]) // Prevent duplicates per user
+}
+
+// ── Risk Incident Models (#286) ───────────────────────────────────────────
+
+model Incident {
+  id              String   @id @default(uuid())
+  protocol        String   // protocol name (Blend, Soroswap, etc.)
+  severity        String   // LOW, MEDIUM, HIGH, CRITICAL
+  type            String   // PAUSE, ANOMALY, DEPEG, EXPLOIT, INTERVENTION
+  title           String
+  description     String
+  affectedVaults  String[] // Array of vault IDs/names
+  resolved        Boolean  @default(false)
+  startedAt       DateTime
+  resolvedAt      DateTime?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([protocol, severity])
+  @@index([startedAt])
+}
+
+// ── Drift Detection Models ──────────────────────────────────────────────────
+
+model DriftEvent {
+  id              String   @id @default(uuid())
+  vaultId         String
+  targetWeight    Float
+  actualWeight    Float
+  driftAmount     Float    // actualWeight - targetWeight
+  isRecovered     Boolean  @default(false)
+  createdAt       DateTime @default(now())
+  resolvedAt      DateTime?
+
+  @@index([vaultId, isRecovered])
+}
+
+// ── Rebalance Queue Models (Issue #281) ─────────────────────────────────────────
+
+model RebalanceQueueEntry {
+  id                  String   @id @default(uuid())
+  vaultId             String
+  status              String   @default("PENDING") // PENDING, PROCESSING, PARTIAL, COMPLETED, FAILED, CANCELLED
+  executionType       String   // FULL, PARTIAL, DEFERRED
+  
+  // Rebalance request details
+  targetAllocations   Json     // JSON object with target weights
+  currentAllocations  Json     // JSON object with current weights
+  executionStrategy   Json     // JSON execution plan
+  partiallyExecuted   Boolean  @default(false)
+  partialFillAmount   Float    @default(0)
+  
+  // Intent tracking for security
+  intentHash          String   // Hash of the intent for replay prevention
+  intentValidUntil    DateTime // Expiry time for the intent
+  
+  // Retry tracking
+  attemptCount        Int      @default(0)
+  maxRetries          Int      @default(3)
+  nextRetryAt         DateTime?
+  lastError           String?
+  
+  // Deferred execution details
+  deferredReason      String?  // Reason for deferral
+  deferredUntil       DateTime?
+  followUpEntryId      String?  // Link to follow-up queue entry
+  
+  // Audit fields
+  triggeredBy         String?  // System or user who triggered
+  completedAt         DateTime?
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  @@index([vaultId, status])
+  @@index([status, nextRetryAt])
+  @@index([createdAt])
+  @@unique([intentHash, vaultId]) // Prevent duplicate intents for same vault
+}
+
+model RebalanceHistory {
+  id                  String   @id @default(uuid())
+  queueEntryId        String   @unique
+  vaultId             String
+  executionType       String   // FULL, PARTIAL, DEFERRED
+  executionResult     Json     // Details about what was executed
+  totalExecuted       Float    // Total amount executed
+  expectedAmount      Float    // Expected amount before partial fill
+  filledPercentage    Float    // Percentage of expected amount
+  transactionHash     String?  // Blockchain tx hash if applicable
+  completedAt         DateTime
+  createdAt           DateTime @default(now())
+
+  @@index([vaultId, completedAt])
+  @@index([completedAt])
+}
+
+// ── Strategy Snapshot Models (Issue #282) ────────────────────────────────────
+
+model StrategySnapshot {
+  id                  String   @id @default(uuid())
+  strategyId          String
+  version             Int      // Version number (incremental)
+  
+  // Configuration snapshot
+  name                String
+  description         String?
+  keyWeights          Json     // Immutable snapshot of key weights at this version
+  riskParameters      Json     // Immutable snapshot of risk parameters
+  constraints         Json     // Immutable allocation constraints
+  
+  // Metadata
+  status              String   @default("ACTIVE") // ACTIVE, SUPERSEDED, ARCHIVED
+  createdAt           DateTime @default(now())
+  supersededAt        DateTime? // When this version was replaced
+  supersededByVersion Int?     // Reference to newer version
+  
+  // Audit
+  changeReason        String?  // Why this version was created
+  changeAuthor        String?  // Who made the change
+  
+  @@unique([strategyId, version]) // One version per strategy
+  @@index([strategyId, status])
+  @@index([strategyId, createdAt])
+}
+
+model StrategyVersionReference {
+  id                  String   @id @default(uuid())
+  strategySnapshotId  String   // References StrategySnapshot.id
+  strategyId          String
+  snapshotVersion     Int      // Copy of version for quick access
+  
+  // Records tied to this version
+  recommendationId    String?  // Recommendation that used this version
+  rebalanceQueueId    String?  // Rebalance event that used this version
+  eventType           String   // RECOMMENDATION, REBALANCE, SNAPSHOT
+  
+  // Audit context
+  linkedAt            DateTime @default(now())
+  linkedBy            String?  // Who/what linked this version
+
+  @@index([strategyId, recommendationId])
+  @@index([strategyId, rebalanceQueueId])
+  @@index([strategySnapshotId, eventType])
+}
+
+model StrategyVersionHistory {
+  id                  String   @id @default(uuid())
+  strategyId          String
+  versionChanges      Json     // What changed between versions
+  fromVersion         Int
+  toVersion           Int
+  changeType          String   // WEIGHTS_UPDATE, CONSTRAINTS_UPDATE, PARAMETERS_UPDATE, FULL_REVISION
+  reason              String
+  author              String?
+  createdAt           DateTime @default(now())
+
+  @@index([strategyId, createdAt])
+  @@index([strategyId, fromVersion, toVersion])
+}

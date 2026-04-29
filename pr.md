@@ -28,5 +28,18 @@ Integrated a secure price oracle with TWAP fallback to protect against price man
 - **Location**: `/contracts/yield_vault/src/oracle.rs`
 - **Closes #24**
 
+## 5. Backend Metrics API & Tracking - #209
+Implemented a lightweight `metricsMiddleware` in Express to record request latency and cache hit ratios.
+- Exposed safely at `GET /api/metrics`.
+
+## 6. Data Freshness Indicators - #210
+Updated the UI to clearly indicate when data was last fetched. Added "Stale Data" badges and time-ago timestamps.
+
+## 7. Protocol Risk Badge Explanations - #211
+Implemented informative, hoverable tooltips on Risk Badges across `ApyDashboard` and `AIAdvisor` to explain risk rationale (TVL, volatility, etc).
+
+## 8. CI/CD Smoke Tests - #213
+Created a robust bash smoke test `scripts/smoke-test.sh` that checks status codes across backend REST APIs and the frontend serving URL before finalizing a redeploy.
+
 ---
-Tested with local Soroban simulations and unit tests in `contracts/yield_vault/src/lib.rs`.
+Tested with local testing and Jest/Vitest unit tests.

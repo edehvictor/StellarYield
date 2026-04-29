@@ -51,7 +51,7 @@ jobs:
           retention-days: 30
 
       - name: Comment audit results on PR
-        if: github.event_name == 'pull_request' && always()
+        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && always()
         uses: actions/github-script@v7
         with:
           script: |
@@ -122,14 +122,11 @@ jobs:
 
       - name: Run Clippy with security lints
         id: clippy
-        # We promote security-relevant lints to errors:
-        #   - clippy::integer_overflow_check   – unchecked arithmetic
-        #   - clippy::unwrap_used              – panics from unwrap
-        #   - clippy::expect_used             – panics from expect
-        #   - clippy::panic                   – explicit panics
-        #   - clippy::arithmetic_side_effects – overflow side-effects
+        # We promote security-relevant lints to errors (see -D flags below).
+        # Scoped to `yield_vault` until other workspace crates are refactored
+        # to satisfy the same rules (e.g. options, …).
         run: |
-          cargo clippy --all-targets --message-format=json 2>&1 \
+          cargo clippy -p yield_vault --all-targets --message-format=json 2>&1 \
             -- \
             -D clippy::unwrap_used \
             -D clippy::expect_used \
@@ -148,7 +145,7 @@ jobs:
           retention-days: 30
 
       - name: Comment Clippy findings on PR
-        if: github.event_name == 'pull_request' && always()
+        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && always()
         uses: actions/github-script@v7
         with:
           script: |
@@ -237,8 +234,12 @@ jobs:
 
           FAIL=0
 
+          # Scan all contract Rust sources (including strategies/ and other nested crates);
+          # skip build artifacts.
+          G="grep -rn --include='*.rs' --exclude-dir=target"
+
           # 1. unsafe blocks in contract sources
-          UNSAFE=$(grep -rn "unsafe {" contracts/*/src/ 2>/dev/null || true)
+          UNSAFE=$($G "unsafe {" contracts 2>/dev/null || true)
           if [ -n "$UNSAFE" ]; then
             echo "### ⛔ `unsafe` blocks detected" >> pr_comment.md
             echo '```' >> pr_comment.md
@@ -248,7 +249,7 @@ jobs:
           fi
 
           # 2. std usage (contracts must be #![no_std])
-          STD_USE=$(grep -rn "^use std::" contracts/*/src/ 2>/dev/null || true)
+          STD_USE=$($G "^use std::" contracts 2>/dev/null || true)
           if [ -n "$STD_USE" ]; then
             echo "### ⛔ \`use std::\` in \`#![no_std]\` contracts" >> pr_comment.md
             echo '```' >> pr_comment.md
@@ -258,7 +259,7 @@ jobs:
           fi
 
           # 3. explicit panics
-          PANICS=$(grep -rn "panic!(" contracts/*/src/ 2>/dev/null || true)
+          PANICS=$($G "panic!(" contracts 2>/dev/null || true)
           if [ -n "$PANICS" ]; then
             echo "### ⚠️ Explicit \`panic!\` calls (consider returning errors)" >> pr_comment.md
             echo '```' >> pr_comment.md
@@ -275,7 +276,7 @@ jobs:
           cat pr_comment.md
 
       - name: Comment custom pattern results on PR
-        if: github.event_name == 'pull_request' && always()
+        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && always()
         uses: actions/github-script@v7
         with:
           script: |

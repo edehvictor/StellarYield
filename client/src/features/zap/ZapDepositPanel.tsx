@@ -1,52 +1,79 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ArrowDown, Zap, Loader2, AlertTriangle, RefreshCw } from "lucide-react";
-import { zapDeposit, type TxStatus } from "../../services/soroban";
+import TxStatusTimeline from "../../components/transaction/TxStatusTimeline";
+import { zapDeposit } from "../../services/soroban";
+import type { TxPhase } from "../../services/transactionPhase";
+import { TX_PHASE_PIPELINE } from "../../services/transactionPhase";
 import { fetchSwapQuote } from "./fetchSwapQuote";
 import { minAmountAfterSlippage } from "./slippage";
 import { parseDecimalToStroops, formatStroopsToDecimal } from "./amount";
 import {
+  buildSelectableZapAssetsFromMetadata,
+  fetchZapSupportedAssetsMetadata,
   getVaultContractIdFromEnv,
   getVaultTokenFromEnv,
   loadZapAssetOptions,
+  mergeVaultIntoZapSelectableAssets,
+  shouldLoadZapMetadataFromApi,
 } from "./assets";
 import type { ZapAssetOption } from "./types";
+import { useSettings } from "../settings/SettingsContext";
+import { resolveSlippage } from "../settings/types";
 
 export interface ZapDepositPanelProps {
   walletAddress: string | null;
 }
 
 export default function ZapDepositPanel({ walletAddress }: ZapDepositPanelProps) {
-  const vaultToken = useMemo(() => getVaultTokenFromEnv(), []);
-  const vaultContractId = useMemo(() => getVaultContractIdFromEnv(), []);
-  const selectableAssets = useMemo(() => {
-    const fromEnv = loadZapAssetOptions();
-    const vault: ZapAssetOption = {
-      symbol: vaultToken.symbol,
-      name: vaultToken.name,
-      contractId: vaultToken.contractId,
-      decimals: vaultToken.decimals,
-    };
-    const merged = [...fromEnv];
-    if (vault.contractId && !merged.some((a) => a.contractId === vault.contractId)) {
-      merged.push(vault);
-    }
-    return merged;
-  }, [vaultToken]);
+  const useApiAssets = shouldLoadZapMetadataFromApi();
+  const { settings } = useSettings();
+  const slippage = resolveSlippage(settings);
 
-  const [inputAsset, setInputAsset] = useState<ZapAssetOption | null>(
-    () => selectableAssets[0] ?? null
+  const initialVault = useMemo(() => getVaultTokenFromEnv(), []);
+  const initialVaultContractId = useMemo(() => getVaultContractIdFromEnv(), []);
+
+  const [vaultToken, setVaultToken] = useState<ZapAssetOption>(initialVault);
+  const [vaultContractId, setVaultContractId] = useState(initialVaultContractId);
+  const [selectableAssets, setSelectableAssets] = useState<ZapAssetOption[]>(() =>
+    mergeVaultIntoZapSelectableAssets(loadZapAssetOptions(), initialVault),
   );
 
   useEffect(() => {
-    if (!inputAsset && selectableAssets[0]) {
-      setInputAsset(selectableAssets[0]);
+    if (!useApiAssets) return;
+    let cancelled = false;
+    void fetchZapSupportedAssetsMetadata().then((meta) => {
+      if (cancelled || !meta) return;
+      setVaultToken(meta.vaultToken);
+      setVaultContractId(meta.vaultContractId);
+      setSelectableAssets(buildSelectableZapAssetsFromMetadata(meta));
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [useApiAssets]);
+
+  const [inputAsset, setInputAsset] = useState<ZapAssetOption | null>(
+    () => mergeVaultIntoZapSelectableAssets(loadZapAssetOptions(), initialVault)[0] ?? null,
+  );
+
+  useEffect(() => {
+    if (!selectableAssets.length) return;
+    if (
+      !inputAsset ||
+      !selectableAssets.some((a) => a.contractId === inputAsset.contractId)
+    ) {
+      // Schedule the state update outside the synchronous effect body
+      const next = selectableAssets[0] ?? null;
+      Promise.resolve().then(() => setInputAsset(next));
     }
   }, [inputAsset, selectableAssets]);
 
   const [amount, setAmount] = useState("");
-  const [slippage, setSlippage] = useState(0.5);
   const [status, setStatus] = useState<"idle" | "loading" | "success" | "error">("idle");
-  const [txPhase, setTxPhase] = useState<TxStatus>("idle");
+  const [txPhase, setTxPhase] = useState<TxPhase>("idle");
+  const lastProgressPhaseRef = useRef<TxPhase>("idle");
+  const [lastProgressPhase, setLastProgressPhase] = useState<TxPhase>("idle");
+  const [txHash, setTxHash] = useState<string | null>(null);
   const [error, setError] = useState("");
   const [quoteLoading, setQuoteLoading] = useState(false);
   const [expectedOut, setExpectedOut] = useState<bigint | null>(null);
@@ -112,7 +139,15 @@ export default function ZapDepositPanel({ walletAddress }: ZapDepositPanelProps)
     return minAmountAfterSlippage(expectedOut, slippage);
   }, [expectedOut, slippage]);
 
-  const handleZap = async () => {
+  const emitPhase = useCallback((p: TxPhase) => {
+    setTxPhase(p);
+    if (p !== "success" && p !== "failure") {
+      lastProgressPhaseRef.current = p;
+      setLastProgressPhase(p);
+    }
+  }, []);
+
+  const handleZap = useCallback(async () => {
     if (!walletAddress || !inputAsset || !vaultContractId || !vaultToken.contractId) return;
     let amountIn: bigint;
     try {
@@ -127,6 +162,10 @@ export default function ZapDepositPanel({ walletAddress }: ZapDepositPanelProps)
       return;
     }
 
+    lastProgressPhaseRef.current = "idle";
+    setLastProgressPhase("idle");
+    setTxPhase("idle");
+    setTxHash(null);
     setStatus("loading");
     setError("");
     try {
@@ -140,18 +179,35 @@ export default function ZapDepositPanel({ walletAddress }: ZapDepositPanelProps)
           minAmountOut: minOut,
           minSharesOut: minOut,
         },
-        (s) => setTxPhase(s)
+        emitPhase,
+        false,
+        settings,
       );
       if (!result.success) {
         throw new Error(result.error || "Transaction failed");
       }
+      setTxHash(result.hash ?? null);
       setStatus("success");
       setAmount("");
     } catch (err) {
       setStatus("error");
       setError(err instanceof Error ? err.message : "Transaction failed");
     }
-  };
+  }, [
+    walletAddress,
+    inputAsset,
+    vaultContractId,
+    vaultToken.contractId,
+    amount,
+    minOut,
+    emitPhase,
+    settings,
+  ]);
+
+  const retryZap = useCallback(() => {
+    setError("");
+    void handleZap();
+  }, [handleZap]);
 
   const configOk =
     Boolean(vaultContractId) &&
@@ -262,49 +318,34 @@ export default function ZapDepositPanel({ walletAddress }: ZapDepositPanelProps)
       </div>
 
       {needsSwap && (
-        <div className="bg-white/5 rounded-xl p-4 mb-4">
-          <div className="flex items-center justify-between mb-2">
-            <span className="text-sm text-gray-400">Slippage tolerance (0.1% to 5%)</span>
-            <span className="text-sm text-white">{slippage}%</span>
-          </div>
-          <input
-            type="range"
-            min={0.1}
-            max={5}
-            step={0.1}
-            value={slippage}
-            onChange={(e) => setSlippage(Number(e.target.value))}
-            className="w-full mb-3 accent-blue-500"
-          />
-          <div className="flex gap-2">
-            {[0.1, 0.5, 1.0, 2.0].map((s) => (
-              <button
-                key={s}
-                type="button"
-                onClick={() => setSlippage(s)}
-                className={`flex-1 py-1 rounded-lg text-sm ${
-                  slippage === s
-                    ? "bg-blue-500 text-white"
-                    : "bg-white/10 text-gray-400 hover:bg-white/20"
-                }`}
-              >
-                {s}%
-              </button>
-            ))}
-          </div>
+        <div className="bg-white/5 rounded-xl p-3 mb-4 flex items-center justify-between text-sm">
+          <span className="text-gray-400">Slippage tolerance</span>
+          <span className="text-white font-medium">{slippage}%</span>
         </div>
       )}
 
-      {error && (
+      {error && txPhase !== "failure" && (
         <div className="flex items-center gap-2 text-red-400 text-sm mb-4">
           <AlertTriangle className="w-4 h-4 shrink-0" />
           {error}
         </div>
       )}
 
-      {txPhase !== "idle" && status === "loading" && (
-        <p className="text-xs text-gray-500 mb-2 capitalize">Status: {txPhase}</p>
-      )}
+      <TxStatusTimeline
+        steps={TX_PHASE_PIPELINE}
+        phase={txPhase}
+        errorMessage={txPhase === "failure" ? error : null}
+        txHash={txHash}
+        failedAtPhase={
+          txPhase === "failure"
+            ? lastProgressPhase !== "idle"
+              ? lastProgressPhase
+              : "polling"
+            : null
+        }
+        onRetry={txPhase === "failure" ? retryZap : undefined}
+        className="mb-4"
+      />
 
       <button
         type="button"

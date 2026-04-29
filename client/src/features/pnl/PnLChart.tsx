@@ -10,6 +10,7 @@ import {
 } from "recharts";
 import { useWallet } from "../../context/useWallet";
 import { TrendingUp, TrendingDown, Loader2, DollarSign } from "lucide-react";
+import { getApiBaseUrl } from "../../lib/api";
 
 interface DailyPnLSnapshot {
   date: string;
@@ -28,7 +29,7 @@ interface PnLData {
   dailySnapshots: DailyPnLSnapshot[];
 }
 
-const API_BASE = import.meta.env.VITE_API_URL || "http://localhost:3001";
+const API_BASE = getApiBaseUrl();
 
 /**
  * PnLChart — Visualizes a user's historical profit & loss with an area chart.
@@ -101,7 +102,15 @@ export default function PnLChart() {
     );
   }
 
-  if (!pnlData) return null;
+  if (!pnlData || (pnlData.dailySnapshots.length === 0 && pnlData.totalDeposited === 0)) {
+    return (
+      <div className="glass-panel p-8 text-center">
+        <DollarSign className="mx-auto mb-4 text-gray-400" size={48} />
+        <h2 className="text-xl font-bold mb-2">No P&L Data Yet</h2>
+        <p className="text-gray-400">Make your first deposit to start tracking your profit and loss.</p>
+      </div>
+    );
+  }
 
   const isProfit = pnlData.absolutePnL >= 0;
   const pnlColor = isProfit ? "text-green-400" : "text-red-400";
@@ -150,7 +159,9 @@ export default function PnLChart() {
       </div>
 
       {/* PnL Chart */}
-      {pnlData.dailySnapshots.length > 0 && (
+      {loading ? (
+        <div className="h-64 w-full animate-pulse bg-gradient-to-r from-gray-700/30 via-gray-600/30 to-gray-700/30 rounded-lg" />
+      ) : pnlData.dailySnapshots.length > 0 ? (
         <div className="h-64">
           <ResponsiveContainer width="100%" height="100%">
             <AreaChart data={pnlData.dailySnapshots}>
@@ -193,6 +204,8 @@ export default function PnLChart() {
             </AreaChart>
           </ResponsiveContainer>
         </div>
+      ) : (
+        <p className="text-gray-400 text-center py-12">No daily PnL data available.</p>
       )}
     </div>
   );

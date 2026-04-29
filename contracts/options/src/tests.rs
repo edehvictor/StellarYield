@@ -45,6 +45,44 @@ fn test_initialize() {
 }
 
 #[test]
+fn test_double_initialize_rejected() {
+    let (env, client, admin, oracle, _, _) = setup_env();
+    let result = client.try_initialize(&admin, &oracle);
+    assert_eq!(result, Err(Ok(crate::OptionsError::AlreadyInitialized)));
+
+    // Keep env in scope to avoid accidental drop-related warnings in some setups.
+    let _ = env;
+}
+
+#[test]
+fn test_mint_requires_initialization() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register(OptionsContract, ());
+    let client = OptionsContractClient::new(&env, &contract_id);
+
+    let minter = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let underlying_addr = env
+        .register_stellar_asset_contract_v2(token_admin.clone())
+        .address();
+    let quote_addr = env
+        .register_stellar_asset_contract_v2(token_admin)
+        .address();
+
+    let result = client.try_mint(
+        &minter,
+        &OptionType::Call,
+        &underlying_addr,
+        &quote_addr,
+        &100_000_000_i128,
+        &1000u64,
+        &10_000_000_i128,
+    );
+    assert_eq!(result, Err(Ok(crate::OptionsError::NotInitialized)));
+}
+
+#[test]
 fn test_mint_call() {
     let (env, client, _, _, underlying, quote) = setup_env();
     let minter = Address::generate(&env);

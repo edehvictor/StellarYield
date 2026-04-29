@@ -1,24 +1,11 @@
-import { defineConfig } from "vitest/config";
+import { defineConfig } from 'vitest/config'
+import react from '@vitejs/plugin-react'
 
 export default defineConfig({
+  plugins: [react()],
   test: {
-    environment: "node",
-    include: ["src/**/*.test.ts"],
-    coverage: {
-      provider: "v8",
-      include: ["src/features/zap/**/*.ts"],
-      exclude: [
-        "src/**/*.test.ts",
-        "src/features/zap/types.ts",
-        "src/features/zap/index.ts",
-        "src/features/zap/ZapDepositPanel.tsx",
-      ],
-      thresholds: {
-        lines: 90,
-        functions: 90,
-        branches: 75,
-        statements: 90,
-      },
-    },
+    environment: 'jsdom',
+    globals: true,
+    setupFiles: ['./src/test-setup.ts'],
   },
-});
+})

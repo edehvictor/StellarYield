@@ -1,12 +1,15 @@
 import { useRef } from "react";
 import { useFrame } from "@react-three/fiber";
 import type { Mesh, Group } from "three";
+import { useReducedMotion } from "../../../hooks/useReducedMotion";
 
 export default function CentralHub() {
   const groupRef = useRef<Group>(null);
   const ringRef = useRef<Mesh>(null);
+  const reducedMotion = useReducedMotion();
 
   useFrame((_, delta) => {
+    if (reducedMotion) return;
     if (ringRef.current) {
       ringRef.current.rotation.z += delta * 0.3;
     }
@@ -40,7 +43,7 @@ export default function CentralHub() {
         />
       </mesh>
 
-      {/* Rotating ring */}
+      {/* Rotating ring — static when reduced motion is preferred */}
       <mesh ref={ringRef}>
         <torusGeometry args={[0.7, 0.03, 8, 48]} />
         <meshBasicMaterial

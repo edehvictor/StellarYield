@@ -1,19 +1,23 @@
-import { useState } from "react";
-import * as StellarSdk from "@stellar/stellar-sdk";
+import { useRef, useState } from "react";
 import freighter from "@stellar/freighter-api";
+import TxStatusTimeline from "../../components/transaction/TxStatusTimeline";
 import { useWallet } from "../../context/useWallet";
+import { submitSignedXdrAndPoll } from "../../services/soroban";
+import type { TxPhase } from "../../services/transactionPhase";
+import {
+  TX_PHASE_SUBMIT_POLL,
+  TX_PHASE_WALLET_ONLY,
+} from "../../services/transactionPhase";
 import type { PendingTransaction } from "./types";
+
+const NETWORK_PASSPHRASE =
+  import.meta.env.VITE_NETWORK_PASSPHRASE ?? "Test SDF Network ; September 2015";
 
 interface PendingTransactionCardProps {
   transaction: PendingTransaction;
   onSign: (txId: string, publicKey: string) => void;
   onExecute: (txId: string) => void;
 }
-
-const RPC_URL =
-  import.meta.env.VITE_SOROBAN_RPC_URL ?? "https://soroban-testnet.stellar.org";
-const NETWORK_PASSPHRASE =
-  import.meta.env.VITE_NETWORK_PASSPHRASE ?? "Test SDF Network ; September 2015";
 
 export default function PendingTransactionCard({
   transaction,
@@ -25,6 +29,14 @@ export default function PendingTransactionCard({
   const [executing, setExecuting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  const [signPhase, setSignPhase] = useState<TxPhase>("idle");
+  const [signError, setSignError] = useState<string | null>(null);
+
+  const [execPhase, setExecPhase] = useState<TxPhase>("idle");
+  const [execError, setExecError] = useState<string | null>(null);
+  const [execHash, setExecHash] = useState<string | null>(null);
+  const lastExecPhaseRef = useRef<TxPhase>("idle");
+
   const hasSigned = transaction.signatures.some(
     (s) => s.publicKey === walletAddress,
   );
@@ -35,6 +47,8 @@ export default function PendingTransactionCard({
     if (!walletAddress) return;
     setSigning(true);
     setError(null);
+    setSignError(null);
+    setSignPhase("waiting_for_wallet");
 
     try {
       const signed = await freighter.signTransaction(transaction.xdr, {
@@ -46,8 +60,13 @@ export default function PendingTransactionCard({
       }
 
       onSign(transaction.id, walletAddress);
+      setSignPhase("success");
+      setTimeout(() => setSignPhase("idle"), 1800);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      const msg = err instanceof Error ? err.message : String(err);
+      setError(msg);
+      setSignError(msg);
+      setSignPhase("failure");
     } finally {
       setSigning(false);
     }
@@ -57,45 +76,46 @@ export default function PendingTransactionCard({
     if (!isReady) return;
     setExecuting(true);
     setError(null);
+    setExecError(null);
+    setExecHash(null);
+    lastExecPhaseRef.current = "idle";
 
     try {
-      const server = new StellarSdk.rpc.Server(RPC_URL);
-      const tx = StellarSdk.TransactionBuilder.fromXDR(
-        transaction.xdr,
-        NETWORK_PASSPHRASE,
-      );
+      const result = await submitSignedXdrAndPoll(transaction.xdr, (p) => {
+        setExecPhase(p);
+        if (p !== "success" && p !== "failure") {
+          lastExecPhaseRef.current = p;
+        }
+      });
 
-      const sendResponse = await server.sendTransaction(tx);
-
-      if (sendResponse.status === "ERROR") {
-        throw new Error(
-          `Submission rejected: ${sendResponse.errorResult?.toXDR("base64") ?? "unknown"}`,
-        );
-      }
-
-      const hash = sendResponse.hash;
-      const deadline = Date.now() + 30_000;
-      let result = await server.getTransaction(hash);
-
-      while (
-        result.status === StellarSdk.rpc.Api.GetTransactionStatus.NOT_FOUND &&
-        Date.now() < deadline
-      ) {
-        await new Promise((r) => setTimeout(r, 2000));
-        result = await server.getTransaction(hash);
-      }
-
-      if (result.status === StellarSdk.rpc.Api.GetTransactionStatus.SUCCESS) {
+      if (result.success) {
+        setExecHash(result.hash ?? null);
         onExecute(transaction.id);
       } else {
-        throw new Error(`Transaction ${result.status}`);
+        const msg = result.error ?? "Transaction failed";
+        setExecError(msg);
+        setError(msg);
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      const msg = err instanceof Error ? err.message : String(err);
+      setExecError(msg);
+      setError(msg);
     } finally {
       setExecuting(false);
     }
   }
+
+  const retryExecute = () => {
+    setExecError(null);
+    setError(null);
+    void handleExecute();
+  };
+
+  const retrySign = () => {
+    setSignError(null);
+    setError(null);
+    void handleSign();
+  };
 
   const statusColor = isExecuted
     ? "text-green-400"
@@ -142,27 +162,55 @@ export default function PendingTransactionCard({
         </p>
       </div>
 
-      {error && <p className="text-sm text-red-400">{error}</p>}
+      {error && signPhase !== "failure" && execPhase !== "failure" && (
+        <p className="text-sm text-red-400">{error}</p>
+      )}
 
       {!isExecuted && (
-        <div className="flex gap-3">
+        <div className="flex flex-col gap-4">
           {!hasSigned && (
-            <button
-              onClick={handleSign}
-              disabled={signing || !walletAddress}
-              className="flex-1 bg-indigo-500/20 text-indigo-300 border border-indigo-500/30 font-semibold py-2 rounded-lg hover:bg-indigo-500/30 disabled:opacity-50 transition-all"
-            >
-              {signing ? "Signing..." : "Sign Transaction"}
-            </button>
+            <div className="space-y-2">
+              <TxStatusTimeline
+                steps={TX_PHASE_WALLET_ONLY}
+                phase={signPhase}
+                errorMessage={signPhase === "failure" ? signError : null}
+                onRetry={signPhase === "failure" ? retrySign : undefined}
+              />
+              <button
+                type="button"
+                onClick={() => void handleSign()}
+                disabled={signing || !walletAddress}
+                className="w-full bg-indigo-500/20 text-indigo-300 border border-indigo-500/30 font-semibold py-2 rounded-lg hover:bg-indigo-500/30 disabled:opacity-50 transition-all"
+              >
+                {signing ? "Signing..." : "Sign Transaction"}
+              </button>
+            </div>
           )}
           {isReady && (
-            <button
-              onClick={handleExecute}
-              disabled={executing}
-              className="flex-1 bg-gradient-to-r from-green-500 to-emerald-600 text-white font-semibold py-2 rounded-lg disabled:opacity-50 transition-opacity"
-            >
-              {executing ? "Executing..." : "Execute"}
-            </button>
+            <div className="space-y-2">
+              <TxStatusTimeline
+                steps={TX_PHASE_SUBMIT_POLL}
+                phase={execPhase}
+                errorMessage={execPhase === "failure" ? execError : null}
+                txHash={execHash}
+                failedAtPhase={
+                  execPhase === "failure"
+                    ? lastExecPhaseRef.current !== "idle"
+                      ? lastExecPhaseRef.current
+                      : "polling"
+                    : null
+                }
+                onRetry={execPhase === "failure" ? retryExecute : undefined}
+              />
+              <button
+                type="button"
+                onClick={() => void handleExecute()}
+                disabled={executing}
+                className="w-full bg-gradient-to-r from-green-500 to-emerald-600 text-white font-semibold py-2 rounded-lg disabled:opacity-50 transition-opacity"
+              >
+                {executing ? "Executing..." : "Execute"}
+              </button>
+            </div>
           )}
         </div>
       )}

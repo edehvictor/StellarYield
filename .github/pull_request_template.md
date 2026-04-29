@@ -1,79 +1,29 @@
-## 📌 Description
-<!-- Clearly explain what this PR does and why it is needed -->
+## Summary
+Brief description of the changes made.
 
----
+## Linked Issue
+Closes #[issue number]
 
-## 🔗 Related Issue
-Closes #[issue-number]
+## Change Type
+- [ ] Bug fix (non-breaking change which fixes an issue)
+- [ ] New feature (non-breaking change which adds functionality)
+- [ ] Breaking change (fix or feature that would cause existing functionality to not work as expected)
+- [ ] Documentation update
+- [ ] Refactor
+- [ ] Other (please describe):
 
----
+## Testing
+Describe how the changes were tested.
 
-## 🧩 Type of Change
-Select the primary type of change:
+### Checklist
+- [ ] Frontend changes tested
+- [ ] Backend changes tested
+- [ ] Contracts changes tested
+- [ ] Documentation updated
+- [ ] Migrations tested (if applicable)
 
-- [ ] Feature
-- [ ] Bug Fix
-- [ ] Refactor (no functional change)
-- [ ] Documentation
-- [ ] Performance Improvement
-- [ ] CI/CD or Infrastructure
-- [ ] Smart Contract (Soroban)
+## Screenshots (if applicable)
+Add screenshots to help explain the changes.
 
----
-
-## 📦 Scope of Impact
-Select all affected areas:
-
-- [ ] Frontend (UI / React)
-- [ ] Backend (API / Server)
-- [ ] Smart Contracts (Soroban)
-- [ ] Database
-- [ ] Stellar / Freighter Wallet Integration
-- [ ] Documentation
-
----
-
-## 🔧 Key Changes
-<!-- Summarize technical implementation -->
-- 
-- 
-- 
-
----
-
-## 🧪 Testing Performed
-
-### 🔍 What was tested
-<!-- What features / flows were validated -->
-- 
-- 
-- 
-
-### 🌐 Environment
-- [ ] Local
-- [ ] Testnet (Stellar)
-- [ ] Futurenet (Soroban)
-
----
-
-## 📸 Screenshots
-<!-- UI screenshots, logs, or transaction proof -->
-
----
-
-## 🚀 Deployment Notes
-<!-- Explain any deployment steps, risks, or breaking changes -->
-
----
-
-## 📝 Additional Notes
-<!-- Any extra context for reviewers -->
----
-
-## ✅ Checklist (Author)
-- [ ] Code self-reviewed
-- [ ] No debug/console logs
-- [ ] Tests added or updated
-- [ ] All tests passing locally
-- [ ] Documentation updated (if needed)
-- [ ] Tested on Stellar testnet (if contracts changed)
+## Deployment Notes
+Any special deployment considerations or notes.

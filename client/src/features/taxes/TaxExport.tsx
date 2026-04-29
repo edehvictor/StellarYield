@@ -1,8 +1,9 @@
 import { useState } from "react";
 import { useWallet } from "../../context/useWallet";
 import { FileSpreadsheet, Download, Loader2, AlertCircle } from "lucide-react";
+import { getApiBaseUrl } from "../../lib/api";
 
-const API_BASE = import.meta.env.VITE_API_URL || "http://localhost:3001";
+const API_BASE = getApiBaseUrl();
 
 /**
  * TaxExport — "Generate Tax Report" UI component for the settings page.

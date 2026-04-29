@@ -138,37 +138,37 @@ function main(): void {
   const data = generateSyntheticData();
   const results = runSimulation(data);
 
-  // eslint-disable-next-line no-console
+   
   console.log("\n=== Dynamic Fee Model Simulation Results ===\n");
-  // eslint-disable-next-line no-console
+   
   console.log("TVL: $1,000,000 | Static baseline: 5% | Window: 10 observations\n");
 
   for (const r of results) {
-    // eslint-disable-next-line no-console
+     
     console.log(`--- ${r.period} ---`);
-    // eslint-disable-next-line no-console
+     
     console.log(`  Avg APY: ${(r.avgApyBps / 100).toFixed(1)}%`);
-    // eslint-disable-next-line no-console
+     
     console.log(`  Avg Dynamic Fee: ${(r.avgDynamicFeeBps / 100).toFixed(2)}%`);
-    // eslint-disable-next-line no-console
+     
     console.log(`  Static fee revenue: $${r.staticFeeRevenue}`);
-    // eslint-disable-next-line no-console
+     
     console.log(`  Dynamic fee revenue: $${r.dynamicFeeRevenue}`);
-    // eslint-disable-next-line no-console
+     
     console.log(`  Delta: ${r.revenueDelta}\n`);
   }
 
-  // eslint-disable-next-line no-console
+   
   console.log("Key findings:");
-  // eslint-disable-next-line no-console
+   
   console.log("1. During low-yield periods, dynamic fee (1%) is much lower than static (5%),");
-  // eslint-disable-next-line no-console
+   
   console.log("   improving user retention and TVL stability.");
-  // eslint-disable-next-line no-console
+   
   console.log("2. During high-yield periods, dynamic fee scales up to capture more revenue.");
-  // eslint-disable-next-line no-console
+   
   console.log("3. The 10-point moving average prevents fee manipulation from single-block spikes.");
-  // eslint-disable-next-line no-console
+   
   console.log("4. Fee bounds (1%-10%) ensure protocol viability and user trust.\n");
 }
 

@@ -1,5 +1,18 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useLayoutEffect, useCallback, useRef } from "react";
 import type { Quest, Achievement } from "./types";
+import {
+  QUEST_STORAGE_VERSION,
+  applySimulatedIndexerProgress,
+  cloneQuests,
+  loadWalletQuestBundle,
+  saveWalletQuestBundle,
+} from "./questPersistence";
+
+export type ProgressVerification =
+  | { status: "idle" }
+  | { status: "loading" }
+  | { status: "verified"; at: number }
+  | { status: "error"; message: string };
 
 // ── Mock quest definitions ───────────────────────────────────────────────
 // In production these would be fetched from the indexer / backend.
@@ -85,79 +98,107 @@ const INITIAL_QUESTS: Quest[] = [
   },
 ];
 
-const STORAGE_KEY = "sy_quests";
-const ACHIEVEMENTS_KEY = "sy_achievements";
-
-function load<T>(key: string, fallback: T): T {
-  try {
-    const raw = localStorage.getItem(key);
-    return raw ? (JSON.parse(raw) as T) : fallback;
-  } catch {
-    return fallback;
-  }
-}
-
-function save<T>(key: string, value: T): void {
-  localStorage.setItem(key, JSON.stringify(value));
+function delay(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const id = setTimeout(resolve, ms);
+    if (!signal) return;
+    signal.addEventListener(
+      "abort",
+      () => {
+        clearTimeout(id);
+        reject(new DOMException("Aborted", "AbortError"));
+      },
+      { once: true },
+    );
+  });
 }
 
 // ── Hook ─────────────────────────────────────────────────────────────────
 
-export function useQuestStore() {
-  const [quests, setQuests] = useState<Quest[]>(() =>
-    load(STORAGE_KEY, INITIAL_QUESTS)
-  );
-  const [achievements, setAchievements] = useState<Achievement[]>(() =>
-    load(ACHIEVEMENTS_KEY, [])
-  );
+export function useQuestStore(walletAddress: string | null) {
+  const walletRef = useRef(walletAddress);
+  walletRef.current = walletAddress;
+
+  const [quests, setQuests] = useState<Quest[]>(() => cloneQuests(INITIAL_QUESTS));
+  const [achievements, setAchievements] = useState<Achievement[]>([]);
+  const [lastSyncedAt, setLastSyncedAt] = useState<number | null>(null);
+  const [progressVerification, setProgressVerification] =
+    useState<ProgressVerification>({ status: "idle" });
   const [isMinting, setIsMinting] = useState(false);
 
-  useEffect(() => { save(STORAGE_KEY, quests); }, [quests]);
-  useEffect(() => { save(ACHIEVEMENTS_KEY, achievements); }, [achievements]);
+  /** Restore display-safe snapshot when the active wallet changes (or session reloads). */
+  useLayoutEffect(() => {
+    if (!walletAddress) {
+      setQuests(cloneQuests(INITIAL_QUESTS));
+      setAchievements([]);
+      setLastSyncedAt(null);
+      setProgressVerification({ status: "idle" });
+      return;
+    }
+
+    const bundle = loadWalletQuestBundle(walletAddress, INITIAL_QUESTS);
+    setQuests(bundle.quests);
+    setAchievements(bundle.achievements);
+    setLastSyncedAt(bundle.lastSyncedAt);
+    setProgressVerification({ status: "idle" });
+  }, [walletAddress]);
+
+  /** Persist display-only progress per wallet. */
+  useEffect(() => {
+    if (!walletAddress) return;
+    saveWalletQuestBundle(walletAddress, {
+      version: QUEST_STORAGE_VERSION,
+      quests,
+      achievements,
+      lastSyncedAt,
+    });
+  }, [walletAddress, quests, achievements, lastSyncedAt]);
 
   /**
    * Simulate indexer verification of on-chain objectives.
    * In production this would call the indexer API and verify server-side.
    * The server must be the source of truth — never trust client-side progress.
    */
-  const refreshProgress = useCallback(async (walletAddress: string) => {
-    if (!walletAddress) return;
+  const refreshProgress = useCallback(async (address: string, signal?: AbortSignal) => {
+    if (!address) return;
 
-    // Simulate async indexer call
-    await new Promise((r) => setTimeout(r, 800));
+    setProgressVerification({ status: "loading" });
 
-    setQuests((prev) =>
-      prev.map((q) => {
-        // Demo: simulate partial/full progress for active quests
-        if (q.id === "q1") {
-          const progress = 100; // pretend indexer confirmed 100 USDC deposit
-          const completed = progress >= q.objectives[0].target;
-          return {
-            ...q,
-            status: completed ? "claimable" : "active",
-            objectives: [{ ...q.objectives[0], progress }],
-          };
-        }
-        if (q.id === "q2") {
-          const progress = 12;
-          return {
-            ...q,
-            objectives: [{ ...q.objectives[0], progress }],
-          };
-        }
-        if (q.id === "q4") {
-          const progress = 3;
-          const completed = progress >= q.objectives[0].target;
-          return {
-            ...q,
-            status: completed ? "claimable" : "active",
-            objectives: [{ ...q.objectives[0], progress }],
-          };
-        }
-        return q;
-      })
-    );
+    try {
+      await delay(800, signal);
+    } catch (e) {
+      if (e instanceof DOMException && e.name === "AbortError") {
+        return;
+      }
+      setProgressVerification({
+        status: "error",
+        message: e instanceof Error ? e.message : "Could not refresh progress.",
+      });
+      return;
+    }
+
+    if (signal?.aborted || walletRef.current !== address) return;
+
+    try {
+      setQuests((prev) => applySimulatedIndexerProgress(prev));
+      const now = Date.now();
+      setLastSyncedAt(now);
+      setProgressVerification({ status: "verified", at: now });
+    } catch (e) {
+      setProgressVerification({
+        status: "error",
+        message: e instanceof Error ? e.message : "Could not refresh progress.",
+      });
+    }
   }, []);
+
+  /** After connect / reconnect, verify progress without blocking cached UI (see stale banner). */
+  useEffect(() => {
+    if (!walletAddress) return;
+    const ac = new AbortController();
+    void refreshProgress(walletAddress, ac.signal);
+    return () => ac.abort();
+  }, [walletAddress, refreshProgress]);
 
   /**
    * Mint an achievement badge NFT via Soroban contract call.
@@ -172,7 +213,6 @@ export function useQuestStore() {
 
       setIsMinting(true);
       try {
-        // Simulate Soroban contract call to mint badge NFT
         await new Promise((r) => setTimeout(r, 1500));
         const fakeTxHash = `tx_${Math.random().toString(36).slice(2, 12)}`;
 
@@ -191,12 +231,17 @@ export function useQuestStore() {
           )
         );
 
+        const addr = walletRef.current;
+        if (addr) {
+          await refreshProgress(addr);
+        }
+
         return fakeTxHash;
       } finally {
         setIsMinting(false);
       }
     },
-    [quests]
+    [quests, refreshProgress],
   );
 
   const totalPoints = achievements.reduce((sum, a) => {
@@ -204,5 +249,20 @@ export function useQuestStore() {
     return sum + (q?.points ?? 0);
   }, 0);
 
-  return { quests, achievements, isMinting, refreshProgress, mintBadge, totalPoints };
+  const isProgressVerifying = progressVerification.status === "loading";
+  const showStaleProgressBanner =
+    isProgressVerifying && lastSyncedAt !== null;
+
+  return {
+    quests,
+    achievements,
+    isMinting,
+    lastSyncedAt,
+    progressVerification,
+    isProgressVerifying,
+    showStaleProgressBanner,
+    refreshProgress,
+    mintBadge,
+    totalPoints,
+  };
 }

@@ -26,9 +26,7 @@ impl MockAmm {
         let balance = out_client.balance(&env.current_contract_address());
         let out_amount = amount_in.min(balance);
 
-        if out_amount < amount_out_min {
-            panic!("slippage");
-        }
+        assert!(out_amount >= amount_out_min, "slippage");
 
         out_client.transfer(&env.current_contract_address(), &sender, &out_amount);
         out_amount

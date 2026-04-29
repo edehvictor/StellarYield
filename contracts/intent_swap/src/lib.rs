@@ -99,7 +99,10 @@ pub enum SwapError {
     InvalidExpiry = 12,
     SelfTrade = 13,
     PartialFillExceeded = 14,
+    InvalidFee = 15,
 }
+
+const MAX_PROTOCOL_FEE_BPS: u32 = 100;
 
 // ── Contract ────────────────────────────────────────────────────────────
 
@@ -127,6 +130,9 @@ impl IntentSwap {
     ) -> Result<(), SwapError> {
         if env.storage().instance().has(&DataKey::Initialized) {
             return Err(SwapError::AlreadyInitialized);
+        }
+        if protocol_fee_bps > MAX_PROTOCOL_FEE_BPS {
+            return Err(SwapError::InvalidFee);
         }
 
         env.storage().instance().set(&DataKey::Admin, &admin);
@@ -444,6 +450,9 @@ impl IntentSwap {
     /// Update protocol fee. Admin only.
     pub fn set_protocol_fee(env: Env, admin: Address, fee_bps: u32) -> Result<(), SwapError> {
         Self::require_admin(&env, &admin)?;
+        if fee_bps > MAX_PROTOCOL_FEE_BPS {
+            return Err(SwapError::InvalidFee);
+        }
         env.storage()
             .instance()
             .set(&DataKey::ProtocolFeeBps, &fee_bps);
@@ -690,6 +699,40 @@ mod tests {
         let (_, client, _, _, _, _, _) = setup_env();
         assert_eq!(client.solver_count(), 0);
         assert_eq!(client.get_protocol_fee(), 50);
+    }
+
+    #[test]
+    fn test_initialize_rejects_fee_above_max() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(IntentSwap, ());
+        let client = IntentSwapClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        let fee_recipient = Address::generate(&env);
+
+        let result = client.try_initialize(&admin, &1000, &101, &fee_recipient);
+        assert_eq!(result, Err(Ok(SwapError::InvalidFee)));
+    }
+
+    #[test]
+    fn test_set_protocol_fee_bounds() {
+        let (_, client, admin, _, _, _, _) = setup_env();
+
+        // zero fee
+        client.set_protocol_fee(&admin, &0);
+        assert_eq!(client.get_protocol_fee(), 0);
+
+        // normal fee
+        client.set_protocol_fee(&admin, &50);
+        assert_eq!(client.get_protocol_fee(), 50);
+
+        // max fee
+        client.set_protocol_fee(&admin, &100);
+        assert_eq!(client.get_protocol_fee(), 100);
+
+        // invalid fee above max
+        let invalid = client.try_set_protocol_fee(&admin, &101);
+        assert_eq!(invalid, Err(Ok(SwapError::InvalidFee)));
     }
 
     #[test]

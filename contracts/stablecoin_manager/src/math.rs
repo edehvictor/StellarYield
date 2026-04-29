@@ -44,7 +44,7 @@ pub fn calculate_collateral_value(
     if vault_shares == 0 {
         return 0;
     }
-    
+
     // value = collateral * (assets / shares) * price
     // (collateral * assets * price) / (shares * 1e7)
     (collateral * vault_assets * price_usd) / (vault_shares * 10_000_000)
@@ -55,6 +55,6 @@ pub fn calculate_cr(collateral_value: i128, debt_value: i128) -> u32 {
     if debt_value == 0 {
         return u32::MAX;
     }
-    
+
     ((collateral_value * 10000) / debt_value) as u32
 }

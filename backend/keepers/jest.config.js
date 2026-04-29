@@ -8,4 +8,10 @@ module.exports = {
     '^.+\\.tsx?$': 'ts-jest',
   },
   setupFiles: ['<rootDir>/src/__tests__/setup.ts'],
+  coverageThreshold: {
+    './src/services/**': {
+      lines: 90,
+      branches: 90,
+    },
+  },
 };

@@ -17,14 +17,33 @@ describe("yield normalization utilities", () => {
   it("normalizes a raw protocol payload into the frontend shape", () => {
     const normalized = normalizeYield(rawYield);
 
-    expect(normalized).toEqual({
-      protocolName: "Blend",
-      apy: 6.75,
-      tvl: 12_500_000.57,
-      riskScore: expect.any(Number),
-      source: "stellar://blend",
-      fetchedAt: "2026-03-25T10:00:00.000Z",
-    });
+    expect(normalized).toEqual(
+      expect.objectContaining({
+        protocolName: "Blend",
+        protocol: "Blend",
+        asset: "USDC",
+        risk: "Low",
+        apy: 6.75,
+        rewardApy: 0,
+        totalApy: 6.75,
+        netApy: expect.any(Number),
+        feeDragApy: expect.any(Number),
+        rewards: [],
+        tvl: 12_500_000.57,
+        riskScore: expect.any(Number),
+        source: "stellar://blend",
+        fetchedAt: "2026-03-25T10:00:00.000Z",
+        netYieldAssumptions: expect.any(Object),
+        netYieldSensitivity: expect.any(Array),
+        capitalEfficiency: expect.any(Object),
+        attribution: {
+          baseYield: expect.any(Number),
+          incentives: expect.any(Number),
+          compounding: expect.any(Number),
+          tacticalRotation: expect.any(Number),
+        },
+      }),
+    );
   });
 
   it("normalizes multiple yield payloads", () => {

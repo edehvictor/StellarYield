@@ -13,7 +13,12 @@ import {
   ChevronDown,
   ExternalLink,
   Layers,
+  Clock,
+  Info
 } from 'lucide-react';
+import { apiUrl } from '../../lib/api';
+import { LiquidityBufferPanel } from './LiquidityBufferPanel';
+import { computeDecayedFreshnessConfidence } from './freshnessDecay';
 
 // ── Types ───────────────────────────────────────────────────────────────
 
@@ -21,29 +26,43 @@ interface ApyEntry {
   protocol: string;
   asset: string;
   apy: number;
+  totalApy?: number;
+  netApy?: number;
+  feeDragApy?: number;
+  netYieldSensitivity?: Array<{
+    environment: "low" | "medium" | "high";
+    netApy: number;
+  }>;
+  capitalEfficiency?: {
+    score: number;
+    grade: "A" | "B" | "C" | "D";
+  };
   tvl: number;
   risk: string;
   change24h: number;
   rewardTokens: string[];
   category: string;
+  fetchedAt?: string;
+  freshnessConfidence?: number;
+  unusableDueToStale?: boolean;
 }
 
 type SortField = 'apy' | 'tvl' | 'risk' | 'protocol';
 type SortDirection = 'asc' | 'desc';
 type ViewMode = 'grid' | 'table';
+type RiskLevel = 'Low' | 'Medium' | 'High';
 
-// ── Mock fallback data ──────────────────────────────────────────────────
-
-const MOCK_APY_DATA: ApyEntry[] = [
-  { protocol: 'Blend',     asset: 'USDC',       apy: 8.42,  tvl: 2_450_000, risk: 'Low',    change24h: 0.32,  rewardTokens: ['BLND'],          category: 'Lending' },
-  { protocol: 'Blend',     asset: 'XLM',        apy: 5.18,  tvl: 1_820_000, risk: 'Low',    change24h: -0.14, rewardTokens: ['BLND'],          category: 'Lending' },
-  { protocol: 'Soroswap',  asset: 'XLM-USDC',   apy: 14.75, tvl: 3_100_000, risk: 'Medium', change24h: 1.23,  rewardTokens: ['SSWP', 'XLM'],  category: 'DEX LP' },
-  { protocol: 'Soroswap',  asset: 'XLM-ETH',    apy: 18.32, tvl: 980_000,   risk: 'High',   change24h: 2.45,  rewardTokens: ['SSWP'],          category: 'DEX LP' },
-  { protocol: 'DeFindex',  asset: 'Yield Index', apy: 10.89, tvl: 1_540_000, risk: 'Medium', change24h: -0.58, rewardTokens: ['DFX'],           category: 'Index' },
-  { protocol: 'DeFindex',  asset: 'Blue Chip',   apy: 6.25,  tvl: 2_210_000, risk: 'Low',    change24h: 0.08,  rewardTokens: ['DFX'],           category: 'Index' },
-  { protocol: 'Aquarius',  asset: 'XLM-yXLM',   apy: 11.54, tvl: 1_350_000, risk: 'Low',    change24h: 0.76,  rewardTokens: ['AQUA', 'ICE'],   category: 'Staking' },
-  { protocol: 'Aquarius',  asset: 'USDC-yUSDC',  apy: 7.88,  tvl: 890_000,   risk: 'Low',    change24h: -0.22, rewardTokens: ['AQUA'],          category: 'Staking' },
-];
+interface ApiApyEntry {
+  protocol?: unknown;
+  asset?: unknown;
+  apy?: unknown;
+  tvl?: unknown;
+  risk?: unknown;
+  change24h?: unknown;
+  rewardTokens?: unknown;
+  category?: unknown;
+  fetchedAt?: unknown;
+}
 
 // ── Helpers ─────────────────────────────────────────────────────────────
 
@@ -53,10 +72,10 @@ function formatTvl(value: number): string {
   return `$${value.toLocaleString()}`;
 }
 
-const RISK_CONFIG: Record<string, { color: string; bg: string; border: string; order: number }> = {
-  Low:    { color: 'text-green-400', bg: 'bg-green-500/15', border: 'border-green-500/30', order: 1 },
-  Medium: { color: 'text-yellow-400', bg: 'bg-yellow-500/15', border: 'border-yellow-500/30', order: 2 },
-  High:   { color: 'text-red-400', bg: 'bg-red-500/15', border: 'border-red-500/30', order: 3 },
+const RISK_CONFIG: Record<string, { color: string; bg: string; border: string; order: number; explanation: string }> = {
+  Low:    { color: 'text-green-400', bg: 'bg-green-500/15', border: 'border-green-500/30', order: 1, explanation: 'High TVL, battle-tested protocol, highly liquid.' },
+  Medium: { color: 'text-yellow-400', bg: 'bg-yellow-500/15', border: 'border-yellow-500/30', order: 2, explanation: 'Moderate volatility or newer protocol with steady growth.' },
+  High:   { color: 'text-red-400', bg: 'bg-red-500/15', border: 'border-red-500/30', order: 3, explanation: 'Low TVL, highly volatile assets, or experimental protocol.' },
 };
 
 const PROTOCOL_COLORS: Record<string, string> = {
@@ -65,6 +84,70 @@ const PROTOCOL_COLORS: Record<string, string> = {
   DeFindex:  'from-amber-500/80 to-orange-600/80',
   Aquarius:  'from-emerald-500/80 to-teal-600/80',
 };
+
+function normalizeNumber(value: unknown, fallback = 0): number {
+  const parsed = typeof value === 'number' ? value : Number(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function normalizeRisk(value: unknown): RiskLevel {
+  return value === 'Low' || value === 'Medium' || value === 'High' ? value : 'Medium';
+}
+
+function deriveCategory(protocol: string): string {
+  if (protocol === 'Soroswap') return 'DEX LP';
+  if (protocol === 'Blend') return 'Lending';
+  if (protocol === 'Aquarius') return 'Staking';
+  if (protocol === 'DeFindex') return 'Index';
+  return 'Other';
+}
+
+function normalizeFetchedAt(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? undefined : value;
+}
+
+function normalizeRewardTokens(tokens: unknown, protocol: string): string[] {
+  if (Array.isArray(tokens)) {
+    const cleaned = tokens.filter((token): token is string => typeof token === 'string' && token.trim().length > 0);
+    if (cleaned.length > 0) return cleaned;
+  }
+  return [protocol.slice(0, 4).toUpperCase()];
+}
+
+function normalizeApyEntry(entry: ApiApyEntry): ApyEntry {
+  const protocol = typeof entry.protocol === 'string' && entry.protocol.trim().length > 0
+    ? entry.protocol
+    : 'Unknown Protocol';
+  const asset = typeof entry.asset === 'string' && entry.asset.trim().length > 0
+    ? entry.asset
+    : 'Unknown Asset';
+
+  return {
+    protocol,
+    asset,
+    apy: normalizeNumber(entry.apy),
+    tvl: normalizeNumber(entry.tvl),
+    risk: normalizeRisk(entry.risk),
+    change24h: normalizeNumber(entry.change24h, parseFloat((Math.random() * 4 - 1).toFixed(2))),
+    rewardTokens: normalizeRewardTokens(entry.rewardTokens, protocol),
+    category: typeof entry.category === 'string' && entry.category.trim().length > 0
+      ? entry.category
+      : deriveCategory(protocol),
+    fetchedAt: normalizeFetchedAt(entry.fetchedAt),
+  };
+}
+
+function getErrorMessage(error: unknown): string {
+  if (error instanceof Error && error.message) {
+    if (error.message.startsWith('HTTP')) {
+      return `Yield API request failed (${error.message})`;
+    }
+    return error.message;
+  }
+  return 'Unable to fetch live APY data right now';
+}
 
 // ── Skeleton Components ─────────────────────────────────────────────────
 
@@ -128,19 +211,39 @@ export default function ApyDashboard() {
   const [selectedCategory, setSelectedCategory] = useState<string>('All');
   const [refreshing, setRefreshing] = useState(false);
 
-  const fetchApyData = async () => {
+  const fetchApyData = async (showLoadingState = true) => {
+    if (showLoadingState) {
+      setLoading(true);
+    }
+
     try {
       setError(null);
-      const res = await fetch('http://localhost:3001/api/yields');
+      const res = await fetch(apiUrl('/api/yields'));
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
       // Map backend data and augment with comparison fields
-      const augmented: ApyEntry[] = data.map((d: { protocol: string; asset: string; apy: number; tvl: number; risk: string }) => ({
-        ...d,
+      const augmented: ApyEntry[] = data.map((d: {
+        protocol: string;
+        asset: string;
+        apy: number;
+        totalApy?: number;
+        netApy?: number;
+        feeDragApy?: number;
+        netYieldSensitivity?: Array<{ environment: "low" | "medium" | "high"; netApy: number }>;
+        capitalEfficiency?: { score: number; grade: "A" | "B" | "C" | "D" };
+        tvl: number;
+        risk: string;
+      }) => {
+        const fetchedTime = d.fetchedAt ? new Date(d.fetchedAt).getTime() : Date.now();
+        const freshness = computeDecayedFreshnessConfidence(Date.now() - fetchedTime);
+        return {
+          ...d,
         change24h: parseFloat((Math.random() * 4 - 1).toFixed(2)),
         rewardTokens: [d.protocol.slice(0, 4).toUpperCase()],
         category: d.protocol === 'Soroswap' ? 'DEX LP' : d.protocol === 'Blend' ? 'Lending' : 'Index',
-      }));
+        freshnessConfidence: freshness.confidence,
+        unusableDueToStale: freshness.unusable,
+      }});
       setApyData(augmented);
     } catch {
       // Fallback to mock data if API is unavailable
@@ -152,12 +255,12 @@ export default function ApyDashboard() {
   };
 
   useEffect(() => {
-    fetchApyData();
+    void fetchApyData();
   }, []);
 
   const handleRefresh = () => {
     setRefreshing(true);
-    fetchApyData();
+    void fetchApyData(false);
   };
 
   // ── Derived state ───────────────────────────────────────────────────
@@ -166,6 +269,7 @@ export default function ApyDashboard() {
 
   const filtered = apyData
     .filter((d) => {
+      if (d.unusableDueToStale) return false;
       const q = searchQuery.toLowerCase();
       const matchesSearch = d.protocol.toLowerCase().includes(q) ||
         d.asset.toLowerCase().includes(q) ||
@@ -177,11 +281,15 @@ export default function ApyDashboard() {
       const dir = sortDirection === 'asc' ? 1 : -1;
       if (sortField === 'protocol') return dir * a.protocol.localeCompare(b.protocol);
       if (sortField === 'risk') return dir * ((RISK_CONFIG[a.risk]?.order ?? 0) - (RISK_CONFIG[b.risk]?.order ?? 0));
-      return dir * ((a[sortField] as number) - (b[sortField] as number));
+      const scoreA = (a[sortField] as number) * (a.freshnessConfidence ?? 1);
+      const scoreB = (b[sortField] as number) * (b.freshnessConfidence ?? 1);
+      return dir * (scoreA - scoreB);
     });
 
-  const bestApy = apyData.length ? Math.max(...apyData.map((d) => d.apy)) : 0;
-  const avgApy = apyData.length ? apyData.reduce((s, d) => s + d.apy, 0) / apyData.length : 0;
+  const bestApy = apyData.length ? Math.max(...apyData.map((d) => d.netApy ?? d.apy)) : 0;
+  const avgApy = apyData.length
+    ? apyData.reduce((s, d) => s + (d.netApy ?? d.apy), 0) / apyData.length
+    : 0;
   const totalTvl = apyData.reduce((s, d) => s + d.tvl, 0);
   const protocolCount = new Set(apyData.map((d) => d.protocol)).size;
 
@@ -218,7 +326,7 @@ export default function ApyDashboard() {
           </div>
           <h3 className="text-xl font-bold mb-2">Failed to Load APY Data</h3>
           <p className="text-gray-400 max-w-md mx-auto mb-6">
-            {error}. Please check your connection and try again.
+            {error}. Please try again.
           </p>
           <button onClick={handleRefresh} className="btn-primary inline-flex items-center gap-2">
             <RefreshCw size={16} /> Retry
@@ -253,9 +361,32 @@ export default function ApyDashboard() {
         </button>
       </header>
 
+      {error && (
+        <div
+          className="glass-panel border border-amber-500/30 bg-amber-500/10 p-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3"
+          role="status"
+        >
+          <div className="flex items-start gap-2 text-amber-200">
+            <AlertTriangle size={16} className="mt-0.5" />
+            <p className="text-sm">
+              Live APY refresh failed. Showing the last available rates.
+            </p>
+          </div>
+          <button onClick={handleRefresh} className="btn-secondary inline-flex items-center gap-2 text-sm self-start sm:self-auto">
+            <RefreshCw size={14} className={refreshing ? 'animate-spin' : ''} />
+            Retry
+          </button>
+        </div>
+      )}
+
       {/* Summary Stats */}
       {loading ? (
-        <SkeletonSummary />
+        <div>
+          <p className="text-sm text-gray-400 mb-3" role="status">
+            Loading latest APY data...
+          </p>
+          <SkeletonSummary />
+        </div>
       ) : (
         <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-4">
           <div className="glass-card p-5 border-l-4 border-[#6C5DD3]">
@@ -263,12 +394,14 @@ export default function ApyDashboard() {
               <Flame size={14} /> Best APY
             </div>
             <p className="text-2xl font-bold text-[#3EAC75]">{bestApy.toFixed(2)}%</p>
+            <p className="text-xs text-gray-500 mt-1">Net after fees/slippage</p>
           </div>
           <div className="glass-card p-5 border-l-4 border-green-500">
             <div className="flex items-center gap-2 text-gray-400 text-xs font-semibold uppercase tracking-wider mb-2">
               <TrendingUp size={14} /> Avg APY
             </div>
-            <p className="text-2xl font-bold">{avgApy.toFixed(2)}%</p>
+              <p className="text-2xl font-bold">{avgApy.toFixed(2)}%</p>
+              <p className="text-xs text-gray-500 mt-1">Portfolio net APY average</p>
           </div>
           <div className="glass-card p-5 border-l-4 border-cyan-500">
             <div className="flex items-center gap-2 text-gray-400 text-xs font-semibold uppercase tracking-wider mb-2">
@@ -348,6 +481,11 @@ export default function ApyDashboard() {
                 const risk = RISK_CONFIG[entry.risk] ?? RISK_CONFIG.Medium;
                 const gradient = PROTOCOL_COLORS[entry.protocol] ?? 'from-gray-500/80 to-gray-600/80';
                 const isPositive = entry.change24h >= 0;
+                
+                const fetchedTime = entry.fetchedAt ? new Date(entry.fetchedAt) : new Date();
+                const diffMins = Math.floor((Date.now() - fetchedTime.getTime()) / 60000);
+                const isStale = (entry.freshnessConfidence ?? 1) < 0.5;
+
                 return (
                   <div
                     key={`${entry.protocol}-${entry.asset}`}
@@ -364,9 +502,31 @@ export default function ApyDashboard() {
                           <p className="font-semibold text-white tracking-wide truncate">{entry.protocol}</p>
                           <p className="text-xs text-gray-500">{entry.category}</p>
                         </div>
-                        <span className={`${risk.bg} ${risk.color} ${risk.border} border px-2 py-0.5 rounded-lg text-[10px] font-bold uppercase tracking-wider`}>
-                          {entry.risk}
-                        </span>
+                        <div
+                          className="group/risk relative flex cursor-help outline-none"
+                          tabIndex={0}
+                          aria-describedby={`risk-tip-grid-${entry.protocol}-${entry.asset}`}
+                        >
+                          <span className={`${risk.bg} ${risk.color} ${risk.border} border px-2 py-0.5 rounded-lg text-[10px] font-bold uppercase tracking-wider flex items-center gap-1`}>
+                            {entry.risk} <Info size={10} />
+                          </span>
+                          <div
+                            id={`risk-tip-grid-${entry.protocol}-${entry.asset}`}
+                            role="tooltip"
+                            className="absolute hidden group-hover/risk:block group-focus-within/risk:block bottom-full mb-2 right-0 w-48 p-2 bg-[#1A1A24] border border-white/10 rounded-lg text-xs leading-relaxed text-gray-300 shadow-xl z-10 transition-opacity"
+                          >
+                            {risk.explanation}
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* Freshness Indicator */}
+                      <div className="flex items-center gap-1.5 mb-3 text-[10px] font-medium uppercase tracking-wider">
+                        {isStale ? (
+                          <span className="text-red-400 flex items-center gap-1 bg-red-400/10 px-2 py-0.5 rounded-full"><Clock size={10} /> Stale Data ({diffMins}m old)</span>
+                        ) : (
+                          <span className="text-gray-500 flex items-center gap-1"><Clock size={10} /> Updated just now ({Math.round((entry.freshnessConfidence ?? 1) * 100)}% confidence)</span>
+                        )}
                       </div>
 
                       {/* Asset Badge */}
@@ -378,9 +538,15 @@ export default function ApyDashboard() {
 
                       {/* APY */}
                       <div className="flex items-baseline gap-2 mb-1">
-                        <span className="text-3xl font-extrabold text-white">{entry.apy.toFixed(2)}</span>
+                        <span className="text-3xl font-extrabold text-white">
+                          {(entry.netApy ?? entry.apy).toFixed(2)}
+                        </span>
                         <span className="text-lg font-bold text-gray-400">% APY</span>
                       </div>
+                      <p className="text-xs text-gray-500">
+                        Gross {(entry.totalApy ?? entry.apy).toFixed(2)}% | Drag{" "}
+                        {(entry.feeDragApy ?? 0).toFixed(2)}%
+                      </p>
 
                       {/* 24h Change + TVL */}
                       <div className="flex items-center gap-4 text-xs mt-2">
@@ -399,6 +565,22 @@ export default function ApyDashboard() {
                           </span>
                         ))}
                       </div>
+                      {entry.capitalEfficiency && (
+                        <div className="mt-3 text-xs text-gray-400">
+                          Capital efficiency:{" "}
+                          <span className="text-white font-semibold">
+                            {entry.capitalEfficiency.score.toFixed(1)} ({entry.capitalEfficiency.grade})
+                          </span>
+                        </div>
+                      )}
+                      {entry.netYieldSensitivity?.length ? (
+                        <div className="mt-2 text-[11px] text-gray-500">
+                          Sensitivity L/M/H:{" "}
+                          {entry.netYieldSensitivity
+                            .map((s) => `${s.environment[0].toUpperCase()}:${s.netApy.toFixed(1)}%`)
+                            .join(" ")}
+                        </div>
+                      ) : null}
                     </div>
 
                     {/* Action */}
@@ -412,8 +594,20 @@ export default function ApyDashboard() {
         </div>
       )}
 
+      {!loading && apyData.length === 0 && (
+        <div className="glass-panel p-16 text-center" data-testid="apy-empty-state">
+          <AlertTriangle size={32} className="text-gray-500 mx-auto mb-4" />
+          <p className="text-gray-300 font-medium">No APY data available yet</p>
+          <p className="text-gray-500 text-sm mt-1">Try refreshing to load the latest rates.</p>
+          <button onClick={handleRefresh} className="btn-secondary inline-flex items-center gap-2 mt-6">
+            <RefreshCw size={14} className={refreshing ? 'animate-spin' : ''} />
+            Retry
+          </button>
+        </div>
+      )}
+
       {/* Table View */}
-      {viewMode === 'table' && (
+      {viewMode === 'table' && apyData.length > 0 && (
         <div className="glass-panel overflow-hidden">
           <div className="overflow-x-auto">
             <table className="w-full text-left border-collapse">
@@ -455,6 +649,11 @@ export default function ApyDashboard() {
                       const risk = RISK_CONFIG[entry.risk] ?? RISK_CONFIG.Medium;
                       const gradient = PROTOCOL_COLORS[entry.protocol] ?? 'from-gray-500/80 to-gray-600/80';
                       const isPositive = entry.change24h >= 0;
+                      
+                      const fetchedTime = entry.fetchedAt ? new Date(entry.fetchedAt) : new Date();
+                      const diffMins = Math.floor((Date.now() - fetchedTime.getTime()) / 60000);
+                      const isStale = diffMins > 5;
+
                       return (
                         <tr
                           key={`${entry.protocol}-${entry.asset}`}
@@ -468,7 +667,10 @@ export default function ApyDashboard() {
                               </div>
                               <div>
                                 <span className="font-semibold text-white tracking-wide">{entry.protocol}</span>
-                                <p className="text-[10px] text-gray-500 mt-0.5">{entry.category}</p>
+                                <div className="flex items-center gap-2 mt-0.5">
+                                  <p className="text-[10px] text-gray-500">{entry.category}</p>
+                                  {isStale && <span className="text-[9px] text-red-400 bg-red-400/10 px-1.5 py-px rounded uppercase">Stale</span>}
+                                </div>
                               </div>
                             </div>
                           </td>
@@ -478,7 +680,12 @@ export default function ApyDashboard() {
                             </span>
                           </td>
                           <td className="px-6 py-5">
-                            <span className="text-green-400 font-extrabold text-lg">{entry.apy.toFixed(2)}%</span>
+                            <span className="text-green-400 font-extrabold text-lg">
+                              {(entry.netApy ?? entry.apy).toFixed(2)}%
+                            </span>
+                            <p className="text-[10px] text-gray-500">
+                              Gross {(entry.totalApy ?? entry.apy).toFixed(2)}%
+                            </p>
                           </td>
                           <td className="px-6 py-5">
                             <span className={`flex items-center gap-1 text-sm font-medium ${isPositive ? 'text-green-400' : 'text-red-400'}`}>
@@ -490,11 +697,29 @@ export default function ApyDashboard() {
                             {formatTvl(entry.tvl)}
                           </td>
                           <td className="px-6 py-5">
-                            <span className={`${risk.bg} ${risk.color} ${risk.border} border px-2.5 py-1.5 rounded text-xs font-bold uppercase tracking-wider`}>
-                              {entry.risk}
-                            </span>
+                            <div
+                              className="group/risk relative inline-flex cursor-help outline-none"
+                              tabIndex={0}
+                              aria-describedby={`risk-tip-table-${entry.protocol}-${entry.asset}`}
+                            >
+                              <span className={`${risk.bg} ${risk.color} ${risk.border} border px-2.5 py-1.5 rounded text-xs font-bold uppercase tracking-wider flex items-center gap-1`}>
+                                {entry.risk} <Info size={12} />
+                              </span>
+                              <div
+                                id={`risk-tip-table-${entry.protocol}-${entry.asset}`}
+                                role="tooltip"
+                                className="absolute hidden group-hover/risk:block group-focus-within/risk:block bottom-full mb-2 left-1/2 -translate-x-1/2 w-48 p-2 bg-[#1A1A24] border border-white/10 rounded-lg text-xs leading-relaxed text-gray-300 shadow-xl z-10 transition-opacity"
+                              >
+                                {risk.explanation}
+                              </div>
+                            </div>
                           </td>
                           <td className="px-6 py-5 text-right">
+                            {entry.capitalEfficiency && (
+                              <p className="text-[10px] text-gray-500 mb-1">
+                                CES {entry.capitalEfficiency.score.toFixed(1)} ({entry.capitalEfficiency.grade})
+                              </p>
+                            )}
                             <button className="btn-secondary text-sm px-5 py-2 opacity-80 group-hover:opacity-100 group-hover:bg-[#6C5DD3] group-hover:border-[#6C5DD3] group-hover:text-white transition-all shadow-md">
                               Deposit
                             </button>
@@ -519,13 +744,32 @@ export default function ApyDashboard() {
       )}
 
       {/* Card Grid Empty State */}
-      {viewMode === 'grid' && !loading && filtered.length === 0 && (
+      {viewMode === 'grid' && !loading && apyData.length > 0 && filtered.length === 0 && (
         <div className="glass-panel p-16 text-center">
           <Search size={32} className="text-gray-600 mx-auto mb-4" />
           <p className="text-gray-400 font-medium">No matching yields found</p>
           <p className="text-gray-600 text-sm mt-1">Try adjusting your search or filters</p>
         </div>
       )}
+
+      <LiquidityBufferPanel
+        recommendations={[
+          {
+            strategyId: "Blend-USDC",
+            stressLevel: "low",
+            recommendedBufferPct: 0.12,
+            recommendedBufferUsd: 180_000,
+            rationale: [],
+          },
+          {
+            strategyId: "Soroswap-XLM-USDC",
+            stressLevel: "medium",
+            recommendedBufferPct: 0.21,
+            recommendedBufferUsd: 310_000,
+            rationale: [],
+          },
+        ]}
+      />
     </div>
   );
 }

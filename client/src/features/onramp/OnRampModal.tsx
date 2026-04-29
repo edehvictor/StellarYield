@@ -1,5 +1,6 @@
 import React, { useState } from "react";
 import { CreditCard, ArrowRight, CheckCircle2, ShieldCheck, DollarSign } from "lucide-react";
+import { apiUrl } from "../../lib/api";
 
 interface OnRampModalProps {
   isOpen: boolean;
@@ -23,7 +24,7 @@ const OnRampModal: React.FC<OnRampModalProps> = ({ isOpen, onClose, walletAddres
     // Simulate API call to on-ramp provider
     setTimeout(async () => {
       try {
-        await fetch("http://localhost:3001/api/onramp/webhook", {
+        await fetch(apiUrl("/api/onramp/webhook"), {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({

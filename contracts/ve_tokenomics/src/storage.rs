@@ -6,8 +6,8 @@ pub enum DataKey {
     Admin,
     YieldToken,
     UserLock(Address),
-    TotalVotingPower, // Placeholder for global state
-    GaugeVote(Address), // User's set of votes
+    TotalVotingPower,         // Placeholder for global state
+    GaugeVote(Address),       // User's set of votes
     PoolTotalWeight(Address), // Total weight for a specific pool
     Initialized,
 }

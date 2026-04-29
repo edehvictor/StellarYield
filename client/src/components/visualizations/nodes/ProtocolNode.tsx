@@ -2,6 +2,7 @@ import { useRef } from "react";
 import { useFrame } from "@react-three/fiber";
 import { Html } from "@react-three/drei";
 import type { Mesh, Vector3Tuple } from "three";
+import { useReducedMotion } from "../../../hooks/useReducedMotion";
 
 interface ProtocolNodeProps {
   position: Vector3Tuple;
@@ -19,13 +20,13 @@ export default function ProtocolNode({
   apy,
 }: ProtocolNodeProps) {
   const meshRef = useRef<Mesh>(null);
+  const reducedMotion = useReducedMotion();
 
   useFrame(() => {
-    if (meshRef.current) {
-      meshRef.current.scale.setScalar(
-        1 + Math.sin(Date.now() * 0.002) * 0.05
-      );
-    }
+    if (reducedMotion || !meshRef.current) return;
+    meshRef.current.scale.setScalar(
+      1 + Math.sin(Date.now() * 0.002) * 0.05
+    );
   });
 
   return (

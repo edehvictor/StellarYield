@@ -8,8 +8,9 @@ import {
   RefreshCw,
 } from "lucide-react";
 import { YieldFlowCanvas } from "../visualizations";
-
 import PortfolioVisualizer from "../visualizer/PortfolioVisualizer";
+import { ExposureMap } from "../../portfolio/ExposureMap";
+import PresetsPanel from "../../features/presets/PresetsPanel";
 
 // ── Types ───────────────────────────────────────────────────────────────
 
@@ -103,6 +104,17 @@ export default function PortfolioDashboard({ walletAddress }: PortfolioDashboard
     );
   }
 
+  if (positions.length === 0) {
+    return (
+      <div className="glass-panel p-12 text-center">
+        <Wallet className="mx-auto mb-4 text-gray-400" size={48} />
+        <h2 className="text-xl font-bold mb-2">No Active Positions</h2>
+        <p className="text-gray-400 mb-6">Start investing to build your portfolio and earn yield.</p>
+        <button className="btn-primary">Make Your First Deposit</button>
+      </div>
+    );
+  }
+
   return (
     <div className="space-y-8">
       {/* Header */}
@@ -161,6 +173,25 @@ export default function PortfolioDashboard({ walletAddress }: PortfolioDashboard
       >
         <YieldFlowCanvas scene="portfolio" positions={positions} />
       </Suspense>
+
+      {/* Exposure Map */}
+      <ExposureMap 
+        data={{
+          byAsset: positions.reduce((acc, p) => {
+            acc[p.asset] = (acc[p.asset] || 0) + p.currentValue;
+            return acc;
+          }, {} as Record<string, number>),
+          byProtocol: positions.reduce((acc, p) => {
+            acc[p.protocol] = (acc[p.protocol] || 0) + p.currentValue;
+            return acc;
+          }, {} as Record<string, number>),
+          totalValue: totalValue,
+          warnings: totalValue > 0 && positions.some(p => p.currentValue / totalValue > 0.5) 
+            ? ["High concentration (>50%) detected in a single position."] 
+            : []
+        }}
+      />
+
       {/* 3D Visualizer Integration */}
       <PortfolioVisualizer />
 
@@ -203,46 +234,55 @@ export default function PortfolioDashboard({ walletAddress }: PortfolioDashboard
         </div>
       </div>
 
+      {/* Allocation Presets */}
+      <div className="glass-panel p-6">
+        <PresetsPanel walletAddress={walletAddress} />
+      </div>
+
       {/* Transaction History */}
       <div className="glass-panel p-6">
         <h3 className="text-lg font-bold mb-4">Transaction History</h3>
-        <div className="space-y-3">
-          {transactions.map((tx) => (
-            <div
-              key={tx.id}
-              className="flex items-center justify-between py-3 border-b border-white/5 last:border-0"
-            >
-              <div className="flex items-center gap-3">
-                <div
-                  className={`w-8 h-8 rounded-full flex items-center justify-center ${
-                    tx.type === "deposit"
-                      ? "bg-[#3EAC75]/20 text-[#3EAC75]"
-                      : "bg-[#F5A623]/20 text-[#F5A623]"
-                  }`}
-                >
-                  {tx.type === "deposit" ? (
-                    <ArrowDownToLine size={14} />
-                  ) : (
-                    <ArrowUpFromLine size={14} />
-                  )}
+        {transactions.length === 0 ? (
+          <p className="text-gray-400 text-center py-6">No transactions yet. Start by making your first deposit.</p>
+        ) : (
+          <div className="space-y-3">
+            {transactions.map((tx) => (
+              <div
+                key={tx.id}
+                className="flex items-center justify-between py-3 border-b border-white/5 last:border-0"
+              >
+                <div className="flex items-center gap-3">
+                  <div
+                    className={`w-8 h-8 rounded-full flex items-center justify-center ${
+                      tx.type === "deposit"
+                        ? "bg-[#3EAC75]/20 text-[#3EAC75]"
+                        : "bg-[#F5A623]/20 text-[#F5A623]"
+                    }`}
+                  >
+                    {tx.type === "deposit" ? (
+                      <ArrowDownToLine size={14} />
+                    ) : (
+                      <ArrowUpFromLine size={14} />
+                    )}
+                  </div>
+                  <div>
+                    <p className="font-medium capitalize">{tx.type}</p>
+                    <p className="text-xs text-gray-500 font-mono">{tx.txHash}</p>
+                  </div>
                 </div>
-                <div>
-                  <p className="font-medium capitalize">{tx.type}</p>
-                  <p className="text-xs text-gray-500 font-mono">{tx.txHash}</p>
-                </div>
-              </div>
 
-              <div className="text-right">
-                <p className={`font-medium ${tx.type === "deposit" ? "text-[#3EAC75]" : "text-[#F5A623]"}`}>
-                  {tx.type === "deposit" ? "+" : "-"}{formatCurrency(tx.amount)}
-                </p>
-                <p className="text-xs text-gray-500 flex items-center gap-1 justify-end">
-                  <Clock size={10} /> {formatDate(tx.timestamp)}
-                </p>
+                <div className="text-right">
+                  <p className={`font-medium ${tx.type === "deposit" ? "text-[#3EAC75]" : "text-[#F5A623]"}`}>
+                    {tx.type === "deposit" ? "+" : "-"}{formatCurrency(tx.amount)}
+                  </p>
+                  <p className="text-xs text-gray-500 flex items-center gap-1 justify-end">
+                    <Clock size={10} /> {formatDate(tx.timestamp)}
+                  </p>
+                </div>
               </div>
-            </div>
-          ))}
-        </div>
+            ))}
+          </div>
+        )}
       </div>
     </div>
   );

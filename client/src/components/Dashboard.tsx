@@ -1,8 +1,11 @@
-import { useEffect, useState, Suspense } from "react";
+import React, { useEffect, useState, Suspense } from "react";
 import { Activity, ArrowUpRight, ShieldCheck, TrendingUp } from "lucide-react";
 import ApyHistoryChart from "./charts/ApyHistoryChart";
 import { YieldFlowCanvas } from "./visualizations";
 import MempoolVisualizer from "./mempool_graph/MempoolVisualizer";
+import CorrelationHeatmap from "./charts/CorrelationHeatmap";
+import { apiUrl } from "../lib/api";
+import ApyAttribution from "../features/yields/ApyAttribution";
 
 interface YieldData {
   protocol: string;
@@ -10,14 +13,25 @@ interface YieldData {
   apy: number;
   tvl: number;
   risk: string;
+  attribution: {
+    baseYield: number;
+    incentives: number;
+    compounding: number;
+    tacticalRotation: number;
+  };
 }
 
 export default function Dashboard() {
   const [yields, setYields] = useState<YieldData[]>([]);
   const [loading, setLoading] = useState(true);
+  const [expandedRows, setExpandedRows] = useState<Record<number, boolean>>({});
+
+  const toggleRow = (index: number) => {
+    setExpandedRows((prev) => ({ ...prev, [index]: !prev[index] }));
+  };
 
   useEffect(() => {
-    fetch("http://localhost:3001/api/yields")
+    fetch(apiUrl("/api/yields"))
       .then((res) => res.json())
       .then((data) => {
         setYields(data);
@@ -103,6 +117,8 @@ export default function Dashboard() {
 
       <ApyHistoryChart />
 
+      <CorrelationHeatmap />
+
       {/* Mempool Visualization Integration */}
       <MempoolVisualizer />
 
@@ -141,47 +157,59 @@ export default function Dashboard() {
                 </tr>
               ) : (
                 yields.map((y, i) => (
-                  <tr
-                    key={i}
-                    className="group transition-colors hover:bg-[rgba(255,255,255,0.03)]"
-                  >
-                    <td className="px-6 py-5">
-                      <span className="font-semibold tracking-wide text-white">
-                        {y.protocol}
-                      </span>
-                    </td>
-                    <td className="px-6 py-5">
-                      <span className="rounded-full border border-[#6C5DD3]/30 bg-gradient-to-r from-[#6C5DD3]/20 to-[#6C5DD3]/10 px-3 py-1.5 text-xs font-bold text-[#6C5DD3]">
-                        {y.asset}
-                      </span>
-                    </td>
-                    <td className="px-6 py-5">
-                      <span className="text-lg font-extrabold text-green-400">
-                        {y.apy}%
-                      </span>
-                    </td>
-                    <td className="px-6 py-5 font-medium text-gray-300">
-                      ${y.tvl.toLocaleString()}
-                    </td>
-                    <td className="px-6 py-5">
-                      <span
-                        className={`rounded px-2.5 py-1.5 text-xs font-bold uppercase tracking-wider ${
-                          y.risk === "Low"
-                            ? "bg-green-500 text-green-400"
-                            : y.risk === "Medium"
-                              ? "bg-yellow-500 text-yellow-400"
-                              : "bg-red-500 text-red-400"
-                        } bg-opacity-20`}
-                      >
-                        {y.risk}
-                      </span>
-                    </td>
-                    <td className="px-6 py-5 text-right">
-                      <button className="btn-secondary px-5 py-2 text-sm opacity-80 shadow-md transition-all group-hover:border-[#6C5DD3] group-hover:bg-[#6C5DD3] group-hover:text-white group-hover:opacity-100">
-                        Deposit
-                      </button>
-                    </td>
-                  </tr>
+                  <React.Fragment key={i}>
+                    <tr
+                      className="group cursor-pointer transition-colors hover:bg-[rgba(255,255,255,0.03)]"
+                      onClick={() => toggleRow(i)}
+                    >
+                      <td className="px-6 py-5">
+                        <span className="font-semibold tracking-wide text-white">
+                          {y.protocol}
+                        </span>
+                      </td>
+                      <td className="px-6 py-5">
+                        <span className="rounded-full border border-[#6C5DD3]/30 bg-gradient-to-r from-[#6C5DD3]/20 to-[#6C5DD3]/10 px-3 py-1.5 text-xs font-bold text-[#6C5DD3]">
+                          {y.asset}
+                        </span>
+                      </td>
+                      <td className="px-6 py-5">
+                        <div className="flex flex-col">
+                          <span className="text-lg font-extrabold text-green-400">
+                            {y.apy}%
+                          </span>
+                        </div>
+                      </td>
+                      <td className="px-6 py-5 font-medium text-gray-300">
+                        ${y.tvl.toLocaleString()}
+                      </td>
+                      <td className="px-6 py-5">
+                        <span
+                          className={`rounded px-2.5 py-1.5 text-xs font-bold uppercase tracking-wider ${y.risk === "Low"
+                              ? "bg-green-500 text-green-400"
+                              : y.risk === "Medium"
+                                ? "bg-yellow-500 text-yellow-400"
+                                : "bg-red-500 text-red-400"
+                            } bg-opacity-20`}
+                        >
+                          {y.risk}
+                        </span>
+                      </td>
+                      <td className="px-6 py-5 text-right">
+                        <button className="btn-secondary px-5 py-2 text-sm opacity-80 shadow-md transition-all group-hover:border-[#6C5DD3] group-hover:bg-[#6C5DD3] group-hover:text-white group-hover:opacity-100">
+                          Deposit
+                        </button>
+                      </td>
+                    </tr>
+                    {expandedRows[i] && (
+                      <tr className="animate-in fade-in slide-in-from-top-2 duration-300">
+                        <td colSpan={6} className="px-6 pb-6 pt-0 border-none">
+                          <div className="max-w-md ml-auto mr-0">
+                            <ApyAttribution attribution={y.attribution} totalApy={y.apy} />
+                          </div>
+                        </td>
+                      </tr>
+                    )}
+                  </React.Fragment>
                 ))
               )}
             </tbody>

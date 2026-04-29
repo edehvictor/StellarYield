@@ -1,4 +1,7 @@
 import * as StellarSdk from "@stellar/stellar-sdk";
+import { slippageRegistry } from "./slippageRegistry";
+import { getYieldData } from "./yieldService";
+import { freezeService } from "./freezeService";
 
 export interface ZapQuoteBody {
   inputTokenContract: string;
@@ -6,12 +9,15 @@ export interface ZapQuoteBody {
   amountInStroops: string;
   inputDecimals: number;
   vaultDecimals: number;
+  protocol?: string;
 }
 
 export interface ZapQuoteResult {
   path: { contractId: string; label?: string }[];
   expectedAmountOutStroops: string;
   source: "router_simulation" | "fallback_rate";
+  slippageApplied: number;
+  amountOutAfterSlippage: string;
 }
 
 const rpcUrl = process.env.SOROBAN_RPC_URL ?? "https://soroban-testnet.stellar.org";
@@ -64,7 +70,14 @@ export async function quoteViaRouterSimulation(
       .setTimeout(30)
       .build();
 
-    const simulated = await server.simulateTransaction(tx);
+    const timeoutMs = parseInt(process.env.SOROBAN_RPC_TIMEOUT_MS ?? "10000", 10);
+    const simulated = await Promise.race([
+      server.simulateTransaction(tx),
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error("Timeout")), timeoutMs)
+      ),
+    ]);
+
     if (StellarSdk.rpc.Api.isSimulationError(simulated)) {
       return null;
     }
@@ -86,6 +99,8 @@ export async function quoteViaRouterSimulation(
       ],
       expectedAmountOutStroops: expected.toString(),
       source: "router_simulation",
+      slippageApplied: 0,
+      amountOutAfterSlippage: expected.toString(),
     };
   } catch {
     return null;
@@ -103,6 +118,8 @@ export function quoteFallback(body: ZapQuoteBody): ZapQuoteResult {
       path: [{ contractId: body.inputTokenContract }],
       expectedAmountOutStroops: amountIn,
       source: "fallback_rate",
+      slippageApplied: 0,
+      amountOutAfterSlippage: amountIn,
     };
   }
 
@@ -117,13 +134,36 @@ export function quoteFallback(body: ZapQuoteBody): ZapQuoteResult {
     ],
     expectedAmountOutStroops: expected,
     source: "fallback_rate",
+    slippageApplied: 0,
+    amountOutAfterSlippage: expected,
   };
 }
 
 export async function getZapQuote(body: ZapQuoteBody): Promise<ZapQuoteResult> {
-  const sim = await quoteViaRouterSimulation(body);
-  if (sim) {
-    return sim;
+  if (freezeService.isFrozen(body.protocol)) {
+    throw new Error(`Quoting is temporarily disabled for ${body.protocol || "all protocols"} due to safety freeze.`);
   }
-  return quoteFallback(body);
+
+  const sim = (await quoteViaRouterSimulation(body)) || quoteFallback(body);
+
+  const protocol = body.protocol || "default";
+  const model = slippageRegistry.getModel(protocol);
+
+  // Get TVL for slippage calculation
+  const yieldData = await getYieldData();
+  const protocolData = yieldData.find(y => y.protocolName.toLowerCase() === protocol.toLowerCase());
+  const tvl = BigInt(Math.floor(protocolData?.tvl || 10_000_000)); // Fallback to 10M
+
+  const amountIn = BigInt(body.amountInStroops);
+  const slippage = model.calculateSlippage(amountIn, tvl);
+
+  const expectedOut = BigInt(sim.expectedAmountOutStroops);
+  const multiplier = 1 - slippage;
+  const outAfterSlippage = (expectedOut * BigInt(Math.floor(multiplier * 10000))) / BigInt(10000);
+
+  return {
+    ...sim,
+    slippageApplied: slippage,
+    amountOutAfterSlippage: outAfterSlippage.toString(),
+  };
 }

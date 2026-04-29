@@ -196,3 +196,43 @@ impl Zap {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use soroban_sdk::testutils::Address as _;
+
+    #[test]
+    fn test_double_initialize_rejected() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register(Zap, ());
+        let client = ZapClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let router = Address::generate(&env);
+        client.initialize(&admin, &router);
+
+        let result = client.try_initialize(&admin, &router);
+        assert_eq!(result, Err(Ok(ZapError::AlreadyInitialized)));
+    }
+
+    #[test]
+    fn test_set_dex_router_unauthorized_rejected() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register(Zap, ());
+        let client = ZapClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let attacker = Address::generate(&env);
+        let router = Address::generate(&env);
+        let new_router = Address::generate(&env);
+        client.initialize(&admin, &router);
+
+        let result = client.try_set_dex_router(&attacker, &new_router);
+        assert_eq!(result, Err(Ok(ZapError::Unauthorized)));
+    }
+}

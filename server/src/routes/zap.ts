@@ -1,22 +1,28 @@
 import { Router, Request, Response } from "express";
+import { getZapSupportedAssetsPayload } from "../config/zapAssetsConfig";
 import { getZapQuote, type ZapQuoteBody } from "../services/zapQuote";
+import { sendError } from "../utils/errorResponse";
+import { validateZapQuote } from "../middleware/validation";
 
 const router = Router();
 
-router.post("/quote", async (req: Request, res: Response) => {
+router.get("/supported-assets", (_req: Request, res: Response) => {
   try {
-    const b = req.body as Partial<ZapQuoteBody>;
-    if (
-      !b.inputTokenContract ||
-      !b.vaultTokenContract ||
-      b.amountInStroops === undefined
-    ) {
-      res.status(400).json({
-        error:
-          "Expected inputTokenContract, vaultTokenContract, amountInStroops",
-      });
-      return;
-    }
+    res.json(getZapSupportedAssetsPayload());
+  } catch (error) {
+    sendError(
+      res,
+      503,
+      "CONFIG_UNAVAILABLE",
+      "Supported assets configuration is unavailable.",
+      error instanceof Error ? error.message : undefined
+    );
+  }
+});
+
+router.post("/quote", validateZapQuote, async (req: Request, res: Response) => {
+  try {
+    const b = req.body as ZapQuoteBody;
 
     const body: ZapQuoteBody = {
       inputTokenContract: String(b.inputTokenContract),
@@ -26,11 +32,6 @@ router.post("/quote", async (req: Request, res: Response) => {
       vaultDecimals: Number(b.vaultDecimals ?? 7),
     };
 
-    if (!/^-?\d+$/.test(body.amountInStroops)) {
-      res.status(400).json({ error: "amountInStroops must be an integer string" });
-      return;
-    }
-
     const quote = await getZapQuote(body);
     res.json({
       path: quote.path,
@@ -38,9 +39,13 @@ router.post("/quote", async (req: Request, res: Response) => {
       source: quote.source,
     });
   } catch (e) {
-    res.status(500).json({
-      error: e instanceof Error ? e.message : "Quote failed",
-    });
+    sendError(
+      res,
+      500,
+      "QUOTE_FAILED",
+      "Quote failed",
+      e instanceof Error ? e.message : undefined
+    );
   }
 });
 

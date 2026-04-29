@@ -28,12 +28,14 @@ interface Props {
   quest: Quest;
   onClaim: (questId: string) => void;
   isMinting: boolean;
+  /** True while indexer verification is in flight (cached progress may update). */
+  progressPending?: boolean;
 }
 
 /**
  * Renders a single quest card with progress bar and claim button.
  */
-export default function QuestCard({ quest, onClaim, isMinting }: Props) {
+export default function QuestCard({ quest, onClaim, isMinting, progressPending }: Props) {
   const obj = quest.objectives[0];
   const pct = Math.min(100, Math.round((obj.progress / obj.target) * 100));
   const isLocked = quest.status === "locked";
@@ -45,7 +47,9 @@ export default function QuestCard({ quest, onClaim, isMinting }: Props) {
       layout
       initial={{ opacity: 0, y: 16 }}
       animate={{ opacity: 1, y: 0 }}
-      className={`glass-card p-5 flex flex-col gap-4 ${isLocked ? "opacity-50" : ""}`}
+      className={`glass-card p-5 flex flex-col gap-4 transition-opacity duration-300 ${
+        isLocked ? "opacity-50" : ""
+      } ${progressPending ? "opacity-90 ring-1 ring-white/10" : ""}`}
     >
       {/* Header */}
       <div className="flex items-start gap-3">

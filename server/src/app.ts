@@ -6,6 +6,11 @@ import { predictApy, HistoricalDataPoint } from "./analytics/apyPredictor";
 import { signFeeBump } from "./relayer/relayer";
 import { context } from "./graphql/context";
 import { graphqlSchema } from "./graphql/schema";
+import { metricsMiddleware, getMetrics } from "./middleware/metrics";
+import { auditMiddleware } from "./middleware/audit";
+import { sendError } from "./utils/errorResponse";
+import { requestContextMiddleware } from "./middleware/requestContext";
+import { errorHandler, requestLoggerMiddleware } from "./middleware/requestLogger";
 import yieldsRouter from "./routes/yields";
 import leaderboardRouter from "./routes/leaderboard";
 import notificationsRouter from "./routes/notifications";
@@ -15,10 +20,29 @@ import zapRouter from "./routes/zap";
 import pnlRouter from "./routes/pnl";
 import exportRouter from "./routes/export";
 import feesRouter from "./routes/fees";
+import transparencyRouter from "./routes/transparency";
+import donationsRouter from "./routes/donations";
+import referralsRouter from "./routes/referrals";
+import adminRouter from "./routes/admin";
+import auditMonitoringRouter from "./routes/auditMonitoring";
+import weeklyReportsRouter from "./routes/weeklyReports";
+import prometheusMetricsRouter from "./routes/prometheusMetrics";
+import alertsRouter from "./routes/alerts";
+import openapiRouter from "./routes/openapi";
+import incidentsRouter from "./routes/incidents";
+import simulatorRouter from "./routes/simulator";
+import correlationRouter from "./routes/correlation";
+import strategiesRouter from "./routes/strategies";
+import treasuryRouter from "./routes/treasury";
+import governanceRouter from "./routes/governance";
+import presetsRouter from "./routes/presets";
+import analyticsRouter from "./routes/analytics";
+import { createAuthChallenge, verifyAuthChallenge } from "./utils/stellarAuth";
 import {
-  createAuthChallenge,
-  verifyAuthChallenge,
-} from "./utils/stellarAuth";
+  getRecommendationTimeline,
+  recordRecommendation,
+} from "./services/recommendationTimelineService";
+import { runStressScenario, StressScenarioType } from "./services/stressScenarioService";
 
 type EventsPrismaClient = {
   event: {
@@ -58,6 +82,10 @@ export function createApp() {
 
   app.use(cors());
   app.use(express.json());
+  app.use(requestContextMiddleware);
+  app.use(requestLoggerMiddleware);
+  app.use(metricsMiddleware);
+  app.use(auditMiddleware);
   app.use(yoga.graphqlEndpoint, yoga);
 
   const relayerLimiter = rateLimit({
@@ -72,19 +100,43 @@ export function createApp() {
   app.use("/api/notifications", notificationsRouter);
   app.use("/api/health", healthRouter);
   app.use("/api/fees", feesRouter);
+  app.use("/api/transparency", transparencyRouter);
+  app.use("/api/donations", donationsRouter);
+  app.use("/api/referrals", referralsRouter);
   app.use("/api/onramp", onrampRouter);
   app.use("/api/zap", zapRouter);
   app.use("/api/users", pnlRouter);
   app.use("/api/users", exportRouter);
+  app.use("/api/admin", adminRouter);
+  app.use("/api/audit-monitoring", auditMonitoringRouter);
+  app.use("/api/weekly-reports", weeklyReportsRouter);
+  app.use("/api/alerts", alertsRouter);
+  app.use("/api/incidents", incidentsRouter);
+  app.use("/api/simulator", simulatorRouter);
+  app.use("/api/correlation", correlationRouter);
+  app.use("/api/openapi", openapiRouter);
+  app.use("/api/strategies", strategiesRouter);
+  app.use("/api/treasury", treasuryRouter);
+  app.use("/api/governance", governanceRouter);
+  app.use("/api/presets", presetsRouter);
+  app.use("/api/analytics", analyticsRouter);
+
+  // Legacy JSON metrics (internal tooling)
+  app.get("/api/metrics", getMetrics);
+  // Prometheus scrape endpoint
+  app.use("/metrics", prometheusMetricsRouter);
 
   app.get("/api/events", async (req: Request, res: Response) => {
     void req;
     const prisma = await loadPrismaClient();
 
     if (!prisma) {
-      res.status(503).json({
-        error: "Events database is unavailable until Prisma client is generated.",
-      });
+      sendError(
+        res,
+        503,
+        "DB_UNAVAILABLE",
+        "Events database is unavailable until Prisma client is generated."
+      );
       return;
     }
 
@@ -97,13 +149,67 @@ export function createApp() {
   });
 
   app.post("/api/recommend", (req: Request, res: Response) => {
-    const { preferences, riskTolerance } = req.body;
+    const { preferences, riskTolerance, expectedApy, liquidityDepthUsd, volatilityPct } = req.body;
     void preferences;
-    res.json({
+    const recommendation = {
       recommendation: `Based on your ${riskTolerance || "moderate"} risk tolerance, we recommend the Yield Index vault on DeFindex for diversified, stable returns.`,
       targetVault: "DeFindex Yield Index",
-      expectedApy: 8.9,
+      expectedApy: typeof expectedApy === "number" ? expectedApy : 8.9,
+      rationale:
+        "The recommendation balances projected yield, risk tolerance, and liquidity depth while minimizing fee drag.",
+    };
+    const userId = String(req.body.userId || "anonymous");
+    const timelineEntry = recordRecommendation(userId, {
+      recommendation: recommendation.recommendation,
+      targetVault: recommendation.targetVault,
+      rationale: recommendation.rationale,
+      inputSnapshot: {
+        riskTolerance: String(riskTolerance || "moderate"),
+        expectedApy:
+          typeof expectedApy === "number" && Number.isFinite(expectedApy) ? expectedApy : 8.9,
+        liquidityDepthUsd:
+          typeof liquidityDepthUsd === "number" && Number.isFinite(liquidityDepthUsd)
+            ? liquidityDepthUsd
+            : 1_000_000,
+        volatilityPct:
+          typeof volatilityPct === "number" && Number.isFinite(volatilityPct) ? volatilityPct : 5,
+      },
     });
+    res.json({
+      ...recommendation,
+      timelineEntry,
+    });
+  });
+
+  app.get("/api/recommend/timeline", (req: Request, res: Response) => {
+    const userId = String(req.query.userId || "anonymous");
+    res.json({
+      userId,
+      timeline: getRecommendationTimeline(userId),
+    });
+  });
+
+  app.post("/api/stress-scenarios/run", (req: Request, res: Response) => {
+    const scenario = String(req.body.scenario || "") as StressScenarioType;
+    const allowedScenarios: StressScenarioType[] = [
+      "apy-collapse",
+      "liquidity-drain",
+      "oracle-shock",
+    ];
+    if (!allowedScenarios.includes(scenario)) {
+      res.status(400).json({
+        error: "Scenario must be one of: apy-collapse, liquidity-drain, oracle-shock.",
+      });
+      return;
+    }
+
+    const result = runStressScenario({
+      scenario,
+      initialValueUsd: Number(req.body.initialValueUsd ?? 10_000),
+      baseApyPct: Number(req.body.baseApyPct ?? 8),
+      days: Number(req.body.days ?? 90),
+    });
+    res.json(result);
   });
 
   app.get("/api/yields/predict", (req: Request, res: Response) => {
@@ -138,8 +244,15 @@ export function createApp() {
     try {
       res.json(createAuthChallenge(req.body));
     } catch (error) {
+      sendError(
+        res,
+        400,
+        "INVALID_AUTH_REQUEST",
+        error instanceof Error ? error.message : "Invalid auth request."
+      );
       res.status(400).json({
         error: error instanceof Error ? error.message : "Invalid auth request.",
+        requestId: (req as unknown as { requestId?: string }).requestId,
       });
     }
   });
@@ -148,14 +261,22 @@ export function createApp() {
     try {
       res.json(verifyAuthChallenge(req.body));
     } catch (error) {
+      sendError(
+        res,
+        400,
+        "INVALID_AUTH_VERIFICATION",
+        error instanceof Error ? error.message : "Invalid auth verification request."
+      );
       res.status(400).json({
         error:
           error instanceof Error
             ? error.message
             : "Invalid auth verification request.",
+        requestId: (req as unknown as { requestId?: string }).requestId,
       });
     }
   });
 
+  app.use(errorHandler);
   return app;
 }

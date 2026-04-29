@@ -9,7 +9,7 @@ pub fn calculate_voting_power(amount: i128, unlock_time: u64, target_time: u64) 
         return 0;
     }
     let duration = (unlock_time - target_time) as i128;
-    
+
     // Use i128 for precision before division
     // amount * duration / MAX_TIME
     (amount * duration) / MAX_TIME as i128

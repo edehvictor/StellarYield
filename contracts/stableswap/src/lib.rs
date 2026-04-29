@@ -732,6 +732,33 @@ mod tests {
     }
 
     #[test]
+    fn test_initialize_fee_bounds_zero_normal_max() {
+        let env = Env::default();
+        let admin = Address::generate(&env);
+        let t0 = Address::generate(&env);
+        let t1 = Address::generate(&env);
+        let lp = Address::generate(&env);
+
+        // zero base fee
+        let c0 = env.register(StableSwap, ());
+        let client0 = StableSwapClient::new(&env, &c0);
+        let zero = client0.try_initialize(&admin, &t0, &t1, &lp, &100, &0, &0);
+        assert!(zero.is_ok());
+
+        // normal base fee (0.3%)
+        let c1 = env.register(StableSwap, ());
+        let client1 = StableSwapClient::new(&env, &c1);
+        let normal = client1.try_initialize(&admin, &t0, &t1, &lp, &100, &30_000, &20_000);
+        assert!(normal.is_ok());
+
+        // max allowed base fee
+        let c2 = env.register(StableSwap, ());
+        let client2 = StableSwapClient::new(&env, &c2);
+        let max = client2.try_initialize(&admin, &t0, &t1, &lp, &100, &MAX_BASE_FEE_BPS, &0);
+        assert!(max.is_ok());
+    }
+
+    #[test]
     fn test_double_initialize_rejected() {
         let env = Env::default();
         let (contract_id, admin, t0, t1, lp) = setup_pool(&env, 100);

@@ -27,4 +27,13 @@ export interface ZapAssetOption {
   name: string;
   contractId: string;
   decimals: number;
+  /** Optional URL for UI avatars / icons when provided by the metadata API */
+  iconUrl?: string;
+}
+
+/** Response from `GET /api/zap/supported-assets` */
+export interface ZapSupportedAssetsMetadata {
+  assets: ZapAssetOption[];
+  vaultToken: ZapAssetOption;
+  vaultContractId: string;
 }

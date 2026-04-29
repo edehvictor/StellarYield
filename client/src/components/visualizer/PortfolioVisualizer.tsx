@@ -10,6 +10,7 @@ import {
   PointMaterial,
 } from "@react-three/drei";
 import * as THREE from "three";
+import { useReducedMotion } from "../../hooks/useReducedMotion";
 
 interface PoolNodeProps {
   position: [number, number, number];
@@ -21,50 +22,57 @@ interface PoolNodeProps {
 
 function PoolNode({ position, name, tvl, yield_rate, color }: PoolNodeProps) {
   const meshRef = useRef<THREE.Mesh>(null);
+  const reducedMotion = useReducedMotion();
   const size = Math.log10(tvl / 1000) * 0.5 + 0.5;
 
   useFrame((state) => {
-    if (meshRef.current) {
-      meshRef.current.rotation.y += 0.01;
-      meshRef.current.position.y =
-        position[1] + Math.sin(state.clock.elapsedTime + position[0]) * 0.1;
-    }
+    if (reducedMotion || !meshRef.current) return;
+    meshRef.current.rotation.y += 0.01;
+    meshRef.current.position.y =
+      position[1] + Math.sin(state.clock.elapsedTime + position[0]) * 0.1;
   });
+
+  // When reduced motion: wrap in a plain group instead of Float
+  const inner = (
+    <group position={position}>
+      <mesh ref={meshRef}>
+        <sphereGeometry args={[size, 32, 32]} />
+        <meshStandardMaterial
+          color={color}
+          emissive={color}
+          emissiveIntensity={0.5}
+          transparent
+          opacity={0.8}
+          roughness={0.2}
+          metalness={0.8}
+        />
+      </mesh>
+      <Text
+        position={[0, size + 0.5, 0]}
+        fontSize={0.3}
+        color="white"
+        anchorX="center"
+        anchorY="middle"
+      >
+        {name}
+      </Text>
+      <Text
+        position={[0, -size - 0.5, 0]}
+        fontSize={0.2}
+        color="#aaa"
+        anchorX="center"
+        anchorY="middle"
+      >
+        {`${yield_rate}% APY`}
+      </Text>
+    </group>
+  );
+
+  if (reducedMotion) return inner;
 
   return (
     <Float speed={2} rotationIntensity={0.5} floatIntensity={1}>
-      <group position={position}>
-        <mesh ref={meshRef}>
-          <sphereGeometry args={[size, 32, 32]} />
-          <meshStandardMaterial
-            color={color}
-            emissive={color}
-            emissiveIntensity={0.5}
-            transparent
-            opacity={0.8}
-            roughness={0.2}
-            metalness={0.8}
-          />
-        </mesh>
-        <Text
-          position={[0, size + 0.5, 0]}
-          fontSize={0.3}
-          color="white"
-          anchorX="center"
-          anchorY="middle"
-        >
-          {name}
-        </Text>
-        <Text
-          position={[0, -size - 0.5, 0]}
-          fontSize={0.2}
-          color="#aaa"
-          anchorX="center"
-          anchorY="middle"
-        >
-          {`${yield_rate}% APY`}
-        </Text>
-      </group>
+      {inner}
     </Float>
   );
 }
@@ -97,7 +105,6 @@ function FlowParticles({
     if (!ref.current) return;
     const positions = ref.current.geometry.attributes.position.array as Float32Array;
     for (let i = 0; i < count; i++) {
-      // Move particles from start to end
       const step = 0.05;
       const dx = end[0] - start[0];
       const dy = end[1] - start[1];
@@ -107,7 +114,6 @@ function FlowParticles({
       positions[i * 3 + 1] += dy * step * Math.random() * 0.1;
       positions[i * 3 + 2] += dz * step * Math.random() * 0.1;
 
-      // Reset if close to end
       const dist = Math.sqrt(
         Math.pow(positions[i * 3] - end[0], 2) +
           Math.pow(positions[i * 3 + 1] - end[1], 2) +
@@ -137,6 +143,8 @@ function FlowParticles({
 }
 
 export default function PortfolioVisualizer() {
+  const reducedMotion = useReducedMotion();
+
   const pools = [
     { name: "USDC-XLM", tvl: 50000, yield: 12.5, color: "#4f46e5", pos: [-5, 2, -3] as [number, number, number] },
     { name: "Y-XLM", tvl: 25000, yield: 18.2, color: "#06b6d4", pos: [5, 1, -2] as [number, number, number] },
@@ -155,11 +163,14 @@ export default function PortfolioVisualizer() {
       <Canvas dpr={[1, 2]}>
         <PerspectiveCamera makeDefault position={[0, 5, 12]} />
         <OrbitControls enableDamping dampingFactor={0.05} rotateSpeed={0.5} maxDistance={20} minDistance={5} />
-        
-        <Stars radius={100} depth={50} count={5000} factor={4} saturation={0} fade speed={1} />
+
+        {/* Stars are hidden when reduced motion is preferred */}
+        {!reducedMotion && (
+          <Stars radius={100} depth={50} count={5000} factor={4} saturation={0} fade speed={1} />
+        )}
         <ambientLight intensity={0.5} />
         <pointLight position={[10, 10, 10]} intensity={1} />
-        
+
         {/* User Node */}
         <mesh position={userPos}>
           <icosahedronGeometry args={[0.5, 1]} />
@@ -175,7 +186,6 @@ export default function PortfolioVisualizer() {
           My Portfolio
         </Text>
 
-        {/* Pool Nodes */}
         {pools.map((pool, i) => (
           <group key={i}>
             <PoolNode
@@ -185,12 +195,15 @@ export default function PortfolioVisualizer() {
               yield_rate={pool.yield}
               color={pool.color}
             />
-            <FlowParticles
-              start={pool.pos}
-              end={userPos}
-              color={pool.color}
-              count={30}
-            />
+            {/* Flow particles disabled under reduced motion */}
+            {!reducedMotion && (
+              <FlowParticles
+                start={pool.pos}
+                end={userPos}
+                color={pool.color}
+                count={30}
+              />
+            )}
           </group>
         ))}
 

@@ -1,0 +1,33 @@
+{
+  "_comment": "Soroban contract address registry. Edit this file after each deployment. Environment variables always override these values at runtime.",
+  "testnet": {
+    "vault": "",
+    "zap": "",
+    "token": "",
+    "governance": "",
+    "strategy": "",
+    "emissionController": "",
+    "liquidStaking": "",
+    "stableswap": ""
+  },
+  "mainnet": {
+    "vault": "",
+    "zap": "",
+    "token": "",
+    "governance": "",
+    "strategy": "",
+    "emissionController": "",
+    "liquidStaking": "",
+    "stableswap": ""
+  },
+  "local": {
+    "vault": "",
+    "zap": "",
+    "token": "",
+    "governance": "",
+    "strategy": "",
+    "emissionController": "",
+    "liquidStaking": "",
+    "stableswap": ""
+  }
+}

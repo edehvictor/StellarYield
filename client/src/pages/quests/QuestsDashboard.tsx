@@ -1,6 +1,6 @@
-import { useState, useEffect } from "react";
+import { useState, useCallback } from "react";
 import { motion } from "framer-motion";
-import { Trophy, RefreshCw, Star, Award } from "lucide-react";
+import { Trophy, RefreshCw, Star, Award, AlertCircle, Loader2 } from "lucide-react";
 import { useWallet } from "../../context/useWallet";
 import { useQuestStore } from "./useQuestStore";
 import QuestCard from "./QuestCard";
@@ -25,31 +25,30 @@ const FILTERS: { label: string; value: QuestStatus | "all" }[] = [
  */
 export default function QuestsDashboard() {
   const { walletAddress, isConnected } = useWallet();
-  const { quests, achievements, isMinting, refreshProgress, mintBadge, totalPoints } =
-    useQuestStore();
+  const scopedWallet = isConnected && walletAddress ? walletAddress : null;
+  const {
+    quests,
+    achievements,
+    isMinting,
+    refreshProgress,
+    mintBadge,
+    totalPoints,
+    progressVerification,
+    isProgressVerifying,
+    showStaleProgressBanner,
+  } = useQuestStore(scopedWallet);
 
   const [filter, setFilter] = useState<QuestStatus | "all">("all");
-  const [isRefreshing, setIsRefreshing] = useState(false);
   const [celebration, setCelebration] = useState<{
     show: boolean;
     title: string;
     points: number;
   }>({ show: false, title: "", points: 0 });
 
-  // Auto-refresh progress when wallet connects
-  useEffect(() => {
-    if (isConnected && walletAddress) {
-      handleRefresh();
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isConnected, walletAddress]);
-
-  async function handleRefresh() {
+  const handleRefresh = useCallback(async () => {
     if (!walletAddress) return;
-    setIsRefreshing(true);
     await refreshProgress(walletAddress);
-    setIsRefreshing(false);
-  }
+  }, [walletAddress, refreshProgress]);
 
   async function handleClaim(questId: string) {
     if (!walletAddress) return;
@@ -102,14 +101,45 @@ export default function QuestsDashboard() {
             </p>
           </div>
           <button
+            type="button"
             onClick={handleRefresh}
-            disabled={isRefreshing}
+            disabled={isProgressVerifying}
             className="btn-secondary flex items-center gap-2 text-sm px-4 py-2"
           >
-            <RefreshCw size={15} className={isRefreshing ? "animate-spin" : ""} />
-            {isRefreshing ? "Syncing..." : "Sync Progress"}
+            <RefreshCw size={15} className={isProgressVerifying ? "animate-spin" : ""} />
+            {isProgressVerifying ? "Syncing..." : "Sync Progress"}
           </button>
         </header>
+
+        {progressVerification.status === "error" && (
+          <div
+            role="alert"
+            className="glass-card border border-red-500/40 bg-red-950/30 px-4 py-3 flex items-start gap-3 text-sm text-red-100"
+          >
+            <AlertCircle size={18} className="shrink-0 mt-0.5 text-red-400" />
+            <div>
+              <p className="font-medium">Could not refresh quest progress</p>
+              <p className="text-red-200/80 mt-1">{progressVerification.message}</p>
+            </div>
+          </div>
+        )}
+
+        {isProgressVerifying && (
+          <div
+            className={`glass-card px-4 py-3 flex items-center gap-3 text-sm ${
+              showStaleProgressBanner
+                ? "border border-amber-500/35 bg-amber-950/25 text-amber-100"
+                : "border border-indigo-500/25 bg-indigo-950/20 text-indigo-100"
+            }`}
+          >
+            <Loader2 size={18} className="animate-spin shrink-0 text-indigo-300" />
+            <span>
+              {showStaleProgressBanner
+                ? "Showing saved progress while verifying with the indexer…"
+                : "Loading quest progress from the indexer…"}
+            </span>
+          </div>
+        )}
 
         {/* Stats */}
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
@@ -164,6 +194,7 @@ export default function QuestsDashboard() {
               quest={quest}
               onClaim={handleClaim}
               isMinting={isMinting}
+              progressPending={isProgressVerifying}
             />
           ))}
         </motion.div>
