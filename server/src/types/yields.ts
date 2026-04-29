@@ -2,6 +2,7 @@ export interface RewardStream {
   tokenSymbol: string;
   emissionPerYear: number;
   tokenPrice: number;
+  confidence?: "low" | "medium" | "high";
 }
 
 export interface ApyAttribution {
@@ -80,6 +81,7 @@ export interface NormalizedYield {
   rewards?: {
     symbol: string;
     apy: number;
+    confidence?: "low" | "medium" | "high";
   }[];
   attribution: ApyAttribution;
 }
