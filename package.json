@@ -2,10 +2,14 @@
   "name": "stellaryield",
   "private": true,
   "scripts": {
-    "smoke-test": "bash scripts/smoke-test.sh"
+    "smoke-test": "bash scripts/smoke-test.sh",
+    "test:provenance": "vitest run tests/services/provenance.test.ts --coverage"
   },
   "dependencies": {
     "@tailwindcss/vite": "^4.2.1",
     "tailwindcss": "^4.2.1"
+  },
+  "optionalDependencies": {
+    "@rolldown/binding-win32-x64-msvc": "^1.0.0-rc.17"
   }
 }
