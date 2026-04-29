@@ -300,3 +300,20 @@ model StrategyVersionHistory {
   @@index([strategyId, createdAt])
   @@index([strategyId, fromVersion, toVersion])
 }
+
+// ── Portfolio Regime Shift Models (Issue #376) ──────────────────────────────
+
+model PortfolioRegimeShiftAlert {
+  id              String   @id @default(uuid())
+  walletAddress   String
+  previousRegime  String   // stable | high-volatility | declining-yield | incentive-spike
+  currentRegime   String
+  confidence      Float
+  rationale       String
+  notified        Boolean  @default(false)
+  notifiedAt      DateTime?
+  createdAt       DateTime @default(now())
+
+  @@index([walletAddress, createdAt])
+  @@index([walletAddress, currentRegime, createdAt])
+}

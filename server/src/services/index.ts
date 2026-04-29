@@ -10,3 +10,4 @@ export type * from './protocolCompatibilityService';
 export type * from './strategyHealthService';
 export type * from './yieldReliabilityService';
 export * from "./conversionRiskService";
+export * from "./portfolioRegimeShiftService";
