@@ -1,11 +1,14 @@
+import { drawdownService, DrawdownToleranceProfile } from "./drawdownService";
+
 /**
  * Risk-Adjusted Yield (RAY) Service
  *
  * Formula:
- *   RAY = APY * (riskScore / 10) / (1 + drawdownProxy)
+ *   RAY = APY * (riskScore / 10) * drawdownMultiplier / (1 + drawdownProxy)
  *
  * Where:
  *   riskScore   — 1–10 safety score (10 = safest)
+ *   drawdownMultiplier — derived from tolerance profile and estimated drawdown
  *   drawdownProxy = ilVolatilityPct / 10 (normalized; 0 = no risk)
  *
  * Tie resolution: equal RAY → higher TVL wins.
@@ -20,18 +23,24 @@ export interface StrategyInput {
   ilVolatilityPct: number;
   riskScore: number;
   fetchedAt?: string;
+  historicalDepthDays?: number;
 }
 
 export interface RankedStrategy extends StrategyInput {
   rank: number;
   riskAdjustedYield: number;
   drawdownProxy: number;
+  estimatedDrawdown: number;
+  drawdownMultiplier: number;
 }
 
 const MIN_FLOOR = 0.01;
 
-export function computeRiskAdjustedYield(strategy: StrategyInput): number {
-  const { apy, riskScore, ilVolatilityPct } = strategy;
+export function computeRiskAdjustedYield(
+  strategy: StrategyInput,
+  profile: DrawdownToleranceProfile = 'balanced'
+): number {
+  const { apy, riskScore, ilVolatilityPct, historicalDepthDays = 365 } = strategy;
 
   if (!Number.isFinite(apy) || !Number.isFinite(riskScore) || !Number.isFinite(ilVolatilityPct)) {
     return 0;
@@ -41,15 +50,28 @@ export function computeRiskAdjustedYield(strategy: StrategyInput): number {
   const drawdownProxy = Math.max(0, ilVolatilityPct) / 10;
   const safeApy = Math.max(0, apy);
 
-  return (safeApy * (safeRiskScore / 10)) / Math.max(MIN_FLOOR, 1 + drawdownProxy);
+  const estimatedDrawdown = drawdownService.estimateDrawdown(ilVolatilityPct, historicalDepthDays);
+  const drawdownMultiplier = drawdownService.calculateYieldMultiplier(estimatedDrawdown, profile);
+
+  return (safeApy * (safeRiskScore / 10) * drawdownMultiplier) / Math.max(MIN_FLOOR, 1 + drawdownProxy);
 }
 
-export function rankStrategies(strategies: StrategyInput[]): RankedStrategy[] {
-  const withScores = strategies.map((s) => ({
-    ...s,
-    riskAdjustedYield: computeRiskAdjustedYield(s),
-    drawdownProxy: Math.max(0, s.ilVolatilityPct) / 10,
-  }));
+export function rankStrategies(
+  strategies: StrategyInput[],
+  profile: DrawdownToleranceProfile = 'balanced'
+): RankedStrategy[] {
+  const withScores = strategies.map((s) => {
+    const estimatedDrawdown = drawdownService.estimateDrawdown(s.ilVolatilityPct, s.historicalDepthDays || 365);
+    const drawdownMultiplier = drawdownService.calculateYieldMultiplier(estimatedDrawdown, profile);
+    
+    return {
+      ...s,
+      riskAdjustedYield: computeRiskAdjustedYield(s, profile),
+      drawdownProxy: Math.max(0, s.ilVolatilityPct) / 10,
+      estimatedDrawdown,
+      drawdownMultiplier,
+    };
+  });
 
   withScores.sort((a, b) => {
     const diff = b.riskAdjustedYield - a.riskAdjustedYield;

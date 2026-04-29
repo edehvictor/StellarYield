@@ -12,6 +12,7 @@ import {
   type ProtocolHealthInput,
 } from "../services/protocolFailoverService";
 import { rotationRegistry } from "../services/strategyRotationService";
+import { exportService } from "../services/exportService";
 
 const router = Router();
 
@@ -145,6 +146,24 @@ router.get("/rotation", (req: Request, res: Response) => {
     current: rotationRegistry.current(),
     decisions: rotationRegistry.recentDecisions(limit),
   });
+});
+
+/**
+ * GET /api/strategies/export
+ * Exports a full snapshot bundle of current opportunity data.
+ */
+router.get("/export", async (req: Request, res: Response) => {
+  try {
+    const bundle = await exportService.generateSnapshotBundle();
+    const filename = `stellar-yield-snapshot-${new Date().toISOString().split('T')[0]}.json`;
+    
+    res.setHeader('Content-Type', 'application/json');
+    res.setHeader('Content-Disposition', `attachment; filename=${filename}`);
+    res.json(bundle);
+  } catch (error) {
+    console.error("Export failed:", error);
+    res.status(500).json({ error: "Failed to generate export bundle" });
+  }
 });
 
 export default router;
