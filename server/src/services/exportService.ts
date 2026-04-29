@@ -33,6 +33,11 @@ export interface OpportunitySnapshot {
   liquidityUsd: number;
   riskScore: number;
   riskAdjustedYield: number;
+  drawdown: {
+    estimated: number;
+    multiplier: number;
+    proxy: number;
+  };
   reliability: {
     score: number;
     status: string;
@@ -100,6 +105,11 @@ export class ExportService {
         liquidityUsd: protocol.liquidityUsd,
         riskScore: s.riskScore,
         riskAdjustedYield: s.riskAdjustedYield,
+        drawdown: {
+          estimated: s.estimatedDrawdown,
+          multiplier: s.drawdownMultiplier,
+          proxy: s.drawdownProxy,
+        },
         reliability: {
           score: reliability.reliabilityScore,
           status: reliability.status,
@@ -124,7 +134,7 @@ export class ExportService {
       opportunities: snapshots,
       metadata: {
         totalOpportunities: snapshots.length,
-        scoringMethodology: "RAY = APY * (riskScore / 10) / (1 + drawdownProxy)",
+        scoringMethodology: "RAY = APY * (riskScore / 10) * drawdownMultiplier / (1 + drawdownProxy)",
       },
     };
   }
