@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from "react";
 import { Trophy, Medal, TrendingUp, Filter } from "lucide-react";
 import { apiUrl } from "../../lib/api";
+import { ConfidenceBadge } from "../../components/AIAdvisor/ConfidenceBadge";
 
 interface RankedStrategy {
   rank: number;
@@ -30,6 +31,25 @@ const StrategyLeaderboard: React.FC = () => {
   const [timeWindow, setTimeWindow] = useState<string>("all");
   const [strategyType, setStrategyType] = useState<string>("all");
 
+  // #375 Rotation Confidence Explorer
+  const [rotationData, setRotationData] = useState<{
+    current: { id: string | null; score: number | null; lastRotatedAt: string | null };
+    decisions: Array<{
+      action: string;
+      reason: string;
+      fromId: string | null;
+      toId: string | null;
+      scoreDelta: number | null;
+      detail: string;
+      evaluatedAt: string;
+      confidenceBreakdown?: any;
+      confidenceStrength?: "borderline" | "strongly_favored";
+      confidenceWhy?: string[];
+    }>;
+  } | null>(null);
+  const [rotationLoading, setRotationLoading] = useState(true);
+  const [rotationError, setRotationError] = useState<string | null>(null);
+
   useEffect(() => {
     setLoading(true);
     const params = new URLSearchParams({ timeWindow, strategyType });
@@ -44,6 +64,26 @@ const StrategyLeaderboard: React.FC = () => {
         setLoading(false);
       });
   }, [timeWindow, strategyType]);
+
+  useEffect(() => {
+    setRotationLoading(true);
+    setRotationError(null);
+    fetch(apiUrl("/api/strategies/rotation?limit=10"))
+      .then(async (res) => {
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        return (await res.json()) as {
+          current: { id: string | null; score: number | null; lastRotatedAt: string | null };
+          decisions: any[];
+        };
+      })
+      .then((d) => setRotationData(d))
+      .catch((err) => setRotationError(err instanceof Error ? err.message : "Failed to load rotation data"))
+      .finally(() => setRotationLoading(false));
+  }, []);
+
+  const latestDecision =
+    rotationData?.decisions?.find((d) => d.action === "rotate") ??
+    rotationData?.decisions?.[0];
 
   return (
     <div className="space-y-8 max-w-5xl mx-auto">
@@ -172,6 +212,70 @@ const StrategyLeaderboard: React.FC = () => {
           </table>
         </div>
       )}
+
+      {/* #375 Rotation Confidence Explorer */}
+      <div className="glass-panel p-6 border border-white/10 shadow-2xl mt-8">
+        <div className="flex items-center justify-between gap-4">
+          <div>
+            <h3 className="text-xl font-bold text-white">Rotation Confidence Explorer</h3>
+            <p className="text-xs text-gray-400 mt-1">
+              Confidence decomposition for the most recent rotation evaluation.
+            </p>
+          </div>
+        </div>
+
+        {rotationLoading ? (
+          <div className="flex justify-center items-center py-10">
+            <div className="animate-spin rounded-full h-10 w-10 border-t-2 border-b-2 border-indigo-500" />
+          </div>
+        ) : rotationError ? (
+          <div className="py-6 text-center text-red-400 text-sm">{rotationError}</div>
+        ) : !latestDecision ? (
+          <div className="py-6 text-center text-gray-400 text-sm">No rotation decisions available.</div>
+        ) : (
+          <div className="space-y-4 mt-4">
+            <div className="rounded-xl border border-white/10 bg-black/20 p-4">
+              <div className="flex items-start justify-between gap-4">
+                <div className="space-y-1">
+                  <p className="text-xs text-gray-400 uppercase tracking-widest">Decision</p>
+                  <p className="text-lg font-bold text-white">
+                    {latestDecision.action === "rotate"
+                      ? `Rotate → ${latestDecision.toId}`
+                      : `Hold (${latestDecision.reason})`}
+                  </p>
+                  <p className="text-xs text-gray-400">
+                    {latestDecision.detail}
+                  </p>
+                </div>
+                {latestDecision.confidenceBreakdown ? (
+                  <span className="px-3 py-1 rounded-full bg-white/5 border border-white/10 text-xs text-gray-300">
+                    {(latestDecision.confidenceStrength === "borderline")
+                      ? "Borderline"
+                      : "Strongly favored"}
+                  </span>
+                ) : null}
+              </div>
+            </div>
+
+            {latestDecision.confidenceBreakdown ? (
+              <>
+                <ConfidenceBadge confidence={latestDecision.confidenceBreakdown} compact />
+                {latestDecision.confidenceWhy?.length ? (
+                  <ul className="text-xs text-gray-300 space-y-0.5">
+                    {latestDecision.confidenceWhy.slice(0, 3).map((w: string, i: number) => (
+                      <li key={i}>• {w}</li>
+                    ))}
+                  </ul>
+                ) : null}
+              </>
+            ) : (
+              <p className="text-xs text-gray-400">
+                Confidence decomposition is only shown when a rotation candidate is selected.
+              </p>
+            )}
+          </div>
+        )}
+      </div>
     </div>
   );
 };

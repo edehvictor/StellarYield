@@ -5,6 +5,11 @@ import {
   strategyHealthEngine,
   yieldReliabilityEngine,
 } from '../services';
+import { strategyStateTransitionAuditService } from '../services/strategyStateTransitionAuditService';
+import {
+  generateRecommendationStabilityReport,
+  type RecommendationOutput,
+} from "../services/recommendationStabilityService";
 import {
   validateAttributionRequest,
   formatAttributionReport,
@@ -540,5 +545,81 @@ router.get('/dashboard', async (req, res) => {
     });
   }
 });
+
+/**
+ * GET /api/analytics/strategy-state-transitions/:strategyId
+ * Returns an audit graph of lifecycle transitions for a strategy.
+ */
+router.get('/strategy-state-transitions/:strategyId', async (req, res) => {
+  try {
+    const { strategyId } = req.params;
+    const limit = Math.max(1, Math.min(500, Number(req.query.limit) || 100));
+
+    const graph = strategyStateTransitionAuditService.getGraph(
+      String(strategyId),
+      limit,
+    );
+
+    res.json({
+      success: true,
+      data: graph,
+    });
+  } catch (error) {
+    res.status(500).json({
+      error: 'Failed to fetch strategy state transitions',
+      message: error instanceof Error ? error.message : 'Unknown error',
+    });
+  }
+});
+
+/**
+ * POST /api/analytics/recommendation-stability/compare
+ * Compares recommendation outputs from "before" vs "after" backend releases.
+ *
+ * Request body:
+ * {
+ *   before: RecommendationOutput[],
+ *   after: RecommendationOutput[],
+ *   baseline?: { testSetId?: string, beforeRelease?: string, afterRelease?: string },
+ *   config?: Partial<RecommendationStabilityConfig>
+ * }
+ */
+router.post(
+  "/recommendation-stability/compare",
+  async (req, res) => {
+    try {
+      const { before, after, baseline, config } = req.body as {
+        before?: RecommendationOutput[];
+        after?: RecommendationOutput[];
+        baseline?: { testSetId?: string; beforeRelease?: string; afterRelease?: string };
+        config?: Record<string, unknown>;
+      };
+
+      if (!Array.isArray(before) || !Array.isArray(after)) {
+        return res.status(400).json({
+          success: false,
+          error: "Missing or invalid request body: expected { before: RecommendationOutput[], after: RecommendationOutput[] }",
+        });
+      }
+
+      const report = generateRecommendationStabilityReport(
+        before,
+        after,
+        baseline ?? {},
+        config as any,
+      );
+
+      res.json({
+        success: true,
+        data: report,
+      });
+    } catch (error) {
+      res.status(500).json({
+        error: "Failed to compare recommendation stability",
+        message: error instanceof Error ? error.message : "Unknown error",
+      });
+    }
+  },
+);
 
 export default router;

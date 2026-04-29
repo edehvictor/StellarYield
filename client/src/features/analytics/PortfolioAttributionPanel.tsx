@@ -23,11 +23,19 @@ interface AttributionBreakdown {
   confidence: number;
 }
 
+interface RewardSourceMixEntry {
+  rewardSource: string;
+  contribution: number;
+  percentage: number;
+  confidence: number;
+}
+
 interface AttributionReport {
   walletAddress: string;
   totalReturn: number;
   totalDeposited: number;
   attributionBreakdown: AttributionBreakdown[];
+  rewardSourceMix?: RewardSourceMixEntry[];
   timeWindow: {
     start: string;
     end: string;
@@ -54,6 +62,20 @@ const DECISION_TYPE_LABELS = {
   rotation: "Strategy Rotation",
   incentive_capture: "Incentive Capture",
   hold: "Hold Strategy",
+};
+
+const REWARD_SOURCE_COLORS: Record<string, string> = {
+  base_protocol_yield: "#6C5DD3",
+  incentive_emissions: "#F5A623",
+  tactical_routing: "#3EAC75",
+  fees: "#FF5E5E",
+};
+
+const REWARD_SOURCE_LABELS: Record<string, string> = {
+  base_protocol_yield: "Base Protocol Yield",
+  incentive_emissions: "Incentive Emissions",
+  tactical_routing: "Tactical Routing",
+  fees: "Embedded Fees",
 };
 
 // ── Helpers ───────────────────────────────────────────────────────────────
@@ -167,12 +189,34 @@ export default function PortfolioAttributionPanel({ walletAddress }: PortfolioAt
   }
 
   // Prepare chart data
-  const pieChartData = report.attributionBreakdown.map(breakdown => ({
-    name: DECISION_TYPE_LABELS[breakdown.decisionType as keyof typeof DECISION_TYPE_LABELS] || breakdown.decisionType,
-    value: breakdown.contribution,
-    percentage: breakdown.percentage,
-    color: DECISION_TYPE_COLORS[breakdown.decisionType as keyof typeof DECISION_TYPE_COLORS] || "#6C5DD3",
-  }));
+  const pieChartData = (report.rewardSourceMix?.length
+    ? report.rewardSourceMix
+    : report.attributionBreakdown
+  ).map((entry: any) => {
+    if ("rewardSource" in entry) {
+      return {
+        name:
+          REWARD_SOURCE_LABELS[entry.rewardSource] || entry.rewardSource,
+        value: entry.contribution,
+        percentage: entry.percentage,
+        color:
+          REWARD_SOURCE_COLORS[entry.rewardSource] || "#6C5DD3",
+      };
+    }
+
+    return {
+      name:
+        DECISION_TYPE_LABELS[
+          entry.decisionType as keyof typeof DECISION_TYPE_LABELS
+        ] || entry.decisionType,
+      value: entry.contribution,
+      percentage: entry.percentage,
+      color:
+        DECISION_TYPE_COLORS[
+          entry.decisionType as keyof typeof DECISION_TYPE_COLORS
+        ] || "#6C5DD3",
+    };
+  });
 
   const barChartData = report.attributionBreakdown.map(breakdown => ({
     name: DECISION_TYPE_LABELS[breakdown.decisionType as keyof typeof DECISION_TYPE_LABELS] || breakdown.decisionType,
@@ -267,7 +311,9 @@ export default function PortfolioAttributionPanel({ walletAddress }: PortfolioAt
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         {/* Pie Chart */}
         <div className="glass-panel p-6">
-          <h3 className="text-lg font-semibold mb-4">Return Attribution by Decision Type</h3>
+          <h3 className="text-lg font-semibold mb-4">
+            Return Attribution by Reward Source
+          </h3>
           <ResponsiveContainer width="100%" height={300}>
             <PieChart>
               <Pie

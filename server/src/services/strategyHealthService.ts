@@ -1,5 +1,9 @@
 import NodeCache from "node-cache";
 import { freezeService } from "./freezeService";
+import {
+  strategyStateTransitionAuditService,
+  type StrategyLifecycleState,
+} from "./strategyStateTransitionAuditService";
 
 // ── Types ───────────────────────────────────────────────────────────────
 
@@ -121,6 +125,27 @@ export class StrategyHealthEngine {
       
       // Determine status
       const status = this.determineHealthStatus(overallScore, metrics);
+
+      // Map health status + freeze flag into lifecycle state for audit graph.
+      const lifecycleState: StrategyLifecycleState = freezeService.isFrozen(strategyId)
+        ? "frozen"
+        : status === "healthy"
+          ? "healthy"
+          : "degraded";
+
+      // #371 append-only lifecycle transition audit (must never block health rendering).
+      try {
+        strategyStateTransitionAuditService.updateFromHealth(
+          strategyId,
+          lifecycleState,
+          `health_status=${status}`,
+        );
+      } catch (err) {
+        console.warn(
+          `Failed to record lifecycle transition for ${strategyId}:`,
+          err instanceof Error ? err.message : String(err),
+        );
+      }
       
       // Analyze trend
       const trend = this.analyzeTrend(strategyId, overallScore);
