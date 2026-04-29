@@ -4,10 +4,10 @@ import { Landmark } from "lucide-react";
 import { ZapDepositPanel } from "../features/zap";
 import { useWallet } from "../context/useWallet";
 import { useVaultOgMeta } from "../hooks/useVaultOgMeta";
+import { RecoveryAdvisor } from "./AIAdvisor/RecoveryAdvisor";
 
 /**
  * Injects or updates a <meta> tag in document.head.
- * Uses `property` attribute (OG convention) and falls back to `name`.
  */
 function setMetaTag(property: string, content: string): void {
   let el =
@@ -53,6 +53,10 @@ export default function Vault() {
         Smart contracts on Soroban that automatically rebalance your positions into the
         highest-yielding pools across the Stellar ecosystem.
       </p>
+
+      <div className="max-w-3xl w-full text-left">
+        <RecoveryAdvisor vaultId={slug} />
+      </div>
 
       <div className="glass-panel p-8 mt-8 max-w-3xl w-full text-left">
         <ZapDepositPanel walletAddress={walletAddress} />
