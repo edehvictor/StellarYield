@@ -4,6 +4,7 @@ import { useWallet } from "../../context/useWallet";
 import { useGovernanceStore } from "./useGovernanceStore";
 import TransactionBuilder from "./TransactionBuilder";
 import PendingTransactionCard from "./PendingTransactionCard";
+import GovernanceForecast from "./GovernanceForecast";
 import type { GovernanceConfig, PendingTransaction } from "./types";
 
 export default function GovernanceDashboard() {
@@ -226,6 +227,11 @@ export default function GovernanceDashboard() {
           <p>No governance proposals yet. Use the builder above to create one.</p>
         </div>
       )}
+
+      {/* Impact Forecast Engine */}
+      <div className="mt-4">
+        <GovernanceForecast />
+      </div>
     </div>
   );
 }

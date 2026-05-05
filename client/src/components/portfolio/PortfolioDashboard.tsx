@@ -8,9 +8,9 @@ import {
   RefreshCw,
 } from "lucide-react";
 import { YieldFlowCanvas } from "../visualizations";
-
 import PortfolioVisualizer from "../visualizer/PortfolioVisualizer";
 import { ExposureMap } from "../../portfolio/ExposureMap";
+import PresetsPanel from "../../features/presets/PresetsPanel";
 
 // ── Types ───────────────────────────────────────────────────────────────
 
@@ -232,6 +232,11 @@ export default function PortfolioDashboard({ walletAddress }: PortfolioDashboard
             </tbody>
           </table>
         </div>
+      </div>
+
+      {/* Allocation Presets */}
+      <div className="glass-panel p-6">
+        <PresetsPanel walletAddress={walletAddress} />
       </div>
 
       {/* Transaction History */}

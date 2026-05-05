@@ -1,76 +1,117 @@
 import { render, screen } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import ApyDashboard from '../ApyDashboard';
-import { describe, it, expect, vi, beforeEach } from 'vitest';
 
-// Mock fetch
 const mockFetch = vi.fn();
 global.fetch = mockFetch;
 
-describe('ApyDashboard Data Freshness & Risk Badges', () => {
+function createDeferredResponse() {
+  let resolve: (value: unknown) => void = () => {};
+  const promise = new Promise((resolver) => {
+    resolve = resolver;
+  });
+  return { promise, resolve };
+}
+
+describe('ApyDashboard states', () => {
   beforeEach(() => {
     vi.clearAllMocks();
   });
 
-  it('renders stale data warning when fetchedAt is over 5 minutes old', async () => {
-    const staleTime = new Date(Date.now() - 6 * 60000).toISOString();
-    
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      json: async () => [{
-        protocol: 'TestProtocol',
-        asset: 'USDC',
-        apy: 5.0,
-        tvl: 1000,
-        risk: 'Low',
-        fetchedAt: staleTime
-      }]
-    });
+  it('shows loading state while APY data is being fetched', async () => {
+    const deferred = createDeferredResponse();
+    mockFetch.mockReturnValueOnce(deferred.promise);
 
     render(<ApyDashboard />);
 
-    // Wait for the mock to resolve and load data
-    const staleBadge = await screen.findAllByText(/Stale Data/i);
-    expect(staleBadge.length).toBeGreaterThan(0);
+    expect(screen.getByText(/Loading latest APY data/i)).toBeInTheDocument();
+
+    deferred.resolve({
+      ok: true,
+      json: async () => [],
+    });
+    await screen.findByTestId('apy-empty-state');
   });
 
-  it('renders fresh data indicator when fetchedAt is recent', async () => {
-    const freshTime = new Date().toISOString();
-    
+  it('renders APY cards when request succeeds', async () => {
     mockFetch.mockResolvedValueOnce({
       ok: true,
-      json: async () => [{
-        protocol: 'FreshProtocol',
-        asset: 'XLM',
-        apy: 12.0,
-        tvl: 5000,
-        risk: 'Medium',
-        fetchedAt: freshTime
-      }]
+      json: async () => [
+        {
+          protocol: 'Blend',
+          asset: 'USDC',
+          apy: 8.42,
+          tvl: 2450000,
+          risk: 'Low',
+          change24h: 0.32,
+          rewardTokens: ['BLND'],
+          category: 'Lending',
+        },
+      ],
     });
 
     render(<ApyDashboard />);
 
-    const freshText = await screen.findAllByText(/Updated just now/i);
-    expect(freshText.length).toBeGreaterThan(0);
+    expect(await screen.findByText('Blend')).toBeInTheDocument();
+    expect(screen.getByText('USDC')).toBeInTheDocument();
+    expect(screen.getByText('8.42')).toBeInTheDocument();
   });
 
-  it('renders risk explanations', async () => {
+  it('renders empty state when API returns no APY rows', async () => {
     mockFetch.mockResolvedValueOnce({
       ok: true,
-      json: async () => [{
-        protocol: 'FreshProtocol',
-        asset: 'XLM',
-        apy: 12.0,
-        tvl: 5000,
-        risk: 'Medium',
-        fetchedAt: new Date().toISOString()
-      }]
+      json: async () => [],
     });
 
     render(<ApyDashboard />);
 
-    // Search for the tooltip text
-    const explanationText = await screen.findAllByText(/Moderate volatility or newer protocol/i);
-    expect(explanationText.length).toBeGreaterThan(0);
+    expect(await screen.findByTestId('apy-empty-state')).toBeInTheDocument();
+    expect(screen.getByText(/No APY data available yet/i)).toBeInTheDocument();
+  });
+
+  it('shows retryable failure state and recovers on retry', async () => {
+    const user = userEvent.setup();
+
+    mockFetch
+      .mockRejectedValueOnce(new Error('Network unavailable'))
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => [
+          {
+            protocol: 'Soroswap',
+            asset: 'XLM-USDC',
+            apy: 14.75,
+            tvl: 3100000,
+            risk: 'Medium',
+          },
+        ],
+      });
+
+    render(<ApyDashboard />);
+
+    expect(await screen.findByText(/Failed to Load APY Data/i)).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: /Retry/i }));
+
+    expect(await screen.findByText('Soroswap')).toBeInTheDocument();
+  });
+
+  it('handles partial APY rows without breaking layout', async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => [
+        {
+          apy: 'not-a-number',
+          risk: 'Unknown',
+          rewardTokens: [],
+        },
+      ],
+    });
+
+    render(<ApyDashboard />);
+
+    expect(await screen.findByText('Unknown Protocol')).toBeInTheDocument();
+    expect(screen.getByText('Unknown Asset')).toBeInTheDocument();
+    expect(screen.getByText('0.00')).toBeInTheDocument();
   });
 });

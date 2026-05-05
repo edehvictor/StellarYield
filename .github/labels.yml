@@ -1,0 +1,64 @@
+# GitHub Labels Configuration for StellarYield
+# Run this script with GitHub CLI to create/update labels:
+# gh label create --repo edehvictor/StellarYield --name "LABEL_NAME" --color "COLOR" --description "DESCRIPTION"
+
+labels:
+  # Triage Labels
+  - name: needs-triage
+    color: "fbca04"
+    description: "Issue needs maintainer review and classification"
+  
+  - name: blocked
+    color: "e11d21"
+    description: "Issue is blocked by dependencies or external factors"
+  
+  - name: keep-active
+    color: "1d76db"
+    description: "Issue should remain active and not be marked as stale"
+  
+  # Stellar Wave Specific
+  - name: stellar-wave
+    color: "795548"
+    description: "Stellar Wave program issue - exempt from stale triage"
+  
+  # Status Labels
+  - name: stale
+    color: "eeeeee"
+    description: "Issue has been inactive for an extended period"
+  
+  - name: work-in-progress
+    color: "ededed"
+    description: "Pull request is still being developed"
+  
+  - name: needs-review
+    color: "fbca04"
+    description: "Pull request needs maintainer review"
+  
+  # Priority Labels
+  - name: good-first-issue
+    color: "7057ff"
+    description: "Good for newcomers to the project"
+  
+  - name: help-wanted
+    color: "008672"
+    description: "Community help is needed"
+  
+  - name: enhancement
+    color: "a2eeef"
+    description: "New feature or improvement"
+  
+  - name: bug
+    color: "d73a4a"
+    description: "Something isn't working correctly"
+  
+  - name: documentation
+    color: "0075ca"
+    description: "Improvements or additions to documentation"
+  
+  - name: security
+    color: "ee0701"
+    description: "Security-related issue or vulnerability"
+  
+  - name: pinned
+    color: "ffffff"
+    description: "Important issue pinned to the top"

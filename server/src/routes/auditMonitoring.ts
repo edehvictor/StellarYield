@@ -7,6 +7,7 @@ import {
   startAuditMonitoring,
   stopAuditMonitoring,
 } from "../utils/auditMonitoring";
+import { sendError } from "../utils/errorResponse";
 
 const auditMonitoringRouter = Router();
 
@@ -19,7 +20,7 @@ function requireAdmin(req: Request, res: Response, next: () => void): void {
     | undefined;
 
   if (!user || user.role !== "ADMIN") {
-    res.status(403).json({ error: "Unauthorized: Admin access required" });
+    sendError(res, 403, "UNAUTHORIZED", "Unauthorized: Admin access required");
     return;
   }
 
