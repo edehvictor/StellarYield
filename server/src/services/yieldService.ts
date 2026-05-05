@@ -8,7 +8,7 @@ import type { NormalizedYield, RawProtocolYield, RewardStream } from "../types/y
 
 const cache = new NodeCache({
   stdTTL: 300,
-  checkperiod: 60,
+  checkperiod: process.env.NODE_ENV === "test" ? 0 : 60,
   useClones: false,
 });
 

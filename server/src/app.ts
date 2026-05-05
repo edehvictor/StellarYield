@@ -30,13 +30,7 @@ import prometheusMetricsRouter from "./routes/prometheusMetrics";
 import alertsRouter from "./routes/alerts";
 import openapiRouter from "./routes/openapi";
 import incidentsRouter from "./routes/incidents";
-import simulatorRouter from "./routes/simulator";
-import correlationRouter from "./routes/correlation";
-import strategiesRouter from "./routes/strategies";
-import treasuryRouter from "./routes/treasury";
-import governanceRouter from "./routes/governance";
-import presetsRouter from "./routes/presets";
-import analyticsRouter from "./routes/analytics";
+
 import { createAuthChallenge, verifyAuthChallenge } from "./utils/stellarAuth";
 import {
   getRecommendationTimeline,
@@ -112,8 +106,7 @@ export function createApp() {
   app.use("/api/weekly-reports", weeklyReportsRouter);
   app.use("/api/alerts", alertsRouter);
   app.use("/api/incidents", incidentsRouter);
-  app.use("/api/simulator", simulatorRouter);
-  app.use("/api/correlation", correlationRouter);
+
   app.use("/api/openapi", openapiRouter);
   app.use("/api/strategies", strategiesRouter);
   app.use("/api/treasury", treasuryRouter);
