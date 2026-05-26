@@ -1,6 +1,6 @@
 // Analytics Helper Functions
 import type { AttributionReport } from '../services/portfolioAttributionService';
-import type { CompatibilityReport } from '../services/protocolCompatibilityService';
+import type { CompatibilityReport, CompatibilityIssue } from '../services/protocolCompatibilityService';
 import type { StrategyHealthScore } from '../services/strategyHealthService';
 import type { DataSourceReliability } from '../services/yieldReliabilityService';
 
@@ -30,16 +30,16 @@ interface ExtendedAttributionReport extends AttributionReport {
 
 interface ExtendedCompatibilityReport extends CompatibilityReport {
   formattedDate?: string;
-  criticalIssues?: Array<{ severity: string }>;
+  criticalIssues: CompatibilityIssue[];
 }
 
 interface ExtendedHealthScore extends StrategyHealthScore {
-  status?: string;
+  status: "healthy" | "degraded" | "critical" | "disabled";
   formattedDate?: string;
 }
 
 interface ExtendedReliabilityScore extends DataSourceReliability {
-  status?: string;
+  status: "low" | "medium" | "high" | "unreliable";
   formattedDate?: string;
 }
 
@@ -90,7 +90,7 @@ export function getCriticalHealthAlerts(scores: StrategyHealthScore[]): Array<{
 export function formatReliabilityScore(reliability: DataSourceReliability): ExtendedReliabilityScore {
   return {
     ...reliability,
-    status: reliability.reliabilityScore >= 80 ? 'reliable' : reliability.reliabilityScore >= 60 ? 'moderate' : 'unreliable',
+    status: reliability.reliabilityScore >= 80 ? 'high' : reliability.reliabilityScore >= 60 ? 'medium' : 'unreliable',
     formattedDate: new Date().toISOString(),
   };
 }
@@ -106,5 +106,5 @@ export function getWeightedProviderSelection(providers: DataSourceReliability[])
 
 export function isProtocolSafeForExecution(protocolName: string, report: CompatibilityReport): boolean {
   const protocolStatus = report.protocols?.find(p => p.protocolName === protocolName);
-  return protocolStatus?.status === 'compatible' && (protocolStatus?.criticalIssues?.length ?? 0) === 0;
+  return protocolStatus?.status === 'compatible' && (protocolStatus?.issues?.length ?? 0) === 0;
 }

@@ -33,3 +33,18 @@ export interface WithdrawalRequest {
     bankName: string;
     accountHolder: string;
 }
+
+/**
+ * OffRampError class for handling off-ramp specific errors
+ */
+export class OffRampError extends Error {
+    constructor(
+        message: string,
+        public code?: string,
+        public originalError?: unknown
+    ) {
+        super(message);
+        this.name = 'OffRampError';
+        Object.setPrototypeOf(this, OffRampError.prototype);
+    }
+}

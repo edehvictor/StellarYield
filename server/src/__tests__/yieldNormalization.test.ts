@@ -11,6 +11,11 @@ const rawYield: RawProtocolYield = {
   network: "mainnet",
   source: "stellar://blend",
   fetchedAt: "2026-03-25T10:00:00.000Z",
+  liquidityUsd: 6_250_000,
+  rebalancingBehavior: "automated",
+  managementFeeBps: 25,
+  performanceFeeBps: 150,
+  capitalEfficiencyPct: 92,
 };
 
 describe("yield normalization utilities", () => {

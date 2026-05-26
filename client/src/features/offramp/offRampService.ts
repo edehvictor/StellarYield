@@ -4,6 +4,7 @@
  */
 
 import type { OffRampTransaction, WithdrawalRequest, OffRampProvider } from "./types";
+import { OffRampError } from "./types";
 
 const STORAGE_KEY = "stellar_yield_offramp_txns";
 
@@ -59,7 +60,12 @@ export class OffRampService {
                 headers: { Authorization: `Bearer ${this.apiKey}` },
             });
 
-            if (!response.ok) throw new Error(`Status code: ${response.status}`);
+            if (!response.ok) {
+                throw new OffRampError(
+                    `Status code: ${response.status}`,
+                    `HTTP_${response.status}`
+                );
+            }
 
             const data = (await response.json()) as { status: string; error?: string };
             const status = this.mapProviderStatus(data.status);
@@ -75,7 +81,9 @@ export class OffRampService {
             return tx;
         } catch (error) {
             tx.status = "failed";
-            tx.errorMessage = error instanceof Error ? error.message : "Poll failed";
+            tx.errorMessage = error instanceof OffRampError 
+                ? error.message 
+                : (error instanceof Error ? error.message : "Poll failed");
             this.saveTransaction(tx);
             return tx;
         }
@@ -131,17 +139,31 @@ export class OffRampService {
             bankName: request.bankName,
         };
 
-        const response = await fetch(`${this.baseUrl}/withdrawals`, {
-            method: "POST",
-            headers: {
-                "Content-Type": "application/json",
-                Authorization: `Bearer ${this.apiKey}`,
-            },
-            body: JSON.stringify(payload),
-        });
+        try {
+            const response = await fetch(`${this.baseUrl}/withdrawals`, {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                    Authorization: `Bearer ${this.apiKey}`,
+                },
+                body: JSON.stringify(payload),
+            });
 
-        if (!response.ok) {
-            throw new Error(`Provider error: ${response.statusText}`);
+            if (!response.ok) {
+                throw new OffRampError(
+                    `Provider error: ${response.statusText}`,
+                    `HTTP_${response.status}`
+                );
+            }
+        } catch (error) {
+            if (error instanceof OffRampError) {
+                throw error;
+            }
+            throw new OffRampError(
+                error instanceof Error ? error.message : 'Unknown error',
+                'SUBMISSION_FAILED',
+                error
+            );
         }
     }
 

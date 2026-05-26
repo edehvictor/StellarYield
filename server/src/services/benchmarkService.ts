@@ -112,7 +112,7 @@ const DEFAULT_CONFIG: BenchmarkConfig = {
   cacheMinutes: 30,
 };
 
-const DISCLAIMER = "Benchmark comparisons are for analytical purposes only and do not guarantee future performance. Past performance does not indicate future results.";
+const DISCLAIMER = "Benchmark outputs are comparative analytics only and do not guarantee future performance. Past performance does not indicate future results.";
 
 const METHODOLOGY = "Passive hold baselines assume buying and holding the underlying asset for the entire benchmark period without any active management. Strategy outcomes reflect active management returns. All returns are calculated net of fees where applicable.";
 

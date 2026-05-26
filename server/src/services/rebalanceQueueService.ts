@@ -25,6 +25,7 @@ export interface RebalanceQueueEntryDTO {
   deferredUntil: Date | null;
   followUpEntryId: string | null;
   lastError: string | null;
+  completedAt: Date | null;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -486,6 +487,7 @@ export class RebalanceQueueService {
       deferredUntil: entry.deferredUntil,
       followUpEntryId: entry.followUpEntryId,
       lastError: entry.lastError,
+      completedAt: entry.completedAt,
       createdAt: entry.createdAt,
       updatedAt: entry.updatedAt,
     };

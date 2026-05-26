@@ -2,39 +2,25 @@ import { fetchNetworkSnapshot } from "../services/stellarNetworkService";
 
 jest.setTimeout(30000);
 
-interface MockCallBuilder {
-  order: jest.Mock;
-  limit: jest.Mock;
-  call: jest.Mock;
-}
-interface MockHorizonServer {
-  ledgers: jest.Mock;
-}
-let mockCallBuilder: MockCallBuilder;
-let mockHorizonServer: MockHorizonServer;
-
-function createMockCallBuilder() {
-  mockCallBuilder = {
+// The mock factory creates the shared instances in its own closure and exposes
+// them via static properties so beforeEach can reference the same objects that
+// the service module received when it was loaded.
+jest.mock("@stellar/stellar-sdk", () => {
+  const callBuilder = {
     order: jest.fn().mockReturnThis(),
     limit: jest.fn().mockReturnThis(),
     call: jest.fn(() => Promise.resolve({ records: [] })),
   };
-  return mockCallBuilder;
-}
+  const horizonServer = { ledgers: jest.fn().mockReturnValue(callBuilder) };
+  const MockServer = jest.fn().mockImplementation(() => horizonServer);
+  (MockServer as any).__callBuilder = callBuilder;
+  (MockServer as any).__horizonServer = horizonServer;
+  return { Horizon: { Server: MockServer } };
+});
 
-function createMockHorizonServer() {
-  createMockCallBuilder();
-  mockHorizonServer = {
-    ledgers: jest.fn().mockReturnValue(mockCallBuilder),
-  };
-  return mockHorizonServer;
-}
-
-jest.mock("@stellar/stellar-sdk", () => ({
-  Horizon: {
-    Server: jest.fn().mockImplementation(() => createMockHorizonServer()),
-  },
-}));
+const { Horizon } = require("@stellar/stellar-sdk");
+const mockCallBuilder = (Horizon.Server as any).__callBuilder;
+const mockHorizonServer = (Horizon.Server as any).__horizonServer;
 
 describe("stellarNetworkService", () => {
   beforeEach(() => {

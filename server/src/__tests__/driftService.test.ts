@@ -13,27 +13,20 @@ jest.mock("../services/alertsService", () => ({
 }));
 
 jest.mock("@prisma/client", () => {
-  const findFirst = jest.fn();
-  const create = jest.fn();
-  const update = jest.fn();
-  return {
-    PrismaClient: jest.fn().mockImplementation(() => ({
-      driftEvent: {
-        findFirst,
-        create,
-        update,
-      }
-    })),
+  const instance = {
+    driftEvent: {
+      findFirst: jest.fn(),
+      create: jest.fn(),
+      update: jest.fn(),
+    },
   };
+  const MockPrismaClient = jest.fn(() => instance);
+  (MockPrismaClient as any).__mockInstance = instance;
+  return { PrismaClient: MockPrismaClient };
 });
 
-const prismaMock = {
-  driftEvent: {
-    findFirst: jest.fn(),
-    create: jest.fn(),
-    update: jest.fn(),
-  },
-};
+const { PrismaClient } = require("@prisma/client");
+const prismaMock = (PrismaClient as any).__mockInstance;
 const mockDriftEventFindFirst = prismaMock.driftEvent.findFirst;
 const mockDriftEventCreate = prismaMock.driftEvent.create;
 const mockDriftEventUpdate = prismaMock.driftEvent.update;

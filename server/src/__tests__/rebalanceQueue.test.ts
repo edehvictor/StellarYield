@@ -1,9 +1,11 @@
 import { EXECUTION_TYPE, REBALANCE_STATUS } from '../queues/types';
 import { RebalanceQueueService } from '../services/rebalanceQueueService';
 
-// Mock Prisma
-jest.mock('@prisma/client', () => ({
-  PrismaClient: jest.fn(() => ({
+// Mock Prisma — the factory creates one shared instance inside its own closure
+// and exposes it via __mockInstance so the test can configure the same object
+// that the module-level `prisma` singleton in the service was assigned.
+jest.mock('@prisma/client', () => {
+  const instance = {
     rebalanceQueueEntry: {
       create: jest.fn(),
       findUnique: jest.fn(),
@@ -18,8 +20,11 @@ jest.mock('@prisma/client', () => ({
       create: jest.fn(),
       findMany: jest.fn(),
     },
-  })),
-}));
+  };
+  const MockPrismaClient = jest.fn(() => instance);
+  (MockPrismaClient as any).__mockInstance = instance;
+  return { PrismaClient: MockPrismaClient };
+});
 
 describe('RebalanceQueueService', () => {
   let service: RebalanceQueueService;
@@ -28,7 +33,8 @@ describe('RebalanceQueueService', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     service = new RebalanceQueueService();
-    mockPrisma = require('@prisma/client').PrismaClient();
+    const { PrismaClient } = require('@prisma/client');
+    mockPrisma = (PrismaClient as any).__mockInstance;
   });
 
   afterEach(async () => {

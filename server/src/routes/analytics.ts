@@ -212,66 +212,9 @@ router.post('/compatibility/config', async (req, res) => {
 // ── Strategy Health Routes ─────────────────────────────────────────────
 
 /**
- * GET /api/analytics/health/:strategyId
- * Get health score for a specific strategy
- */
-router.get('/health/:strategyId', async (req, res) => {
-  try {
-    const { strategyId } = req.params;
-    const { strategyName } = req.query;
-    
-    const healthScore = await strategyHealthEngine.calculateHealthScore(
-      strategyId,
-      (strategyName as string) || `Strategy ${strategyId}`
-    );
-    
-    const formattedScore = formatHealthScore(healthScore);
-    
-    res.json({
-      success: true,
-      data: formattedScore,
-    });
-  } catch (error) {
-    console.error(`Health score calculation failed for ${req.params.strategyId}:`, error);
-    res.status(500).json({
-      error: 'Failed to calculate health score',
-      message: error instanceof Error ? error.message : 'Unknown error'
-    });
-  }
-});
-
-/**
- * POST /api/analytics/health/batch
- * Get health scores for multiple strategies
- */
-router.post('/health/batch', async (req, res) => {
-  try {
-    const { strategyIds } = req.body;
-    
-    if (!Array.isArray(strategyIds) || strategyIds.length === 0) {
-      return res.status(400).json({
-        error: 'strategyIds must be a non-empty array'
-      });
-    }
-
-    const healthScores = await strategyHealthEngine.getHealthScores(strategyIds);
-    const formattedScores = healthScores.map(formatHealthScore);
-    
-    res.json({
-      success: true,
-      data: formattedScores,
-    });
-  } catch (error) {
-    res.status(500).json({
-      error: 'Failed to get health scores',
-      message: error instanceof Error ? error.message : 'Unknown error'
-    });
-  }
-});
-
-/**
  * GET /api/analytics/health/alerts
  * Get critical health alerts
+ * NOTE: must be declared before /health/:strategyId to avoid being swallowed
  */
 router.get('/health/alerts', async (req, res) => {
   try {
@@ -318,11 +261,96 @@ router.post('/health/config', async (req, res) => {
   }
 });
 
+/**
+ * POST /api/analytics/health/batch
+ * Get health scores for multiple strategies
+ */
+router.post('/health/batch', async (req, res) => {
+  try {
+    const { strategyIds } = req.body;
+
+    if (!Array.isArray(strategyIds) || strategyIds.length === 0) {
+      return res.status(400).json({ error: 'strategyIds must be a non-empty array' });
+    }
+
+    const healthScores = await strategyHealthEngine.getHealthScores(strategyIds);
+    res.json({ success: true, data: healthScores.map(formatHealthScore) });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to get health scores', message: error instanceof Error ? error.message : 'Unknown error' });
+  }
+});
+
+/**
+ * GET /api/analytics/health/:strategyId
+ * Get health score for a specific strategy
+ * NOTE: must be declared after static /health/* routes
+ */
+router.get('/health/:strategyId', async (req, res) => {
+  try {
+    const { strategyId } = req.params;
+    const { strategyName } = req.query;
+
+    const healthScore = await strategyHealthEngine.calculateHealthScore(
+      strategyId,
+      (strategyName as string) || `Strategy ${strategyId}`
+    );
+
+    res.json({ success: true, data: formatHealthScore(healthScore) });
+  } catch (error) {
+    console.error(`Health score calculation failed for ${req.params.strategyId}:`, error);
+    res.status(500).json({ error: 'Failed to calculate health score', message: error instanceof Error ? error.message : 'Unknown error' });
+  }
+});
+
 // ── Yield Reliability Routes ────────────────────────────────────────────
+
+/**
+ * GET /api/analytics/reliability/compare
+ * Compare and rank providers
+ * NOTE: must be declared before /reliability/:providerId
+ */
+router.get('/reliability/compare', async (req, res) => {
+  try {
+    const providers = [
+      { id: 'blend_api', name: 'Blend Protocol', source: 'api' },
+      { id: 'soroswap_api', name: 'Soroswap', source: 'api' },
+      { id: 'defindex_api', name: 'DeFindex', source: 'api' },
+    ];
+    const comparison = await yieldReliabilityEngine.compareProviders(providers);
+    res.json({ success: true, data: comparison });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to compare providers', message: error instanceof Error ? error.message : 'Unknown error' });
+  }
+});
+
+/**
+ * GET /api/analytics/reliability/recommendations
+ * Get providers suitable for recommendations
+ * NOTE: must be declared before /reliability/:providerId
+ */
+router.get('/reliability/recommendations', async (req, res) => {
+  try {
+    const { minReliability = 70 } = req.query;
+    const providers = await yieldReliabilityEngine.getProvidersForRecommendations(Number(minReliability));
+    const weightedSelection = getWeightedProviderSelection(providers);
+    res.json({
+      success: true,
+      data: {
+        providers: weightedSelection.map(formatReliabilityScore),
+        minReliability: Number(minReliability),
+        totalProviders: providers.length,
+        selectedProviders: weightedSelection.length,
+      },
+    });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to get provider recommendations', message: error instanceof Error ? error.message : 'Unknown error' });
+  }
+});
 
 /**
  * GET /api/analytics/reliability/:providerId
  * Get reliability score for a specific provider
+ * NOTE: must be declared after static /reliability/* routes
  */
 router.get('/reliability/:providerId', async (req, res) => {
   try {
@@ -374,58 +402,6 @@ router.post('/reliability/batch', async (req, res) => {
   } catch (error) {
     res.status(500).json({
       error: 'Failed to get reliability scores',
-      message: error instanceof Error ? error.message : 'Unknown error'
-    });
-  }
-});
-
-/**
- * GET /api/analytics/reliability/compare
- * Compare and rank providers
- */
-router.get('/reliability/compare', async (req, res) => {
-  try {
-    const providers = [
-      { id: 'blend_api', name: 'Blend Protocol', source: 'api' },
-      { id: 'soroswap_api', name: 'Soroswap', source: 'api' },
-      { id: 'defindex_api', name: 'DeFindex', source: 'api' },
-    ];
-    const comparison = await yieldReliabilityEngine.compareProviders(providers);
-    
-    res.json({
-      success: true,
-      data: comparison,
-    });
-  } catch (error) {
-    res.status(500).json({
-      error: 'Failed to compare providers',
-      message: error instanceof Error ? error.message : 'Unknown error'
-    });
-  }
-});
-
-/**
- * GET /api/analytics/reliability/recommendations
- * Get providers suitable for recommendations
- */
-router.get('/reliability/recommendations', async (req, res) => {
-  try {
-    const { minReliability = 70 } = req.query;
-    const providers = await yieldReliabilityEngine.getProvidersForRecommendations(Number(minReliability));
-    const weightedSelection = getWeightedProviderSelection(providers);
-    
-    res.json({
-      success: true,
-      data: {
-        providers: weightedSelection.map(formatReliabilityScore),
-        minReliability: Number(minReliability),
-        totalProviders: providers.length,
-        selectedProviders: weightedSelection.length,
-      }
-    });
-  } catch (error) {
-    res.status(500).json({
-      error: 'Failed to get provider recommendations',
       message: error instanceof Error ? error.message : 'Unknown error'
     });
   }

@@ -68,10 +68,6 @@ export function generateIV(): Uint8Array {
   return crypto.getRandomValues(new Uint8Array(IV_LENGTH));
 }
 
-function toArrayBuffer(view: Uint8Array): ArrayBuffer {
-  return view.buffer.slice(view.byteOffset, view.byteOffset + view.byteLength) as ArrayBuffer;
-}
-
 /**
  * Encrypt contact data using AES-GCM
  * 
@@ -91,10 +87,10 @@ export async function encryptContactData(
     const encryptedBuffer = await crypto.subtle.encrypt(
       {
         name: ENCRYPTION_ALGORITHM,
-        iv: toArrayBuffer(iv),
+        iv: iv, // Pass Uint8Array directly instead of ArrayBuffer
       },
       key,
-      toArrayBuffer(dataBytes)
+      dataBytes // Pass Uint8Array directly instead of ArrayBuffer
     );
     
     // Combine IV and encrypted data
@@ -134,10 +130,10 @@ export async function decryptContactData(
     const decryptedBuffer = await crypto.subtle.decrypt(
       {
         name: ENCRYPTION_ALGORITHM,
-        iv: toArrayBuffer(iv),
+        iv: iv, // Pass Uint8Array directly
       },
       key,
-      toArrayBuffer(encrypted)
+      encrypted // Pass Uint8Array directly
     );
     
     const decoder = new TextDecoder();

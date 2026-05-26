@@ -3,9 +3,9 @@ import { EXECUTION_TYPE, REBALANCE_STATUS, STRATEGY_EVENT_TYPE } from '../queues
 import { RebalanceQueueService } from '../services/rebalanceQueueService';
 import { StrategySnapshotVersioningService } from '../services/strategySnapshotVersioningService';
 
-// Mock Prisma for integration test
-jest.mock('@prisma/client', () => ({
-  PrismaClient: jest.fn(() => ({
+// Mock Prisma for integration test — singleton so all services share the same instance
+jest.mock('@prisma/client', () => {
+  const instance = {
     rebalanceQueueEntry: {
       create: jest.fn(),
       findUnique: jest.fn(),
@@ -23,9 +23,11 @@ jest.mock('@prisma/client', () => ({
     strategySnapshot: {
       create: jest.fn(),
       findUnique: jest.fn(),
+      findUniqueOrThrow: jest.fn(),
       findFirst: jest.fn(),
       findMany: jest.fn(),
       update: jest.fn(),
+      updateMany: jest.fn(),
       count: jest.fn(),
     },
     strategyVersionReference: {
@@ -38,8 +40,11 @@ jest.mock('@prisma/client', () => ({
       create: jest.fn(),
       findMany: jest.fn(),
     },
-  })),
-}));
+  };
+  const MockPrismaClient = jest.fn(() => instance);
+  (MockPrismaClient as any).__mockInstance = instance;
+  return { PrismaClient: MockPrismaClient };
+});
 
 describe('Rebalance Queue and Strategy Versioning Integration', () => {
   let queueService: RebalanceQueueService;
@@ -50,7 +55,8 @@ describe('Rebalance Queue and Strategy Versioning Integration', () => {
     jest.clearAllMocks();
     queueService = new RebalanceQueueService();
     versioningService = new StrategySnapshotVersioningService();
-    mockPrisma = require('@prisma/client').PrismaClient();
+    const { PrismaClient } = require('@prisma/client');
+    mockPrisma = (PrismaClient as any).__mockInstance;
   });
 
   describe('Complete Rebalance Lifecycle with Versioning', () => {
@@ -166,7 +172,7 @@ describe('Rebalance Queue and Strategy Versioning Integration', () => {
         updatedAt: new Date(),
       });
 
-      const _queueEntry = await queueService.enqueueRebalance(
+      await queueService.enqueueRebalance(
         vaultId,
         { BTC: 0.5, ETH: 0.5 },
         { BTC: 0.6, ETH: 0.4 },
@@ -189,6 +195,14 @@ describe('Rebalance Queue and Strategy Versioning Integration', () => {
         id: 'history-1',
         queueEntryId: 'queue-1',
         filledPercentage: 70,
+      });
+
+      // createDeferredFollowUp calls rebalanceQueueEntry.create internally
+      mockPrisma.rebalanceQueueEntry.create.mockResolvedValueOnce({
+        id: 'queue-2',
+        vaultId,
+        status: REBALANCE_STATUS.PENDING,
+        executionType: EXECUTION_TYPE.DEFERRED,
       });
 
       mockPrisma.rebalanceQueueEntry.update.mockResolvedValueOnce({
@@ -416,10 +430,21 @@ describe('Rebalance Queue and Strategy Versioning Integration', () => {
         },
       ]);
 
-      // Mock processing
+      // markAsProcessing → update, then recordPartialExecution → findUniqueOrThrow + history.create + update
       mockPrisma.rebalanceQueueEntry.update
-        .mockResolvedValueOnce({ status: REBALANCE_STATUS.PROCESSING })
-        .mockResolvedValueOnce({ status: REBALANCE_STATUS.COMPLETED });
+        .mockResolvedValueOnce({ id: 'queue-1', status: REBALANCE_STATUS.PROCESSING })
+        .mockResolvedValueOnce({ id: 'queue-1', status: REBALANCE_STATUS.COMPLETED });
+
+      mockPrisma.rebalanceQueueEntry.findUniqueOrThrow.mockResolvedValueOnce({
+        id: 'queue-1',
+        vaultId: 'vault-1',
+        targetAllocations: {},
+        currentAllocations: {},
+        executionStrategy: {},
+        attemptCount: 1,
+        intentValidUntil: new Date(Date.now() + 86400000),
+        maxRetries: 3,
+      });
 
       mockPrisma.rebalanceHistory.create.mockResolvedValueOnce({
         id: 'history-1',
@@ -429,7 +454,7 @@ describe('Rebalance Queue and Strategy Versioning Integration', () => {
         enabled: true,
         batchSize: 10,
         enableRetries: true,
-        enableDeferredProcessing: true,
+        enableDeferredProcessing: false,
         logResults: false,
       });
 
@@ -450,8 +475,19 @@ describe('Rebalance Queue and Strategy Versioning Integration', () => {
       ]);
 
       mockPrisma.rebalanceQueueEntry.update
-        .mockResolvedValueOnce({ status: REBALANCE_STATUS.PROCESSING })
-        .mockResolvedValueOnce({ status: REBALANCE_STATUS.COMPLETED });
+        .mockResolvedValueOnce({ id: 'queue-2', status: REBALANCE_STATUS.PROCESSING })
+        .mockResolvedValueOnce({ id: 'queue-2', status: REBALANCE_STATUS.COMPLETED });
+
+      mockPrisma.rebalanceQueueEntry.findUniqueOrThrow.mockResolvedValueOnce({
+        id: 'queue-2',
+        vaultId: 'vault-1',
+        targetAllocations: {},
+        currentAllocations: {},
+        executionStrategy: {},
+        attemptCount: 0,
+        intentValidUntil: new Date(Date.now() + 86400000),
+        maxRetries: 3,
+      });
 
       mockPrisma.rebalanceHistory.create.mockResolvedValueOnce({
         id: 'history-2',

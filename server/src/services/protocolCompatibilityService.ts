@@ -210,7 +210,7 @@ export class ProtocolCompatibilityEngine {
       // Check each component
       const issues: CompatibilityIssue[] = [];
       for (const requirement of requirements) {
-        const componentIssues = await this.checkRequirement(protocolName, requirement, currentVersion);
+        const componentIssues = await this.checkComponentCompatibility(protocolName, requirement.component, requirement, currentVersion);
         issues.push(...componentIssues);
       }
 
@@ -231,7 +231,23 @@ export class ProtocolCompatibilityEngine {
       };
     } catch {
       console.error('Failed to fetch protocol version:', { protocolName });
-      return null;
+      return {
+        protocolName,
+        currentVersion: 'unknown',
+        latestVersion: 'unknown',
+        status: 'incompatible' as const,
+        issues: [{
+          severity: 'critical' as const,
+          component: 'unknown',
+          issue: 'Failed to fetch protocol version',
+          impact: 'Cannot determine compatibility',
+          recommendation: 'Check protocol connectivity',
+          affectedStrategies: [],
+        }],
+        lastChecked: new Date().toISOString(),
+        recommendations: ['Check protocol connectivity'],
+        autoUpdateAvailable: false,
+      };
     }
   }
 
@@ -239,9 +255,10 @@ export class ProtocolCompatibilityEngine {
    * Check a specific compatibility requirement
    */
   private async checkComponentCompatibility(
+    protocolName: string,
     componentName: string,
     requirements: CompatibilityRequirement,
-    _component: string,
+    currentVersion: ProtocolVersion,
   ): Promise<CompatibilityIssue[]> {
     const issues: CompatibilityIssue[] = [];
 
@@ -273,7 +290,7 @@ export class ProtocolCompatibilityEngine {
       }
 
       // Breaking changes check
-      const breakingChangesCheck = await this.checkBreakingChanges(protocolName, _currentVersion, requirements);
+      const breakingChangesCheck = await this.checkBreakingChanges(protocolName, currentVersion.version, requirements);
       if (breakingChangesCheck.hasBreakingChanges) {
         issues.push({
           severity: breakingChangesCheck.affectsCriticalPath ? 'critical' : 'high',

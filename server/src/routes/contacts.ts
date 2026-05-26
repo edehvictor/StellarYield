@@ -154,7 +154,7 @@ router.post("/", async (req: Request, res: Response) => {
       return res.status(400).json({ 
         error: "Invalid request body",
         code: "INVALID_REQUEST",
-        details: validation.error.errors
+        details: validation.error.issues
       });
     }
 
@@ -238,7 +238,7 @@ router.put("/:id", async (req: Request, res: Response) => {
       return res.status(400).json({ 
         error: "Invalid request body",
         code: "INVALID_REQUEST",
-        details: validation.error.errors
+        details: validation.error.issues
       });
     }
 
