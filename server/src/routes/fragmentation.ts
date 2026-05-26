@@ -291,6 +291,85 @@ export function resetFragmentationServiceForTesting(): void {
   (fragmentationService as any).lastSuccessfulUpdate = null;
 }
 
+export interface FragmentationHistorySnapshot {
+  timestamp: string;
+  fragmentationScore: number;
+  effectiveProtocolCount: number;
+  hhi: number;
+  multiProtocolRoutingPct: number;
+  executionQualityScore: number;
+}
+
+export interface FragmentationHistoryResponse {
+  success: boolean;
+  data: {
+    snapshots: FragmentationHistorySnapshot[];
+    source: "live" | "mock" | "historical";
+    dataFreshness: {
+      earliestSnapshot: string;
+      latestSnapshot: string;
+      snapshotCount: number;
+    };
+    warnings?: string[];
+  };
+}
+
+class MockHistoricalService {
+  private historyStore: FragmentationHistorySnapshot[] | null = null;
+
+  private generateMockHistory(): FragmentationHistorySnapshot[] {
+    const snapshots: FragmentationHistorySnapshot[] = [];
+    const now = Date.now();
+    const baseScore = 45;
+    const baseProtocols = 1.82;
+
+    for (let i = 29; i >= 0; i--) {
+      const ts = new Date(now - i * 24 * 60 * 60 * 1000);
+      const noise = (Math.random() - 0.5) * 10;
+      const protocolNoise = (Math.random() - 0.5) * 0.4;
+      snapshots.push({
+        timestamp: ts.toISOString(),
+        fragmentationScore: Math.max(0, Math.min(100, baseScore + noise + (i % 5) * 1.5)),
+        effectiveProtocolCount: Math.max(1, baseProtocols + protocolNoise + (i % 7) * 0.1),
+        hhi: Math.round(5000 + (Math.random() - 0.5) * 1000),
+        multiProtocolRoutingPct: Math.max(0, Math.min(100, 35 + (Math.random() - 0.5) * 10)),
+        executionQualityScore: Math.max(0, Math.min(100, 72 + (Math.random() - 0.5) * 8)),
+      });
+    }
+
+    return snapshots;
+  }
+
+  async getHistory(
+    days: number = 30,
+  ): Promise<FragmentationHistorySnapshot[]> {
+    if (!this.historyStore) {
+      this.historyStore = this.generateMockHistory();
+    }
+
+    const snapshots = this.historyStore.slice(-days);
+    if (snapshots.length === 0) {
+      throw new DataUnavailableError("No historical fragmentation data available");
+    }
+
+    return snapshots;
+  }
+
+  resetHistory(): void {
+    this.historyStore = null;
+  }
+}
+
+const historicalService = new MockHistoricalService();
+
+/**
+ * Expose historical service for testing
+ * @internal
+ */
+export function getHistoricalServiceForTesting(): MockHistoricalService {
+  return historicalService;
+}
+
 /**
  * Create fragmentation router
  */
@@ -308,6 +387,67 @@ export function createFragmentationRouter(): Router {
    * - Calculation errors: HTTP 500
    * - Invalid requests: HTTP 400
    */
+  /**
+   * GET /api/liquidity/fragmentation/history
+   * Returns historical fragmentation snapshots for trend analysis
+   */
+  router.get('/fragmentation/history', async (req: Request, res: Response) => {
+    const startTime = Date.now();
+
+    try {
+      const days = Math.min(Math.max(parseInt(req.query.days as string) || 30, 1), 365);
+
+      const snapshots = await historicalService.getHistory(days);
+      const earliestSnapshot = snapshots[0]?.timestamp || new Date().toISOString();
+      const latestSnapshot = snapshots[snapshots.length - 1]?.timestamp || new Date().toISOString();
+
+      const warnings: string[] = [];
+      const source = process.env.FRAGMENTATION_HISTORY_SOURCE === "live" ? "live" : "mock";
+
+      if (source === "mock") {
+        warnings.push("Historical data based on simulated projections. Actual historical data may vary.");
+      }
+
+      const response: FragmentationHistoryResponse = {
+        success: true,
+        data: {
+          snapshots,
+          source,
+          dataFreshness: {
+            earliestSnapshot,
+            latestSnapshot,
+            snapshotCount: snapshots.length,
+          },
+          ...(warnings.length > 0 && { warnings }),
+        },
+      };
+
+      res.setHeader('Cache-Control', 'public, max-age=3600');
+      res.status(200).json(response);
+    } catch (error) {
+      if (error instanceof DataUnavailableError) {
+        const errorResponse: FragmentationErrorResponse = {
+          success: false,
+          error: {
+            code: 'HISTORY_UNAVAILABLE',
+            message: error.message,
+          },
+        };
+        res.status(503).json(errorResponse);
+        return;
+      }
+
+      const errorResponse: FragmentationErrorResponse = {
+        success: false,
+        error: {
+          code: 'INTERNAL_ERROR',
+          message: 'An unexpected error occurred while fetching historical data',
+        },
+      };
+      res.status(500).json(errorResponse);
+    }
+  });
+
   router.get('/fragmentation', async (req: Request, res: Response) => {
     const startTime = Date.now();
 

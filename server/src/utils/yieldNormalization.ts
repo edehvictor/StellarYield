@@ -15,7 +15,7 @@ export function normalizeYield(rawYield: RawProtocolYield): NormalizedYield {
 
   const baseApy = roundTo(rawYield.apyBps / 100, 2);
   let rewardApy = 0;
-  const rewards: { symbol: string; apy: number }[] = [];
+  const rewards: { symbol: string; apy: number; confidence?: "low" | "medium" | "high" }[] = [];
 
   if (rawYield.rewards && rawYield.tvlUsd > 0) {
     for (const reward of rawYield.rewards) {

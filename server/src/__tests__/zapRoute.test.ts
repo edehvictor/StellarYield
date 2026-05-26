@@ -43,4 +43,64 @@ describe("POST /api/zap/quote", () => {
 
     expect(res.status).toBe(400);
   });
+
+  describe("enhanced quote metadata", () => {
+    it("includes quotedAt timestamp", async () => {
+      const res = await request(createApp())
+        .post("/api/zap/quote")
+        .send({
+          inputTokenContract: "CDSAMEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+          vaultTokenContract: "CDSAMEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+          amountInStroops: "1000",
+          inputDecimals: 7,
+          vaultDecimals: 7,
+        });
+
+      expect(res.body.quotedAt).toBeDefined();
+      expect(() => new Date(res.body.quotedAt)).not.toThrow();
+    });
+
+    it("includes minAmountOutStroops", async () => {
+      const res = await request(createApp())
+        .post("/api/zap/quote")
+        .send({
+          inputTokenContract: "CDSAMEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+          vaultTokenContract: "CDSAMEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+          amountInStroops: "1000",
+          inputDecimals: 7,
+          vaultDecimals: 7,
+        });
+
+      expect(res.body.minAmountOutStroops).toBeDefined();
+    });
+
+    it("includes isFallback flag", async () => {
+      const res = await request(createApp())
+        .post("/api/zap/quote")
+        .send({
+          inputTokenContract: "CDSAMEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+          vaultTokenContract: "CDSAMEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+          amountInStroops: "1000",
+          inputDecimals: 7,
+          vaultDecimals: 7,
+        });
+
+      expect(res.body.isFallback).toBe(true);
+    });
+
+    it("includes slippageApplied and amountOutAfterSlippage", async () => {
+      const res = await request(createApp())
+        .post("/api/zap/quote")
+        .send({
+          inputTokenContract: "CDSAMEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+          vaultTokenContract: "CDSAMEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+          amountInStroops: "1000",
+          inputDecimals: 7,
+          vaultDecimals: 7,
+        });
+
+      expect(typeof res.body.slippageApplied).toBe("number");
+      expect(res.body.amountOutAfterSlippage).toBeDefined();
+    });
+  });
 });

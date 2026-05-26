@@ -7,7 +7,6 @@ export interface ProtocolConfig {
   baseTvlUsd: number;
   volatilityPct: number;
   protocolAgeDays: number;
-  protocolAgeDays: number;
   source: string;
   liquidityUsd: number;
   rebalancingBehavior: string;

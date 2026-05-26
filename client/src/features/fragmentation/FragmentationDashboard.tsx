@@ -9,6 +9,7 @@ import MaterialImpactWarning from './MaterialImpactWarning';
 import ProtocolDistributionChart from './ProtocolDistributionChart';
 import RoutingRecommendations from './RoutingRecommendations';
 import DataFreshnessIndicator from './DataFreshnessIndicator';
+import FragmentationTrendChart from './FragmentationTrendChart';
 
 interface FragmentationDashboardProps {
   refreshInterval?: number;  // Default: 60000ms (1 minute)
@@ -177,6 +178,9 @@ export default function FragmentationDashboard({
             dataCompleteness={metrics.dataCompleteness}
             lastUpdate={lastUpdate}
           />
+
+          {/* Historical Trend Chart */}
+          <FragmentationTrendChart days={30} />
         </>
       )}
     </div>

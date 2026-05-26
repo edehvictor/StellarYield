@@ -1,5 +1,5 @@
 import { PrismaClient, Incident } from "@prisma/client"; // Type verified via tsc
-import { recoveryRecommendationService, RecoveryRecommendation, ShockEvent } from "./recoveryRecommendationService";
+import { recoveryRecommendationService, RecoveryRecommendation, ShockEvent, ShockEventType } from "./recoveryRecommendationService";
 
 const prisma = new PrismaClient();
 

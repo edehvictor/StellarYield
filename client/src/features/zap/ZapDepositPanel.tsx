@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ArrowDown, Zap, Loader2, AlertTriangle, RefreshCw } from "lucide-react";
+import { ArrowDown, Zap, Loader2, AlertTriangle, RefreshCw, Clock, Info } from "lucide-react";
 import TxStatusTimeline from "../../components/transaction/TxStatusTimeline";
 import { zapDeposit } from "../../services/soroban";
 import type { TxPhase } from "../../services/transactionPhase";
@@ -16,7 +16,7 @@ import {
   mergeVaultIntoZapSelectableAssets,
   shouldLoadZapMetadataFromApi,
 } from "./assets";
-import type { ZapAssetOption } from "./types";
+import type { ZapAssetOption, ZapQuoteResponse } from "./types";
 import { useSettings } from "../settings/SettingsContext";
 import { resolveSlippage } from "../settings/types";
 
@@ -24,10 +24,19 @@ export interface ZapDepositPanelProps {
   walletAddress: string | null;
 }
 
+const MIN_SLIPPAGE = 0.1;
+const MAX_SLIPPAGE = 15;
+const STALE_QUOTE_AGE_MS = 60_000;
+const FALLBACK_SOURCE = "fallback_rate";
+
+function quoteAgeSeconds(quotedAt: string): number {
+  return Math.floor((Date.now() - new Date(quotedAt).getTime()) / 1000);
+}
+
 export default function ZapDepositPanel({ walletAddress }: ZapDepositPanelProps) {
   const useApiAssets = shouldLoadZapMetadataFromApi();
   const { settings } = useSettings();
-  const slippage = resolveSlippage(settings);
+  const settingsSlippage = resolveSlippage(settings);
 
   const initialVault = useMemo(() => getVaultTokenFromEnv(), []);
   const initialVaultContractId = useMemo(() => getVaultContractIdFromEnv(), []);
@@ -62,7 +71,6 @@ export default function ZapDepositPanel({ walletAddress }: ZapDepositPanelProps)
       !inputAsset ||
       !selectableAssets.some((a) => a.contractId === inputAsset.contractId)
     ) {
-      // Schedule the state update outside the synchronous effect body
       const next = selectableAssets[0] ?? null;
       Promise.resolve().then(() => setInputAsset(next));
     }
@@ -79,6 +87,9 @@ export default function ZapDepositPanel({ walletAddress }: ZapDepositPanelProps)
   const [expectedOut, setExpectedOut] = useState<bigint | null>(null);
   const [quotePath, setQuotePath] = useState<string>("");
   const [quoteSource, setQuoteSource] = useState<string>("");
+  const [quoteData, setQuoteData] = useState<ZapQuoteResponse | null>(null);
+  const [slippageTolerance, setSlippageTolerance] = useState(settingsSlippage);
+  const [showSlippageEdit, setShowSlippageEdit] = useState(false);
 
   const needsSwap = inputAsset?.contractId !== vaultToken.contractId;
 
@@ -86,6 +97,7 @@ export default function ZapDepositPanel({ walletAddress }: ZapDepositPanelProps)
     if (!inputAsset || !amount || !vaultToken.contractId) {
       setExpectedOut(null);
       setQuotePath("");
+      setQuoteData(null);
       return;
     }
     let stroops: bigint;
@@ -107,6 +119,7 @@ export default function ZapDepositPanel({ walletAddress }: ZapDepositPanelProps)
         setExpectedOut(stroops);
         setQuotePath(`${inputAsset.symbol} (no swap)`);
         setQuoteSource("direct");
+        setQuoteData(null);
       } else {
         const q = await fetchSwapQuote({
           inputTokenContract: inputAsset.contractId,
@@ -114,18 +127,21 @@ export default function ZapDepositPanel({ walletAddress }: ZapDepositPanelProps)
           amountInStroops: stroops.toString(),
           inputDecimals: inputAsset.decimals,
           vaultDecimals: vaultToken.decimals,
+          slippageTolerance: slippageTolerance / 100,
         });
         setExpectedOut(BigInt(q.expectedAmountOutStroops));
         setQuotePath(q.path.map((h) => h.label ?? h.contractId.slice(0, 6)).join(" → "));
         setQuoteSource(q.source);
+        setQuoteData(q);
       }
     } catch (e) {
       setExpectedOut(null);
       setError(e instanceof Error ? e.message : "Could not load quote");
+      setQuoteData(null);
     } finally {
       setQuoteLoading(false);
     }
-  }, [amount, inputAsset, needsSwap, vaultToken]);
+  }, [amount, inputAsset, needsSwap, slippageTolerance, vaultToken]);
 
   useEffect(() => {
     const t = setTimeout(() => {
@@ -136,8 +152,18 @@ export default function ZapDepositPanel({ walletAddress }: ZapDepositPanelProps)
 
   const minOut = useMemo(() => {
     if (expectedOut === null || expectedOut <= 0n) return null;
-    return minAmountAfterSlippage(expectedOut, slippage);
-  }, [expectedOut, slippage]);
+    return minAmountAfterSlippage(expectedOut, slippageTolerance);
+  }, [expectedOut, slippageTolerance]);
+
+  const isStale = useMemo(() => {
+    if (!quoteData) return false;
+    return quoteAgeSeconds(quoteData.quotedAt) > STALE_QUOTE_AGE_MS / 1000;
+  }, [quoteData]);
+
+  const isFallback = useMemo(() => {
+    if (!quoteData) return false;
+    return quoteData.isFallback || quoteData.source === FALLBACK_SOURCE;
+  }, [quoteData]);
 
   const emitPhase = useCallback((p: TxPhase) => {
     setTxPhase(p);
@@ -145,6 +171,11 @@ export default function ZapDepositPanel({ walletAddress }: ZapDepositPanelProps)
       lastProgressPhaseRef.current = p;
       setLastProgressPhase(p);
     }
+  }, []);
+
+  const handleSlippageChange = useCallback((value: number) => {
+    const clamped = Math.min(MAX_SLIPPAGE, Math.max(MIN_SLIPPAGE, value));
+    setSlippageTolerance(clamped);
   }, []);
 
   const handleZap = useCallback(async () => {
@@ -252,6 +283,32 @@ export default function ZapDepositPanel({ walletAddress }: ZapDepositPanelProps)
         </div>
       )}
 
+      {/* Fallback quote warning */}
+      {isFallback && needsSwap && (
+        <div className="mb-4 flex items-start gap-2 text-amber-200/90 text-sm bg-amber-500/10 border border-amber-500/30 rounded-lg p-3">
+          <Info className="w-4 h-4 shrink-0 mt-0.5 text-amber-400" />
+          <div>
+            <p className="font-medium text-amber-300">Fallback quote active</p>
+            <p className="text-xs text-amber-200/70">
+              Router simulation unavailable. Using estimated rate. Actual output may differ.
+            </p>
+          </div>
+        </div>
+      )}
+
+      {/* Stale quote warning */}
+      {isStale && !quoteLoading && (
+        <div className="mb-4 flex items-start gap-2 text-orange-200/90 text-sm bg-orange-500/10 border border-orange-500/30 rounded-lg p-3">
+          <Clock className="w-4 h-4 shrink-0 mt-0.5 text-orange-400" />
+          <div>
+            <p className="font-medium text-orange-300">Stale quote</p>
+            <p className="text-xs text-orange-200/70">
+              Quote is over 60 seconds old. Refresh for current rates.
+            </p>
+          </div>
+        </div>
+      )}
+
       <div className="bg-white/5 rounded-xl p-4 mb-2">
         <label className="text-sm text-gray-400 mb-2 block">You pay</label>
         <div className="flex gap-3">
@@ -301,26 +358,109 @@ export default function ZapDepositPanel({ walletAddress }: ZapDepositPanelProps)
             {needsSwap ? "Vault token after swap" : "Vault token"}
           </span>
         </div>
+
+        {/* Min output after slippage */}
         {minOut !== null && minOut > 0n && (
           <p className="text-xs text-gray-400">
-            Min. after {slippage}% slippage:{" "}
+            Min. after {slippageTolerance}% slippage:{" "}
             <span className="text-gray-200 font-mono">
               {formatStroopsToDecimal(minOut, vaultToken.decimals)} {vaultToken.symbol}
             </span>
           </p>
         )}
+
+        {/* Quote source badge */}
+        {quoteSource && needsSwap && (
+          <div className="flex items-center gap-2">
+            <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${
+              quoteSource === "router_simulation"
+                ? "bg-green-500/20 text-green-400"
+                : quoteSource === "fallback_rate"
+                  ? "bg-amber-500/20 text-amber-400"
+                  : "bg-blue-500/20 text-blue-400"
+            }`}>
+              {quoteSource === "router_simulation" ? "Simulated" : quoteSource === "fallback_rate" ? "Fallback" : quoteSource}
+            </span>
+
+            {/* Quote age */}
+            {quoteData && (
+              <span className="text-[10px] text-gray-500 flex items-center gap-1">
+                <Clock size={10} />
+                {quoteAgeSeconds(quoteData.quotedAt)}s ago
+              </span>
+            )}
+          </div>
+        )}
+
         {quotePath && (
           <p className="text-xs text-gray-500">
             Path: {quotePath}
-            {quoteSource && ` · ${quoteSource}`}
           </p>
         )}
       </div>
 
+      {/* Slippage tolerance editor */}
       {needsSwap && (
-        <div className="bg-white/5 rounded-xl p-3 mb-4 flex items-center justify-between text-sm">
-          <span className="text-gray-400">Slippage tolerance</span>
-          <span className="text-white font-medium">{slippage}%</span>
+        <div className="bg-white/5 rounded-xl p-3 mb-4">
+          <div className="flex items-center justify-between mb-2">
+            <div className="flex items-center gap-1">
+              <span className="text-sm text-gray-400">Slippage tolerance</span>
+              <button
+                type="button"
+                onClick={() => setShowSlippageEdit(!showSlippageEdit)}
+                className="text-gray-500 hover:text-gray-300"
+              >
+                <Info size={12} />
+              </button>
+            </div>
+            <span className={`text-sm font-medium ${
+              slippageTolerance > 5 ? "text-red-400" : slippageTolerance > 2 ? "text-amber-400" : "text-white"
+            }`}>
+              {slippageTolerance}%
+            </span>
+          </div>
+
+          {showSlippageEdit && (
+            <div className="space-y-2">
+              <div className="flex gap-2">
+                {[0.1, 0.5, 1, 2, 3, 5].map((val) => (
+                  <button
+                    key={val}
+                    type="button"
+                    onClick={() => handleSlippageChange(val)}
+                    className={`text-xs px-2 py-1 rounded ${
+                      slippageTolerance === val
+                        ? "bg-[#6C5DD3] text-white"
+                        : "bg-white/10 text-gray-400 hover:bg-white/20"
+                    }`}
+                  >
+                    {val}%
+                  </button>
+                ))}
+              </div>
+              <div className="flex items-center gap-2">
+                <input
+                  type="range"
+                  min={MIN_SLIPPAGE}
+                  max={MAX_SLIPPAGE}
+                  step={0.1}
+                  value={slippageTolerance}
+                  onChange={(e) => handleSlippageChange(parseFloat(e.target.value))}
+                  className="flex-1 accent-[#6C5DD3]"
+                />
+                <span className="text-xs text-gray-500 w-10 text-right">{slippageTolerance}%</span>
+              </div>
+              {slippageTolerance >= 5 && (
+                <p className="text-xs text-red-400 flex items-center gap-1">
+                  <AlertTriangle size={10} />
+                  High slippage may result in significant price impact
+                </p>
+              )}
+              <p className="text-[10px] text-gray-500">
+                Safe range: {MIN_SLIPPAGE}% – {MAX_SLIPPAGE}%. Higher tolerance means more risk of unfavorable rate.
+              </p>
+            </div>
+          )}
         </div>
       )}
 

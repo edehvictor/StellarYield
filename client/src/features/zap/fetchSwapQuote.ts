@@ -4,8 +4,11 @@ import { apiUrl } from "../../lib/api";
 /**
  * Ask the backend for the best known swap path and expected vault-token output.
  * Falls back to a deterministic ratio when the DEX router is not configured.
+ * Includes slippage tolerance and returns quote metadata (age, source, min output).
  */
-export async function fetchSwapQuote(req: ZapQuoteRequest): Promise<ZapQuoteResponse> {
+export async function fetchSwapQuote(
+  req: ZapQuoteRequest,
+): Promise<ZapQuoteResponse> {
   const res = await fetch(apiUrl("/api/zap/quote"), {
     method: "POST",
     headers: { "Content-Type": "application/json" },

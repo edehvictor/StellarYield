@@ -30,6 +30,7 @@ router.post("/quote", validateZapQuote, async (req: Request, res: Response) => {
       amountInStroops: String(b.amountInStroops),
       inputDecimals: Number(b.inputDecimals ?? 7),
       vaultDecimals: Number(b.vaultDecimals ?? 7),
+      slippageTolerance: b.slippageTolerance !== undefined ? Number(b.slippageTolerance) : undefined,
     };
 
     const quote = await getZapQuote(body);
@@ -37,6 +38,12 @@ router.post("/quote", validateZapQuote, async (req: Request, res: Response) => {
       path: quote.path,
       expectedAmountOutStroops: quote.expectedAmountOutStroops,
       source: quote.source,
+      slippageApplied: quote.slippageApplied,
+      amountOutAfterSlippage: quote.amountOutAfterSlippage,
+      quotedAt: quote.quotedAt,
+      minAmountOutStroops: quote.minAmountOutStroops,
+      quoteAgeMs: quote.quoteAgeMs,
+      isFallback: quote.isFallback,
     });
   } catch (e) {
     sendError(

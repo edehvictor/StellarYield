@@ -6,6 +6,7 @@ export { default as MaterialImpactWarning } from './MaterialImpactWarning';
 export { default as ProtocolDistributionChart } from './ProtocolDistributionChart';
 export { default as RoutingRecommendations } from './RoutingRecommendations';
 export { default as DataFreshnessIndicator } from './DataFreshnessIndicator';
+export { default as FragmentationTrendChart } from './FragmentationTrendChart';
 
 export type {
   FragmentationCategory,
