@@ -18,6 +18,7 @@ Protected branch merges should be approved by repository maintainers who have th
 ## Deployment Checks
 
 - Confirm the Vercel deployment for `main` finishes successfully.
+- Confirm the Vercel project still points its **Root Directory** at `client`, with Install `npm ci --no-audit`, Build `npm run build`, and Output `dist`. See the "Vercel Deployment Settings" section in [`README.md`](../README.md) for the full table.
 - Confirm any backend deployment job or hosting platform reports a healthy release.
 - Confirm Soroban contract deployment steps, addresses, and network targets match the intended release.
 - Record any updated contract addresses or environment values in the relevant docs or deployment notes.
@@ -38,7 +39,7 @@ Protected branch merges should be approved by repository maintainers who have th
 
 ## Rollback Notes
 
-- If the frontend deployment is unhealthy, redeploy the last known good Vercel build.
+- If the frontend deployment is unhealthy, redeploy the last known good Vercel build via **Deployments → … → Promote to Production** in the Vercel dashboard.
 - If the backend release is unhealthy, roll back to the previous stable deployment in the hosting platform.
 - If a contract deployment is incorrect, stop frontend promotion of the new addresses and follow the contract-specific remediation plan before resuming traffic.
 

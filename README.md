@@ -116,6 +116,30 @@ node scripts/verify-readme-commands.js
 
 When the pull request workflow fails, GitHub Actions uploads frontend failure artifacts and contract test logs for a short retention window. Open the failed workflow run in the GitHub Actions tab and look for the **Artifacts** section near the bottom of the run summary.
 
+## Vercel Deployment Settings
+
+The frontend is deployed via Vercel. To avoid the recurring `client/client/...` path failures that have appeared in past preview deployments, the Vercel project must be configured against the `client/` directory and not the repository root. The committed `vercel.json` already encodes the install, build, and output paths *relative to that root*, so misconfiguring the Vercel root re-introduces the doubled path.
+
+Use these values when creating or auditing the Vercel project:
+
+| Setting              | Value                                             |
+| -------------------- | ------------------------------------------------- |
+| Framework Preset     | Vite                                              |
+| Root Directory       | `client`                                          |
+| Install Command      | `npm ci --no-audit`                               |
+| Build Command        | `npm run build`                                   |
+| Output Directory     | `dist`                                            |
+| Node.js Version      | 20.x                                              |
+
+These match the committed [`vercel.json`](./vercel.json) at the repository root. Vercel resolves the install/build/output paths *inside* the configured Root Directory, so leaving the root unset (or pointing it at the repo root) makes Vercel run `npm run build` from a folder that has no `build` script.
+
+### Troubleshooting
+
+- **Build fails with `client/client/...` paths.** The Vercel Root Directory is set to the repo root instead of `client`. Update the project settings, redeploy, and confirm the build logs now start with `Running install command: npm ci --no-audit` inside `client/`.
+- **Preview deployment fails while production succeeds (or vice versa).** Compare the **Environment Variables** scoped to Production vs Preview in the Vercel dashboard. Frontend builds only see variables prefixed `VITE_`; anything else is invisible to the client bundle. Re-promote a known-good build from the **Deployments** tab while you investigate.
+- **Custom domain stuck on a stale deployment.** Re-promote the desired deployment from the Vercel dashboard or roll back via the **Deployments → … → Promote to Production** menu. See [`docs/release-checklist.md`](./docs/release-checklist.md) for the documented rollback path.
+- **Missing assets in production.** Confirm the asset lives under `client/public/` (served at the site root) or is imported from `client/src/` so Vite bundles it. Assets placed at the repo root are not picked up by the build.
+
 ## Contributor and Release Docs
 
    The mock API will be available at http://localhost:3001
