@@ -81,3 +81,33 @@ curl -X POST http://localhost:3001/api/zap/quote \
     "protocol": "Blend"
   }' | jq
 ```
+
+## Rate-limited endpoints
+
+Several backend endpoints use `express-rate-limit` to protect expensive or sensitive operations. Clients should treat HTTP `429` responses as retryable only after waiting for the limiter window to reset.
+
+| Endpoint | Limit | Source |
+| --- | --- | --- |
+| `POST /api/relayer/fee-bump` | 3 requests per 15 minutes per IP | `server/src/app.ts` |
+| `GET /api/users/:address/export` | 5 requests per 15 minutes per IP | `server/src/routes/export.ts` |
+| `GET /api/openapi` | 60 requests per 15 minutes per IP | `server/src/routes/openapi.ts` |
+| `GET /api/openapi/docs` | 60 requests per 15 minutes per IP | `server/src/routes/openapi.ts` |
+| `GET /metrics` | 10 requests per minute per IP | `server/src/routes/prometheusMetrics.ts` |
+
+### Expected 429 behavior
+
+When a limiter is exceeded, the API returns HTTP `429` with a short plain-text message such as:
+
+```text
+Too many requests, please try again later.
+```
+
+The `/metrics` endpoint enables standard rate-limit headers and disables legacy headers, so Prometheus or other scrape clients can distinguish rate limiting from missing authorization. Other limited endpoints rely on the default `express-rate-limit` response behavior.
+
+### Frontend retry guidance
+
+- Do not retry immediately after a `429`.
+- Show a user-facing message that the operation is temporarily rate limited.
+- Use exponential backoff for background retries, and stop retrying once the user cancels or navigates away.
+- For export downloads, keep the existing request available to the user instead of starting repeated export attempts.
+- For relayer fee-bump requests, ask the user to wait before submitting another transaction request.
