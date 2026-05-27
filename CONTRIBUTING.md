@@ -11,22 +11,33 @@ Thanks for contributing to StellarYield, a Stellar-native DeFi yield aggregator 
 ### 💻 Local Setup
 Since StellarYield is a full-stack monorepo, ensure you have the correct environments set up for the stack you are touching:
 * **Smart Contracts:** Install the stable Rust toolchain and the `soroban-cli`. Make sure `rustfmt` and `clippy` are available.
-* **Frontend/Backend:** Ensure Node.js (v18+) is installed.
+* **Frontend/Backend:** Ensure Node.js 20+ is installed (matches CI).
 
 ### ✅ Verification Commands
-Before submitting a Pull Request, your code must pass the following local checks. PRs with failing checks will not be reviewed.
+Before submitting a Pull Request, run the checks that match what you changed. **GitHub Actions treats some steps as advisory** (they can report warnings while the job stays green); you should still fix lint and build issues before review. For a full matrix of **blocking vs advisory** checks, copy-paste commands that mirror CI (including Postgres for the backend), and how to read failure logs, see **[docs/contributor-guide.md](./docs/contributor-guide.md)**.
 
-**For Smart Contracts (`/contracts`):**
+**For Soroban contracts (`contracts/`):**
 ```bash
+cd contracts
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 ```
 
-**For Frontend & Backend (`/client` and `/server`):**
+**For the frontend (`client/`):**
 ```bash
+cd client
 npm run lint
 npm run test
+npm run build
+```
+
+**For the backend (`server/`)** you need PostgreSQL and `DATABASE_URL` (see the contributor guide for a `docker run` one-liner matching CI):
+```bash
+cd server
+npm run lint
+npm run build
+npm test
 ```
 
 ### 🖼️ UI Snapshot Checklist for Visual Reviews
@@ -49,6 +60,16 @@ If you are adding a "Good First Issue" to the backlog, it should:
 * Have a narrow scope (e.g., a single UI component or a read-only view function).
 * Include explicit acceptance criteria.
 * Be easily testable in isolation.
+
+### ❓ Questions & Scope
+If a change requires touching the client UX, the backend API, *and* the smart contracts, please split that work into separate, sequential Pull Requests to make reviewing easier and safer.
+
+### 🆘 CI or Vercel failures — what to send maintainers
+Include a link to the failed workflow run or Vercel deployment log, your branch name, whether the PR is from a fork, the **first** concrete error from the logs (not only “tests failed”), what you already ran locally, and (for UI) screenshots or the preview URL. See **“What to include when asking maintainers for help”** in [docs/contributor-guide.md](./docs/contributor-guide.md).
+
+### 🖥️ Running workflows locally
+Use the command blocks in [docs/contributor-guide.md](./docs/contributor-guide.md) for parity with `.github/workflows/ci.yml` and related workflows. Optional: [nektos/act](https://github.com/nektos/act) with Docker. You can also trigger a run on GitHub with `gh workflow run CI --ref "$(git branch --show-current)"` (run `gh workflow list` if the workflow name differs).
+
 ## Contract Security
 
 Pull requests that touch `contracts/` must pass the checklist in
@@ -56,7 +77,9 @@ Pull requests that touch `contracts/` must pass the checklist in
 before review. The checklist covers storage schema changes, authorization checks,
 arithmetic safety, test coverage, and admin permission review.
 
-## CI Failure Artifacts
+## CI failure artifacts, logs, and fuzzing
+
+Failed workflow runs may publish downloadable **Artifacts** (for example frontend test/build logs or contract test output). Open the run in the **Actions** tab and scroll to **Artifacts**, or follow [How to interpret failed logs](./docs/contributor-guide.md#how-to-interpret-failed-logs) in the contributor guide.
 
 ### 🧪 Running the Fuzzing Suite
 The vault includes a property-based testing suite built with `proptest`. To run the fuzz tests:
@@ -79,6 +102,3 @@ The fuzzing suite validates the following invariants:
 * Multi-user deposits produce proportional shares
 * Share price never decreases from deposit/withdraw operations
 * Rebalance correctly updates tracked assets
-
-### ❓ Questions & Scope
-If a change requires touching the client UX, the backend API, *and* the smart contracts, please split that work into separate, sequential Pull Requests to make reviewing easier and safer.
