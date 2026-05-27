@@ -11,6 +11,7 @@
  * on every page load.
  */
 import { Router, Request, Response } from "express";
+import { failoverIncidentHistoryService } from "../services/failoverIncidentHistoryService";
 
 const transparencyRouter = Router();
 
@@ -102,6 +103,70 @@ transparencyRouter.get(
             res.status(500).json({ error: "Unable to fetch transparency data." });
         }
     },
+);
+
+/**
+ * GET /api/transparency/failover-history
+ *
+ * Returns the in-memory failover incident history, newest first.
+ * Optional query param: ?protocolId=<id>
+ */
+transparencyRouter.get(
+  "/failover-history",
+  (req: Request, res: Response): void => {
+    const protocolId = req.query.protocolId as string | undefined;
+    res.json({ incidents: failoverIncidentHistoryService.getHistory(protocolId) });
+  },
+);
+
+/**
+ * POST /api/transparency/failover-history
+ *
+ * Record a new failover incident.
+ * Body: { protocolId, protocolName, reasons, startedAt? }
+ */
+transparencyRouter.post(
+  "/failover-history",
+  (req: Request, res: Response): void => {
+    const { protocolId, protocolName, reasons, startedAt } = req.body as {
+      protocolId?: string;
+      protocolName?: string;
+      reasons?: string[];
+      startedAt?: string;
+    };
+    if (!protocolId || !protocolName || !Array.isArray(reasons)) {
+      res.status(400).json({ error: "protocolId, protocolName, and reasons are required." });
+      return;
+    }
+    const incident = failoverIncidentHistoryService.recordIncident({
+      protocolId,
+      protocolName,
+      reasons,
+      startedAt,
+    });
+    res.status(201).json(incident);
+  },
+);
+
+/**
+ * POST /api/transparency/failover-history/:protocolId/resolve
+ *
+ * Mark the most recent open incident for a protocol as resolved.
+ */
+transparencyRouter.post(
+  "/failover-history/:protocolId/resolve",
+  (req: Request, res: Response): void => {
+    const { recoveredAt } = req.body as { recoveredAt?: string };
+    const incident = failoverIncidentHistoryService.resolveIncident(
+      req.params.protocolId,
+      recoveredAt,
+    );
+    if (!incident) {
+      res.status(404).json({ error: "No open incident found for this protocol." });
+      return;
+    }
+    res.json(incident);
+  },
 );
 
 export { aggregateTransparencyData };

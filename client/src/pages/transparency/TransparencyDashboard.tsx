@@ -13,7 +13,7 @@
  * the first fetch is in flight.
  */
 import { useState, useEffect } from "react";
-import { Loader2, TrendingUp, Flame, BarChart2 } from "lucide-react";
+import { Loader2, TrendingUp, Flame, BarChart2, AlertTriangle, CheckCircle, Clock } from "lucide-react";
 import {
     LineChart,
     Line,
@@ -42,6 +42,18 @@ interface TransparencyData {
     totalBurnedTokens: number;
     deflationaryRatio: number;
     history: HistoryPoint[];
+}
+
+interface FailoverIncident {
+    id: string;
+    protocolId: string;
+    protocolName: string;
+    trigger: string;
+    reasons: string[];
+    startedAt: string;
+    recoveredAt?: string;
+    durationMs?: number;
+    resolved: boolean;
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────
@@ -99,6 +111,7 @@ export default function TransparencyDashboard() {
     const [error, setError] = useState<string | null>(null);
     const [smokeStatus, setSmokeStatus] = useState<ReturnType<typeof parseSmokeRunResult>>(null);
     const [smokeHistory, setSmokeHistory] = useState<Array<ReturnType<typeof parseSmokeRunResult>>>([]);
+    const [failoverIncidents, setFailoverIncidents] = useState<FailoverIncident[]>([]);
 
     useEffect(() => {
         async function fetchData() {
@@ -139,6 +152,13 @@ export default function TransparencyDashboard() {
                 setSmokeHistory([]);
             }
         }
+    }, []);
+
+    useEffect(() => {
+        fetch(`${API_BASE}/api/transparency/failover-history`)
+            .then((res) => (res.ok ? res.json() : Promise.resolve({ incidents: [] })))
+            .then((data: { incidents: FailoverIncident[] }) => setFailoverIncidents(data.incidents))
+            .catch(() => setFailoverIncidents([]));
     }, []);
 
     // ── Truncate X-axis labels to MM/DD ───────────────────────────────────
@@ -266,6 +286,65 @@ export default function TransparencyDashboard() {
                         />
                     </LineChart>
                 </ResponsiveContainer>
+            </div>
+
+            <div className="glass-panel rounded-2xl p-6">
+                <div className="flex items-center gap-2 mb-4">
+                    <AlertTriangle size={18} className="text-amber-400" />
+                    <h3 className="font-semibold text-white">Provider Failover Incident History</h3>
+                </div>
+                {failoverIncidents.length === 0 ? (
+                    <p className="text-sm text-gray-400">No failover incidents recorded.</p>
+                ) : (
+                    <ul className="space-y-3">
+                        {failoverIncidents.slice(0, 10).map((inc) => (
+                            <li
+                                key={inc.id}
+                                className={`rounded-xl border p-3 ${
+                                    inc.resolved
+                                        ? "border-green-500/20 bg-green-500/5"
+                                        : "border-amber-500/20 bg-amber-500/5"
+                                }`}
+                            >
+                                <div className="flex items-center justify-between mb-1">
+                                    <span className="text-sm font-semibold text-white">
+                                        {inc.protocolName}
+                                    </span>
+                                    <span
+                                        className={`flex items-center gap-1 text-xs font-medium ${
+                                            inc.resolved ? "text-green-400" : "text-amber-400"
+                                        }`}
+                                    >
+                                        {inc.resolved ? (
+                                            <><CheckCircle size={12} /> Recovered</>
+                                        ) : (
+                                            <><Clock size={12} /> Active</>
+                                        )}
+                                    </span>
+                                </div>
+                                <p className="text-xs text-gray-400 capitalize">
+                                    Trigger: {inc.trigger.replace("_", " ")}
+                                </p>
+                                <p className="text-xs text-gray-500 mt-0.5">
+                                    Started: {new Date(inc.startedAt).toLocaleString()}
+                                </p>
+                                {inc.recoveredAt && (
+                                    <p className="text-xs text-green-400 mt-0.5">
+                                        Recovered: {new Date(inc.recoveredAt).toLocaleString()}
+                                        {inc.durationMs !== undefined && (
+                                            <> ({Math.round(inc.durationMs / 1000)}s outage)</>
+                                        )}
+                                    </p>
+                                )}
+                                {inc.reasons.length > 0 && (
+                                    <p className="text-xs text-gray-500 mt-1 truncate">
+                                        {inc.reasons[0]}
+                                    </p>
+                                )}
+                            </li>
+                        ))}
+                    </ul>
+                )}
             </div>
 
             <div className="glass-panel rounded-2xl p-6">
