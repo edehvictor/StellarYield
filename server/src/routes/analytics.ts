@@ -6,6 +6,7 @@ import {
   yieldReliabilityEngine,
 } from '../services';
 import { strategyStateTransitionAuditService } from '../services/strategyStateTransitionAuditService';
+import { getSourceHealthRegistry } from '../services/yieldSourceRegistryService';
 import {
   generateRecommendationStabilityReport,
   type RecommendationOutput,
@@ -299,6 +300,34 @@ router.get('/health/:strategyId', async (req, res) => {
   } catch (error) {
     console.error(`Health score calculation failed for ${req.params.strategyId}:`, error);
     res.status(500).json({ error: 'Failed to calculate health score', message: error instanceof Error ? error.message : 'Unknown error' });
+  }
+});
+
+// ── Yield Data Source Registry ──────────────────────────────────────────
+
+/**
+ * GET /api/analytics/sources/health
+ * Read-only health registry for every registered yield data source.
+ * Returns each source's status (healthy/degraded/stale/unavailable), latest
+ * fetch time, uptime, latency, and failure reason.
+ */
+router.get('/sources/health', async (_req, res) => {
+  try {
+    const registry = await getSourceHealthRegistry();
+    res.setHeader(
+      'Cache-Control',
+      'public, max-age=30, stale-while-revalidate=15',
+    );
+    res.json({
+      success: true,
+      data: registry,
+    });
+  } catch (error) {
+    console.error('Source health registry generation failed:', error);
+    res.status(500).json({
+      error: 'Failed to build source health registry',
+      message: error instanceof Error ? error.message : 'Unknown error',
+    });
   }
 });
 
