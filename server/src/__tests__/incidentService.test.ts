@@ -70,4 +70,25 @@ describe("IncidentService", () => {
     expect(incident).not.toBeNull();
     expect(incident?.id).toBe("mock-id-123");
   });
+
+  it("should build postmortem linking guidance for transparency views", () => {
+    const guidance = service.getPostmortemLinkingGuidance({
+      id: "incident-42",
+      title: "Provider RPC outage: Blend USDC vault",
+      startedAt: new Date("2026-05-27T08:15:00.000Z"),
+      resolved: true,
+    });
+
+    expect(guidance).toEqual({
+      incidentId: "incident-42",
+      title: "Provider RPC outage: Blend USDC vault",
+      status: "resolved",
+      templatePath: "docs/postmortems/TEMPLATE.md",
+      expectedPostmortemPath: "docs/postmortems/2026-05-27-provider-rpc-outage-blend-usdc-vault.md",
+      linkField: "postmortemUrl",
+      displayLabel: "Postmortem: Provider RPC outage: Blend USDC vault",
+      transparencyHint:
+        "Render postmortemUrl in incident records and transparency views after mitigation or resolution.",
+    });
+  });
 });

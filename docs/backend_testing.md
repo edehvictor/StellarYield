@@ -42,6 +42,15 @@ Replace `ID` with the actual incident ID from the previous command.
 curl -X PATCH http://localhost:3001/api/incidents/ID/resolve | jq
 ```
 
+### Link a postmortem
+
+After mitigation or resolution, create a public postmortem from
+[`docs/postmortems/TEMPLATE.md`](./postmortems/TEMPLATE.md) and link the
+incident record to that document from transparency views. The expected metadata
+field is `postmortemUrl`; see
+[`docs/incident-postmortems.md`](./incident-postmortems.md) for the full
+linking flow and safety rules.
+
 ## 3. Emergency Freeze Control (#288)
 
 _Note: These commands require the admin role. If the `requireAdmin` middleware is active, you may need an auth token._

@@ -14,6 +14,30 @@ export interface IncidentWithRecommendations extends Incident {
     recommendations: RecoveryRecommendation[];
 }
 
+export const INCIDENT_POSTMORTEM_TEMPLATE_PATH = "docs/postmortems/TEMPLATE.md";
+export const INCIDENT_POSTMORTEM_LINK_FIELD = "postmortemUrl";
+
+export interface IncidentPostmortemGuidance {
+    incidentId: string;
+    title: string;
+    status: "open" | "resolved";
+    templatePath: string;
+    expectedPostmortemPath: string;
+    linkField: string;
+    displayLabel: string;
+    transparencyHint: string;
+}
+
+function slugifyIncidentTitle(title: string): string {
+    const slug = title
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, "-")
+        .replace(/^-+|-+$/g, "")
+        .slice(0, 72);
+
+    return slug || "incident";
+}
+
 export class IncidentService {
     async createIncident(data: {
         protocol: string;
@@ -57,6 +81,25 @@ export class IncidentService {
         return prisma.incident.findUnique({
             where: { id },
         });
+    }
+
+    getPostmortemLinkingGuidance(
+        incident: Pick<Incident, "id" | "title" | "startedAt" | "resolved">
+    ): IncidentPostmortemGuidance {
+        const date = incident.startedAt.toISOString().slice(0, 10);
+        const slug = slugifyIncidentTitle(incident.title);
+
+        return {
+            incidentId: incident.id,
+            title: incident.title,
+            status: incident.resolved ? "resolved" : "open",
+            templatePath: INCIDENT_POSTMORTEM_TEMPLATE_PATH,
+            expectedPostmortemPath: `docs/postmortems/${date}-${slug}.md`,
+            linkField: INCIDENT_POSTMORTEM_LINK_FIELD,
+            displayLabel: `Postmortem: ${incident.title}`,
+            transparencyHint:
+                "Render postmortemUrl in incident records and transparency views after mitigation or resolution.",
+        };
     }
 
     async getRecommendationsForIncident(id: string): Promise<RecoveryRecommendation[]> {
