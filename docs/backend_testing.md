@@ -222,3 +222,44 @@ DISABLE_RATE_LIMITS=true npm run dev
 ```
 
 Note: This should never be used in production.
+
+## 6. Server Route Ownership Map
+
+The following table maps each route file in `server/src/routes/` to its primary endpoints, active responsibilities, related service layers, and test suites:
+
+| Route File (in `server/src/routes/`) | Primary Responsibilities / Endpoints | Related Service Files (in `server/src/services/`) | Related Test Files (in `server/src/__tests__/`) |
+| :--- | :--- | :--- | :--- |
+| `activityTimeline.ts` | `GET /:walletAddress` - Build unified chronological timeline of user events (deposits, rebalances, rewards, etc.) | `accountActivityTimelineService.ts` | N/A |
+| `admin.ts` | `/vaults/*` (update params/metadata, pause/resume), `/fees/config`, `/risk/parameters`, `/audit-*` (logs, stats, export, verify), `/users/*`, `/recommendations/*` (freeze, resume) - Operator commands & admin actions | `freezeService.ts`, `ipfs/vaultMetadataService`, `strategyStateTransitionAuditService.ts` | `stellarAuth.test.ts`, `vaultMetadataService.test.ts`, `vaultMetadataValidation.test.ts` |
+| `alerts.ts` | `POST /`, `GET /:wallet`, `DELETE /:id` - Create, view, and delete automated user APY alert thresholds | `alertsService.ts`, `alertsPreferenceRules.ts` | `alerts.test.ts` |
+| `analytics.ts` | `/attribution/*`, `/compatibility/*`, `/health/*`, `/sources/health`, `/reliability/*`, `/dashboard`, `/strategy-state-transitions/*`, `/recommendation-stability/*`, `/providers/uptime` - Yield analytics dashboard data | `portfolioAttributionService.ts`, `protocolCompatibilityService.ts`, `strategyHealthService.ts`, `yieldReliabilityService.ts`, `strategyStateTransitionAuditService.ts`, `yieldSourceRegistryService.ts`, `recommendationStabilityService.ts` | `analyticsRoutes.contract.test.ts`, `analyticsRoutes.simple.test.ts` |
+| `analyticsUtils.ts` | Helper utilities (request validation, report formatting, reliability scoring) for the analytics router | `portfolioAttributionService.ts`, `yieldReliabilityService.ts` | `analyticsRoutes.simple.test.ts` |
+| `auditMonitoring.ts` | `/alerts`, `/status`, `/report`, `/export`, `POST /start`, `/stop` - System-wide audit security log monitoring & integrity replays | `auditReplayService.ts` (monitored by `utils/auditMonitoring`) | `auditReplay.test.ts` |
+| `contacts.ts` | `GET /`, `GET /:id`, `POST /`, `PUT /:id`, `DELETE /:id`, `/search`, `/export`, `/import` - CRUD for client-side encrypted contacts | `PrismaClient` (direct database access) | N/A |
+| `correlation.ts` | `GET /:protocolA/:protocolB` - Retrieve historical correlation coefficients between two yield protocols | `correlationService.ts` | `correlationService.test.ts` |
+| `deposits.ts` | `POST /route` - Multi-protocol deposit allocation routing optimizer | `depositRoutingService.ts` | `portfolio.test.ts` |
+| `donations.ts` | `/` - Handles user charity protocol donation logs | `PrismaClient` (direct database access) | `donations.test.ts` |
+| `export.ts` | `POST /export/preview`, `/export/download` - Tax lot data previews and CSV export file downloads | `exportService.ts` | `exportService.test.ts`, `csvExport.test.ts`, `taxLotPreview.test.ts` |
+| `fees.ts` | `/` - Fetches current transactional network gas and protocol fee details | `feeOracleService.ts` | N/A |
+| `fragmentation.ts` | `GET /fragmentation`, `/fragmentation/history` - Retrieve liquidity fragmentation metrics & historical TVL splits | `MockFragmentationService`, `MockHistoricalService` | `fragmentation.test.ts`, `fragmentationHistory.test.ts` |
+| `governance.ts` | `/` - Governance voting shifts APY impact forecasting | `governanceForecastService.ts` | `governanceForecast.test.ts` |
+| `health.ts` | `GET /` - Basic service status health and indexer synchronization check | `PrismaClient` (direct database access) | `health.test.ts` |
+| `incidents.ts` | `GET /`, `GET /:id`, `POST /`, `PATCH /:id/resolve`, `GET /:id/recommendations` - Track protocol risk incidents (hack/pause) | `incidentService.ts` | `incidentService.test.ts` |
+| `indexer.ts` | `/` - Block indexer sync delay monitoring | `stellarNetworkService.ts` | `indexerStatus.test.ts` |
+| `leaderboard.ts` | `GET /` - Fetches top depositors by TVL with cached rankings | `PrismaClient` (direct database access) | N/A |
+| `momentum.ts` | `/` - Detects yield growth velocity and asset rotational triggers | `opportunityMomentumEngine.ts` | `momentumRoutes.test.ts`, `opportunityMomentumEngine.test.ts` |
+| `notifications.ts` | `/` - Fetches list of in-app/email alerts | `emailService.ts` | N/A |
+| `onramp.ts` | `/` - Aggregates third-party fiat-to-crypto on-ramp quotes | `PrismaClient` (direct database access) | N/A |
+| `openapi.ts` | `/` - Serves standard Swagger OpenAPI spec files | Direct spec schema config | N/A |
+| `pnl.ts` | `GET /pnl` - realized and unrealized yield PnL metric calculator | `pnl_engine` | `pnlCalculator.test.ts` |
+| `presets.ts` | `/` - strategy allocation template presets | `allocationPresetsService.ts` | `allocationPresets.test.ts`, `treasuryPresets.test.ts` |
+| `prometheusMetrics.ts` | `/metrics` - Serves live telemetry performance indicators to Prometheus scraping agent | `monitoring` telemetry utils | `prometheus.test.ts`, `metrics.test.ts` |
+| `referrals.ts` | `/` - Handles user referral signup and dynamic payout distributions | `PrismaClient` (direct database access) | `server/src/routes/referrals.test.ts` (inline route test) |
+| `rewards.ts` | `/` - Accumulated token rewards tracking and normalization | `rewardScheduleRegistry.ts`, `rewardScheduleHealth.ts` | `rewardNormalization.test.ts` |
+| `simulator.ts` | `/` - Simulates strategy rotations or re-allocation dry runs | `simulationService.ts` | `simulationService.test.ts` |
+| `strategies.ts` | `/` - Manage multi-protocol strategies, regime shifts, and manual/auto rebalancing | `strategyRotationService.ts`, `strategyRotationDryRun.ts`, `strategySnapshotVersioningService.ts` | `strategyRotationService.test.ts`, `strategyRotationDryRun.test.ts`, `strategySnapshotVersioning.test.ts` |
+| `transparency.ts` | `/` - cryptographic yield attribution verification | `provenance.service.ts` | `transparency.test.ts`, `services/provenance.test.ts` |
+| `treasury.ts` | `/` - DAO Treasury allocation backtesting and simulation | `treasurySimulationService.ts` | `treasurySimulation.test.ts` |
+| `weeklyReports.ts` | `/` - Consolidates weekly yields reports | `weeklyYieldReportService.ts` | `weeklyYieldReport.test.ts` |
+| `yields.ts` | `GET /` - Fetches baseline protocol APYs with custom fee drag calculators | `yieldService.ts`, `netYieldEngine.ts` | `netYieldEngine.test.ts`, `yieldNormalization.test.ts`, `yieldRegime.test.ts` |
+| `zap.ts` | `GET /supported-assets`, `POST /quote` - Generates single-transaction multi-asset swap & vault entry routes | `zapQuote.ts`, `slippageRegistry.ts` | `zapQuote.test.ts`, `zapRoute.test.ts`, `zapSupportedAssetsRoute.test.ts`, `slippageRegistry.test.ts` |
