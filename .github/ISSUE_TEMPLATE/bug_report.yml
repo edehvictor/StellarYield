@@ -1,0 +1,74 @@
+name: Bug Report
+description: Report a bug or unexpected behaviour in StellarYield
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report a bug. Please fill in as much detail as you can.
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Describe the bug
+      description: A clear and concise description of what the bug is.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to reproduce
+      description: Steps to reproduce the behaviour.
+      placeholder: |
+        1. Go to '...'
+        2. Click on '...'
+        3. See error
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behaviour
+      description: What did you expect to happen?
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behaviour
+      description: What actually happened?
+    validations:
+      required: true
+
+  - type: dropdown
+    id: package
+    attributes:
+      label: Affected package
+      options:
+        - Frontend (client/)
+        - Backend (server/)
+        - Contracts (contracts/)
+        - CI / GitHub Actions
+        - Other / Unknown
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Browser, OS, Node version, wallet, network (testnet/mainnet), etc.
+      placeholder: |
+        - OS: macOS 14
+        - Node: 20.x
+        - Browser: Chrome 124
+        - Network: testnet
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Screenshots / logs
+      description: Paste any relevant console output, error messages, or screenshots.

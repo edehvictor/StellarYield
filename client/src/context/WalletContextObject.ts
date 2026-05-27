@@ -1,12 +1,16 @@
 import { createContext } from "react";
-import type { ConnectWalletOptions, WalletAddressType } from "../auth/types";
+import type { ConnectWalletOptions, WalletAddressType, WalletProviderId } from "../auth/types";
 
 export interface WalletContextValue {
   walletAddress: string | null;
   walletAddressType: WalletAddressType | null;
   providerLabel: string | null;
+  providerId: WalletProviderId | null;
+  network: string | null;
   sessionKeyAddress: string | null;
   verificationStatus: "verified" | "degraded" | null;
+  connectedAt: string | null;
+  lastActivityAt: string | null;
   isConnected: boolean;
   isConnecting: boolean;
   isFreighterInstalled: boolean | null;

@@ -1,0 +1,44 @@
+name: Documentation
+description: Report missing, incorrect, or unclear documentation
+labels: ["documentation"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this template for documentation improvements — missing guides, incorrect content, or clarity issues.
+
+  - type: textarea
+    id: description
+    attributes:
+      label: What documentation needs updating?
+      description: Link to the file or section, or describe what is missing.
+    validations:
+      required: true
+
+  - type: textarea
+    id: current
+    attributes:
+      label: Current state
+      description: What does the documentation currently say (or fail to say)?
+
+  - type: textarea
+    id: desired
+    attributes:
+      label: Desired state
+      description: What should the documentation say?
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Documentation area
+      options:
+        - README
+        - API / backend docs
+        - Contract docs
+        - Deployment guide
+        - Contributing guide
+        - Other
+    validations:
+      required: true

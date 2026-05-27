@@ -16,6 +16,8 @@ export interface WalletSession {
   sessionSecret?: string;
   loginHint?: string;
   verificationStatus: VerificationStatus;
+  connectedAt?: string;
+  lastActivityAt?: string;
 }
 
 export interface ConnectWalletOptions {

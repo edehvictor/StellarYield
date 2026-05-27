@@ -13,6 +13,7 @@ import {
 } from "lucide-react";
 import TxStatusTimeline from "../../components/transaction/TxStatusTimeline";
 import type { TxPhase } from "../../services/transactionPhase";
+import { ExitImpactEstimator } from "../ExitImpactEstimator";
 import { OffRampService } from "./offRampService";
 import type { OffRampTransaction, WithdrawalRequest } from "./types";
 
@@ -196,6 +197,14 @@ export default function OffRampPanel({
             />
           </div>
         </div>
+
+        {usdcAmount && Number(usdcAmount) > 0 && (
+          <ExitImpactEstimator 
+            amountUsd={Number(usdcAmount)} 
+            poolLiquidityUsd={1000000} // Mock liquidity depth
+            exitFeeBps={50} // 0.5% mock fee
+          />
+        )}
 
         {error && (
           <div className="flex items-center gap-2 p-3 bg-red-500/10 border border-red-500/30 rounded-lg">

@@ -1,42 +1,98 @@
-# Difficulty labels
-- name: "difficulty: easy"
-  color: "0e8a16"
-  description: "Good for first-time contributors; limited scope, clear acceptance criteria"
+# GitHub Labels Configuration for StellarYield
+# Run this script with GitHub CLI to create/update labels:
+# gh label import .github/labels.yml
 
-- name: "difficulty: medium"
-  color: "e4b400"
-  description: "Requires familiarity with the codebase; moderate complexity"
+labels:
+  # Triage Labels
+  - name: needs-triage
+    color: "fbca04"
+    description: "Issue needs maintainer review and classification"
 
-- name: "difficulty: hard"
-  color: "b60205"
-  description: "Complex change; significant design or implementation effort required"
+  - name: blocked
+    color: "e11d21"
+    description: "Issue is blocked by dependencies or external factors"
 
-# Area labels
-- name: "area: frontend"
-  color: "1d76db"
-  description: "Affects the React/Vite client (client/)"
+  - name: keep-active
+    color: "1d76db"
+    description: "Issue should remain active and not be marked as stale"
 
-- name: "area: backend"
-  color: "0075ca"
-  description: "Affects the Node.js server (server/)"
+  # Stellar Wave Specific
+  - name: stellar-wave
+    color: "795548"
+    description: "Stellar Wave program issue - exempt from stale triage"
 
-- name: "area: contracts"
-  color: "5319e7"
-  description: "Affects Soroban smart contracts (contracts/)"
+  # Status Labels
+  - name: stale
+    color: "eeeeee"
+    description: "Issue has been inactive for an extended period"
 
-- name: "area: docs"
-  color: "d4c5f9"
-  description: "Documentation only"
+  - name: work-in-progress
+    color: "ededed"
+    description: "Pull request is still being developed"
 
-- name: "area: ci"
-  color: "f9d0c4"
-  description: "GitHub Actions workflows and CI configuration"
+  - name: needs-review
+    color: "fbca04"
+    description: "Pull request needs maintainer review"
 
-# Type labels (keep existing ones intact — only add if not already present)
-- name: "good first issue"
-  color: "7057ff"
-  description: "Good for newcomers"
+  # Priority / Type Labels
+  - name: good-first-issue
+    color: "7057ff"
+    description: "Good for newcomers to the project"
 
-- name: "help wanted"
-  color: "008672"
-  description: "Extra attention is needed"
+  - name: help-wanted
+    color: "008672"
+    description: "Community help is needed"
+
+  - name: enhancement
+    color: "a2eeef"
+    description: "New feature or improvement"
+
+  - name: bug
+    color: "d73a4a"
+    description: "Something isn't working correctly"
+
+  - name: documentation
+    color: "0075ca"
+    description: "Improvements or additions to documentation"
+
+  - name: security
+    color: "ee0701"
+    description: "Security-related issue or vulnerability"
+
+  - name: pinned
+    color: "ffffff"
+    description: "Important issue pinned to the top"
+
+  # Difficulty Labels (for contributor onboarding)
+  - name: "difficulty: easy"
+    color: "0e8a16"
+    description: "Good for first-time contributors; limited scope, clear acceptance criteria"
+
+  - name: "difficulty: medium"
+    color: "e4b400"
+    description: "Requires familiarity with the codebase; moderate complexity"
+
+  - name: "difficulty: hard"
+    color: "b60205"
+    description: "Complex change; significant design or implementation effort required"
+
+  # Area Labels
+  - name: "area: frontend"
+    color: "1d76db"
+    description: "Affects the React/Vite client (client/)"
+
+  - name: "area: backend"
+    color: "0075ca"
+    description: "Affects the Node.js server (server/)"
+
+  - name: "area: contracts"
+    color: "5319e7"
+    description: "Affects Soroban smart contracts (contracts/)"
+
+  - name: "area: docs"
+    color: "d4c5f9"
+    description: "Documentation only"
+
+  - name: "area: ci"
+    color: "f9d0c4"
+    description: "GitHub Actions workflows and CI configuration"

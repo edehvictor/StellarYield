@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { AlertTriangle, RefreshCw } from "lucide-react";
 import {
   CartesianGrid,
   Line,
@@ -8,6 +9,7 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
+import { apiUrl } from "../../lib/api";
 
 type TimeRange = "1W" | "1M" | "All";
 
@@ -16,20 +18,10 @@ interface HistoricalApyPoint {
   apy: number;
 }
 
-const mockHistory: HistoricalApyPoint[] = [
-  { date: "2026-02-20", apy: 8.12 },
-  { date: "2026-02-24", apy: 8.34 },
-  { date: "2026-02-28", apy: 8.2 },
-  { date: "2026-03-03", apy: 8.56 },
-  { date: "2026-03-06", apy: 8.75 },
-  { date: "2026-03-09", apy: 8.63 },
-  { date: "2026-03-12", apy: 8.91 },
-  { date: "2026-03-15", apy: 9.08 },
-  { date: "2026-03-18", apy: 8.84 },
-  { date: "2026-03-20", apy: 9.16 },
-  { date: "2026-03-22", apy: 9.28 },
-  { date: "2026-03-25", apy: 9.41 },
-];
+interface ApiHistoryPoint {
+  date?: unknown;
+  apy?: unknown;
+}
 
 function formatAxisDate(date: string) {
   return new Date(date).toLocaleDateString("en-US", {
@@ -53,32 +45,63 @@ function filterHistory(history: HistoricalApyPoint[], range: TimeRange) {
 
 const rangeOptions: TimeRange[] = ["1W", "1M", "All"];
 
+function normalizeHistoryPoint(point: ApiHistoryPoint): HistoricalApyPoint | null {
+  if (typeof point.date !== "string") {
+    return null;
+  }
+
+  const parsedDate = new Date(point.date);
+  if (Number.isNaN(parsedDate.getTime())) {
+    return null;
+  }
+
+  const apy = typeof point.apy === "number" ? point.apy : Number(point.apy);
+  if (!Number.isFinite(apy)) {
+    return null;
+  }
+
+  return { date: point.date, apy };
+}
+
 export default function ApyHistoryChart() {
   const [range, setRange] = useState<TimeRange>("1M");
   const [history, setHistory] = useState<HistoricalApyPoint[]>([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [retrying, setRetrying] = useState(false);
 
-  useEffect(() => {
-    async function loadHistory() {
-      try {
-        const response = await fetch(
-          "http://localhost:3001/api/yields/history",
-        );
-
-        if (!response.ok) {
-          throw new Error("History endpoint unavailable");
-        }
-
-        const data = (await response.json()) as HistoricalApyPoint[];
-        setHistory(data.length > 0 ? data : mockHistory);
-      } catch (error) {
-        console.warn("Using mock APY history data", error);
-        setHistory(mockHistory);
-      } finally {
-        setLoading(false);
-      }
+  const loadHistory = async (showLoader = true) => {
+    if (showLoader) {
+      setLoading(true);
     }
 
+    try {
+      setError(null);
+      const response = await fetch(apiUrl("/api/yields/history"));
+
+      if (!response.ok) {
+        throw new Error(`History endpoint unavailable (${response.status})`);
+      }
+
+      const raw = await response.json();
+      const rows = Array.isArray(raw) ? raw : [];
+      const normalized = rows
+        .map((row) => normalizeHistoryPoint(row as ApiHistoryPoint))
+        .filter((point): point is HistoricalApyPoint => point !== null)
+        .sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+      setHistory(normalized);
+    } catch (err) {
+      const message =
+        err instanceof Error ? err.message : "Unable to load APY history";
+      setError(message);
+      setHistory((prev) => (prev.length > 0 ? prev : []));
+    } finally {
+      setLoading(false);
+      setRetrying(false);
+    }
+  };
+
+  useEffect(() => {
     void loadHistory();
   }, []);
 
@@ -117,8 +140,35 @@ export default function ApyHistoryChart() {
 
       <div className="h-[320px] w-full sm:h-[360px]">
         {loading ? (
-          <div className="flex h-full items-center justify-center text-gray-400">
-            Loading APY history...
+          <div className="h-full w-full rounded-lg border border-white/10 bg-white/[0.02] p-5">
+            <p className="text-sm text-gray-400 mb-3" role="status">
+              Loading APY history...
+            </p>
+            <div className="h-full w-full animate-pulse bg-gradient-to-r from-gray-700/30 via-gray-600/30 to-gray-700/30 rounded-lg" />
+          </div>
+        ) : error && history.length === 0 ? (
+          <div className="h-full w-full rounded-lg border border-red-500/30 bg-red-500/10 px-6 py-8 flex flex-col items-center justify-center text-center">
+            <AlertTriangle size={24} className="text-red-300 mb-3" />
+            <p className="text-red-100 font-semibold">Unable to load APY history</p>
+            <p className="text-red-200/90 text-sm mt-1 max-w-sm">{error}</p>
+            <button
+              type="button"
+              onClick={() => {
+                setRetrying(true);
+                void loadHistory(false);
+              }}
+              className="btn-secondary mt-4 inline-flex items-center gap-2"
+            >
+              <RefreshCw size={14} className={retrying ? "animate-spin" : ""} />
+              Retry
+            </button>
+          </div>
+        ) : filteredHistory.length === 0 ? (
+          <div className="h-full w-full rounded-lg border border-white/10 bg-white/[0.02] px-6 py-8 flex flex-col items-center justify-center text-center">
+            <p className="text-gray-300 font-semibold">No APY history points available</p>
+            <p className="text-gray-500 text-sm mt-1">
+              The API returned no valid entries for this range.
+            </p>
           </div>
         ) : (
           <ResponsiveContainer width="100%" height="100%">

@@ -3,9 +3,9 @@
 //! Implements an in-memory order book with price-time priority matching.
 //! Supports limit orders, market orders, and order cancellation.
 
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::time::{SystemTime, UNIX_EPOCH};
-use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 /// Order side (buy or sell)
@@ -64,6 +64,7 @@ pub struct Order {
 
 impl Order {
     /// Create a new order
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         trader: String,
         side: Side,
@@ -159,9 +160,10 @@ impl OrderBookSide {
 
     /// Add an order to the book
     pub fn add_order(&mut self, order: &Order) {
-        let level = self.levels.entry(order.price).or_insert_with(|| {
-            PriceLevel::new(order.price)
-        });
+        let level = self
+            .levels
+            .entry(order.price)
+            .or_insert_with(|| PriceLevel::new(order.price));
         level.total_amount = level.total_amount.saturating_add(order.remaining());
         level.orders.push_back(order.id.clone());
     }
@@ -171,7 +173,7 @@ impl OrderBookSide {
         if let Some(level) = self.levels.get_mut(&order.price) {
             level.total_amount = level.total_amount.saturating_sub(order.remaining());
             level.orders.retain(|id| id != &order.id);
-            
+
             if level.total_amount == 0 && level.orders.is_empty() {
                 self.levels.remove(&order.price);
             }
@@ -184,6 +186,12 @@ impl OrderBookSide {
             Side::Buy => self.levels.keys().next_back().copied(),
             Side::Sell => self.levels.keys().next().copied(),
         }
+    }
+
+    /// Get the order IDs at the best price level
+    pub fn best_orders(&self) -> Option<&VecDeque<String>> {
+        let price = self.best_price()?;
+        self.levels.get(&price).map(|l| &l.orders)
     }
 }
 
@@ -235,6 +243,10 @@ impl OrderBook {
         self.orders.get(order_id)
     }
 
+    pub fn get_order_mut(&mut self, order_id: &str) -> Option<&mut Order> {
+        self.orders.get_mut(order_id)
+    }
+
     pub fn best_bid(&self) -> Option<u128> {
         self.bids.best_price()
     }
@@ -257,8 +269,31 @@ impl OrderBook {
         }
     }
 
+    /// Return a depth snapshot with up to `levels` price levels on each side.
+    pub fn depth(&self, levels: usize) -> OrderBookDepth {
+        let bids: Vec<(u128, u128)> = self
+            .bids
+            .levels
+            .iter()
+            .rev()
+            .take(levels)
+            .map(|(price, level)| (*price, level.total_amount))
+            .collect();
+
+        let asks: Vec<(u128, u128)> = self
+            .asks
+            .levels
+            .iter()
+            .take(levels)
+            .map(|(price, level)| (*price, level.total_amount))
+            .collect();
+
+        OrderBookDepth { bids, asks }
+    }
+
     pub fn cancel_all_for_trader(&mut self, trader: &str) -> Vec<String> {
-        let order_ids: Vec<String> = self.orders
+        let order_ids: Vec<String> = self
+            .orders
             .iter()
             .filter(|(_, order)| order.trader == trader && order.is_active())
             .map(|(id, _)| id.clone())
@@ -268,6 +303,15 @@ impl OrderBook {
         }
         order_ids
     }
+}
+
+/// Depth snapshot returned by `OrderBook::depth`.
+#[derive(Debug, Clone)]
+pub struct OrderBookDepth {
+    /// (price, total_amount) pairs, best bid first
+    pub bids: Vec<(u128, u128)>,
+    /// (price, total_amount) pairs, best ask first
+    pub asks: Vec<(u128, u128)>,
 }
 
 /// Trade execution result
@@ -287,12 +331,7 @@ pub struct Trade {
 }
 
 impl Trade {
-    pub fn new(
-        maker_order: &Order,
-        taker_order: &Order,
-        amount: u128,
-        price: u128,
-    ) -> Self {
+    pub fn new(maker_order: &Order, taker_order: &Order, amount: u128, price: u128) -> Self {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()

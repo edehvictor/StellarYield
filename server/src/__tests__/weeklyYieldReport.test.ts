@@ -387,3 +387,52 @@ describe("Weekly Yield Report Service", () => {
     });
   });
 });
+
+describe("Weekly Yield Report Preview Fixture", () => {
+  it("should generate deterministic preview fixture", () => {
+    const user = generateMockUserYieldData("preview-user");
+    const vaults = generateMockVaultYieldData();
+    const startDate = new Date("2024-01-01");
+    const endDate = new Date("2024-01-08");
+
+    const report = calculateWeeklyYieldReport(user, vaults, startDate, endDate);
+
+    expect(report.userId).toBe("preview-user");
+    expect(report.weeklyYield).toBeGreaterThan(0);
+    expect(report.topVaults.length).toBeGreaterThan(0);
+  });
+
+  it("should render preview fixture as HTML", () => {
+    const user = generateMockUserYieldData("preview-user");
+    const vaults = generateMockVaultYieldData();
+    const startDate = new Date("2024-01-01");
+    const endDate = new Date("2024-01-08");
+
+    const report = calculateWeeklyYieldReport(user, vaults, startDate, endDate);
+
+    const html = renderWeeklyYieldReport({
+      userName: report.userName,
+      walletAddress: report.walletAddress,
+      weeklyYield: report.weeklyYield,
+      weeklyYieldPercentage: report.weeklyYieldPercentage,
+      totalYield: report.totalYield,
+      topVaults: report.topVaults,
+      vaultCount: report.vaultCount,
+      period: report.period,
+    });
+
+    expect(html).toContain("<!DOCTYPE html>");
+    expect(html).toContain("Weekly Yield Report");
+    expect(html).toContain("preview-user");
+  });
+
+  it("should use fixture data without real user data", () => {
+    const user = generateMockUserYieldData("preview-user");
+
+    // Verify no real user data is included
+    expect(user.email).toContain("preview-user");
+    expect(user.walletAddress).toMatch(/^G[a-zA-Z0-9]+$/);
+    expect(user.walletAddress.length).toBeGreaterThan(10);
+    expect(user.userName).toContain("preview-user");
+  });
+});

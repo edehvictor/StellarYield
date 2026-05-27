@@ -10,6 +10,8 @@ import {
   Link as LinkIcon,
   UserPlus,
 } from "lucide-react";
+import { getApiBaseUrl } from "../../lib/api";
+import { resolveAppBaseUrl, buildReferralLink } from "./referralLink";
 
 interface ReferralData {
   referredTvl: number;
@@ -18,8 +20,17 @@ interface ReferralData {
   referralLink: string;
 }
 
-const API_BASE = import.meta.env.VITE_API_URL || "http://localhost:3001";
-const APP_URL = import.meta.env.VITE_APP_URL || "https://stellaryield.vercel.app";
+const API_BASE = getApiBaseUrl();
+const { url: APP_URL, isFallback: APP_URL_IS_FALLBACK } = resolveAppBaseUrl(
+  import.meta.env.VITE_APP_URL as string | undefined,
+);
+if (APP_URL_IS_FALLBACK) {
+  // Don't crash when VITE_APP_URL is unset — fall back to the default domain
+  // and warn so misconfigured deployments are noticed.
+  console.warn(
+    "[referrals] VITE_APP_URL is not configured; referral links use the default domain.",
+  );
+}
 
 /**
  * ReferralDashboard — User dashboard for the referral & affiliate system.
@@ -33,6 +44,7 @@ export default function ReferralDashboard() {
   const [loading, setLoading] = useState(false);
   const [claiming, setClaiming] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [copyError, setCopyError] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [claimSuccess, setClaimSuccess] = useState(false);
 
@@ -41,9 +53,7 @@ export default function ReferralDashboard() {
   const [submitSuccess, setSubmitSuccess] = useState(false);
   const [referralCodeInput, setReferralCodeInput] = useState("");
 
-  const referralLink = walletAddress
-    ? `${APP_URL}/?ref=${encodeURIComponent(walletAddress)}`
-    : "";
+  const referralLink = buildReferralLink(APP_URL, walletAddress ?? "");
 
   const fetchReferralData = useCallback(async () => {
     if (!walletAddress) return;
@@ -73,20 +83,29 @@ export default function ReferralDashboard() {
   }, [isConnected, walletAddress, fetchReferralData]);
 
   const handleCopy = async () => {
+    if (!referralLink) return;
+    setCopyError(false);
     try {
       await navigator.clipboard.writeText(referralLink);
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
     } catch {
-      // Fallback for older browsers
-      const textArea = document.createElement("textarea");
-      textArea.value = referralLink;
-      document.body.appendChild(textArea);
-      textArea.select();
-      document.execCommand("copy");
-      document.body.removeChild(textArea);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
+      // Fallback for browsers without the async clipboard API.
+      try {
+        const textArea = document.createElement("textarea");
+        textArea.value = referralLink;
+        document.body.appendChild(textArea);
+        textArea.select();
+        const ok = document.execCommand("copy");
+        document.body.removeChild(textArea);
+        if (!ok) throw new Error("Clipboard copy was rejected");
+        setCopied(true);
+        setTimeout(() => setCopied(false), 2000);
+      } catch {
+        // Surface a clear failure instead of pretending the copy succeeded.
+        setCopyError(true);
+        setTimeout(() => setCopyError(false), 4000);
+      }
     }
   };
 
@@ -230,6 +249,13 @@ export default function ReferralDashboard() {
             )}
           </button>
         </div>
+        {copyError && (
+          <p className="text-red-400 text-xs mt-2 flex items-center gap-1">
+            <AlertCircle size={12} />
+            Couldn&apos;t copy automatically — select the link above and copy it
+            manually.
+          </p>
+        )}
         <p className="text-gray-500 text-xs mt-2">
           Share this link. When someone deposits via your link, you earn a
           percentage of the protocol fees they generate.
@@ -237,26 +263,35 @@ export default function ReferralDashboard() {
       </div>
 
       {/* Stats */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-        <div className="bg-white/5 rounded-xl p-4">
-          <p className="text-gray-400 text-xs mb-1">Referred TVL</p>
-          <p className="text-2xl font-bold text-white">
-            ${fmtUsd(referralData?.referredTvl ?? 0)}
-          </p>
+      {referralData && referralData.totalReferrals === 0 ? (
+        <div className="bg-gradient-to-br from-indigo-500/10 to-purple-500/10 rounded-xl p-8 text-center border border-indigo-500/20">
+          <UserPlus className="mx-auto mb-4 text-gray-400" size={48} />
+          <h3 className="text-lg font-bold mb-2">No Referrals Yet</h3>
+          <p className="text-gray-400 mb-4">Share your referral link to start earning rewards.</p>
+          <p className="text-sm text-gray-500">Each successful referral gives you a percentage of protocol fees.</p>
         </div>
-        <div className="bg-white/5 rounded-xl p-4">
-          <p className="text-gray-400 text-xs mb-1">Total Referrals</p>
-          <p className="text-2xl font-bold text-white">
-            {referralData?.totalReferrals ?? 0}
-          </p>
+      ) : (
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+          <div className="bg-white/5 rounded-xl p-4">
+            <p className="text-gray-400 text-xs mb-1">Referred TVL</p>
+            <p className="text-2xl font-bold text-white">
+              ${fmtUsd(referralData?.referredTvl ?? 0)}
+            </p>
+          </div>
+          <div className="bg-white/5 rounded-xl p-4">
+            <p className="text-gray-400 text-xs mb-1">Total Referrals</p>
+            <p className="text-2xl font-bold text-white">
+              {referralData?.totalReferrals ?? 0}
+            </p>
+          </div>
+          <div className="bg-white/5 rounded-xl p-4">
+            <p className="text-gray-400 text-xs mb-1">Unclaimed Rewards</p>
+            <p className="text-2xl font-bold text-green-400">
+              ${fmtUsd(referralData?.unclaimedRewards ?? 0)}
+            </p>
+          </div>
         </div>
-        <div className="bg-white/5 rounded-xl p-4">
-          <p className="text-gray-400 text-xs mb-1">Unclaimed Rewards</p>
-          <p className="text-2xl font-bold text-green-400">
-            ${fmtUsd(referralData?.unclaimedRewards ?? 0)}
-          </p>
-        </div>
-      </div>
+      )}
 
       {/* Claim Button */}
       <button

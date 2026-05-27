@@ -6,7 +6,11 @@ import {
   exportReportsToCSV,
   getWeeklyDateRange,
   formatDateForDisplay,
+  generateMockUserYieldData,
+  generateMockVaultYieldData,
+  calculateWeeklyYieldReport,
 } from "../services/weeklyYieldReportService";
+import { renderWeeklyYieldReport } from "../templates/weeklyYieldReportTemplate";
 import {
   runWeeklyYieldReportJobNow,
   getJobStatus,
@@ -74,9 +78,47 @@ weeklyReportsRouter.get(
 );
 
 /**
- * Get report statistics
- * GET /api/weekly-reports/stats
+ * Get preview fixture for weekly report template
+ * GET /api/weekly-reports/preview
+ * Returns deterministic fixture data for testing and UI preview
  */
+weeklyReportsRouter.get(
+  "/preview",
+  async (req: Request, res: Response): Promise<void> => {
+    try {
+      const user = generateMockUserYieldData("preview-user");
+      const vaults = generateMockVaultYieldData();
+      const { startDate, endDate } = getWeeklyDateRange();
+
+      const report = calculateWeeklyYieldReport(user, vaults, startDate, endDate);
+
+      // Generate HTML preview
+      const htmlPreview = renderWeeklyYieldReport({
+        userName: report.userName,
+        walletAddress: report.walletAddress,
+        weeklyYield: report.weeklyYield,
+        weeklyYieldPercentage: report.weeklyYieldPercentage,
+        totalYield: report.totalYield,
+        topVaults: report.topVaults,
+        vaultCount: report.vaultCount,
+        period: report.period,
+      });
+
+      res.json({
+        success: true,
+        message: "Weekly yield report preview fixture",
+        data: report,
+        htmlPreview,
+      });
+    } catch (error) {
+      res.status(500).json({
+        error:
+          error instanceof Error ? error.message : "Failed to generate preview",
+      });
+    }
+  },
+);
+
 weeklyReportsRouter.get(
   "/stats",
   requireAdmin,

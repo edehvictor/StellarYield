@@ -1,6 +1,7 @@
 import { useOutletContext } from "react-router-dom";
 import { Wallet } from "lucide-react";
 import PortfolioDashboard from "./PortfolioDashboard";
+import { ReallocationTimelinePlanner } from "../../portfolio/ReallocationTimelinePlanner";
 
 export default function PortfolioPage() {
   const { walletAddress } = useOutletContext<{ walletAddress: string | null }>();
@@ -20,5 +21,29 @@ export default function PortfolioPage() {
     );
   }
 
-  return <PortfolioDashboard walletAddress={walletAddress} />;
+  return (
+    <div className="space-y-6">
+      <PortfolioDashboard walletAddress={walletAddress} />
+      <ReallocationTimelinePlanner
+        planName="May Rotation Plan"
+        status="draft"
+        steps={[
+          {
+            stepId: "step-1",
+            scheduledAt: "2026-05-01T09:00:00.000Z",
+            expectedFeeUsd: 120,
+            expectedRecoveryHours: 8,
+            allocations: { "Vault-A": 70, "Vault-B": 20, "Vault-C": 10 },
+          },
+          {
+            stepId: "step-2",
+            scheduledAt: "2026-05-04T09:00:00.000Z",
+            expectedFeeUsd: 140,
+            expectedRecoveryHours: 10,
+            allocations: { "Vault-A": 45, "Vault-B": 35, "Vault-C": 20 },
+          },
+        ]}
+      />
+    </div>
+  );
 }

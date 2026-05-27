@@ -98,3 +98,93 @@ export async function getFeeOracleEstimate(): Promise<FeeOracleResponse> {
   cacheExpiresAt = now + CACHE_TTL_MS;
   return result;
 }
+
+// ── Fee Oracle Deviation Alerting ────────────────────────────────────────
+
+export type FeeAlertLevel = 'normal' | 'warning' | 'critical';
+
+export interface FeeDeviationAlert {
+  level: FeeAlertLevel;
+  currentFee: number;            // stroops, the observed average fee
+  baselineFee: number;           // stroops, EMA-smoothed baseline
+  deviationPct: number;          // signed: positive = above baseline
+  warningThresholdPct: number;   // always WARNING_DEVIATION_PCT
+  criticalThresholdPct: number;  // always CRITICAL_DEVIATION_PCT
+  message: string;               // human-readable summary
+  generatedAt: string;           // ISO timestamp
+}
+
+const WARNING_DEVIATION_PCT = 20;
+const CRITICAL_DEVIATION_PCT = 50;
+const EMA_ALPHA = 0.3; // weight given to the most recent observation
+
+let feeBaseline: number | null = null;
+
+/** Reset the EMA baseline (useful in tests). */
+export function resetFeeBaseline(): void {
+  feeBaseline = null;
+}
+
+/**
+ * Pure computation of a fee deviation alert.
+ * Keeps baseline tracking separate so this function can be tested without
+ * module-level state.
+ */
+export function computeFeeDeviationAlert(
+  currentFee: number,
+  baselineFee: number,
+): FeeDeviationAlert {
+  const deviationPct =
+    baselineFee > 0 ? ((currentFee - baselineFee) / baselineFee) * 100 : 0;
+  const absDeviation = Math.abs(deviationPct);
+
+  let level: FeeAlertLevel = 'normal';
+  if (absDeviation >= CRITICAL_DEVIATION_PCT) {
+    level = 'critical';
+  } else if (absDeviation >= WARNING_DEVIATION_PCT) {
+    level = 'warning';
+  }
+
+  const direction = deviationPct >= 0 ? 'above' : 'below';
+  const message =
+    level === 'normal'
+      ? `Fees within normal range (${deviationPct.toFixed(1)}% ${direction} baseline)`
+      : level === 'warning'
+        ? `Fee spike: ${Math.abs(deviationPct).toFixed(1)}% ${direction} baseline — costs elevated`
+        : `Critical fee spike: ${Math.abs(deviationPct).toFixed(1)}% ${direction} baseline — consider delaying transactions`;
+
+  return {
+    level,
+    currentFee: Math.round(currentFee),
+    baselineFee: Math.round(baselineFee),
+    deviationPct: Math.round(deviationPct * 10) / 10,
+    warningThresholdPct: WARNING_DEVIATION_PCT,
+    criticalThresholdPct: CRITICAL_DEVIATION_PCT,
+    message,
+    generatedAt: new Date().toISOString(),
+  };
+}
+
+/**
+ * Stateful: updates the EMA baseline and returns a deviation alert.
+ */
+export function checkFeeDeviation(currentFee: number): FeeDeviationAlert {
+  if (feeBaseline === null) {
+    feeBaseline = currentFee;
+  } else {
+    feeBaseline = EMA_ALPHA * currentFee + (1 - EMA_ALPHA) * feeBaseline;
+  }
+  return computeFeeDeviationAlert(currentFee, feeBaseline);
+}
+
+/**
+ * Convenience: fetch the latest fee estimate and compute a deviation alert.
+ */
+export async function getFeeDeviationAlert(): Promise<{
+  estimate: FeeOracleResponse;
+  alert: FeeDeviationAlert;
+}> {
+  const estimate = await getFeeOracleEstimate();
+  const alert = checkFeeDeviation(estimate.fees.average);
+  return { estimate, alert };
+}

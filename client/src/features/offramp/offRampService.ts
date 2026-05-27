@@ -3,12 +3,35 @@
  * Handles integration with MoonPay or Stellar Anchor for bank withdrawals
  */
 
-import type { OffRampTransaction, WithdrawalRequest, OffRampProvider } from "./types";
+import type { OffRampTransaction, WithdrawalRequest, OffRampProvider, OffRampErrorType } from "./types";
+import { OffRampError } from "./types";
+
+function createOffRampError(
+    type: OffRampErrorType,
+    userMessage: string,
+    retryable: boolean,
+    cause?: Error,
+    transactionId?: string,
+): OffRampError {
+    const err = new OffRampError(userMessage, type, cause);
+    err.userMessage = userMessage;
+    err.retryable = retryable;
+    err.transactionId = transactionId;
+    return err;
+}
+
+function httpErrorType(status: number): OffRampErrorType {
+    const known = [401, 403, 500, 503] as const;
+    if ((known as readonly number[]).includes(status)) {
+        return `HTTP_${status}` as OffRampErrorType;
+    }
+    return "NETWORK_ERROR";
+}
 
 const STORAGE_KEY = "stellar_yield_offramp_txns";
 
 export class OffRampService {
-    private provider: OffRampProvider;
+    readonly provider: OffRampProvider;
     private apiKey: string;
     private baseUrl: string;
 
@@ -42,7 +65,18 @@ export class OffRampService {
         this.saveTransaction(transaction);
 
         // Call off-ramp provider API
-        await this.submitToProvider(transaction, request);
+        try {
+            await this.submitToProvider(transaction, request);
+        } catch (error) {
+            transaction.status = "failed";
+            if (error instanceof OffRampError) {
+                transaction.errorMessage = error.userMessage;
+            } else {
+                transaction.errorMessage = error instanceof Error ? error.message : "Unknown error";
+            }
+            this.saveTransaction(transaction);
+            throw error;
+        }
 
         return transaction;
     }
@@ -59,7 +93,13 @@ export class OffRampService {
                 headers: { Authorization: `Bearer ${this.apiKey}` },
             });
 
-            if (!response.ok) throw new Error(`Status code: ${response.status}`);
+            if (!response.ok) {
+                throw createOffRampError(
+                    httpErrorType(response.status),
+                    `Status code: ${response.status}`,
+                    response.status >= 500,
+                );
+            }
 
             const data = (await response.json()) as { status: string; error?: string };
             const status = this.mapProviderStatus(data.status);
@@ -68,16 +108,27 @@ export class OffRampService {
             if (status === "completed") {
                 tx.completedAt = Date.now();
             } else if (status === "failed") {
-                tx.errorMessage = data.error || "Unknown error";
+                tx.errorMessage = data.error || "Transaction failed";
             }
 
             this.saveTransaction(tx);
             return tx;
         } catch (error) {
+            if (error instanceof OffRampError) {
+                throw error;
+            }
             tx.status = "failed";
-            tx.errorMessage = error instanceof Error ? error.message : "Poll failed";
+            tx.errorMessage = error instanceof OffRampError 
+                ? error.message 
+                : (error instanceof Error ? error.message : "Poll failed");
             this.saveTransaction(tx);
-            return tx;
+            throw createOffRampError(
+                "NETWORK_ERROR",
+                "Unable to check transaction status. Please try again later.",
+                true,
+                error instanceof Error ? error : undefined,
+                txId,
+            );
         }
     }
 
@@ -108,10 +159,10 @@ export class OffRampService {
      */
     private validateDestination(bankAccount: string, memo: string): void {
         if (!bankAccount || bankAccount.length < 8) {
-            throw new Error("Invalid bank account number");
+            throw createOffRampError("INVALID_BANK_ACCOUNT", "Invalid bank account", false);
         }
         if (!memo || memo.length === 0 || memo.length > 28) {
-            throw new Error("Invalid memo format");
+            throw createOffRampError("INVALID_MEMO", "Invalid memo format", false);
         }
     }
 
@@ -131,17 +182,33 @@ export class OffRampService {
             bankName: request.bankName,
         };
 
-        const response = await fetch(`${this.baseUrl}/withdrawals`, {
-            method: "POST",
-            headers: {
-                "Content-Type": "application/json",
-                Authorization: `Bearer ${this.apiKey}`,
-            },
-            body: JSON.stringify(payload),
-        });
+        try {
+            const response = await fetch(`${this.baseUrl}/withdrawals`, {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                    Authorization: `Bearer ${this.apiKey}`,
+                },
+                body: JSON.stringify(payload),
+            });
 
-        if (!response.ok) {
-            throw new Error(`Provider error: ${response.statusText}`);
+            if (!response.ok) {
+                throw createOffRampError(
+                    httpErrorType(response.status),
+                    `Provider error: ${response.statusText}`,
+                    response.status >= 500,
+                );
+            }
+        } catch (error) {
+            if (error instanceof OffRampError) {
+                throw error;
+            }
+            throw createOffRampError(
+                "SUBMISSION_FAILED",
+                error instanceof Error ? error.message : "Unknown error",
+                true,
+                error instanceof Error ? error : undefined,
+            );
         }
     }
 

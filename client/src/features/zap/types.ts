@@ -12,6 +12,7 @@ export interface ZapQuoteRequest {
   amountInStroops: string;
   inputDecimals: number;
   vaultDecimals: number;
+  slippageTolerance?: number;
 }
 
 /** Quote used to show expected vault-token output and to derive `min_amount_out`. */
@@ -19,6 +20,12 @@ export interface ZapQuoteResponse {
   path: SwapPathHop[];
   expectedAmountOutStroops: string;
   source: "router_simulation" | "fallback_rate";
+  slippageApplied: number;
+  amountOutAfterSlippage: string;
+  quotedAt: string;
+  minAmountOutStroops: string;
+  quoteAgeMs: number;
+  isFallback: boolean;
 }
 
 /** Asset the user can select as zap input (Soroban SAC contract id). */

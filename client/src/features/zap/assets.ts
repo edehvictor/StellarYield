@@ -1,4 +1,5 @@
 import type { ZapAssetOption, ZapSupportedAssetsMetadata } from "./types";
+import { getApiBaseUrl } from "../../lib/api";
 
 /**
  * Default assets for zap input selection. Override via `VITE_ZAP_ASSETS_JSON`
@@ -44,12 +45,7 @@ export function getVaultContractIdFromEnv(): string {
 }
 
 function zapApiBaseUrl(): string {
-  const env = import.meta.env;
-  const base =
-    (env.VITE_API_BASE_URL as string | undefined) ||
-    (env.VITE_API_URL as string | undefined) ||
-    "http://localhost:3001";
-  return base.replace(/\/$/, "");
+  return getApiBaseUrl();
 }
 
 /** When `VITE_ZAP_METADATA_FROM_API` is true, the Zap UI may load assets from the backend. */

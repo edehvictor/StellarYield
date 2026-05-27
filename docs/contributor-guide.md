@@ -97,3 +97,14 @@ The process-scoped policy change only affects the current shell window and is us
 ## Finding CI Artifacts
 
 When the pull request workflow fails, GitHub Actions uploads failure artifacts with a 7-day retention period. Open the workflow run, scroll to the run summary, and download the files listed in the **Artifacts** section.
+
+## File Encoding
+
+All tracked text files in this repository are UTF-8 (no BOM) with LF line endings. Editors and tooling occasionally re-encode files when copy-pasting from rich text, opening files on Windows, or piping through shells with a non-UTF-8 locale, which is how mojibake (`â€™`, `Â§`, `â€“`) creeps in.
+
+When adding or editing user-facing copy or documentation:
+
+- Configure your editor to save as **UTF-8** without a byte-order mark.
+- Prefer plain ASCII for technical content (`->`, `--`, `...`); reserve Unicode typography (`→`, `—`, `…`, `•`) for places where the visual difference matters.
+- If you must copy from a rich-text source, paste into a plain-text editor first to strip Word-style smart quotes and dashes.
+- Before committing, run `git diff` and look for replacement characters (`�`) or repeating `Ã`/`Â` sequences — those almost always indicate encoding drift rather than intentional content.

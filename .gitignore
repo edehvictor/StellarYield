@@ -2,9 +2,28 @@
 client/node_modules/
 server/node_modules/
 contracts/target/
+**/target/
+**/test_snapshots/
 dist/
 .env
 .claude/
 .agents/
 issue.md
 pr.md
+backend/matching_engine/target
+
+# ── Build outputs ────────────────────────────────────────────────────────────
+.next/
+*.tsbuildinfo
+
+# ── Coverage reports ─────────────────────────────────────────────────────────
+coverage/
+*.lcov
+lcov.info
+
+# ── CI log artifacts ─────────────────────────────────────────────────────────
+frontend-test.log
+frontend-build.log
+
+# ── Runtime data ─────────────────────────────────────────────────────────────
+server/audit-logs/

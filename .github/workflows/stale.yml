@@ -1,0 +1,218 @@
+name: Stale Issue and PR Triage
+
+on:
+  schedule:
+    # Run daily at 9:00 AM UTC
+    - cron: '0 9 * * *'
+  workflow_dispatch:
+
+permissions:
+  issues: write
+  pull-requests: write
+
+jobs:
+  stale-issues:
+    runs-on: ubuntu-latest
+    if: github.repository == 'edehvictor/StellarYield'
+    
+    steps:
+      - name: Mark stale issues and PRs
+        uses: actions/stale@v9
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          
+          # Issue configuration
+          days-before-issue-stale: 30
+          days-before-issue-close: 14
+          stale-issue-label: 'stale'
+          stale-issue-message: |
+            This issue has been inactive for 30 days and will be marked as stale.
+            
+            To keep it active:
+            - Add a comment with updates or questions
+            - Add the `keep-active` label to prevent auto-closure
+            
+            If no activity occurs in 14 days, this issue will be automatically closed.
+            
+            Thank you for your contributions to StellarYield! 🚀
+          close-issue-message: |
+            This issue was closed due to inactivity.
+            
+            If you believe this issue is still relevant, please:
+            1. Reopen the issue
+            2. Add a comment explaining why it should remain open
+            3. Remove the `stale` label
+            
+            We appreciate your understanding in keeping our issue tracker manageable.
+            
+          # PR configuration  
+          days-before-pr-stale: 21
+          days-before-pr-close: 7
+          stale-pr-label: 'stale'
+          stale-pr-message: |
+            This pull request has been inactive for 21 days and will be marked as stale.
+            
+            To keep it active:
+            - Add a comment with updates or questions
+            - Address any pending review comments
+            - Add the `keep-active` label to prevent auto-closure
+            
+            If no activity occurs in 7 days, this PR will be automatically closed.
+            
+            Thank you for contributing to StellarYield! 🚀
+          close-pr-message: |
+            This pull request was closed due to inactivity.
+            
+            If you'd like to continue working on this:
+            1. Reopen the PR
+            2. Add a comment explaining the current status
+            3. Remove the `stale` label
+            4. Address any outstanding feedback
+            
+            We appreciate your understanding in keeping our PR queue manageable.
+          
+          # Exemptions
+          exempt-issue-labels: |
+            pinned,
+            security,
+            good-first-issue,
+            help-wanted,
+            enhancement,
+            bug,
+            documentation,
+            needs-triage,
+            blocked,
+            keep-active,
+            stellar-wave
+          exempt-pr-labels: |
+            pinned,
+            security,
+            work-in-progress,
+            needs-review,
+            needs-triage,
+            blocked,
+            keep-active
+          
+          # Don't close issues/PRs with milestones
+          exempt-all-milestones: true
+          
+          # Limit operations per run to avoid overwhelming the repository
+          operations-per-run: 30
+
+  triage-new-issues:
+    runs-on: ubuntu-latest
+    if: github.repository == 'edehvictor/StellarYield'
+    
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        
+      - name: Triage new issues
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { data: issues } = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: [],
+              sort: 'created',
+              direction: 'desc',
+              per_page: 50
+            });
+            
+            const threeDaysAgo = new Date();
+            threeDaysAgo.setDate(threeDaysAgo.getDate() - 3);
+            
+            for (const issue of issues) {
+              if (issue.pull_request) continue; // Skip PRs
+              
+              const createdAt = new Date(issue.created_at);
+              const hasLabels = issue.labels.length > 0;
+              
+              // Only triage issues created in the last 3 days without labels
+              if (createdAt > threeDaysAgo && !hasLabels) {
+                // Check if it's a Stellar Wave issue (exempt from triage)
+                const isStellarWave = issue.title.toLowerCase().includes('stellar wave') || 
+                                     issue.body.toLowerCase().includes('stellar wave');
+                
+                if (isStellarWave) {
+                  // Add stellar-wave label and skip triage
+                  await github.rest.issues.addLabels({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    issue_number: issue.number,
+                    labels: ['stellar-wave']
+                  });
+                  
+                  // Add a comment for Stellar Wave issues
+                  await github.rest.issues.createComment({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    issue_number: issue.number,
+                    body: `🌟 **Stellar Wave Issue Detected**\n\nThis issue has been tagged as a Stellar Wave issue and will remain active for the duration of the wave program.\n\nThank you for participating in Stellar Wave! 🚀`
+                  });
+                } else {
+                  // Add needs-triage label for regular issues
+                  await github.rest.issues.addLabels({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    issue_number: issue.number,
+                    labels: ['needs-triage']
+                  });
+                  
+                  // Add a triage comment
+                  await github.rest.issues.createComment({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    issue_number: issue.number,
+                    body: `🏷️ **Issue Needs Triage**\n\nThis issue has been marked as \`needs-triage\` and will be reviewed by maintainers.\n\n**What happens next:**\n- A maintainer will assess the issue and add appropriate labels\n- The issue may be assigned to someone or marked as \`good-first-issue\`\n- If it's a duplicate, it will be closed with a reference\n\nThank you for opening this issue! 🎯`
+                  });
+                }
+              }
+            }
+
+  cleanup-old-drafts:
+    runs-on: ubuntu-latest
+    if: github.repository == 'edehvictor/StellarYield'
+    
+    steps:
+      - name: Close old draft PRs
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { data: pulls } = await github.rest.pulls.list({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              sort: 'created',
+              direction: 'desc',
+              per_page: 50
+            });
+            
+            const thirtyDaysAgo = new Date();
+            thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+            
+            for (const pr of pulls) {
+              if (pr.draft) {
+                const createdAt = new Date(pr.created_at);
+                
+                if (createdAt < thirtyDaysAgo) {
+                  // Close old draft PRs
+                  await github.rest.pulls.update({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    pull_number: pr.number,
+                    state: 'closed'
+                  });
+                  
+                  // Add a comment explaining the closure
+                  await github.rest.issues.createComment({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    issue_number: pr.number,
+                    body: `📝 **Draft PR Closed**\n\nThis draft pull request was automatically closed after 30 days of inactivity.\n\nIf you'd like to continue working on this:\n1. Reopen the PR\n2. Remove the draft status\n3. Add a comment with your current progress\n\nWe appreciate your contribution! 💫`
+                  });
+                }
+              }
+            }

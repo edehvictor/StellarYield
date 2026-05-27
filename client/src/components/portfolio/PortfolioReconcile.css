@@ -1,0 +1,7 @@
+.portfolio-reconcile table { width: 100%; border-collapse: collapse; }
+.portfolio-reconcile th, .portfolio-reconcile td { padding: 8px 10px; border: 1px solid #eee; text-align: left; }
+.sev-matched { background: #f8fff8; }
+.sev-small { background: #fffaf0; }
+.sev-material { background: #fff4f0; }
+.sev-critical { background: #ffecec; }
+.sev-unavailable { background: #f2f2f2; color: #888; }

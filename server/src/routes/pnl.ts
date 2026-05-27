@@ -4,6 +4,8 @@ import {
   type UserTransaction,
   type SharePriceSnapshot,
 } from "../services/pnl_engine";
+import { sendError } from "../utils/errorResponse";
+import { validateWalletAddress } from "../middleware/validation";
 
 type PnLPrismaClient = {
   userTransaction: {
@@ -57,20 +59,13 @@ const pnlRouter = Router();
  * - Time-Weighted Return percentage
  * - Daily PnL snapshots for charting
  */
-pnlRouter.get("/:address/pnl", async (req: Request, res: Response) => {
+pnlRouter.get("/:address/pnl", validateWalletAddress, async (req: Request, res: Response) => {
   const { address } = req.params;
-
-  if (!address || typeof address !== "string" || address.length < 10) {
-    res.status(400).json({ error: "Invalid wallet address." });
-    return;
-  }
 
   const prisma = await loadPrismaClient();
 
   if (!prisma) {
-    res.status(503).json({
-      error: "PnL database is unavailable.",
-    });
+    sendError(res, 503, "DB_UNAVAILABLE", "PnL database is unavailable.");
     return;
   }
 
@@ -114,7 +109,7 @@ pnlRouter.get("/:address/pnl", async (req: Request, res: Response) => {
   } catch (error) {
     console.error(`[pnl] Failed to calculate PnL for ${address}`, error);
     await prisma.$disconnect?.();
-    res.status(500).json({ error: "Failed to calculate PnL." });
+    sendError(res, 500, "PNL_CALCULATION_FAILED", "Failed to calculate PnL.");
   }
 });
 

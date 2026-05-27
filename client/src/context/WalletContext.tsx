@@ -66,6 +66,39 @@ export function WalletProvider({ children }: { children: ReactNode }) {
     clearStoredSession();
     setSession(null);
     setErrorMessage(null);
+
+    // Clear wallet-specific cached data and session state
+    try {
+      window.localStorage.removeItem('authToken');
+      window.localStorage.removeItem('stellar_yield_google_oauth');
+      window.localStorage.removeItem('stellar_yield_google_sheets');
+
+      // Clear any in-flight pending transaction state or notifications
+      // by resetting browser's fetch/cache for wallet-dependent endpoints
+      if ('caches' in window) {
+        void (async () => {
+          try {
+            const cacheNames = await caches.keys();
+            for (const cacheName of cacheNames) {
+              const cache = await caches.open(cacheName);
+              const requests = await cache.keys();
+              for (const request of requests) {
+                if (request.url.includes('/api/users/') ||
+                    request.url.includes('/api/rewards/') ||
+                    request.url.includes('/api/referrals/') ||
+                    request.url.includes('/api/yields/')) {
+                  await cache.delete(request);
+                }
+              }
+            }
+          } catch {
+            // Cache API might not be available in all environments
+          }
+        })();
+      }
+    } catch {
+      // localStorage or other APIs might not be available
+    }
   }
 
   function clearError() {
@@ -93,8 +126,12 @@ export function WalletProvider({ children }: { children: ReactNode }) {
       walletAddress: session?.walletAddress ?? null,
       walletAddressType: session?.walletAddressType ?? null,
       providerLabel: session?.providerLabel ?? null,
+      providerId: session?.providerId ?? null,
+      network: session?.providerId ? "mainnet" : null,
       sessionKeyAddress: session?.sessionKeyAddress ?? null,
       verificationStatus: session?.verificationStatus ?? null,
+      connectedAt: session?.connectedAt ?? null,
+      lastActivityAt: session?.lastActivityAt ?? null,
       isConnected: Boolean(session?.walletAddress),
       isConnecting,
       isFreighterInstalled,

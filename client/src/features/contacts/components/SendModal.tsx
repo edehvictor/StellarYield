@@ -6,7 +6,7 @@
 import React, { useState } from 'react';
 import { X, Send, ArrowDownRight } from 'lucide-react';
 import { AddressAutocomplete, ContactsModal } from '../index';
-import { ContactSuggestion } from '../types';
+import type { Contact, ContactSuggestion } from '../types';
 
 interface SendModalProps {
   isOpen: boolean;
@@ -43,6 +43,16 @@ export function SendModal({ isOpen, onClose, walletAddress, balance }: SendModal
     setRecipientAddress(contact.address);
     setSelectedContact(contact);
     setShowContacts(false);
+  };
+
+  const handleSavedContactSelect = (contact: Contact) => {
+    const suggestion: ContactSuggestion = {
+      id: contact.id,
+      name: 'Contact Name',
+      address: contact.encryptedAddress,
+      displayText: 'Contact Name',
+    };
+    handleContactSelect(suggestion);
   };
 
   /**
@@ -109,6 +119,7 @@ export function SendModal({ isOpen, onClose, walletAddress, balance }: SendModal
             </h2>
             <button
               onClick={onClose}
+              aria-label="Close"
               className="text-gray-400 hover:text-white transition-colors"
             >
               <X size={24} />
@@ -136,16 +147,6 @@ export function SendModal({ isOpen, onClose, walletAddress, balance }: SendModal
                   placeholder="Enter recipient address or search contacts..."
                   className="w-full"
                 />
-                <button
-                  type="button"
-                  onClick={() => setShowContacts(true)}
-                  className="absolute right-2 top-1/2 transform -translate-y-1/2 p-1 text-gray-400 hover:text-white transition-colors"
-                  title="Open address book"
-                >
-                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a4 4 0 11-8 0 4 4 0 018 0z" />
-                  </svg>
-                </button>
               </div>
               {selectedContact && (
                 <div className="mt-2 text-sm text-green-400 flex items-center gap-1">
@@ -228,7 +229,7 @@ export function SendModal({ isOpen, onClose, walletAddress, balance }: SendModal
               </button>
               <button
                 onClick={handleSend}
-                disabled={!recipientAddress || !amount || isSending}
+                disabled={isSending}
                 className="flex-1 px-4 py-2 bg-indigo-500 text-white rounded-lg hover:bg-indigo-600 transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
               >
                 {isSending ? (
@@ -257,7 +258,7 @@ export function SendModal({ isOpen, onClose, walletAddress, balance }: SendModal
       <ContactsModal
         isOpen={showContacts}
         onClose={() => setShowContacts(false)}
-        onSelectContact={handleContactSelect}
+        onSelectContact={handleSavedContactSelect}
       />
     </>
   );

@@ -1,6 +1,7 @@
 import { useRef, useMemo } from "react";
 import { useFrame } from "@react-three/fiber";
 import type { Points } from "three";
+import { useReducedMotion } from "../../../hooks/useReducedMotion";
 
 interface BackgroundStarsProps {
   count?: number;
@@ -8,6 +9,7 @@ interface BackgroundStarsProps {
 
 export default function BackgroundStars({ count = 150 }: BackgroundStarsProps) {
   const pointsRef = useRef<Points>(null);
+  const reducedMotion = useReducedMotion();
 
   const positions = useMemo(() => {
     const arr = new Float32Array(count * 3);
@@ -20,9 +22,8 @@ export default function BackgroundStars({ count = 150 }: BackgroundStarsProps) {
   }, [count]);
 
   useFrame((_, delta) => {
-    if (pointsRef.current) {
-      pointsRef.current.rotation.z += delta * 0.01;
-    }
+    if (reducedMotion || !pointsRef.current) return;
+    pointsRef.current.rotation.z += delta * 0.01;
   });
 
   return (

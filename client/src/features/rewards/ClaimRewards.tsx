@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from "react";
 import { useWallet } from "../../context/useWallet";
 import { Gift, CheckCircle, Loader2, AlertCircle } from "lucide-react";
+import { getApiBaseUrl } from "../../lib/api";
 
 interface ClaimData {
   index: number;
@@ -8,7 +9,7 @@ interface ClaimData {
   proof: string[];
 }
 
-const API_BASE = import.meta.env.VITE_API_URL || "http://localhost:3001";
+const API_BASE = getApiBaseUrl();
 
 /**
  * ClaimRewards — Frontend UI for claiming Merkle-tree distributed $YIELD rewards.

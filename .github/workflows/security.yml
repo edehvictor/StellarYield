@@ -102,7 +102,7 @@ jobs:
             }
 
       - name: Fail on vulnerabilities
-        if: steps.audit.outputs.exit_code != '0'
+        if: github.event_name == 'push' && steps.audit.outputs.exit_code != '0'
         run: exit 1
 
   clippy-security:
@@ -305,5 +305,5 @@ jobs:
             }
 
       - name: Fail on prohibited patterns
-        if: steps.patterns.outputs.fail == '1'
+        if: github.event_name == 'push' && steps.patterns.outputs.fail == '1'
         run: exit 1

@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from "react";
 import { Bell, Trash2, CheckCircle, Info, AlertTriangle, ExternalLink } from "lucide-react";
 import { useWallet } from "../../context/useWallet";
+import { apiUrl } from "../../lib/api";
 
 interface Notification {
   id: string;
@@ -28,7 +29,7 @@ const NotificationBell: React.FC = () => {
 
   const fetchNotifications = async () => {
     try {
-      const res = await fetch(`http://localhost:3001/api/notifications/${walletAddress}`);
+      const res = await fetch(apiUrl(`/api/notifications/${walletAddress}`));
       const data = await res.json();
       setNotifications(data);
       setUnreadCount(data.filter((n: Notification) => !n.isRead).length);
@@ -39,7 +40,7 @@ const NotificationBell: React.FC = () => {
 
   const markAsRead = async (id: string) => {
     try {
-      await fetch(`http://localhost:3001/api/notifications/${id}/read`, { method: "PATCH" });
+      await fetch(apiUrl(`/api/notifications/${id}/read`), { method: "PATCH" });
       setNotifications(prev => prev.map(n => n.id === id ? { ...n, isRead: true } : n));
       setUnreadCount(count => count - 1);
     } catch (err) {
@@ -50,7 +51,7 @@ const NotificationBell: React.FC = () => {
   const clearAll = async () => {
     try {
       if (!walletAddress) return;
-      await fetch(`http://localhost:3001/api/notifications/${walletAddress}`, { method: "DELETE" });
+      await fetch(apiUrl(`/api/notifications/${walletAddress}`), { method: "DELETE" });
       setNotifications([]);
       setUnreadCount(0);
     } catch (err) {

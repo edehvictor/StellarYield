@@ -1,6 +1,8 @@
 import { Router, Request, Response } from "express";
 import { getZapSupportedAssetsPayload } from "../config/zapAssetsConfig";
 import { getZapQuote, type ZapQuoteBody } from "../services/zapQuote";
+import { sendError } from "../utils/errorResponse";
+import { validateZapQuote } from "../middleware/validation";
 
 const router = Router();
 
@@ -8,29 +10,19 @@ router.get("/supported-assets", (_req: Request, res: Response) => {
   try {
     res.json(getZapSupportedAssetsPayload());
   } catch (error) {
-    res.status(503).json({
-      error:
-        error instanceof Error
-          ? error.message
-          : "Supported assets configuration is unavailable.",
-    });
+    sendError(
+      res,
+      503,
+      "CONFIG_UNAVAILABLE",
+      "Supported assets configuration is unavailable.",
+      error instanceof Error ? error.message : undefined
+    );
   }
 });
 
-router.post("/quote", async (req: Request, res: Response) => {
+router.post("/quote", validateZapQuote, async (req: Request, res: Response) => {
   try {
-    const b = req.body as Partial<ZapQuoteBody>;
-    if (
-      !b.inputTokenContract ||
-      !b.vaultTokenContract ||
-      b.amountInStroops === undefined
-    ) {
-      res.status(400).json({
-        error:
-          "Expected inputTokenContract, vaultTokenContract, amountInStroops",
-      });
-      return;
-    }
+    const b = req.body as ZapQuoteBody;
 
     const body: ZapQuoteBody = {
       inputTokenContract: String(b.inputTokenContract),
@@ -38,23 +30,29 @@ router.post("/quote", async (req: Request, res: Response) => {
       amountInStroops: String(b.amountInStroops),
       inputDecimals: Number(b.inputDecimals ?? 7),
       vaultDecimals: Number(b.vaultDecimals ?? 7),
+      slippageTolerance: b.slippageTolerance !== undefined ? Number(b.slippageTolerance) : undefined,
     };
-
-    if (!/^-?\d+$/.test(body.amountInStroops)) {
-      res.status(400).json({ error: "amountInStroops must be an integer string" });
-      return;
-    }
 
     const quote = await getZapQuote(body);
     res.json({
       path: quote.path,
       expectedAmountOutStroops: quote.expectedAmountOutStroops,
       source: quote.source,
+      slippageApplied: quote.slippageApplied,
+      amountOutAfterSlippage: quote.amountOutAfterSlippage,
+      quotedAt: quote.quotedAt,
+      minAmountOutStroops: quote.minAmountOutStroops,
+      quoteAgeMs: quote.quoteAgeMs,
+      isFallback: quote.isFallback,
     });
   } catch (e) {
-    res.status(500).json({
-      error: e instanceof Error ? e.message : "Quote failed",
-    });
+    sendError(
+      res,
+      500,
+      "QUOTE_FAILED",
+      "Quote failed",
+      e instanceof Error ? e.message : undefined
+    );
   }
 });
 

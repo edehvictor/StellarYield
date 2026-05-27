@@ -31,8 +31,9 @@ describe('logger utility', () => {
   test('configures pino-pretty transport in non-production environments', () => {
     process.env.NODE_ENV = 'development';
     
-    // Use require to trigger module evaluation with new ENV
-    require('../utils/logger');
+    jest.isolateModules(() => {
+      require('../utils/logger');
+    });
     
     expect(pino).toHaveBeenCalledWith(
       expect.objectContaining({

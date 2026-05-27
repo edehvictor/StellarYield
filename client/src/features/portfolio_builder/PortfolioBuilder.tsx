@@ -14,10 +14,23 @@ import {
   distributeAmount,
   normalizeWeights,
 } from "./portfolioUtils";
+import RebalancePreview from "./RebalancePreview";
 
 export interface PortfolioBuilderProps {
   walletAddress: string | null;
   availableVaults: Array<{ contractId: string; name: string; apy: number }>;
+}
+
+function buildInitialAllocations(
+  availableVaults: PortfolioBuilderProps["availableVaults"],
+): VaultAllocation[] {
+  return availableVaults.slice(0, 3).map((v) => ({
+    vaultContractId: v.contractId,
+    vaultName: v.name,
+    apy: v.apy,
+    weight: 100 / Math.min(3, availableVaults.length),
+    amount: 0n,
+  }));
 }
 
 export default function PortfolioBuilder({
@@ -26,13 +39,11 @@ export default function PortfolioBuilder({
 }: PortfolioBuilderProps) {
   const [totalAmount, setTotalAmount] = useState("");
   const [allocations, setAllocations] = useState<VaultAllocation[]>(() =>
-    availableVaults.slice(0, 3).map((v) => ({
-      vaultContractId: v.contractId,
-      vaultName: v.name,
-      apy: v.apy,
-      weight: 100 / Math.min(3, availableVaults.length),
-      amount: 0n,
-    })),
+    buildInitialAllocations(availableVaults),
+  );
+  // Baseline ("current") position the rebalance sandbox previews against.
+  const [baselineAllocations] = useState<VaultAllocation[]>(() =>
+    buildInitialAllocations(availableVaults),
   );
   const [txPhase, setTxPhase] = useState<TxPhase>("idle");
   const [error, setError] = useState("");
@@ -192,6 +203,16 @@ export default function PortfolioBuilder({
             </div>
           ))}
         </div>
+      )}
+
+      {/* Rebalance Simulation Sandbox */}
+      {totalAmount && Number(totalAmount) > 0 && (
+        <RebalancePreview
+          totalValueUsd={Number(totalAmount)}
+          currentAllocations={baselineAllocations}
+          targetAllocations={allocations}
+          disabled={!isValid}
+        />
       )}
 
       {/* Error Display */}

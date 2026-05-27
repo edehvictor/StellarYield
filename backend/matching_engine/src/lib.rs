@@ -1,7 +1,7 @@
 //! # Matching Engine
 //!
 //! Off-chain matching engine with Libp2p networking for the StellarYield CLMM protocol.
-//! 
+//!
 //! This crate provides:
 //! - **Order Book**: In-memory order book with price-time priority matching
 //! - **Matching Engine**: Core order matching algorithm
@@ -51,14 +51,14 @@
 //! let result = engine.submit_order(sell_order);
 //! ```
 
-pub mod orderbook;
 pub mod matching;
 pub mod network;
+pub mod orderbook;
 pub mod settlement;
 pub mod utils;
 
 // Re-export main types
-pub use orderbook::{Order, OrderBook, Side, OrderType, OrderStatus, Trade};
-pub use matching::{MatchingEngine, MatchResult};
+pub use matching::{MatchResult, MatchingEngine};
 pub use network::{MatchingEngineNetwork, NetworkConfig, NetworkEvent, NetworkMessage};
-pub use settlement::{SettlementPayload, SettlementData, SettlementBatch, SettlementVerifier};
+pub use orderbook::{Order, OrderBook, OrderStatus, OrderType, Side, Trade};
+pub use settlement::{SettlementBatch, SettlementData, SettlementPayload, SettlementVerifier};

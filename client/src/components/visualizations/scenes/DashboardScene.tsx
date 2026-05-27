@@ -4,6 +4,7 @@ import ProtocolNode from "../nodes/ProtocolNode";
 import ParticleStream from "../particles/ParticleStream";
 import BackgroundStars from "../effects/BackgroundStars";
 import type { QualityConfig } from "../types";
+import { useReducedMotion } from "../../../hooks/useReducedMotion";
 
 interface DashboardSceneProps {
   quality: QualityConfig;
@@ -13,10 +14,11 @@ const HUB_POSITION: [number, number, number] = [0, -1, 0];
 
 export default function DashboardScene({ quality }: DashboardSceneProps) {
   const { nodes } = useYieldFlowData(quality.maxParticlesPerStream);
+  const reducedMotion = useReducedMotion();
 
   return (
     <>
-      {quality.enableStars && <BackgroundStars />}
+      {quality.enableStars && !reducedMotion && <BackgroundStars />}
       <CentralHub />
 
       {nodes.map((node) => (
@@ -28,14 +30,17 @@ export default function DashboardScene({ quality }: DashboardSceneProps) {
             radius={node.nodeRadius}
             apy={node.apy}
           />
-          <ParticleStream
-            origin={HUB_POSITION}
-            target={node.position}
-            count={Math.min(node.particleCount, quality.maxParticlesPerStream)}
-            speed={node.speed}
-            color={node.color}
-            enableGlow={quality.enableGlow}
-          />
+          {/* Particle streams are disabled under reduced motion */}
+          {!reducedMotion && (
+            <ParticleStream
+              origin={HUB_POSITION}
+              target={node.position}
+              count={Math.min(node.particleCount, quality.maxParticlesPerStream)}
+              speed={node.speed}
+              color={node.color}
+              enableGlow={quality.enableGlow}
+            />
+          )}
         </group>
       ))}
     </>

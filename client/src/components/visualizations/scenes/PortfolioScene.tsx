@@ -5,6 +5,7 @@ import ParticleStream from "../particles/ParticleStream";
 import BackgroundStars from "../effects/BackgroundStars";
 import type { QualityConfig, PortfolioPosition, FlowNode } from "../types";
 import type { Vector3Tuple } from "three";
+import { useReducedMotion } from "../../../hooks/useReducedMotion";
 
 interface PortfolioSceneProps {
   quality: QualityConfig;
@@ -37,6 +38,8 @@ export default function PortfolioScene({
   quality,
   positions,
 }: PortfolioSceneProps) {
+  const reducedMotion = useReducedMotion();
+
   const nodes: FlowNode[] = useMemo(() => {
     if (!positions.length) return [];
 
@@ -69,7 +72,7 @@ export default function PortfolioScene({
   if (!nodes.length) {
     return (
       <>
-        {quality.enableStars && <BackgroundStars count={80} />}
+        {quality.enableStars && !reducedMotion && <BackgroundStars count={80} />}
         <CentralHub />
       </>
     );
@@ -77,7 +80,7 @@ export default function PortfolioScene({
 
   return (
     <>
-      {quality.enableStars && <BackgroundStars />}
+      {quality.enableStars && !reducedMotion && <BackgroundStars />}
       <CentralHub />
 
       {nodes.map((node) => (
@@ -89,14 +92,17 @@ export default function PortfolioScene({
             radius={node.nodeRadius}
             apy={node.apy}
           />
-          <ParticleStream
-            origin={HUB_POSITION}
-            target={node.position}
-            count={Math.min(node.particleCount, quality.maxParticlesPerStream)}
-            speed={node.speed}
-            color={node.color}
-            enableGlow={quality.enableGlow}
-          />
+          {/* Particle streams are disabled under reduced motion */}
+          {!reducedMotion && (
+            <ParticleStream
+              origin={HUB_POSITION}
+              target={node.position}
+              count={Math.min(node.particleCount, quality.maxParticlesPerStream)}
+              speed={node.speed}
+              color={node.color}
+              enableGlow={quality.enableGlow}
+            />
+          )}
         </group>
       ))}
     </>

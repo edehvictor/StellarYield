@@ -3,16 +3,13 @@
  * Provides state management and CRUD operations for contacts
  */
 
-import { useState, useEffect, useCallback, useMemo } from 'react';
-import { useWallet } from '../../context/useWallet';
-import { Contact, ContactData, ContactSuggestion } from '../types';
+import { useState, useEffect, useCallback } from 'react';
+import { useWallet } from '../../../context/useWallet';
+import type { Contact, ContactData, ContactSuggestion } from '../types';
 import { 
   deriveEncryptionKey, 
-  encryptContactData, 
-  decryptContactData,
   isValidWalletAddress,
   isValidContactName,
-  generateContactId
 } from '../utils/encryption';
 import {
   getContacts,
@@ -102,8 +99,7 @@ export function useContacts(): UseContactsReturn {
       return;
     }
 
-    const query = state.searchQuery.toLowerCase();
-    const filtered = state.contacts.filter(contact => {
+    const filtered = state.contacts.filter(_contact => {
       // Note: We can't filter by decrypted data here without the key
       // This would need to be done on the decrypted data after loading
       return true; // Placeholder - actual filtering would happen after decryption
@@ -339,7 +335,7 @@ export function useContacts(): UseContactsReturn {
   /**
    * Check for duplicate contacts
    */
-  const isDuplicate = useCallback((name: string, address: string, excludeId?: string): boolean => {
+  const isDuplicate = useCallback((_name: string, _address: string, _excludeId?: string): boolean => {
     // Note: This would need actual decryption of contact data
     // For now, returning false as placeholder
     return false;

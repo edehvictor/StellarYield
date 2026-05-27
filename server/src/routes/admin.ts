@@ -6,6 +6,10 @@ import {
   exportAuditLogsToCSV,
   verifyAuditTrailIntegrity,
 } from "../middleware/audit";
+import { uploadVaultMetadata } from "../services/ipfs/vaultMetadataService";
+import { freezeService } from "../services/freezeService";
+import { PROTOCOLS } from "../config/protocols";
+import { strategyStateTransitionAuditService } from "../services/strategyStateTransitionAuditService";
 
 const adminRouter = Router();
 
@@ -60,6 +64,73 @@ adminRouter.post(
           error instanceof Error
             ? error.message
             : "Failed to update vault parameters",
+      });
+    }
+  },
+);
+
+/**
+ * Upload vault metadata to IPFS and return metadata URI for contract updates
+ * POST /api/admin/vaults/:vaultId/metadata
+ */
+adminRouter.post(
+  "/vaults/:vaultId/metadata",
+  requireAdmin,
+  async (req: Request, res: Response): Promise<void> => {
+    try {
+      const { vaultId } = req.params;
+      const { vaultName, description, iconSvg } = req.body as {
+        vaultName?: string;
+        description?: string;
+        iconSvg?: string;
+      };
+
+      if (!vaultName || !description || !iconSvg) {
+        res.status(400).json({
+          error: "vaultName, description, and iconSvg are required",
+        });
+        return;
+      }
+
+      const uploadResult = await uploadVaultMetadata({
+        vaultName,
+        description,
+        iconSvg,
+      });
+
+      setAuditContext(req, {
+        action: "UPDATE_VAULT_METADATA_URI",
+        resource: "VAULT",
+        resourceId: vaultId,
+        changes: {
+          metadataUri: uploadResult.metadataUri,
+          cid: uploadResult.cid,
+          uploadMode: uploadResult.uploadMode,
+        },
+      });
+
+      res.json({
+        success: true,
+        vaultId,
+        cid: uploadResult.cid,
+        metadataUri: uploadResult.metadataUri,
+        iconUri: uploadResult.iconUri,
+        uploadMode: uploadResult.uploadMode,
+        metadata: uploadResult.metadata,
+        transactionPayload: {
+          method: "set_metadata_uri",
+          args: {
+            vaultId,
+            metadataUri: uploadResult.metadataUri,
+          },
+        },
+      });
+    } catch (error) {
+      res.status(500).json({
+        error:
+          error instanceof Error
+            ? error.message
+            : "Failed to upload vault metadata",
       });
     }
   },
@@ -412,6 +483,122 @@ adminRouter.post(
             ? error.message
             : "Failed to grant user access",
       });
+    }
+  },
+);
+
+/**
+ * Global or protocol-specific recommendation freeze
+ * POST /api/admin/recommendations/freeze
+ */
+adminRouter.post(
+  "/recommendations/freeze",
+  requireAdmin,
+  async (req: Request, res: Response): Promise<void> => {
+    try {
+      const { protocol, reason } = req.body;
+      const actor = (req as unknown as { user?: { id: string } }).user?.id || "admin";
+
+      let state;
+      if (protocol) {
+        state = await freezeService.freezeProtocol(protocol, reason, actor);
+
+        // #371 operator intervention: record lifecycle transition to frozen.
+        try {
+          strategyStateTransitionAuditService.recordOperatorIntervention(
+            String(protocol).toLowerCase(),
+            "frozen",
+            `freeze_reason=${reason}`,
+            actor,
+          );
+        } catch (err) {
+          console.warn("Failed to record frozen transition:", err);
+        }
+      } else {
+        state = await freezeService.freezeGlobal(reason, actor);
+
+        // #371 operator intervention: record frozen transition for all known strategies.
+        for (const p of PROTOCOLS) {
+          try {
+            strategyStateTransitionAuditService.recordOperatorIntervention(
+              p.protocolName.toLowerCase(),
+              "frozen",
+              `freeze_reason=${reason}`,
+              actor,
+            );
+          } catch {
+            // Best-effort only; never break the admin endpoint.
+          }
+        }
+      }
+
+      setAuditContext(req, {
+        action: "FREEZE_RECOMMENDATIONS",
+        resource: protocol ? "PROTOCOL" : "GLOBAL",
+        resourceId: protocol || "GLOBAL",
+        changes: { reason },
+      });
+
+      res.json({ success: true, state });
+    } catch {
+      res.status(500).json({ error: "Failed to freeze recommendations" });
+    }
+  },
+);
+
+/**
+ * Global or protocol-specific recommendation resume
+ * POST /api/admin/recommendations/resume
+ */
+adminRouter.post(
+  "/recommendations/resume",
+  requireAdmin,
+  async (req: Request, res: Response): Promise<void> => {
+    try {
+      const { protocol } = req.body;
+      const actor = (req as unknown as { user?: { id: string } }).user?.id || "admin";
+
+      let state;
+      if (protocol) {
+        state = await freezeService.resumeProtocol(protocol, actor);
+
+        // #371 operator intervention: record lifecycle transition to recovered.
+        try {
+          strategyStateTransitionAuditService.recordOperatorIntervention(
+            String(protocol).toLowerCase(),
+            "recovered",
+            "resume_reason=operator",
+            actor,
+          );
+        } catch (err) {
+          console.warn("Failed to record recovered transition:", err);
+        }
+      } else {
+        state = await freezeService.resumeGlobal(actor);
+
+        for (const p of PROTOCOLS) {
+          try {
+            strategyStateTransitionAuditService.recordOperatorIntervention(
+              p.protocolName.toLowerCase(),
+              "recovered",
+              "resume_reason=operator",
+              actor,
+            );
+          } catch {
+            // Best-effort only; never break the admin endpoint.
+          }
+        }
+      }
+
+      setAuditContext(req, {
+        action: "RESUME_RECOMMENDATIONS",
+        resource: protocol ? "PROTOCOL" : "GLOBAL",
+        resourceId: protocol || "GLOBAL",
+      });
+
+      res.json({ success: true, state });
+    } catch {
+      res.status(500).json({ error: "Failed to resume recommendations" });
     }
   },
 );

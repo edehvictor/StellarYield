@@ -3,10 +3,13 @@ import { createApp } from '../app';
 
 describe('Metrics Endpoint', () => {
   const app = createApp();
+  app.get('/__metrics-test-ping', (_req, res) => {
+    res.json({ ok: true });
+  });
 
   it('should return metrics with correct shape', async () => {
     // Generate some traffic to populate metrics
-    await request(app).get('/api/yields');
+    await request(app).get('/__metrics-test-ping');
     
     const response = await request(app).get('/api/metrics');
     

@@ -8,9 +8,10 @@ import type {
   WalletSession,
 } from "./types";
 import { getAdapter } from "./walletAdapters";
+import { getApiBaseUrl } from "../lib/api";
 
 const STORAGE_KEY = "stellar-yield.wallet-session";
-const API_BASE_URL = import.meta.env.VITE_API_URL ?? "http://localhost:3001";
+
 
 interface ChallengeResponse {
   challenge: string;
@@ -95,7 +96,7 @@ async function verifySmartWalletSession(
   }
 
   try {
-    const challengeResponse = await fetch(`${API_BASE_URL}/api/auth/challenge`, {
+    const challengeResponse = await fetch(`${getApiBaseUrl()}/api/auth/challenge`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -120,7 +121,7 @@ async function verifySmartWalletSession(
     );
 
     const verificationResponse = await fetch(
-      `${API_BASE_URL}/api/auth/verify`,
+      `${getApiBaseUrl()}/api/auth/verify`,
       {
         method: "POST",
         headers: {
@@ -168,6 +169,8 @@ export async function connectWalletSession(
       providerId,
       providerLabel: getProviderLabel(providerId),
       verificationStatus: "verified",
+      connectedAt: new Date().toISOString(),
+      lastActivityAt: new Date().toISOString(),
     };
     saveSession(session);
     return session;
@@ -188,6 +191,8 @@ export async function connectWalletSession(
     sessionSecret: sessionKey.secret(),
     loginHint,
     verificationStatus: "degraded",
+    connectedAt: new Date().toISOString(),
+    lastActivityAt: new Date().toISOString(),
   };
 
   session.verificationStatus = await verifySmartWalletSession(session);

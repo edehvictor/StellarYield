@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 import type { FlowNode } from "../types";
 import type { Vector3Tuple } from "three";
+import { apiUrl } from "../../../lib/api";
 
 interface NormalizedYield {
   protocolName: string;
@@ -67,7 +68,7 @@ export function useYieldFlowData(maxParticlesPerStream: number): {
 
     async function fetchYields() {
       try {
-        const res = await fetch("http://localhost:3001/api/yields");
+        const res = await fetch(apiUrl("/api/yields"));
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const data: NormalizedYield[] = await res.json();
 

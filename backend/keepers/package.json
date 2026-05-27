@@ -16,12 +16,14 @@
     "bullmq": "^5.12.7",
     "dotenv": "^16.4.7",
     "ioredis": "^5.4.1",
+    "node-cache": "^5.1.2",
     "pino": "^9.5.0",
     "pino-pretty": "^13.0.0"
   },
   "devDependencies": {
     "@types/jest": "^30.0.0",
     "@types/node": "^20.0.0",
+    "fast-check": "^4.7.0",
     "jest": "^30.3.0",
     "ts-jest": "^29.4.6",
     "ts-node-dev": "^2.0.0",

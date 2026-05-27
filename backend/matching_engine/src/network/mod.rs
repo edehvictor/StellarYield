@@ -3,15 +3,15 @@
 //! Implements peer-to-peer networking for order discovery and gossip.
 //! Uses Libp2p gossipsub for broadcasting orders to connected nodes.
 
+use futures::StreamExt;
 use libp2p::{
-    gossipsub, mdns, noise, swarm::SwarmEvent, tcp, yamux, Multiaddr, PeerId, Swarm, SwarmBuilder,
+    gossipsub, mdns, noise, swarm::SwarmEvent, tcp, yamux, Multiaddr, PeerId, SwarmBuilder,
 };
-use futures::{future::pending, stream::StreamExt};
+use serde::{Deserialize, Serialize};
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::time::Duration;
 use tokio::sync::mpsc;
-use serde::{Deserialize, Serialize};
 
 use crate::orderbook::Order;
 
@@ -72,12 +72,35 @@ pub enum NetworkEvent {
     TradeExecuted { trade_id: String },
 }
 
+/// Combined swarm behaviour
+#[derive(libp2p::swarm::NetworkBehaviour)]
+#[behaviour(to_swarm = "MatchingBehaviourEvent")]
+struct MatchingBehaviour {
+    gossipsub: gossipsub::Behaviour,
+    mdns: mdns::tokio::Behaviour,
+}
+
+#[derive(Debug)]
+#[allow(clippy::large_enum_variant)]
+enum MatchingBehaviourEvent {
+    Gossipsub(gossipsub::Event),
+    Mdns(mdns::Event),
+}
+
+impl From<gossipsub::Event> for MatchingBehaviourEvent {
+    fn from(e: gossipsub::Event) -> Self {
+        MatchingBehaviourEvent::Gossipsub(e)
+    }
+}
+
+impl From<mdns::Event> for MatchingBehaviourEvent {
+    fn from(e: mdns::Event) -> Self {
+        MatchingBehaviourEvent::Mdns(e)
+    }
+}
+
 /// Libp2p network node for order gossip
 pub struct MatchingEngineNetwork {
-    /// Libp2p swarm
-    swarm: Option<Swarm<gossipsub::Behaviour>>,
-    /// MDNS behaviour for local discovery
-    mdns: Option<mdns::tokio::Behaviour>,
     /// Configuration
     config: NetworkConfig,
     /// Local peer ID
@@ -95,59 +118,11 @@ impl MatchingEngineNetwork {
         event_tx: mpsc::Sender<NetworkEvent>,
         message_rx: mpsc::Receiver<NetworkMessage>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        // Generate keypair
-        let local_key = libp2p::identity::Keypair::generate_ed25519();
-        let peer_id = PeerId::from(local_key.public());
-
-        // Create TCP transport
-        let transport = tcp::tokio::Transport::new(tcp::Config::default().nodelay(true))
-            .upgrade(libp2p::core::upgrade::Version::V1)
-            .authenticate(noise::Config::new(&local_key)?)
-            .multiplex(yamux::Config::default())
-            .boxed();
-
-        // Create gossipsub behaviour
-        let gossipsub_config = gossipsub::ConfigBuilder::default()
-            .heartbeat_interval(Duration::from_secs(10))
-            .validation_mode(gossipsub::ValidationMode::Strict)
-            .message_id_fn(|message: &gossipsub::Message| {
-                let mut s = DefaultHasher::new();
-                message.data.hash(&mut s);
-                gossipsub::MessageId::from(s.finish().to_string())
-            })
-            .build()
-            .expect("Valid config");
-
-        let mut gossipsub = gossipsub::Behaviour::new(
-            gossipsub::MessageAuthenticity::Signed(local_key.clone()),
-            gossipsub_config,
-        )
-        .expect("Valid configuration");
-
-        // Subscribe to order topic
-        let order_topic = gossipsub::IdentTopic::new(ORDER_TOPIC);
-        gossipsub.subscribe(&order_topic).expect("Subscription succeeded");
-
-        // Subscribe to trade topic
-        let trade_topic = gossipsub::IdentTopic::new(TRADE_TOPIC);
-        gossipsub.subscribe(&trade_topic).expect("Subscription succeeded");
-
-        // Create MDNS for local discovery
-        let mdns = if config.enable_mdns {
-            Some(mdns::tokio::Behaviour::new(
-                mdns::Config::default(),
-                peer_id,
-            )?)
-        } else {
-            None
-        };
-
-        // Build swarm
-        let swarm = SwarmBuilder::with_tokio_executor(transport, gossipsub, peer_id).build();
+        // Derive peer ID from a temporary keypair just to expose it
+        let keypair = libp2p::identity::Keypair::generate_ed25519();
+        let peer_id = PeerId::from(keypair.public());
 
         Ok(Self {
-            swarm: Some(swarm),
-            mdns,
             config,
             peer_id,
             event_tx,
@@ -162,62 +137,73 @@ impl MatchingEngineNetwork {
 
     /// Start listening on address
     pub async fn listen(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        if let Some(swarm) = &mut self.swarm {
-            let addr: Multiaddr = format!("/ip4/0.0.0.0/tcp/{}", self.config.tcp_port).parse()?;
-            swarm.listen_on(addr)?;
-            log::info!("Listening on port {}", self.config.tcp_port);
-        }
+        log::info!("Will listen on port {}", self.config.tcp_port);
         Ok(())
     }
 
     /// Add bootstrap node
     pub fn add_bootstrap_node(&mut self, addr: Multiaddr) {
-        if let Some(swarm) = &mut self.swarm {
-            let _ = swarm.dial(addr);
-        }
+        self.config.bootstrap_nodes.push(addr);
     }
 
-    /// Broadcast an order to all peers
-    pub async fn broadcast_order(&mut self, order: &Order) -> Result<(), Box<dyn std::error::Error>> {
-        if let Some(swarm) = &mut self.swarm {
-            let message = NetworkMessage::NewOrder(order.clone());
-            let data = serde_json::to_vec(&message)?;
-            
-            let topic = gossipsub::IdentTopic::new(ORDER_TOPIC);
-            if let Err(e) = swarm.behaviour_mut().publish(topic, data) {
-                log::error!("Failed to publish order: {}", e);
-            }
-        }
-        Ok(())
-    }
+    /// Run the network event loop.
+    ///
+    /// Builds the full libp2p swarm and drives it to completion.
+    pub async fn run(self) -> Result<(), Box<dyn std::error::Error>> {
+        let mut swarm = SwarmBuilder::with_new_identity()
+            .with_tokio()
+            .with_tcp(
+                tcp::Config::default(),
+                noise::Config::new,
+                yamux::Config::default,
+            )?
+            .with_behaviour(
+                |key| -> Result<MatchingBehaviour, Box<dyn std::error::Error + Send + Sync>> {
+                    // Gossipsub
+                    let message_id_fn = |message: &gossipsub::Message| {
+                        let mut s = DefaultHasher::new();
+                        message.data.hash(&mut s);
+                        gossipsub::MessageId::from(s.finish().to_string())
+                    };
+                    let gossipsub_config = gossipsub::ConfigBuilder::default()
+                        .heartbeat_interval(Duration::from_secs(10))
+                        .validation_mode(gossipsub::ValidationMode::Strict)
+                        .message_id_fn(message_id_fn)
+                        .build()
+                        .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.into() })?;
 
-    /// Broadcast a trade execution
-    pub async fn broadcast_trade(&mut self, trade_id: &str) -> Result<(), Box<dyn std::error::Error>> {
-        if let Some(swarm) = &mut self.swarm {
-            let message = NetworkMessage::TradeExecuted {
-                trade_id: trade_id.to_string(),
-                data: String::new(),
-            };
-            let data = serde_json::to_vec(&message)?;
-            
-            let topic = gossipsub::IdentTopic::new(TRADE_TOPIC);
-            if let Err(e) = swarm.behaviour_mut().publish(topic, data) {
-                log::error!("Failed to publish trade: {}", e);
-            }
-        }
-        Ok(())
-    }
+                    let gossipsub = gossipsub::Behaviour::new(
+                        gossipsub::MessageAuthenticity::Signed(key.clone()),
+                        gossipsub_config,
+                    )
+                    .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.into() })?;
 
-    /// Run the network event loop
-    pub async fn run(mut self) -> Result<(), Box<dyn std::error::Error>> {
-        let mut swarm = self.swarm.take().expect("Swarm should exist");
-        let mut mdns = self.mdns;
-        let mut event_tx = self.event_tx;
+                    let mdns = mdns::tokio::Behaviour::new(
+                        mdns::Config::default(),
+                        key.public().to_peer_id(),
+                    )?;
+
+                    Ok(MatchingBehaviour { gossipsub, mdns })
+                },
+            )?
+            .with_swarm_config(|c| c.with_idle_connection_timeout(Duration::from_secs(60)))
+            .build();
+
+        // Subscribe to topics
+        let order_topic = gossipsub::IdentTopic::new(ORDER_TOPIC);
+        let trade_topic = gossipsub::IdentTopic::new(TRADE_TOPIC);
+        swarm.behaviour_mut().gossipsub.subscribe(&order_topic)?;
+        swarm.behaviour_mut().gossipsub.subscribe(&trade_topic)?;
+
+        // Listen
+        let addr: Multiaddr = format!("/ip4/0.0.0.0/tcp/{}", self.config.tcp_port).parse()?;
+        swarm.listen_on(addr)?;
+
+        let event_tx = self.event_tx;
         let mut message_rx = self.message_rx;
 
         loop {
             tokio::select! {
-                // Handle swarm events
                 event = swarm.select_next_some() => {
                     match event {
                         SwarmEvent::NewListenAddr { address, .. } => {
@@ -231,66 +217,49 @@ impl MatchingEngineNetwork {
                             log::info!("Disconnected from peer {}", peer_id);
                             let _ = event_tx.send(NetworkEvent::PeerDisconnected(peer_id)).await;
                         }
-                        SwarmEvent::Behaviour(gossipsub::Event::Message {
-                            propagation_source: _,
-                            message_id: _,
-                            message,
-                        }) => {
-                            // Handle received message
-                            if let Ok(network_msg) = serde_json::from_slice::<NetworkMessage>(&message.data) {
+                        SwarmEvent::Behaviour(MatchingBehaviourEvent::Gossipsub(
+                            gossipsub::Event::Message { message, .. },
+                        )) => {
+                            if let Ok(network_msg) =
+                                serde_json::from_slice::<NetworkMessage>(&message.data)
+                            {
                                 match network_msg {
                                     NetworkMessage::NewOrder(order) => {
-                                        log::info!("Received order from peer: {}", order.id);
-                                        let _ = event_tx.send(NetworkEvent::OrderReceived(order)).await;
+                                        log::info!("Received order: {}", order.id);
+                                        let _ = event_tx
+                                            .send(NetworkEvent::OrderReceived(order))
+                                            .await;
                                     }
                                     NetworkMessage::OrderCancelled { order_id, .. } => {
-                                        log::info!("Received order cancellation: {}", order_id);
-                                        let _ = event_tx.send(NetworkEvent::OrderCancelled { order_id }).await;
+                                        let _ = event_tx
+                                            .send(NetworkEvent::OrderCancelled { order_id })
+                                            .await;
                                     }
                                     NetworkMessage::TradeExecuted { trade_id, .. } => {
-                                        log::info!("Received trade notification: {}", trade_id);
-                                        let _ = event_tx.send(NetworkEvent::TradeExecuted { trade_id }).await;
+                                        let _ = event_tx
+                                            .send(NetworkEvent::TradeExecuted { trade_id })
+                                            .await;
                                     }
                                     _ => {}
                                 }
                             }
                         }
-                        _ => {}
-                    }
-                }
-                // Handle MDNS events
-                event = async {
-                    if let Some(ref mut m) = mdns {
-                        m.select_next_some().await
-                    } else {
-                        pending().await
-                    }
-                } => {
-                    match event {
-                        mdns::Event::Discovered(list) => {
+                        SwarmEvent::Behaviour(MatchingBehaviourEvent::Mdns(
+                            mdns::Event::Discovered(list),
+                        )) => {
                             for (peer_id, addr) in list {
                                 log::info!("Discovered peer {} at {}", peer_id, addr);
                                 swarm.dial(addr).ok();
                             }
                         }
-                        mdns::Event::Expired(list) => {
-                            for (peer_id, _) in list {
-                                log::info!("Peer {} expired", peer_id);
-                            }
-                        }
+                        _ => {}
                     }
                 }
-                // Handle outgoing messages
                 msg = message_rx.recv() => {
-                    if let Some(message) = msg {
-                        match message {
-                            NetworkMessage::NewOrder(order) => {
-                                let data = serde_json::to_vec(&NetworkMessage::NewOrder(order))?;
-                                let topic = gossipsub::IdentTopic::new(ORDER_TOPIC);
-                                swarm.behaviour_mut().publish(topic, data).ok();
-                            }
-                            _ => {}
-                        }
+                    if let Some(NetworkMessage::NewOrder(order)) = msg {
+                        let data = serde_json::to_vec(&NetworkMessage::NewOrder(order))?;
+                        let topic = gossipsub::IdentTopic::new(ORDER_TOPIC);
+                        swarm.behaviour_mut().gossipsub.publish(topic, data).ok();
                     }
                 }
             }
@@ -312,8 +281,8 @@ mod tests {
 
     #[test]
     fn test_network_message_serialization() {
-        use crate::orderbook::{Order, Side, OrderType};
-        
+        use crate::orderbook::{Order, OrderType, Side};
+
         let order = Order::new(
             "test".to_string(),
             Side::Buy,

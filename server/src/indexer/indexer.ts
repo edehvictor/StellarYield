@@ -1,4 +1,5 @@
 import * as StellarSdk from '@stellar/stellar-sdk';
+import { recordReplayError } from './indexerStatus';
 const RPC_URL = process.env.RPC_URL || 'https://soroban-testnet.stellar.org';
 const CONTRACT_ID = process.env.VITE_CONTRACT_ID || '';
 const POLL_INTERVAL = 5000; // 5 seconds
@@ -28,7 +29,7 @@ type IndexerPrismaClient = {
 
 async function loadPrismaClient(): Promise<IndexerPrismaClient | null> {
   try {
-    const prismaModule = (await import('@prisma/client')) as {
+    const prismaModule = (await import('@prisma/client')) as unknown as {
       PrismaClient?: new () => IndexerPrismaClient;
     };
 
@@ -124,6 +125,10 @@ export async function startIndexer() {
       setTimeout(poll, POLL_INTERVAL);
     } catch (error) {
       console.error('[Indexer] Error:', error);
+      recordReplayError(
+        error instanceof Error ? error.message : String(error),
+        startLedger,
+      );
       setTimeout(poll, POLL_INTERVAL); // Retry
     }
   };
