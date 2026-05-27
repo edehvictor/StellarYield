@@ -1,12 +1,14 @@
 import { STRATEGY_EVENT_TYPE, VERSION_CHANGE_TYPE } from '../queues/types';
 import { StrategySnapshotVersioningService } from '../services/strategySnapshotVersioningService';
 
-// Mock Prisma
-jest.mock('@prisma/client', () => ({
-  PrismaClient: jest.fn(() => ({
+// Mock Prisma — singleton pattern so the module-level `prisma` and test's
+// mockPrisma reference the same object.
+jest.mock('@prisma/client', () => {
+  const instance = {
     strategySnapshot: {
       create: jest.fn(),
       findUnique: jest.fn(),
+      findUniqueOrThrow: jest.fn(),
       findFirst: jest.fn(),
       findMany: jest.fn(),
       update: jest.fn(),
@@ -23,8 +25,11 @@ jest.mock('@prisma/client', () => ({
       create: jest.fn(),
       findMany: jest.fn(),
     },
-  })),
-}));
+  };
+  const MockPrismaClient = jest.fn(() => instance);
+  (MockPrismaClient as any).__mockInstance = instance;
+  return { PrismaClient: MockPrismaClient };
+});
 
 describe('StrategySnapshotVersioningService', () => {
   let service: StrategySnapshotVersioningService;
@@ -33,7 +38,8 @@ describe('StrategySnapshotVersioningService', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     service = new StrategySnapshotVersioningService();
-    mockPrisma = require('@prisma/client').PrismaClient();
+    const { PrismaClient } = require('@prisma/client');
+    mockPrisma = (PrismaClient as any).__mockInstance;
   });
 
   describe('Snapshot Creation', () => {
@@ -310,6 +316,8 @@ describe('StrategySnapshotVersioningService', () => {
       mockPrisma.strategyVersionHistory.findMany.mockResolvedValue([
         {
           id: 'change-1',
+          fromVersion: 1,
+          toVersion: 2,
           changeType: VERSION_CHANGE_TYPE.WEIGHTS_UPDATE,
           versionChanges: {
             keyWeights: {
@@ -379,7 +387,7 @@ describe('StrategySnapshotVersioningService', () => {
 
       mockPrisma.strategySnapshot.updateMany.mockResolvedValue({ count: 5 });
 
-      const archived = await service.archiveOldVersions('strategy-1', 10);
+      const archived = await service.archiveOldVersions('strategy-1', 0);
 
       expect(archived).toBe(5);
     });
@@ -417,7 +425,14 @@ describe('StrategySnapshotVersioningService', () => {
 
   describe('Change Type Detection', () => {
     it('should detect weights-only changes', async () => {
-      mockPrisma.strategySnapshot.findFirst.mockResolvedValue(null);
+      mockPrisma.strategySnapshot.findFirst.mockResolvedValue({
+        id: 'snap-1',
+        version: 1,
+        status: 'ACTIVE',
+        keyWeights: { BTC: 0.4 },
+        riskParameters: { vol: 0.25 },
+        constraints: { min: 0.05 },
+      });
       mockPrisma.strategySnapshot.create.mockResolvedValue({
         id: 'snap-2',
         version: 2,

@@ -1,6 +1,7 @@
 import { useState, useEffect } from "react";
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, RadarChart, PolarGrid, PolarAngleAxis, PolarRadiusAxis, Radar } from "recharts";
 import { Activity, AlertTriangle, CheckCircle, XCircle, TrendingUp, TrendingDown, Minus, RefreshCw, Settings } from "lucide-react";
+import StatusBadge from '../../components/StatusBadge';
 
 // ── Types ───────────────────────────────────────────────────────────────
 
@@ -202,10 +203,11 @@ export default function StrategyHealthPanel({ strategyIds = ['strategy_1', 'stra
           >
             <div className="flex items-center justify-between mb-2">
               <div className="flex items-center gap-2">
-                {STATUS_ICONS[score.status]}
-                <span className="text-xs font-semibold uppercase tracking-wider text-gray-400">
-                  {score.status}
-                </span>
+                <StatusBadge
+                  variant={score.status === 'healthy' ? 'success' : score.status === 'degraded' ? 'warning' : score.status === 'critical' ? 'danger' : 'neutral'}
+                  label={score.status}
+                  compact
+                />
               </div>
               {getTrendIcon(score.trend)}
             </div>
@@ -253,10 +255,16 @@ export default function StrategyHealthPanel({ strategyIds = ['strategy_1', 'stra
               </p>
             </div>
             <div className="flex items-center gap-3">
-              {STATUS_ICONS[selectedStrategy.status]}
-              <span className="text-lg font-bold" style={{ color: getStatusColor(selectedStrategy.overallScore) }}>
-                {selectedStrategy.overallScore}/100
-              </span>
+              <div className="flex items-center gap-3">
+                <StatusBadge
+                  variant={selectedStrategy.status === 'healthy' ? 'success' : selectedStrategy.status === 'degraded' ? 'warning' : selectedStrategy.status === 'critical' ? 'danger' : 'neutral'}
+                  label={selectedStrategy.status}
+                  compact
+                />
+                <span className="text-lg font-bold" style={{ color: getStatusColor(selectedStrategy.overallScore) }}>
+                  {selectedStrategy.overallScore}/100
+                </span>
+              </div>
             </div>
           </div>
 

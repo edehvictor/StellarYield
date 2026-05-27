@@ -1,9 +1,11 @@
 import { EXECUTION_TYPE, REBALANCE_STATUS } from '../queues/types';
 import { RebalanceQueueService } from '../services/rebalanceQueueService';
 
-// Mock Prisma
-jest.mock('@prisma/client', () => ({
-  PrismaClient: jest.fn(() => ({
+// Mock Prisma — the factory creates one shared instance inside its own closure
+// and exposes it via __mockInstance so the test can configure the same object
+// that the module-level `prisma` singleton in the service was assigned.
+jest.mock('@prisma/client', () => {
+  const instance = {
     rebalanceQueueEntry: {
       create: jest.fn(),
       findUnique: jest.fn(),
@@ -18,8 +20,11 @@ jest.mock('@prisma/client', () => ({
       create: jest.fn(),
       findMany: jest.fn(),
     },
-  })),
-}));
+  };
+  const MockPrismaClient = jest.fn(() => instance);
+  (MockPrismaClient as any).__mockInstance = instance;
+  return { PrismaClient: MockPrismaClient };
+});
 
 describe('RebalanceQueueService', () => {
   let service: RebalanceQueueService;
@@ -28,7 +33,19 @@ describe('RebalanceQueueService', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     service = new RebalanceQueueService();
-    mockPrisma = require('@prisma/client').PrismaClient();
+    const { PrismaClient } = require('@prisma/client');
+    mockPrisma = (PrismaClient as any).__mockInstance;
+  });
+
+  afterEach(async () => {
+    jest.clearAllMocks();
+    // Ensure timers are cleared
+    jest.clearAllTimers();
+  });
+
+  afterAll(async () => {
+    // Add any async cleanup
+    await new Promise(resolve => setTimeout(() => resolve(undefined), 100));
   });
 
   describe('enqueueRebalance', () => {
@@ -412,13 +429,14 @@ describe('RebalanceQueueService', () => {
       mockPrisma.rebalanceQueueEntry.update.mockResolvedValue({
         id: 'queue-1',
         status: REBALANCE_STATUS.COMPLETED,
-        completedAt: expect.any(Date),
+        completedAt: new Date(), // Ensure Date object, not undefined
       });
 
       const result = await service.markAsCompleted('queue-1', '0xabc123');
 
       expect(result.status).toBe(REBALANCE_STATUS.COMPLETED);
       expect(result.completedAt).toBeDefined();
+      expect(result.completedAt).toBeInstanceOf(Date); // Add validation
       expect(mockPrisma.rebalanceHistory.create).toHaveBeenCalled();
     });
 
@@ -427,7 +445,7 @@ describe('RebalanceQueueService', () => {
         id: 'queue-1',
         status: REBALANCE_STATUS.CANCELLED,
         lastError: 'User requested cancellation',
-        completedAt: expect.any(Date),
+        completedAt: new Date(),
       });
 
       const result = await service.cancelEntry('queue-1', 'User requested cancellation');

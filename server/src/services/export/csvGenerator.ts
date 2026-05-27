@@ -115,13 +115,45 @@ export function createCSVStream(records: TransactionRecord[]): Readable {
 }
 
 /**
- * Create a filename for the tax export CSV.
- *
- * @param address - The user's wallet address.
- * @returns A safe filename string.
+ * Replace any character that is not alphanumeric, dot, underscore or hyphen
+ * with a single hyphen, and trim leading/trailing hyphens. Keeps export
+ * filenames safe across operating systems and Content-Disposition headers.
  */
-export function createExportFilename(address: string): string {
+export function sanitizeFilenameSegment(value: string): string {
+  return String(value)
+    .replace(/[^a-zA-Z0-9._-]+/g, "-")
+    .replace(/\.{2,}/g, ".") // collapse runs of dots so no segment contains ".."
+    .replace(/^[-.]+|[-.]+$/g, "");
+}
+
+/** Resolve the current deployment environment for filename tagging. */
+function currentEnvironment(): string {
+  const raw =
+    process.env.STELLAR_NETWORK ??
+    process.env.NETWORK ??
+    process.env.NODE_ENV ??
+    "production";
+  return sanitizeFilenameSegment(raw.toLowerCase()) || "production";
+}
+
+/**
+ * Create a standardized, filesystem-safe filename for an export download.
+ *
+ * Format: `stellaryield-<reportType>-<environment>-<shortAddr>-<YYYY-MM-DD>.<ext>`
+ * e.g. `stellaryield-tax-report-testnet-GABCDEFG-2026-05-26.csv`.
+ *
+ * @param address - The user's wallet address (first 8 chars are used).
+ * @param options - Optional report type (default `tax-report`) and extension
+ *   (default `csv`). All segments are sanitized of unsafe characters.
+ */
+export function createExportFilename(
+  address: string,
+  options: { reportType?: string; extension?: string } = {},
+): string {
+  const reportType = sanitizeFilenameSegment(options.reportType ?? "tax-report");
+  const extension = sanitizeFilenameSegment(options.extension ?? "csv") || "csv";
+  const env = currentEnvironment();
   const date = new Date().toISOString().split("T")[0];
-  const shortAddr = address.slice(0, 8);
-  return `stellaryield-tax-report-${shortAddr}-${date}.csv`;
+  const shortAddr = sanitizeFilenameSegment(address.slice(0, 8));
+  return `stellaryield-${reportType}-${env}-${shortAddr}-${date}.${extension}`;
 }

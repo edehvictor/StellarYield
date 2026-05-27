@@ -18,6 +18,17 @@ export interface NetYieldResult {
   feeDragApy: number;
   assumptions: NetYieldAssumptions;
   sensitivity: YieldSensitivityProfile[];
+  feeAttribution: FeeAttributionBreakdown;
+}
+
+export interface FeeAttributionBreakdown {
+  managementFeeApy: number;
+  protocolFeeApy: number;
+  slippageApy: number;
+  networkFeeApy: number;
+  rewardOffsetApy: number;
+  unknownFeeApy: number;
+  totalFeeDragApy: number;
 }
 
 const BPS_DENOMINATOR = 10_000;
@@ -56,6 +67,30 @@ function clampBps(value: number, min = 0, max = 3_000): number {
 function roundTo(value: number, digits = 2): number {
   const factor = 10 ** digits;
   return Math.round(value * factor) / factor;
+}
+
+function calculateFeeAttribution(
+  grossApy: number,
+  assumptions: NetYieldAssumptions,
+): FeeAttributionBreakdown {
+  const protocolFeeApy = (grossApy * assumptions.protocolFeeBps) / BPS_DENOMINATOR;
+  const managementFeeApy = (grossApy * assumptions.vaultFeeBps) / BPS_DENOMINATOR;
+  const networkFeeApy = (grossApy * assumptions.rebalanceCostBps) / BPS_DENOMINATOR;
+  const slippageApy = (grossApy * assumptions.slippageBps) / BPS_DENOMINATOR;
+  const rewardOffsetApy = Math.max(0, roundTo(grossApy * 0.0015));
+  const knownFeeTotal = protocolFeeApy + managementFeeApy + networkFeeApy + slippageApy;
+  const totalFeeDragApy = knownFeeTotal;
+  const unknownFeeApy = Math.max(0, roundTo(totalFeeDragApy - knownFeeTotal));
+
+  return {
+    managementFeeApy: roundTo(managementFeeApy),
+    protocolFeeApy: roundTo(protocolFeeApy),
+    slippageApy: roundTo(slippageApy),
+    networkFeeApy: roundTo(networkFeeApy),
+    rewardOffsetApy,
+    unknownFeeApy,
+    totalFeeDragApy: roundTo(totalFeeDragApy),
+  };
 }
 
 export function sanitizeAssumptions(
@@ -116,5 +151,6 @@ export function calculateNetYield(
     feeDragApy: roundTo(feeDragApy),
     assumptions: sanitized,
     sensitivity,
+    feeAttribution: calculateFeeAttribution(boundedGrossApy, sanitized),
   };
 }

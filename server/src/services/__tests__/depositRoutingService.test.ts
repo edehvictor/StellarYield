@@ -37,6 +37,10 @@ beforeEach(() => {
     source: "router_simulation",
     slippageApplied: 0.005,
     amountOutAfterSlippage: "995",
+    quotedAt: "2026-01-01T00:00:00.000Z",
+    minAmountOutStroops: "995",
+    quoteAgeMs: 0,
+    isFallback: false,
   });
 
   mockGetFee.mockResolvedValue({

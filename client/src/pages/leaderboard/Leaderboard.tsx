@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from "react";
-import { Trophy, Medal, Star, Wallet } from "lucide-react";
+import { Trophy, Medal, Star, Wallet, AlertCircle, RefreshCw, Users } from "lucide-react";
 import { apiUrl } from "../../lib/api";
 
 interface LeaderboardEntry {
@@ -13,18 +13,31 @@ interface LeaderboardEntry {
 const Leaderboard: React.FC = () => {
   const [leaderboard, setLeaderboard] = useState<LeaderboardEntry[]>([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
+  const fetchLeaderboard = () => {
+    setLoading(true);
+    setError(null);
     fetch(apiUrl("/api/leaderboard"))
-      .then((res) => res.json())
+      .then((res) => {
+        if (!res.ok) {
+          throw new Error(`HTTP ${res.status}: ${res.statusText}`);
+        }
+        return res.json();
+      })
       .then((data) => {
         setLeaderboard(Array.isArray(data) ? data : data.items ?? []);
         setLoading(false);
       })
       .catch((err) => {
         console.error("Failed to fetch leaderboard", err);
+        setError(err instanceof Error ? err.message : "Failed to load leaderboard data");
         setLoading(false);
       });
+  };
+
+  useEffect(() => {
+    fetchLeaderboard();
   }, []);
 
   const truncateAddress = (address: string) => {
@@ -33,8 +46,75 @@ const Leaderboard: React.FC = () => {
 
   if (loading) {
     return (
-      <div className="flex justify-center items-center h-64">
-        <div className="animate-spin rounded-full h-12 w-12 border-t-2 border-b-2 border-indigo-500"></div>
+      <div className="space-y-8 max-w-5xl mx-auto">
+        <div className="text-center space-y-4">
+          <h2 className="text-4xl font-black tracking-tight text-white flex items-center justify-center gap-3">
+            <Trophy className="text-yellow-500" size={40} />
+            TVL LEADERBOARD
+          </h2>
+          <p className="text-gray-400 max-w-2xl mx-auto text-lg italic">
+            Compete with the whales to earn exclusive badges and protocol rewards.
+          </p>
+        </div>
+        <div className="glass-panel p-12 flex flex-col items-center justify-center space-y-4">
+          <div className="animate-spin rounded-full h-16 w-16 border-t-2 border-b-2 border-indigo-500"></div>
+          <p className="text-gray-400 text-sm">Loading leaderboard rankings...</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="space-y-8 max-w-5xl mx-auto">
+        <div className="text-center space-y-4">
+          <h2 className="text-4xl font-black tracking-tight text-white flex items-center justify-center gap-3">
+            <Trophy className="text-yellow-500" size={40} />
+            TVL LEADERBOARD
+          </h2>
+          <p className="text-gray-400 max-w-2xl mx-auto text-lg italic">
+            Compete with the whales to earn exclusive badges and protocol rewards.
+          </p>
+        </div>
+        <div className="glass-panel p-12 flex flex-col items-center justify-center space-y-4 border border-red-500/30">
+          <AlertCircle className="text-red-400" size={48} />
+          <div className="text-center space-y-2">
+            <h3 className="text-xl font-bold text-white">Failed to Load Leaderboard</h3>
+            <p className="text-gray-400 text-sm max-w-md">{error}</p>
+          </div>
+          <button
+            onClick={fetchLeaderboard}
+            className="flex items-center gap-2 px-6 py-3 bg-indigo-500 hover:bg-indigo-600 text-white font-semibold rounded-lg transition-colors"
+          >
+            <RefreshCw size={16} />
+            Retry
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  if (leaderboard.length === 0) {
+    return (
+      <div className="space-y-8 max-w-5xl mx-auto">
+        <div className="text-center space-y-4">
+          <h2 className="text-4xl font-black tracking-tight text-white flex items-center justify-center gap-3">
+            <Trophy className="text-yellow-500" size={40} />
+            TVL LEADERBOARD
+          </h2>
+          <p className="text-gray-400 max-w-2xl mx-auto text-lg italic">
+            Compete with the whales to earn exclusive badges and protocol rewards.
+          </p>
+        </div>
+        <div className="glass-panel p-12 flex flex-col items-center justify-center space-y-4">
+          <Users className="text-gray-500" size={64} />
+          <div className="text-center space-y-2">
+            <h3 className="text-xl font-bold text-white">No Rankings Yet</h3>
+            <p className="text-gray-400 text-sm max-w-md">
+              Be the first to deposit and claim your spot on the leaderboard!
+            </p>
+          </div>
+        </div>
       </div>
     );
   }

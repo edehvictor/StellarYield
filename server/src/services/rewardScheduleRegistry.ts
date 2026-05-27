@@ -1,5 +1,5 @@
 import { RewardScheduleModel } from "../models/RewardSchedule";
-import { RewardSchedule, RewardEventType } from "../types/rewards";
+import { RewardSchedule } from "../types/rewards";
 
 export class RewardScheduleRegistry {
   /**

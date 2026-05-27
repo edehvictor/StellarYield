@@ -53,7 +53,8 @@ describe('ApyDashboard states', () => {
 
     render(<ApyDashboard />);
 
-    expect(await screen.findByText('Blend')).toBeInTheDocument();
+    const blendLabels = await screen.findAllByText('Blend');
+    expect(blendLabels.length).toBeGreaterThan(0);
     expect(screen.getByText('USDC')).toBeInTheDocument();
     expect(screen.getByText('8.42')).toBeInTheDocument();
   });
@@ -96,7 +97,8 @@ describe('ApyDashboard states', () => {
     expect(await screen.findByText(/Failed to Load APY Data/i)).toBeInTheDocument();
     await user.click(screen.getByRole('button', { name: /Retry/i }));
 
-    expect(await screen.findByText('Soroswap')).toBeInTheDocument();
+    const soroswapLabels = await screen.findAllByText('Soroswap');
+    expect(soroswapLabels.length).toBeGreaterThan(0);
   });
 
   it('handles partial APY rows without breaking layout', async () => {
@@ -113,7 +115,8 @@ describe('ApyDashboard states', () => {
 
     render(<ApyDashboard />);
 
-    expect(await screen.findByText('Unknown Protocol')).toBeInTheDocument();
+    const unknownProtocols = await screen.findAllByText('Unknown Protocol');
+    expect(unknownProtocols.length).toBeGreaterThan(0);
     expect(screen.getByText('Unknown Asset')).toBeInTheDocument();
     expect(screen.getByText('0.00')).toBeInTheDocument();
   });

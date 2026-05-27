@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { Download, FileJson, Loader2, CheckCircle2, AlertCircle } from 'lucide-react';
+import { buildExportFilename } from './exportFilename';
 
 export const ExportBundle: React.FC = () => {
   const [isExporting, setIsExporting] = useState(false);
@@ -17,7 +18,7 @@ export const ExportBundle: React.FC = () => {
       const url = window.URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = `stellar-yield-snapshot-${new Date().toISOString().split('T')[0]}.json`;
+      a.download = buildExportFilename('snapshot', 'json');
       document.body.appendChild(a);
       a.click();
       window.URL.revokeObjectURL(url);

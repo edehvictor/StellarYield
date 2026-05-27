@@ -18,4 +18,13 @@ export interface CreateAlertPayload {
   condition: AlertCondition;
   thresholdValue: number;
   email: string;
+  preferences?: AlertPreferences;
+}
+
+export interface AlertPreferences {
+  channel: "email" | "in_app";
+  cooldownMinutes: number;
+  severityThreshold: number;
+  quietHoursStart: number;
+  quietHoursEnd: number;
 }

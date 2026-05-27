@@ -1,0 +1,33 @@
+{
+  "_comment": "Previous deployment snapshot (example).",
+  "testnet": {
+    "vault": "GCURRENTPREVTESTNETVAULT",
+    "zap": "GCURRENTPREVTESTNETZAP",
+    "token": "",
+    "governance": "GCURRENTPREVTESTNETGOV",
+    "strategy": "GCURRENTPREVTESTNETSTRAT",
+    "emissionController": "GCURRENTPREVTESTNETEMC",
+    "liquidStaking": "GCURRENTPREVTESTNETLS",
+    "stableswap": "GCURRENTPREVTESTNETSS"
+  },
+  "mainnet": {
+    "vault": "GCURRENTPREVMAINVAULT",
+    "zap": "GCURRENTPREVMAINZAP",
+    "token": "GCURRENTPREVMAINTOKEN",
+    "governance": "GCURRENTPREVMAINGOV",
+    "strategy": "GCURRENTPREVMAINSTRAT",
+    "emissionController": "GCURRENTPREVMAINEMC",
+    "liquidStaking": "",
+    "stableswap": "GCURRENTPREVMAINSS"
+  },
+  "local": {
+    "vault": "",
+    "zap": "",
+    "token": "",
+    "governance": "",
+    "strategy": "",
+    "emissionController": "",
+    "liquidStaking": "",
+    "stableswap": ""
+  }
+}

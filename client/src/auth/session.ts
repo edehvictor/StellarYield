@@ -169,6 +169,8 @@ export async function connectWalletSession(
       providerId,
       providerLabel: getProviderLabel(providerId),
       verificationStatus: "verified",
+      connectedAt: new Date().toISOString(),
+      lastActivityAt: new Date().toISOString(),
     };
     saveSession(session);
     return session;
@@ -189,6 +191,8 @@ export async function connectWalletSession(
     sessionSecret: sessionKey.secret(),
     loginHint,
     verificationStatus: "degraded",
+    connectedAt: new Date().toISOString(),
+    lastActivityAt: new Date().toISOString(),
   };
 
   session.verificationStatus = await verifySmartWalletSession(session);

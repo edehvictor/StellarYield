@@ -11,6 +11,7 @@ import {
   UserPlus,
 } from "lucide-react";
 import { getApiBaseUrl } from "../../lib/api";
+import { resolveAppBaseUrl, buildReferralLink } from "./referralLink";
 
 interface ReferralData {
   referredTvl: number;
@@ -20,7 +21,16 @@ interface ReferralData {
 }
 
 const API_BASE = getApiBaseUrl();
-const APP_URL = import.meta.env.VITE_APP_URL || "https://stellaryield.vercel.app";
+const { url: APP_URL, isFallback: APP_URL_IS_FALLBACK } = resolveAppBaseUrl(
+  import.meta.env.VITE_APP_URL as string | undefined,
+);
+if (APP_URL_IS_FALLBACK) {
+  // Don't crash when VITE_APP_URL is unset — fall back to the default domain
+  // and warn so misconfigured deployments are noticed.
+  console.warn(
+    "[referrals] VITE_APP_URL is not configured; referral links use the default domain.",
+  );
+}
 
 /**
  * ReferralDashboard — User dashboard for the referral & affiliate system.
@@ -34,6 +44,7 @@ export default function ReferralDashboard() {
   const [loading, setLoading] = useState(false);
   const [claiming, setClaiming] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [copyError, setCopyError] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [claimSuccess, setClaimSuccess] = useState(false);
 
@@ -42,9 +53,7 @@ export default function ReferralDashboard() {
   const [submitSuccess, setSubmitSuccess] = useState(false);
   const [referralCodeInput, setReferralCodeInput] = useState("");
 
-  const referralLink = walletAddress
-    ? `${APP_URL}/?ref=${encodeURIComponent(walletAddress)}`
-    : "";
+  const referralLink = buildReferralLink(APP_URL, walletAddress ?? "");
 
   const fetchReferralData = useCallback(async () => {
     if (!walletAddress) return;
@@ -74,20 +83,29 @@ export default function ReferralDashboard() {
   }, [isConnected, walletAddress, fetchReferralData]);
 
   const handleCopy = async () => {
+    if (!referralLink) return;
+    setCopyError(false);
     try {
       await navigator.clipboard.writeText(referralLink);
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
     } catch {
-      // Fallback for older browsers
-      const textArea = document.createElement("textarea");
-      textArea.value = referralLink;
-      document.body.appendChild(textArea);
-      textArea.select();
-      document.execCommand("copy");
-      document.body.removeChild(textArea);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
+      // Fallback for browsers without the async clipboard API.
+      try {
+        const textArea = document.createElement("textarea");
+        textArea.value = referralLink;
+        document.body.appendChild(textArea);
+        textArea.select();
+        const ok = document.execCommand("copy");
+        document.body.removeChild(textArea);
+        if (!ok) throw new Error("Clipboard copy was rejected");
+        setCopied(true);
+        setTimeout(() => setCopied(false), 2000);
+      } catch {
+        // Surface a clear failure instead of pretending the copy succeeded.
+        setCopyError(true);
+        setTimeout(() => setCopyError(false), 4000);
+      }
     }
   };
 
@@ -231,6 +249,13 @@ export default function ReferralDashboard() {
             )}
           </button>
         </div>
+        {copyError && (
+          <p className="text-red-400 text-xs mt-2 flex items-center gap-1">
+            <AlertCircle size={12} />
+            Couldn&apos;t copy automatically — select the link above and copy it
+            manually.
+          </p>
+        )}
         <p className="text-gray-500 text-xs mt-2">
           Share this link. When someone deposits via your link, you earn a
           percentage of the protocol fees they generate.

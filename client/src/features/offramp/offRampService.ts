@@ -3,33 +3,35 @@
  * Handles integration with MoonPay or Stellar Anchor for bank withdrawals
  */
 
-import type { OffRampTransaction, WithdrawalRequest, OffRampProvider, OffRampError, OffRampErrorType } from "./types";
+import type { OffRampTransaction, WithdrawalRequest, OffRampProvider, OffRampErrorType } from "./types";
+import { OffRampError } from "./types";
 
-const STORAGE_KEY = "stellar_yield_offramp_txns";
-
-/**
- * Create a structured off-ramp error
- */
 function createOffRampError(
     type: OffRampErrorType,
     userMessage: string,
     retryable: boolean,
-    originalError?: Error,
+    cause?: Error,
     transactionId?: string,
 ): OffRampError {
-    const error = new Error(userMessage) as OffRampError;
-    error.type = type;
-    error.userMessage = userMessage;
-    error.retryable = retryable;
-    error.transactionId = transactionId;
-    if (originalError) {
-        error.cause = originalError;
-    }
-    return error;
+    const err = new OffRampError(userMessage, type, cause);
+    err.userMessage = userMessage;
+    err.retryable = retryable;
+    err.transactionId = transactionId;
+    return err;
 }
 
+function httpErrorType(status: number): OffRampErrorType {
+    const known = [401, 403, 500, 503] as const;
+    if ((known as readonly number[]).includes(status)) {
+        return `HTTP_${status}` as OffRampErrorType;
+    }
+    return "NETWORK_ERROR";
+}
+
+const STORAGE_KEY = "stellar_yield_offramp_txns";
+
 export class OffRampService {
-    private provider: OffRampProvider;
+    readonly provider: OffRampProvider;
     private apiKey: string;
     private baseUrl: string;
 
@@ -58,28 +60,7 @@ export class OffRampService {
         };
 
         // Validate destination address and memo
-        try {
-            this.validateDestination(request.bankAccount, transaction.memo);
-        } catch (error) {
-            if (error instanceof Error && error.message.includes("bank account")) {
-                throw createOffRampError(
-                    "INVALID_BANK_ACCOUNT",
-                    "Bank account number is invalid. Please check the format and try again.",
-                    false,
-                    error,
-                    txId,
-                );
-            } else if (error instanceof Error && error.message.includes("memo")) {
-                throw createOffRampError(
-                    "INVALID_MEMO",
-                    "Account holder name contains invalid characters. Please use only letters and numbers.",
-                    false,
-                    error,
-                    txId,
-                );
-            }
-            throw error;
-        }
+        this.validateDestination(request.bankAccount, transaction.memo);
 
         // Store transaction locally
         this.saveTransaction(transaction);
@@ -141,24 +122,11 @@ export class OffRampService {
             });
 
             if (!response.ok) {
-                if (response.status === 401 || response.status === 403) {
-                    throw createOffRampError(
-                        "AUTHENTICATION_FAILURE",
-                        "Authentication failed. Please contact support.",
-                        false,
-                        undefined,
-                        txId,
-                    );
-                } else if (response.status === 503) {
-                    throw createOffRampError(
-                        "PROVIDER_DOWNTIME",
-                        "Provider is temporarily unavailable. Please try again later.",
-                        true,
-                        undefined,
-                        txId,
-                    );
-                }
-                throw new Error(`Status code: ${response.status}`);
+                throw createOffRampError(
+                    httpErrorType(response.status),
+                    `Status code: ${response.status}`,
+                    response.status >= 500,
+                );
             }
 
             const data = (await response.json()) as { status: string; error?: string };
@@ -188,7 +156,9 @@ export class OffRampService {
                 throw error;
             }
             tx.status = "failed";
-            tx.errorMessage = error instanceof Error ? error.message : "Poll failed";
+            tx.errorMessage = error instanceof OffRampError 
+                ? error.message 
+                : (error instanceof Error ? error.message : "Poll failed");
             this.saveTransaction(tx);
             throw createOffRampError(
                 "NETWORK_ERROR",
@@ -244,10 +214,10 @@ export class OffRampService {
      */
     private validateDestination(bankAccount: string, memo: string): void {
         if (!bankAccount || bankAccount.length < 8) {
-            throw new Error("Invalid bank account number");
+            throw createOffRampError("INVALID_BANK_ACCOUNT", "Invalid bank account", false);
         }
         if (!memo || memo.length === 0 || memo.length > 28) {
-            throw new Error("Invalid memo format");
+            throw createOffRampError("INVALID_MEMO", "Invalid memo format", false);
         }
     }
 
@@ -278,59 +248,10 @@ export class OffRampService {
             });
 
             if (!response.ok) {
-                const errorData = await response.json().catch(() => ({})) as Record<string, unknown>;
-                const errorMessage = (errorData.message as string) || response.statusText;
-
-                if (response.status === 400) {
-                    if (errorMessage.includes("region")) {
-                        throw createOffRampError(
-                            "UNSUPPORTED_REGION",
-                            "Your region is not supported for this transaction. Please check supported countries.",
-                            false,
-                            undefined,
-                            transaction.id,
-                        );
-                    } else if (errorMessage.includes("liquidity")) {
-                        throw createOffRampError(
-                            "INSUFFICIENT_LIQUIDITY",
-                            "Insufficient liquidity for this amount. Please try a smaller amount or try again later.",
-                            true,
-                            undefined,
-                            transaction.id,
-                        );
-                    } else if (errorMessage.includes("exists")) {
-                        throw createOffRampError(
-                            "TRANSACTION_EXISTS",
-                            "A transaction with this account already exists. Please wait for it to complete.",
-                            false,
-                            undefined,
-                            transaction.id,
-                        );
-                    }
-                } else if (response.status === 401 || response.status === 403) {
-                    throw createOffRampError(
-                        "AUTHENTICATION_FAILURE",
-                        "Authentication failed. Please contact support.",
-                        false,
-                        undefined,
-                        transaction.id,
-                    );
-                } else if (response.status === 503) {
-                    throw createOffRampError(
-                        "PROVIDER_DOWNTIME",
-                        "Provider is temporarily unavailable. Please try again later.",
-                        true,
-                        undefined,
-                        transaction.id,
-                    );
-                }
-
                 throw createOffRampError(
-                    "UNKNOWN_ERROR",
-                    `Provider error: ${errorMessage}`,
-                    true,
-                    undefined,
-                    transaction.id,
+                    httpErrorType(response.status),
+                    `Provider error: ${response.statusText}`,
+                    response.status >= 500,
                 );
             }
         } catch (error) {
@@ -338,11 +259,10 @@ export class OffRampService {
                 throw error;
             }
             throw createOffRampError(
-                "NETWORK_ERROR",
-                "Network error. Please check your connection and try again.",
+                "SUBMISSION_FAILED",
+                error instanceof Error ? error.message : "Unknown error",
                 true,
                 error instanceof Error ? error : undefined,
-                transaction.id,
             );
         }
     }

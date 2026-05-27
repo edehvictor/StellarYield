@@ -13,6 +13,7 @@
 
 import { PrismaClient } from "@prisma/client";
 import { sendEmail } from "./emailService";
+import { shouldSuppressAlert, type AlertPreferences } from "./alertsPreferenceRules";
 
 const prisma = new PrismaClient();
 
@@ -27,6 +28,14 @@ export interface CreateAlertInput {
   condition: AlertCondition;
   thresholdValue: number;
   email: string;
+  preferences?: AlertPreferences;
+}
+
+const alertPreferencesStore = new Map<string, AlertPreferences>();
+const alertLastTriggeredStore = new Map<string, number>();
+
+function toAlertKey(walletAddress: string, vaultId: string) {
+  return `${walletAddress.toLowerCase()}::${vaultId.toLowerCase()}`;
 }
 
 // ── CRUD ────────────────────────────────────────────────────────────────
@@ -46,7 +55,7 @@ export async function createAlert(input: CreateAlertInput) {
     );
   }
 
-  return prisma.userAlert.create({
+  const created = await prisma.userAlert.create({
     data: {
       walletAddress: input.walletAddress,
       vaultId: input.vaultId,
@@ -56,6 +65,13 @@ export async function createAlert(input: CreateAlertInput) {
       status: "active",
     },
   });
+  if (input.preferences) {
+    alertPreferencesStore.set(
+      toAlertKey(input.walletAddress, input.vaultId),
+      input.preferences,
+    );
+  }
+  return created;
 }
 
 /** List all non-deleted alerts for a wallet address. */
@@ -104,6 +120,21 @@ export async function evaluateAlerts(
       (alert.condition === "below" && currentApy < alert.thresholdValue);
 
     if (!triggered) continue;
+
+    const key = toAlertKey(alert.walletAddress, alert.vaultId);
+    const preferences = alertPreferencesStore.get(key);
+    if (preferences) {
+      const now = new Date();
+      const suppress = shouldSuppressAlert(
+        now,
+        alertLastTriggeredStore.get(key),
+        preferences,
+      );
+      if (suppress || currentApy < preferences.severityThreshold) {
+        continue;
+      }
+      alertLastTriggeredStore.set(key, now.getTime());
+    }
 
     // Mark triggered first to prevent duplicate emails on concurrent evaluations
     await prisma.userAlert.update({

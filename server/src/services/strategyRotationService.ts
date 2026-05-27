@@ -1,3 +1,48 @@
+export type RotationCandidate = {
+  id: string;
+  score: number; // raw score from strategy evaluation
+  reason?: string;
+  confidence?: number; // 0-100
+};
+
+export type RotationRecord = {
+  timestamp: string;
+  winner: RotationCandidate | null;
+  skipped: { candidate: RotationCandidate; reason: string }[];
+  metadata?: any;
+};
+
+const history: RotationRecord[] = [];
+
+export function decideRotation(candidates: RotationCandidate[], metadata?: any) {
+  if (!candidates || candidates.length === 0) {
+    const rec: RotationRecord = { timestamp: new Date().toISOString(), winner: null, skipped: [], metadata };
+    history.push(rec);
+    return rec;
+  }
+
+  // prefer higher (score * confidenceFactor)
+  const scored = candidates.map((c) => ({
+    candidate: c,
+    weight: c.score * ((c.confidence ?? 50) / 100),
+  }));
+  scored.sort((a, b) => b.weight - a.weight);
+  const winner = scored[0].candidate;
+  const skipped = scored.slice(1).map((s) => ({ candidate: s.candidate, reason: 'lower_weight' }));
+  const rec: RotationRecord = { timestamp: new Date().toISOString(), winner, skipped, metadata };
+  history.push(rec);
+  return rec;
+}
+
+export function getRotationHistory() {
+  return history.slice();
+}
+
+export function clearRotationHistory() {
+  history.length = 0;
+}
+
+export default { decideRotation, getRotationHistory, clearRotationHistory };
 import {
   computeConfidenceScore,
   computeDecayedFreshnessConfidence,

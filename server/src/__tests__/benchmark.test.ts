@@ -14,8 +14,15 @@ describe("BenchmarkEngine", () => {
     engine.clearCache();
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     jest.clearAllMocks();
+    // Ensure timers are cleared
+    jest.clearAllTimers();
+  });
+
+  afterAll(async () => {
+    // Add any async cleanup
+    await new Promise(resolve => setTimeout(() => resolve(undefined), 100));
   });
 
   describe("definePassiveBaseline", () => {
@@ -154,9 +161,9 @@ describe("BenchmarkEngine", () => {
 
     it("should correctly identify underperformance", async () => {
       const baseline = await engine.definePassiveBaseline(
-        "BTC",
-        "Bitcoin",
-        "blue-chip",
+        "USDC",
+        "USD Coin",
+        "stablecoin",
         90,
       );
 
@@ -410,9 +417,9 @@ describe("BenchmarkEngine", () => {
 
     it("should classify significant underperformance", async () => {
       const baseline = await engine.definePassiveBaseline(
-        "BTC",
-        "Bitcoin",
-        "blue-chip",
+        "USDC",
+        "USD Coin",
+        "stablecoin",
         90,
       );
 
@@ -622,9 +629,9 @@ describe("getBenchmarkSummary", () => {
     const result = await engine.computeBenchmark(
       "strat_2",
       "Poor Strategy",
-      "BTC",
-      "Bitcoin",
-      "blue-chip",
+      "USDC",
+      "USD Coin",
+      "stablecoin",
       -10.0,
       0.30,
       90,

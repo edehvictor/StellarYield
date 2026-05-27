@@ -30,11 +30,16 @@ export function normalizeYield(rawYield: RawProtocolYield): NormalizedYield {
       
       // If confidence is low, we still include it but it's marked
       rewardApy += roundedApy;
-      rewards.push({
+      const rewardEntry: { symbol: string; apy: number; confidence?: "low" | "medium" | "high" } = {
         symbol: reward.tokenSymbol,
         apy: roundedApy,
-        confidence: reward.confidence,
-      });
+      };
+      
+      if (reward.confidence) {
+        rewardEntry.confidence = reward.confidence;
+      }
+      
+      rewards.push(rewardEntry);
     }
   }
 

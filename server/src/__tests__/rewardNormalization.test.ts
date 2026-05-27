@@ -12,6 +12,11 @@ describe("Reward Normalization", () => {
     network: "mainnet",
     source: "test",
     fetchedAt: new Date().toISOString(),
+    liquidityUsd: 500_000,
+    rebalancingBehavior: "manual",
+    managementFeeBps: 50,
+    performanceFeeBps: 200,
+    capitalEfficiencyPct: 85,
   };
 
   it("should normalize yield with no rewards", () => {

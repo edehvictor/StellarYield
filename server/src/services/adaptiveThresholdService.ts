@@ -254,12 +254,17 @@ export class AdaptiveThresholdController {
       throw new Error("Adaptive threshold service is frozen");
     }
 
-    // Enforce safety floor
-    const enforcedThreshold = Math.max(newThreshold, this.config.absoluteMinimum);
-
     const conditions = await this.collectSystemConditions();
     const previousState = this.getPreviousState();
     const previousThreshold = previousState?.currentThreshold || this.config.defaultThreshold;
+
+    // Enforce maxSingleAdjustment limit then safety floor
+    const maxChange = this.config.maxSingleAdjustment;
+    const clampedThreshold = Math.min(
+      Math.max(newThreshold, previousThreshold - maxChange),
+      previousThreshold + maxChange
+    );
+    const enforcedThreshold = Math.max(clampedThreshold, this.config.absoluteMinimum);
 
     const adjustment: ThresholdAdjustment = {
       previousThreshold,
@@ -282,7 +287,7 @@ export class AdaptiveThresholdController {
       lastUpdated: new Date().toISOString(),
       adjustmentHistory: this.adjustmentLog.slice(-50),
       conditions,
-      atSafetyFloor: enforcedThreshold === this.config.absoluteMinimum,
+      atSafetyFloor: newThreshold <= this.config.absoluteMinimum || enforcedThreshold === this.config.absoluteMinimum,
       currentReason: reason,
     };
 
@@ -471,7 +476,7 @@ export class AdaptiveThresholdController {
    */
   private isStateStale(lastUpdated: string): boolean {
     const interval = this.config.minAdjustmentIntervalMinutes * 60 * 1000;
-    return Date.now() - new Date(lastUpdated).getTime() < interval;
+    return Date.now() - new Date(lastUpdated).getTime() > interval;
   }
 
   /**

@@ -1,3 +1,55 @@
+export type Position = { asset: string; expected: number };
+export type ProviderBalance = { provider: string; asset: string; balance?: number };
+
+export type ReconcileRow = {
+  asset: string;
+  expected: number;
+  observed: number | null;
+  delta: number | null;
+  deltaPct: number | null;
+  severity: 'matched' | 'small' | 'material' | 'critical' | 'unavailable';
+};
+
+export function reconcilePortfolio(positions: Position[], balances: ProviderBalance[]) {
+  const rows: ReconcileRow[] = [];
+  positions.forEach((pos) => {
+    const matching = balances.filter((b) => b.asset === pos.asset && typeof b.balance === 'number');
+    if (matching.length === 0) {
+      rows.push({
+        asset: pos.asset,
+        expected: pos.expected,
+        observed: null,
+        delta: null,
+        deltaPct: null,
+        severity: 'unavailable',
+      });
+      return;
+    }
+
+    const observed = matching.reduce((s, b) => s + (b.balance ?? 0), 0);
+    const delta = observed - pos.expected;
+    const deltaPct = pos.expected === 0 ? (observed === 0 ? 0 : Infinity) : delta / Math.abs(pos.expected);
+
+    const absPct = Math.abs(deltaPct === Infinity ? Number.POSITIVE_INFINITY : deltaPct);
+    let severity: ReconcileRow['severity'] = 'matched';
+    if (absPct < 0.01) severity = 'matched';
+    else if (absPct < 0.05) severity = 'small';
+    else if (absPct < 0.15) severity = 'material';
+    else severity = 'critical';
+
+    rows.push({
+      asset: pos.asset,
+      expected: pos.expected,
+      observed,
+      delta,
+      deltaPct: Number.isFinite(deltaPct) ? deltaPct : null,
+      severity,
+    });
+  });
+  return rows;
+}
+
+export default reconcilePortfolio;
 export interface PortfolioPosition {
   assetId: string
   amount: number

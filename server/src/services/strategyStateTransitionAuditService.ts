@@ -45,8 +45,6 @@ export interface StrategyStateTransitionGraph {
   edges: StrategyStateTransitionEdge[];
 }
 
-const STATE_ORDER: StrategyLifecycleState[] = ["healthy", "degraded", "frozen", "recovered"];
-
 // State machine for lifecycle auditing.
 // We explicitly disallow some direct edges to keep semantics consistent.
 const ALLOWED_TRANSITIONS: Record<StrategyLifecycleState, StrategyLifecycleState[]> = {
@@ -205,4 +203,3 @@ export class StrategyStateTransitionAuditService {
 
 export const strategyStateTransitionAuditService =
   new StrategyStateTransitionAuditService();
-

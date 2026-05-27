@@ -22,18 +22,20 @@ yieldsRouter.get("/", async (_req, res) => {
       slippageBps: parseBps(_req.query.slippageBps),
     };
     const hasCustomAssumptions = Object.values(assumptions).some((value) => value != null);
-    const payload = hasCustomAssumptions
-      ? yields.map((entry) => {
-          const netYield = calculateNetYield(entry.totalApy, assumptions);
-          return {
-            ...entry,
-            netApy: netYield.netApy,
-            feeDragApy: netYield.feeDragApy,
-            netYieldAssumptions: netYield.assumptions,
-            netYieldSensitivity: netYield.sensitivity,
-          };
-        })
-      : yields;
+    const payload = yields.map((entry) => {
+      const netYield = calculateNetYield(
+        entry.totalApy,
+        hasCustomAssumptions ? assumptions : undefined,
+      );
+      return {
+        ...entry,
+        netApy: netYield.netApy,
+        feeDragApy: netYield.feeDragApy,
+        netYieldAssumptions: netYield.assumptions,
+        netYieldSensitivity: netYield.sensitivity,
+        feeAttribution: netYield.feeAttribution,
+      };
+    });
     res.setHeader(
       "Cache-Control",
       `public, max-age=${CURRENT_YIELDS_TTL_SECONDS}, stale-while-revalidate=30`,

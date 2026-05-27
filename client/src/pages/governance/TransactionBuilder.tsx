@@ -1,8 +1,10 @@
-import { useState } from "react";
+import { useState, useMemo } from "react";
 import * as StellarSdk from "@stellar/stellar-sdk";
 import { useWallet } from "../../context/useWallet";
 import { ADMIN_ACTIONS } from "./governanceActions";
 import type { AdminAction, PendingTransaction } from "./types";
+import { AlertTriangle, CheckCircle, XCircle } from "lucide-react";
+import { validateTransactionBuilder } from "./validation";
 
 interface TransactionBuilderProps {
   threshold: number;
@@ -42,6 +44,11 @@ export default function TransactionBuilder({
   const [error, setError] = useState<string | null>(null);
 
   const action = ADMIN_ACTIONS.find((a) => a.method === selectedAction);
+
+  const validationSummary = useMemo(
+    () => validateTransactionBuilder(action, walletAddress, fieldValues),
+    [action, walletAddress, fieldValues],
+  );
 
   async function handleBuild() {
     if (!walletAddress || !action || !contractId) return;
@@ -175,10 +182,75 @@ export default function TransactionBuilder({
               <p className="text-sm text-red-400">{error}</p>
             )}
 
+            {validationSummary && (
+              <div
+                className={`border rounded-lg p-4 ${
+                  validationSummary.isValid
+                    ? "border-green-500/30 bg-green-500/5"
+                    : "border-red-500/30 bg-red-500/5"
+                }`}
+              >
+                <div className="flex items-start gap-3 mb-3">
+                  {validationSummary.isValid ? (
+                    <CheckCircle className="w-5 h-5 text-green-400 flex-shrink-0 mt-0.5" />
+                  ) : (
+                    <XCircle className="w-5 h-5 text-red-400 flex-shrink-0 mt-0.5" />
+                  )}
+                  <div className="flex-1">
+                    <h4 className="font-semibold text-sm mb-1">
+                      {validationSummary.isValid
+                        ? "Ready to Build"
+                        : "Validation Required"}
+                    </h4>
+                    {validationSummary.errors.length > 0 && (
+                      <ul className="text-sm text-red-400 space-y-1">
+                        {validationSummary.errors.map((err, idx) => (
+                          <li key={idx}>• {err.message}</li>
+                        ))}
+                      </ul>
+                    )}
+                  </div>
+                </div>
+
+                {validationSummary.isValid && (
+                  <div className="space-y-2 text-sm border-t border-gray-700 pt-3">
+                    <div className="flex justify-between">
+                      <span className="text-gray-400">Action:</span>
+                      <span className="font-medium">{validationSummary.action}</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-gray-400">Target:</span>
+                      <span className="font-medium">{validationSummary.target}</span>
+                    </div>
+                    <div className="flex justify-between items-center">
+                      <span className="text-gray-400">Risk Level:</span>
+                      <span
+                        className={`flex items-center gap-1 font-medium ${
+                          validationSummary.risk === "critical"
+                            ? "text-red-400"
+                            : validationSummary.risk === "high"
+                            ? "text-orange-400"
+                            : validationSummary.risk === "medium"
+                            ? "text-yellow-400"
+                            : "text-green-400"
+                        }`}
+                      >
+                        {validationSummary.risk === "critical" ||
+                        validationSummary.risk === "high" ? (
+                          <AlertTriangle className="w-4 h-4" />
+                        ) : null}
+                        {validationSummary.risk.toUpperCase()}
+                      </span>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
             <button
               onClick={handleBuild}
-              disabled={building || !walletAddress}
-              className="w-full bg-gradient-to-r from-indigo-500 to-purple-600 text-white font-semibold py-3 rounded-lg disabled:opacity-50 transition-opacity"
+              disabled={building || !walletAddress || !validationSummary?.isValid}
+              className="w-full bg-gradient-to-r from-indigo-500 to-purple-600 text-white font-semibold py-3 rounded-lg disabled:opacity-50 disabled:cursor-not-allowed transition-opacity"
             >
               {building ? "Building Transaction..." : "Build & Propose"}
             </button>

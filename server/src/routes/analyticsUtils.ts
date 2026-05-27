@@ -4,6 +4,10 @@ import { StrategyHealthScore } from '../services/strategyHealthService';
 import { DataSourceReliability } from '../services/yieldReliabilityService';
 
 // Analytics Helper Functions
+import type { AttributionReport } from '../services/portfolioAttributionService';
+import type { CompatibilityReport, CompatibilityIssue } from '../services/protocolCompatibilityService';
+import type { StrategyHealthScore } from '../services/strategyHealthService';
+import type { DataSourceReliability } from '../services/yieldReliabilityService';
 
 export function validateAttributionRequest(walletAddress: string, startTime: string, endTime: string): { valid: boolean; error?: string } {
   // Basic validation
@@ -46,6 +50,48 @@ export function formatCompatibilityReport(report: CompatibilityReport): any {
 
 export function formatHealthScore(score: StrategyHealthScore): any {
   const overallScore = score.overallScore;
+// Extended interfaces for utility functions
+interface ExtendedAttributionReport extends AttributionReport {
+  formattedDate?: string;
+  totalAttribution?: number;
+}
+
+interface ExtendedCompatibilityReport extends CompatibilityReport {
+  formattedDate?: string;
+  criticalIssues: CompatibilityIssue[];
+}
+
+interface ExtendedHealthScore extends StrategyHealthScore {
+  status: "healthy" | "degraded" | "critical" | "disabled";
+  formattedDate?: string;
+}
+
+interface ExtendedReliabilityScore extends DataSourceReliability {
+  status: "low" | "medium" | "high" | "unreliable";
+  formattedDate?: string;
+}
+
+interface WeightedProvider extends DataSourceReliability {
+  weight: number;
+}
+
+export function formatAttributionReport(report: AttributionReport): ExtendedAttributionReport {
+  return {
+    ...report,
+    formattedDate: new Date().toISOString(),
+    totalAttribution: report.attributionBreakdown?.reduce((sum, item) => sum + item.contribution, 0) || 0,
+  };
+}
+
+export function formatCompatibilityReport(report: CompatibilityReport): ExtendedCompatibilityReport {
+  return {
+    ...report,
+    formattedDate: new Date().toISOString(),
+    criticalIssues: report.criticalIssues || [],
+  };
+}
+
+export function formatHealthScore(score: StrategyHealthScore): ExtendedHealthScore {
   return {
     ...score,
     status: overallScore >= 80 ? 'healthy' : overallScore >= 60 ? 'degraded' : 'critical',
@@ -69,25 +115,24 @@ export function getCriticalHealthAlerts(scores: StrategyHealthScore[]): Array<{
     }));
 }
 
-export function formatReliabilityScore(reliability: DataSourceReliability): any {
-  const score = reliability.reliabilityScore;
+export function formatReliabilityScore(reliability: DataSourceReliability): ExtendedReliabilityScore {
   return {
     ...reliability,
-    status: score >= 80 ? 'reliable' : score >= 60 ? 'moderate' : 'unreliable',
+    status: reliability.reliabilityScore >= 80 ? 'high' : reliability.reliabilityScore >= 60 ? 'medium' : 'unreliable',
     formattedDate: new Date().toISOString(),
   };
 }
 
-export function getWeightedProviderSelection(providers: DataSourceReliability[]): any[] {
+export function getWeightedProviderSelection(providers: DataSourceReliability[]): WeightedProvider[] {
   return providers
     .map(provider => ({
       ...provider,
-      weight: provider.reliabilityScore / 100,
+      weight: provider.reliabilityScore / 100, // Simple weighting based on score
     }))
     .sort((a, b) => b.weight - a.weight);
 }
 
-export function isProtocolSafeForExecution(protocolName: string, report: ProtocolReport): boolean {
-  const protocolStatus = report.protocols?.find((p: { protocolName: string; status: string; criticalIssues?: number }) => p.protocolName === protocolName);
-  return protocolStatus?.status === 'compatible' && (protocolStatus?.criticalIssues ?? 0) === 0;
+export function isProtocolSafeForExecution(protocolName: string, report: CompatibilityReport): boolean {
+  const protocolStatus = report.protocols?.find(p => p.protocolName === protocolName);
+  return protocolStatus?.status === 'compatible' && (protocolStatus?.issues?.length ?? 0) === 0;
 }

@@ -5,8 +5,6 @@
  * and fee behavior. Forecasts are modeled outcomes, not guaranteed results.
  */
 
-import { RewardScheduleRegistry } from "./rewardScheduleRegistry";
-
 export type ProposalType = "fee_change" | "allocation_limit" | "strategy_param" | "reward_change";
 
 export interface GovernanceForecastInput {

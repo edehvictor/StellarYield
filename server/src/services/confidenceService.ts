@@ -1,3 +1,62 @@
+type ProviderReading = { provider: string; apy?: number; weight?: number };
+
+export function computeConfidence(readings: ProviderReading[], consensusApy: number | null) {
+  const reasons: string[] = [];
+  if (!readings || readings.length === 0) {
+    reasons.push('no_readings');
+    return { score: 0, reasons };
+  }
+
+  const available = readings.filter((r) => typeof r.apy === 'number');
+  if (available.length === 0) {
+    reasons.push('missing_readings');
+    return { score: 0, reasons };
+  }
+
+  const weights = available.map((r) => r.weight ?? 1);
+  const totalWeight = weights.reduce((s, w) => s + w, 0);
+  const mean = available.reduce((s, r, i) => s + (r.apy! * (weights[i] / totalWeight)), 0);
+  const variance = available.reduce((s, r, i) => {
+    const diff = r.apy! - mean;
+    return s + (weights[i] / totalWeight) * diff * diff;
+  }, 0);
+  const std = Math.sqrt(variance);
+
+  // base score by provider count
+  let score = Math.min(100, available.length * 10 + 20);
+
+  // penalize for high stddev relative to mean
+  if (mean !== 0) {
+    const relStd = Math.abs(std / Math.max(1e-6, Math.abs(mean)));
+    if (relStd > 0.2) {
+      score -= 30;
+      reasons.push('high_variance');
+    } else if (relStd > 0.1) {
+      score -= 10;
+      reasons.push('moderate_variance');
+    } else {
+      reasons.push('low_variance');
+    }
+  }
+
+  // penalize for disagreement with consensus
+  if (consensusApy === null) {
+    reasons.push('no_consensus');
+    score = Math.max(0, score - 20);
+  } else {
+    const diff = Math.abs(mean - consensusApy);
+    if (Math.abs(mean) > 1e-6 && diff / Math.abs(mean) > 0.15) {
+      score = Math.max(0, score - 25);
+      reasons.push('consensus_mismatch');
+    }
+  }
+
+  // clamp
+  score = Math.max(0, Math.min(100, Math.round(score)));
+  return { score, reasons };
+}
+
+export default computeConfidence;
 /**
  * Recommendation Confidence Score and Uncertainty Bands (#277)
  *

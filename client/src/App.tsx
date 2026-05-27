@@ -27,6 +27,7 @@ import YieldForGood from "./features/donations/YieldForGood";
 import YieldCalculator from "./components/calculator/YieldCalculator";
 import StrategyLeaderboard from "./pages/leaderboard/StrategyLeaderboard";
 import TreasurySimulation from "./pages/treasury/TreasurySimulation";
+import WalletSessionReview from "./auth/WalletSessionReview";
 import { useWallet } from "./context/useWallet";
 import { useState } from "react";
 import {
@@ -54,6 +55,7 @@ import {
   Target,
   Vault as VaultIcon,
   Zap,
+  KeyRound,
 } from "lucide-react";
 import "./index.css";
 import SettingsModal from "./features/settings/SettingsModal";
@@ -215,6 +217,14 @@ const RootLayout = () => {
           >
             <TrendingUp size={18} /> RAY Leaderboard
           </Link>
+          {isConnected && (
+            <Link
+              to="/wallet-session"
+              className="hover:text-white transition-colors flex items-center gap-2"
+            >
+              <KeyRound size={18} /> Wallet Session
+            </Link>
+          )}
           {isConnected && (
             <Link
               to="/treasury"
@@ -414,6 +424,10 @@ const router = createBrowserRouter([
       {
         path: "/strategy-leaderboard",
         element: <StrategyLeaderboard />,
+      },
+      {
+        path: "/wallet-session",
+        element: <WalletSessionReview />,
       },
       {
         path: "/treasury",

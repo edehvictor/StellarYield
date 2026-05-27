@@ -144,27 +144,9 @@ These match the committed [`vercel.json`](./vercel.json) at the repository root.
 
 ## Contributor and Release Docs
 
-   The mock API will be available at http://localhost:3001
-
-## 🧪 Post-deploy smoke test
-After deploying the frontend + backend, run the included smoke test to validate basic reachability.
-
-```bash
-FRONTEND_URL="https://your-frontend-url" \
-BACKEND_URL="https://your-backend-url" \
-bash scripts/smoke-test.sh
-```
-
-- **Checks**: `GET /api/yields`, `GET /api/metrics`, and the frontend root.
-- **Config**: `FRONTEND_URL` and `BACKEND_URL` environment variables.
-🌊 Contributing via Drips Wave
-We are proudly participating in the Stellar Wave Program via Drips! We are actively looking for Web3 full-stack and Rust developers.
-Check our open issues labeled Stellar Wave, apply via the Drips App, and submit your PR to earn rewards funded by the Stellar Development Foundation!
 - [Contributing Guide](./CONTRIBUTING.md)
 - [Pre-commit Formatting and Verification Guide](./docs/contributor-guide.md)
 - [Release Checklist](./docs/release-checklist.md)
-
-## Drips Wave
 
 ---
 
@@ -173,7 +155,11 @@ Check our open issues labeled Stellar Wave, apply via the Drips App, and submit 
 After merge/deploy, you can quickly verify the public app + API are reachable:
 
 ```bash
+# Unix/Linux/macOS (Bash)
 npm run smoke-test
+
+# Windows/Cross-platform (Node.js)
+npm run smoke-test:node
 ```
 
 ### Configuration
@@ -181,9 +167,20 @@ npm run smoke-test
 Override targets via environment variables:
 
 ```bash
+# Unix/Linux/macOS
 FRONTEND_URL="https://stellaryield.vercel.app" \
 BACKEND_URL="https://your-backend.example.com" \
 npm run smoke-test
+
+# Windows PowerShell
+$env:FRONTEND_URL="https://stellaryield.vercel.app"
+$env:BACKEND_URL="https://your-backend.example.com"
+npm run smoke-test:node
+
+# Windows Command Prompt
+set FRONTEND_URL=https://stellaryield.vercel.app
+set BACKEND_URL=https://your-backend.example.com
+npm run smoke-test:node
 ```
 
 Optional path overrides:
@@ -191,5 +188,9 @@ Optional path overrides:
 - `BACKEND_HEALTH_PATH` (default: `/api/health`)
 - `BACKEND_YIELDS_PATH` (default: `/api/yields`)
 - `FRONTEND_ASSET_PATH` (default: `/favicon.svg`)
+
+### CI Usage
+
+Both smoke test variants support the same environment variables and produce identical output. The Node.js version (`smoke-test:node`) is recommended for CI environments and Windows contributors as it has no Bash dependency.
 
 StellarYield is participating in the Stellar Wave Program via Drips. Contributors can pick up open issues, submit focused pull requests, and validate their work locally with the commands above before opening a PR.

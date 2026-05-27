@@ -210,7 +210,7 @@ export class ProtocolCompatibilityEngine {
       // Check each component
       const issues: CompatibilityIssue[] = [];
       for (const requirement of requirements) {
-        const componentIssues = await this.checkRequirement(protocolName, requirement, currentVersion);
+        const componentIssues = await this.checkComponentCompatibility(protocolName, requirement.component, requirement, currentVersion);
         issues.push(...componentIssues);
       }
 
@@ -235,17 +235,17 @@ export class ProtocolCompatibilityEngine {
         protocolName,
         currentVersion: 'unknown',
         latestVersion: 'unknown',
-        status: 'incompatible',
+        status: 'incompatible' as const,
         issues: [{
-          severity: 'critical',
-          component: 'all',
+          severity: 'critical' as const,
+          component: 'unknown',
           issue: 'Failed to fetch protocol version',
-          impact: 'Cannot verify compatibility',
-          recommendation: 'Check network connectivity or protocol status',
+          impact: 'Cannot determine compatibility',
+          recommendation: 'Check protocol connectivity',
           affectedStrategies: [],
         }],
         lastChecked: new Date().toISOString(),
-        recommendations: ['Manual verification required'],
+        recommendations: ['Check protocol connectivity'],
         autoUpdateAvailable: false,
       };
     }
@@ -254,8 +254,9 @@ export class ProtocolCompatibilityEngine {
   /**
    * Check a specific compatibility requirement
    */
-  private async checkRequirement(
+  private async checkComponentCompatibility(
     protocolName: string,
+    componentName: string,
     requirements: CompatibilityRequirement,
     currentVersion: ProtocolVersion,
   ): Promise<CompatibilityIssue[]> {

@@ -11,6 +11,15 @@ describe("netYieldEngine", () => {
 
     expect(result.feeDragApy).toBe(0.24);
     expect(result.netApy).toBe(11.76);
+    expect(result.feeAttribution).toEqual({
+      managementFeeApy: 0.06,
+      protocolFeeApy: 0.12,
+      slippageApy: 0.03,
+      networkFeeApy: 0.03,
+      rewardOffsetApy: 0.02,
+      unknownFeeApy: 0,
+      totalFeeDragApy: 0.24,
+    });
   });
 
   it("clamps invalid assumptions and handles non-finite values", () => {

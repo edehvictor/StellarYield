@@ -24,7 +24,7 @@ describe("recommendationTimelineService", () => {
     });
 
     expect(entry.timestamp).toBeTruthy();
-    const timeline = getRecommendationTimeline("user-1");
+    const timeline = await getRecommendationTimeline("user-1");
     expect(timeline).toHaveLength(1);
     expect(timeline[0].changedInputs).toContain("initial-baseline");
   });

@@ -13,8 +13,15 @@ describe("AdaptiveThresholdController", () => {
     controller.reset();
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     jest.clearAllMocks();
+    // Ensure timers are cleared
+    jest.clearAllTimers();
+  });
+
+  afterAll(async () => {
+    // Add any async cleanup
+    await new Promise(resolve => setTimeout(() => resolve(undefined), 100));
   });
 
   describe("getCurrentThreshold", () => {

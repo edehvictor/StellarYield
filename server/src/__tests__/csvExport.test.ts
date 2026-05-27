@@ -225,4 +225,34 @@ describe("createExportFilename", () => {
     const filename = createExportFilename("GABCDEF");
     expect(filename).toMatch(/^stellaryield-tax-report-/);
   });
+
+  it("includes the current environment", () => {
+    const prev = process.env.STELLAR_NETWORK;
+    process.env.STELLAR_NETWORK = "testnet";
+    try {
+      expect(createExportFilename("GABCDEF")).toContain("-testnet-");
+    } finally {
+      if (prev === undefined) delete process.env.STELLAR_NETWORK;
+      else process.env.STELLAR_NETWORK = prev;
+    }
+  });
+
+  it("honours a custom report type and extension", () => {
+    const filename = createExportFilename("GABCDEF", {
+      reportType: "audit-log",
+      extension: "json",
+    });
+    expect(filename).toMatch(/^stellaryield-audit-log-/);
+    expect(filename).toMatch(/\.json$/);
+  });
+
+  it("strips unsafe characters from all segments", () => {
+    const filename = createExportFilename("G/../  AB", {
+      reportType: "tax report",
+    });
+    // No path separators, spaces, or other unsafe characters.
+    expect(filename).not.toMatch(/[^a-zA-Z0-9._-]/);
+    expect(filename).not.toContain("..");
+    expect(filename).toMatch(/^stellaryield-tax-report-/);
+  });
 });

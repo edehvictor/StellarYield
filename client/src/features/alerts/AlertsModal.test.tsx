@@ -114,13 +114,17 @@ describe("AlertsModal", () => {
 
     fireEvent.click(screen.getByText("Add Alert"));
 
-    await waitFor(() => expect(mockCreate).toHaveBeenCalledWith({
+    await waitFor(() => expect(mockCreate).toHaveBeenCalledWith(expect.objectContaining({
       walletAddress: "GTEST",
       vaultId: "Blend",
       condition: "above",
       thresholdValue: 10,
       email: "user@example.com",
-    }));
+      preferences: expect.objectContaining({
+        channel: "email",
+        cooldownMinutes: 60,
+      }),
+    })));
   });
 
   it("deletes an alert when trash button is clicked", async () => {

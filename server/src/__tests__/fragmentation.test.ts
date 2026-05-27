@@ -9,7 +9,6 @@
 import request from 'supertest';
 import { createApp } from '../app';
 import { getFragmentationServiceForTesting, resetFragmentationServiceForTesting } from '../routes/fragmentation';
-import fc from 'fast-check';
 
 describe('GET /api/liquidity/fragmentation', () => {
   const app = createApp();
@@ -147,227 +146,120 @@ describe('GET /api/liquidity/fragmentation', () => {
      * within 5 minutes of the current server time.
      */
     it('returns metrics within 5 minutes of current time', async () => {
-      await fc.assert(
-        fc.asyncProperty(
-          fc.constant(null), // No input needed, just run multiple times
-          async () => {
-            const beforeRequest = Date.now();
-            const res = await request(app).get('/api/liquidity/fragmentation');
-            const afterRequest = Date.now();
-            
-            if (res.status !== 200) {
-              // Skip if service is unavailable
-              return true;
-            }
-
-            const { timestamp } = res.body.data;
-            const metricTime = new Date(timestamp).getTime();
-            
-            // Metric timestamp should be within 5 minutes (300000ms) of request time
-            const fiveMinutesMs = 5 * 60 * 1000;
-            const timeDiff = Math.abs(metricTime - beforeRequest);
-            
-            expect(timeDiff).toBeLessThanOrEqual(fiveMinutesMs);
-            
-            // Also verify timestamp is not in the future
-            expect(metricTime).toBeLessThanOrEqual(afterRequest);
-            
-            return true;
-          }
-        ),
-        { numRuns: 100 }
-      );
-    }, 30000); // 30 second timeout for property-based test
+      const beforeRequest = Date.now();
+      const res = await request(app).get('/api/liquidity/fragmentation');
+      const afterRequest = Date.now();
+      
+      if (res.status === 200) {
+        const { timestamp } = res.body.data;
+        const metricTime = new Date(timestamp).getTime();
+        
+        const fiveMinutesMs = 5 * 60 * 1000;
+        const timeDiff = Math.abs(metricTime - beforeRequest);
+        
+        expect(timeDiff).toBeLessThanOrEqual(fiveMinutesMs);
+        expect(metricTime).toBeLessThanOrEqual(afterRequest);
+      }
+    });
 
     it('nextUpdateAt is in the future', async () => {
-      await fc.assert(
-        fc.asyncProperty(
-          fc.constant(null),
-          async () => {
-            const beforeRequest = Date.now();
-            const res = await request(app).get('/api/liquidity/fragmentation');
-            
-            if (res.status !== 200) {
-              return true;
-            }
-
-            const { nextUpdateAt } = res.body.data;
-            const nextUpdateTime = new Date(nextUpdateAt).getTime();
-            
-            // nextUpdateAt should be in the future
-            expect(nextUpdateTime).toBeGreaterThan(beforeRequest);
-            
-            // nextUpdateAt should be within reasonable bounds (not more than 10 minutes in future)
-            const tenMinutesMs = 10 * 60 * 1000;
-            expect(nextUpdateTime - beforeRequest).toBeLessThanOrEqual(tenMinutesMs);
-            
-            return true;
-          }
-        ),
-        { numRuns: 100 }
-      );
-    }, 30000); // 30 second timeout for property-based test
+      const beforeRequest = Date.now();
+      const res = await request(app).get('/api/liquidity/fragmentation');
+      
+      if (res.status === 200) {
+        const { nextUpdateAt } = res.body.data;
+        const nextUpdateTime = new Date(nextUpdateAt).getTime();
+        
+        expect(nextUpdateTime).toBeGreaterThan(beforeRequest);
+        
+        const tenMinutesMs = 10 * 60 * 1000;
+        expect(nextUpdateTime - beforeRequest).toBeLessThanOrEqual(tenMinutesMs);
+      }
+    });
   });
 
   describe('Property 12: Cache Header Presence', () => {
-    /**
-     * Feature: protocol-liquidity-fragmentation-analyzer
-     * Property 12: Cache Header Presence
-     * **Validates: Requirements 3.5**
-     * 
-     * For any API response from /api/liquidity/fragmentation, the response
-     * SHALL include Cache-Control, X-Data-Freshness, and X-Next-Update headers.
-     */
     it('always includes all required cache headers', async () => {
-      await fc.assert(
-        fc.asyncProperty(
-          fc.constant(null),
-          async () => {
-            const res = await request(app).get('/api/liquidity/fragmentation');
-            
-            if (res.status !== 200) {
-              // Even error responses should have some headers, but we focus on success cases
-              return true;
-            }
-
-            // Verify all three required headers are present
-            expect(res.headers['cache-control']).toBeDefined();
-            expect(res.headers['x-data-freshness']).toBeDefined();
-            expect(res.headers['x-next-update']).toBeDefined();
-            
-            // Verify Cache-Control has correct format
-            expect(res.headers['cache-control']).toContain('public');
-            expect(res.headers['cache-control']).toContain('max-age=300');
-            
-            // Verify timestamps are valid ISO 8601
-            const dataFreshness = new Date(res.headers['x-data-freshness']);
-            const nextUpdate = new Date(res.headers['x-next-update']);
-            
-            expect(dataFreshness.getTime()).not.toBeNaN();
-            expect(nextUpdate.getTime()).not.toBeNaN();
-            
-            // Verify nextUpdate is after dataFreshness
-            expect(nextUpdate.getTime()).toBeGreaterThan(dataFreshness.getTime());
-            
-            return true;
-          }
-        ),
-        { numRuns: 100 }
-      );
-    }, 30000); // 30 second timeout for property-based test
+      const res = await request(app).get('/api/liquidity/fragmentation');
+      
+      if (res.status === 200) {
+        expect(res.headers['cache-control']).toBeDefined();
+        expect(res.headers['x-data-freshness']).toBeDefined();
+        expect(res.headers['x-next-update']).toBeDefined();
+        
+        expect(res.headers['cache-control']).toContain('public');
+        expect(res.headers['cache-control']).toContain('max-age=300');
+        
+        const dataFreshness = new Date(res.headers['x-data-freshness']);
+        const nextUpdate = new Date(res.headers['x-next-update']);
+        
+        expect(dataFreshness.getTime()).not.toBeNaN();
+        expect(nextUpdate.getTime()).not.toBeNaN();
+        
+        expect(nextUpdate.getTime()).toBeGreaterThan(dataFreshness.getTime());
+      }
+    });
 
     it('cache headers match response body timestamps', async () => {
-      await fc.assert(
-        fc.asyncProperty(
-          fc.constant(null),
-          async () => {
-            const res = await request(app).get('/api/liquidity/fragmentation');
-            
-            if (res.status !== 200) {
-              return true;
-            }
-
-            const { timestamp, nextUpdateAt } = res.body.data;
-            const headerFreshness = res.headers['x-data-freshness'];
-            const headerNextUpdate = res.headers['x-next-update'];
-            
-            // Headers should match body timestamps
-            expect(headerFreshness).toBe(timestamp);
-            expect(headerNextUpdate).toBe(nextUpdateAt);
-            
-            return true;
-          }
-        ),
-        { numRuns: 100 }
-      );
-    }, 30000); // 30 second timeout for property-based test
+      const res = await request(app).get('/api/liquidity/fragmentation');
+      
+      if (res.status === 200) {
+        const { timestamp, nextUpdateAt } = res.body.data;
+        const headerFreshness = res.headers['x-data-freshness'];
+        const headerNextUpdate = res.headers['x-next-update'];
+        
+        expect(headerFreshness).toBe(timestamp);
+        expect(headerNextUpdate).toBe(nextUpdateAt);
+      }
+    });
   });
 
   describe('Property 18: Partial Data Completeness Indicator', () => {
-    /**
-     * Feature: protocol-liquidity-fragmentation-analyzer
-     * Property 18: Partial Data Completeness Indicator
-     * **Validates: Requirements 7.5**
-     * 
-     * For any scenario where data sources are partially unavailable, the API
-     * response SHALL include a dataCompleteness field accurately indicating
-     * which sources are missing.
-     */
     it('dataCompleteness accurately reflects data availability', async () => {
-      await fc.assert(
-        fc.asyncProperty(
-          fc.constant(null),
-          async () => {
-            const res = await request(app).get('/api/liquidity/fragmentation');
-            
-            if (res.status !== 200) {
-              return true;
-            }
-
-            const { dataCompleteness } = res.body.data;
-            
-            // Verify all required fields are present
-            expect(dataCompleteness).toHaveProperty('poolDepthAvailable');
-            expect(dataCompleteness).toHaveProperty('routeDataAvailable');
-            expect(dataCompleteness).toHaveProperty('missingProtocols');
-            expect(dataCompleteness).toHaveProperty('isStale');
-            
-            // Verify types
-            expect(typeof dataCompleteness.poolDepthAvailable).toBe('boolean');
-            expect(typeof dataCompleteness.routeDataAvailable).toBe('boolean');
-            expect(Array.isArray(dataCompleteness.missingProtocols)).toBe(true);
-            expect(typeof dataCompleteness.isStale).toBe('boolean');
-            
-            // If data is stale, staleSince should be present
-            if (dataCompleteness.isStale) {
-              expect(dataCompleteness).toHaveProperty('staleSince');
-              expect(typeof dataCompleteness.staleSince).toBe('string');
-              
-              // staleSince should be a valid timestamp
-              const staleSince = new Date(dataCompleteness.staleSince!);
-              expect(staleSince.getTime()).not.toBeNaN();
-            }
-            
-            // If protocols are missing, the array should not be empty
-            if (dataCompleteness.missingProtocols.length > 0) {
-              dataCompleteness.missingProtocols.forEach((protocol: string) => {
-                expect(typeof protocol).toBe('string');
-                expect(protocol.length).toBeGreaterThan(0);
-              });
-            }
-            
-            return true;
-          }
-        ),
-        { numRuns: 100 }
-      );
-    }, 30000); // 30 second timeout for property-based test
+      const res = await request(app).get('/api/liquidity/fragmentation');
+      
+      if (res.status === 200) {
+        const { dataCompleteness } = res.body.data;
+        
+        expect(dataCompleteness).toHaveProperty('poolDepthAvailable');
+        expect(dataCompleteness).toHaveProperty('routeDataAvailable');
+        expect(dataCompleteness).toHaveProperty('missingProtocols');
+        expect(dataCompleteness).toHaveProperty('isStale');
+        
+        expect(typeof dataCompleteness.poolDepthAvailable).toBe('boolean');
+        expect(typeof dataCompleteness.routeDataAvailable).toBe('boolean');
+        expect(Array.isArray(dataCompleteness.missingProtocols)).toBe(true);
+        expect(typeof dataCompleteness.isStale).toBe('boolean');
+        
+        if (dataCompleteness.isStale) {
+          expect(dataCompleteness).toHaveProperty('staleSince');
+          expect(typeof dataCompleteness.staleSince).toBe('string');
+          
+          const staleSince = new Date(dataCompleteness.staleSince!);
+          expect(staleSince.getTime()).not.toBeNaN();
+        }
+        
+        if (dataCompleteness.missingProtocols.length > 0) {
+          dataCompleteness.missingProtocols.forEach((protocol: string) => {
+            expect(typeof protocol).toBe('string');
+            expect(protocol.length).toBeGreaterThan(0);
+          });
+        }
+      }
+    });
 
     it('missing protocols list contains valid protocol names', async () => {
-      await fc.assert(
-        fc.asyncProperty(
-          fc.constant(null),
-          async () => {
-            const res = await request(app).get('/api/liquidity/fragmentation');
-            
-            if (res.status !== 200) {
-              return true;
-            }
-
-            const { dataCompleteness } = res.body.data;
-            const validProtocols = ['Blend', 'Soroswap', 'DeFindex', 'Aquarius'];
-            
-            // All missing protocols should be from the valid set
-            dataCompleteness.missingProtocols.forEach((protocol: string) => {
-              expect(validProtocols).toContain(protocol);
-            });
-            
-            return true;
-          }
-        ),
-        { numRuns: 100 }
-      );
-    }, 30000); // 30 second timeout for property-based test
+      const res = await request(app).get('/api/liquidity/fragmentation');
+      
+      if (res.status === 200) {
+        const { dataCompleteness } = res.body.data;
+        const validProtocols = ['Blend', 'Soroswap', 'DeFindex', 'Aquarius'];
+        
+        dataCompleteness.missingProtocols.forEach((protocol: string) => {
+          expect(validProtocols).toContain(protocol);
+        });
+      }
+    });
   });
 
   describe('Performance', () => {

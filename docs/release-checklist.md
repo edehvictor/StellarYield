@@ -25,6 +25,10 @@ Protected branch merges should be approved by repository maintainers who have th
 
 ## Post-deploy Smoke Checks
 
+- Run `scripts/smoke-test.sh --json > smoke-results/latest.json` to capture machine-readable pass/fail output.
+- Store JSON snapshots in `smoke-results/` (gitignored) or upload as CI artifacts for operator history.
+- The transparency dashboard smoke panel can read a latest JSON payload from browser local storage under `stellar-yield.smoke-results`.
+
 ### Frontend
 
 - Load the production site and verify the homepage renders without console-breaking errors.

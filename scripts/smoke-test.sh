@@ -3,6 +3,7 @@ set -euo pipefail
 
 FRONTEND_URL=${FRONTEND_URL:-"http://localhost:5173"}
 BACKEND_URL=${BACKEND_URL:-"http://localhost:3001"}
+OUTPUT_MODE=${OUTPUT_MODE:-"text"}
 
 BACKEND_HEALTH_PATH=${BACKEND_HEALTH_PATH:-"/api/health"}
 BACKEND_YIELDS_PATH=${BACKEND_YIELDS_PATH:-"/api/yields"}
@@ -32,6 +33,49 @@ expect_200() {
     exit 1
   fi
 }
+
+run_check() {
+  local label="$1"
+  local url="$2"
+  local status
+  status="$(curl_status "$url")"
+  if [[ "$status" == "200" ]]; then
+    echo "{\"label\":\"$label\",\"url\":\"$url\",\"status\":\"pass\",\"httpCode\":200}"
+    return 0
+  fi
+
+  if [[ "$status" == "000" ]]; then
+    echo "{\"label\":\"$label\",\"url\":\"$url\",\"status\":\"fail\",\"httpCode\":0,\"message\":\"unreachable\"}"
+    return 1
+  fi
+
+  echo "{\"label\":\"$label\",\"url\":\"$url\",\"status\":\"fail\",\"httpCode\":$status}"
+  return 1
+}
+
+if [[ "${1:-}" == "--json" || "$OUTPUT_MODE" == "json" ]]; then
+  timestamp="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+  checks=(
+    "Backend ${BACKEND_HEALTH_PATH}|${BACKEND_URL}${BACKEND_HEALTH_PATH}"
+    "Backend ${BACKEND_YIELDS_PATH}|${BACKEND_URL}${BACKEND_YIELDS_PATH}"
+    "Frontend /|${FRONTEND_URL}/"
+    "Frontend ${FRONTEND_ASSET_PATH}|${FRONTEND_URL}${FRONTEND_ASSET_PATH}"
+  )
+
+  results=()
+  overall="pass"
+  for check in "${checks[@]}"; do
+    label="${check%%|*}"
+    url="${check##*|}"
+    result="$(run_check "$label" "$url")" || overall="fail"
+    results+=("$result")
+  done
+
+  printf '{"timestamp":"%s","frontendUrl":"%s","backendUrl":"%s","status":"%s","checks":[%s]}\n' \
+    "$timestamp" "$FRONTEND_URL" "$BACKEND_URL" "$overall" "$(IFS=,; echo "${results[*]}")"
+  [[ "$overall" == "pass" ]] || exit 1
+  exit 0
+fi
 
 echo "----------------------------------------"
 echo "StellarYield Smoke Test"

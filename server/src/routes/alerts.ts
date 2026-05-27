@@ -27,6 +27,13 @@ router.post("/", async (req: Request, res: Response) => {
     condition?: string;
     thresholdValue?: unknown;
     email?: string;
+    preferences?: {
+      channel?: string;
+      cooldownMinutes?: unknown;
+      severityThreshold?: unknown;
+      quietHoursStart?: unknown;
+      quietHoursEnd?: unknown;
+    };
   };
 
   if (!walletAddress || !vaultId || !condition || thresholdValue === undefined || !email) {
@@ -46,12 +53,51 @@ router.post("/", async (req: Request, res: Response) => {
   }
 
   try {
+    let preferences;
+    if (req.body.preferences) {
+      const channel = req.body.preferences.channel;
+      const cooldownMinutes = Number(req.body.preferences.cooldownMinutes);
+      const severityThreshold = Number(req.body.preferences.severityThreshold);
+      const quietHoursStart = Number(req.body.preferences.quietHoursStart);
+      const quietHoursEnd = Number(req.body.preferences.quietHoursEnd);
+
+      if (!["email", "in_app"].includes(channel)) {
+        res.status(400).json({ error: "preferences.channel must be email or in_app" });
+        return;
+      }
+      if (!Number.isFinite(cooldownMinutes) || cooldownMinutes < 0 || cooldownMinutes > 1440) {
+        res.status(400).json({ error: "preferences.cooldownMinutes must be between 0 and 1440" });
+        return;
+      }
+      if (!Number.isFinite(severityThreshold) || severityThreshold < 0 || severityThreshold > 1000) {
+        res.status(400).json({ error: "preferences.severityThreshold must be between 0 and 1000" });
+        return;
+      }
+      if (!Number.isInteger(quietHoursStart) || quietHoursStart < 0 || quietHoursStart > 23) {
+        res.status(400).json({ error: "preferences.quietHoursStart must be an integer from 0 to 23" });
+        return;
+      }
+      if (!Number.isInteger(quietHoursEnd) || quietHoursEnd < 0 || quietHoursEnd > 23) {
+        res.status(400).json({ error: "preferences.quietHoursEnd must be an integer from 0 to 23" });
+        return;
+      }
+
+      preferences = {
+        channel: channel as "email" | "in_app",
+        cooldownMinutes,
+        severityThreshold,
+        quietHoursStart,
+        quietHoursEnd,
+      };
+    }
+
     const alert = await createAlert({
       walletAddress,
       vaultId,
       condition: condition as AlertCondition,
       thresholdValue: threshold,
       email,
+      preferences,
     });
     res.status(201).json(alert);
   } catch (err) {

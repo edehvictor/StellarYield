@@ -181,7 +181,7 @@ export async function getZapQuote(body: ZapQuoteBody): Promise<ZapQuoteResult> {
   const outAfterSlippage = (expectedOut * BigInt(Math.floor(multiplier * 10000))) / BigInt(10000);
 
   const now = Date.now();
-  const quoteAgeMs = new Date(quotedAt).getTime();
+  const quotedAtMs = new Date(quotedAt).getTime();
 
   return {
     ...sim,
@@ -189,7 +189,7 @@ export async function getZapQuote(body: ZapQuoteBody): Promise<ZapQuoteResult> {
     amountOutAfterSlippage: outAfterSlippage.toString(),
     minAmountOutStroops: outAfterSlippage.toString(),
     quotedAt,
-    quoteAgeMs: now - quoteAgeMs,
+    quoteAgeMs: now - quotedAtMs,
     isFallback: sim.source === "fallback_rate",
   };
 }

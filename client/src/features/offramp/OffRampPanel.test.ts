@@ -89,6 +89,12 @@ describe("OffRampService", () => {
         };
 
         const tx = await service.initiateWithdrawal(request);
+
+        (global.fetch as any).mockResolvedValueOnce({
+            ok: true,
+            json: async () => ({ status: "pending" }),
+        });
+
         const polled = await service.pollStatus(tx.id);
 
         expect(polled).toBeDefined();

@@ -6,7 +6,7 @@
  */
 import { useCallback, useEffect, useRef, useState } from "react";
 import { X, Bell, Trash2, Plus, AlertTriangle, CheckCircle2, Loader2 } from "lucide-react";
-import type { UserAlert, AlertCondition } from "./types";
+import type { UserAlert, AlertCondition, AlertPreferences } from "./types";
 import { fetchAlerts, createAlert, deleteAlert } from "./alertsApi";
 
 const MAX_ALERTS = 20;
@@ -24,6 +24,11 @@ interface FormState {
   condition: AlertCondition;
   thresholdValue: string;
   email: string;
+  channel: "email" | "in_app";
+  cooldownMinutes: string;
+  severityThreshold: string;
+  quietHoursStart: string;
+  quietHoursEnd: string;
 }
 
 const DEFAULT_FORM: FormState = {
@@ -31,7 +36,14 @@ const DEFAULT_FORM: FormState = {
   condition: "above",
   thresholdValue: "",
   email: "",
+  channel: "email",
+  cooldownMinutes: "60",
+  severityThreshold: "0",
+  quietHoursStart: "23",
+  quietHoursEnd: "6",
 };
+
+const PREFS_STORAGE_KEY = "stellar-yield.alert-preferences";
 
 export default function AlertsModal({
   isOpen,
@@ -65,6 +77,17 @@ export default function AlertsModal({
   }, [isOpen, loadAlerts]);
 
   useEffect(() => {
+    const stored = window.localStorage.getItem(PREFS_STORAGE_KEY);
+    if (!stored) return;
+    try {
+      const prefs = JSON.parse(stored) as Partial<FormState>;
+      setForm((prev) => ({ ...prev, ...prefs }));
+    } catch {
+      // ignore malformed local storage data
+    }
+  }, []);
+
+  useEffect(() => {
     if (!isOpen) return;
     const handler = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
     window.addEventListener("keydown", handler);
@@ -91,6 +114,21 @@ export default function AlertsModal({
       setFormError(`Maximum of ${MAX_ALERTS} active alerts reached`);
       return;
     }
+    const preferences: AlertPreferences = {
+      channel: form.channel,
+      cooldownMinutes: Number(form.cooldownMinutes),
+      severityThreshold: Number(form.severityThreshold),
+      quietHoursStart: Number(form.quietHoursStart),
+      quietHoursEnd: Number(form.quietHoursEnd),
+    };
+    if (!Number.isFinite(preferences.cooldownMinutes) || preferences.cooldownMinutes < 0 || preferences.cooldownMinutes > 1440) {
+      setFormError("Cooldown must be between 0 and 1440 minutes");
+      return;
+    }
+    if (!Number.isFinite(preferences.severityThreshold) || preferences.severityThreshold < 0 || preferences.severityThreshold > 1000) {
+      setFormError("Severity threshold must be between 0 and 1000");
+      return;
+    }
 
     setSubmitting(true);
     try {
@@ -100,7 +138,18 @@ export default function AlertsModal({
         condition: form.condition,
         thresholdValue: threshold,
         email: form.email,
+        preferences,
       });
+      window.localStorage.setItem(
+        PREFS_STORAGE_KEY,
+        JSON.stringify({
+          channel: form.channel,
+          cooldownMinutes: form.cooldownMinutes,
+          severityThreshold: form.severityThreshold,
+          quietHoursStart: form.quietHoursStart,
+          quietHoursEnd: form.quietHoursEnd,
+        }),
+      );
       setAlerts((prev) => [created, ...prev]);
       setForm(DEFAULT_FORM);
     } catch (err) {
@@ -197,6 +246,57 @@ export default function AlertsModal({
               onChange={(e) => setForm((f) => ({ ...f, email: e.target.value }))}
               aria-label="Notification email"
               className="col-span-2 bg-white/10 text-white rounded-xl px-3 py-2 text-sm border border-white/10 focus:border-indigo-400 outline-none placeholder:text-gray-500"
+            />
+
+            <select
+              value={form.channel}
+              onChange={(e) => setForm((f) => ({ ...f, channel: e.target.value as "email" | "in_app" }))}
+              aria-label="Notification channel"
+              className="col-span-2 bg-white/10 text-white rounded-xl px-3 py-2 text-sm border border-white/10 focus:border-indigo-400 outline-none"
+            >
+              <option value="email">Email</option>
+              <option value="in_app">In-app</option>
+            </select>
+
+            <input
+              type="number"
+              min={0}
+              max={1440}
+              value={form.cooldownMinutes}
+              onChange={(e) => setForm((f) => ({ ...f, cooldownMinutes: e.target.value }))}
+              aria-label="Cooldown minutes"
+              placeholder="Cooldown (minutes)"
+              className="bg-white/10 text-white rounded-xl px-3 py-2 text-sm border border-white/10 focus:border-indigo-400 outline-none"
+            />
+            <input
+              type="number"
+              min={0}
+              max={1000}
+              value={form.severityThreshold}
+              onChange={(e) => setForm((f) => ({ ...f, severityThreshold: e.target.value }))}
+              aria-label="Severity threshold"
+              placeholder="Severity threshold"
+              className="bg-white/10 text-white rounded-xl px-3 py-2 text-sm border border-white/10 focus:border-indigo-400 outline-none"
+            />
+            <input
+              type="number"
+              min={0}
+              max={23}
+              value={form.quietHoursStart}
+              onChange={(e) => setForm((f) => ({ ...f, quietHoursStart: e.target.value }))}
+              aria-label="Quiet hours start"
+              placeholder="Quiet start UTC"
+              className="bg-white/10 text-white rounded-xl px-3 py-2 text-sm border border-white/10 focus:border-indigo-400 outline-none"
+            />
+            <input
+              type="number"
+              min={0}
+              max={23}
+              value={form.quietHoursEnd}
+              onChange={(e) => setForm((f) => ({ ...f, quietHoursEnd: e.target.value }))}
+              aria-label="Quiet hours end"
+              placeholder="Quiet end UTC"
+              className="bg-white/10 text-white rounded-xl px-3 py-2 text-sm border border-white/10 focus:border-indigo-400 outline-none"
             />
           </div>
 

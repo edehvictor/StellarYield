@@ -1,5 +1,6 @@
 import { useState, useEffect } from "react";
 import { Shield, AlertTriangle, CheckCircle, XCircle, RefreshCw, Info, Settings } from "lucide-react";
+import StatusBadge from '../../components/StatusBadge';
 
 // ── Types ───────────────────────────────────────────────────────────────
 
@@ -167,10 +168,7 @@ export default function CompatibilityPanel() {
             </p>
           </div>
           <div className="flex items-center gap-3">
-            {STATUS_ICONS[report.overallStatus]}
-            <span className="text-lg font-bold capitalize" style={{ color: STATUS_COLORS[report.overallStatus] }}>
-              {report.overallStatus}
-            </span>
+            <StatusBadge variant={report.overallStatus === 'compatible' ? 'success' : report.overallStatus === 'degraded' ? 'warning' : 'danger'} label={report.overallStatus} compact />
           </div>
         </div>
 
@@ -210,10 +208,7 @@ export default function CompatibilityPanel() {
           >
             <div className="flex items-center justify-between mb-3">
               <div className="flex items-center gap-2">
-                {STATUS_ICONS[protocol.status]}
-                <span className="text-xs font-semibold uppercase tracking-wider text-gray-400">
-                  {protocol.status}
-                </span>
+                <StatusBadge variant={protocol.status === 'compatible' ? 'success' : protocol.status === 'degraded' ? 'warning' : 'danger'} label={protocol.status} compact />
               </div>
               {protocol.autoUpdateAvailable && (
                 <div className="px-2 py-1 bg-[#6C5DD3]/20 text-[#6C5DD3] text-xs rounded">
@@ -255,7 +250,7 @@ export default function CompatibilityPanel() {
               </p>
             </div>
             <div className="flex items-center gap-3">
-              {STATUS_ICONS[selectedProtocol.status]}
+              <StatusBadge variant={selectedProtocol.status === 'compatible' ? 'success' : selectedProtocol.status === 'degraded' ? 'warning' : 'danger'} label={selectedProtocol.status} compact />
               <span className="text-lg font-bold capitalize" style={{ color: STATUS_COLORS[selectedProtocol.status] }}>
                 {selectedProtocol.status}
               </span>

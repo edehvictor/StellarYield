@@ -4,6 +4,16 @@
 
 export type OffRampProvider = "moonpay" | "anchor";
 
+export type OffRampErrorType =
+  | "INVALID_BANK_ACCOUNT"
+  | "INVALID_MEMO"
+  | "NETWORK_ERROR"
+  | "SUBMISSION_FAILED"
+  | "HTTP_401"
+  | "HTTP_403"
+  | "HTTP_500"
+  | "HTTP_503";
+
 export interface OffRampConfig {
     provider: OffRampProvider;
     apiKey: string;
@@ -37,23 +47,20 @@ export interface WithdrawalRequest {
 }
 
 /**
- * Off-Ramp Error Types
- * Categorizes errors for better handling and user messaging
+ * OffRampError class for handling off-ramp specific errors
  */
-export type OffRampErrorType =
-    | "UNSUPPORTED_REGION"
-    | "INVALID_BANK_ACCOUNT"
-    | "INVALID_MEMO"
-    | "PROVIDER_DOWNTIME"
-    | "INSUFFICIENT_LIQUIDITY"
-    | "AUTHENTICATION_FAILURE"
-    | "TRANSACTION_EXISTS"
-    | "NETWORK_ERROR"
-    | "UNKNOWN_ERROR";
-
-export interface OffRampError extends Error {
-    type: OffRampErrorType;
-    userMessage: string;
-    retryable: boolean;
+export class OffRampError extends Error {
+    type?: OffRampErrorType;
+    userMessage?: string;
+    retryable?: boolean;
     transactionId?: string;
+    cause?: Error;
+
+    constructor(message: string, type?: OffRampErrorType, cause?: Error) {
+        super(message);
+        this.name = "OffRampError";
+        this.type = type;
+        this.cause = cause;
+        Object.setPrototypeOf(this, OffRampError.prototype);
+    }
 }

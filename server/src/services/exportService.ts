@@ -1,8 +1,7 @@
-import { PROTOCOLS, ProtocolConfig } from "../config/protocols";
+import { PROTOCOLS } from "../config/protocols";
 import { 
   rankStrategies, 
-  computeRiskAdjustedYield,
-  StrategyInput
+  type StrategyInput
 } from "./riskAdjustedYieldService";
 import { yieldReliabilityEngine } from "./yieldReliabilityService";
 import { 
