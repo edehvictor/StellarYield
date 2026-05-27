@@ -11,7 +11,7 @@ import { getAdapter } from "./walletAdapters";
 import { getApiBaseUrl } from "../lib/api";
 
 const STORAGE_KEY = "stellar-yield.wallet-session";
-const API_BASE_URL = getApiBaseUrl();
+
 
 interface ChallengeResponse {
   challenge: string;
@@ -96,7 +96,7 @@ async function verifySmartWalletSession(
   }
 
   try {
-    const challengeResponse = await fetch(`${API_BASE_URL}/api/auth/challenge`, {
+    const challengeResponse = await fetch(`${getApiBaseUrl()}/api/auth/challenge`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -121,7 +121,7 @@ async function verifySmartWalletSession(
     );
 
     const verificationResponse = await fetch(
-      `${API_BASE_URL}/api/auth/verify`,
+      `${getApiBaseUrl()}/api/auth/verify`,
       {
         method: "POST",
         headers: {

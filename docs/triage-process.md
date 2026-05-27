@@ -1,3 +1,4 @@
+# Maintainer Issue Triage Process
 **Triage Process**
 
 - **Purpose:** Provide a repeatable daily workflow for maintainers to triage issues, signals, and operational alerts without changing GitHub permissions.
@@ -28,215 +29,36 @@ We keep some simple shell helpers in `scripts/` to produce lists you can paste i
 - This process is intentionally permission-agnostic. Use labels and issue body markers rather than requiring new team membership.
 # Issue and PR Triage Process
 
-This document outlines the triage process for maintaining a healthy and manageable issue tracker in the StellarYield repository.
+This document outlines the weekly issue triage workflow for the StellarYield maintainers, particularly for the Stellar Wave program.
 
-## 🎯 Overview
+## Saved Search Queries / Triage States
 
-The triage system helps maintainers:
-- Categorize new issues quickly
-- Identify and prioritize important work
-- Keep the issue tracker clean and focused
-- Support Stellar Wave participants effectively
-- Prevent issue tracker bloat from stale issues
+To maintain visibility over community contributions, use the following GitHub search queries:
 
-## 🤖 Automated Triage
+1. **Unclaimed Issues (Ready for Community)**
+   `is:issue is:open label:"Stellar Wave" label:"help wanted" no:assignee`
+   *Action:* Review for clarity, add 'good first issue' if applicable.
 
-### Daily Workflow (runs at 9:00 AM UTC)
+2. **Claimed Issues (In Progress)**
+   `is:issue is:open label:"Stellar Wave" has:assignee no:linked-pr`
+   *Action:* Ping assignees if there has been no activity for >7 days.
 
-1. **New Issue Triage**: Issues created in the last 3 days without labels are automatically tagged with `needs-triage`
-2. **Stale Detection**: Issues inactive for 30 days are marked as `stale`
-3. **Stale Closure**: Issues marked `stale` for 14 days without activity are closed
-4. **Draft PR Cleanup**: Draft PRs older than 30 days are automatically closed
+3. **Ready for Review (PR Submitted)**
+   `is:pr is:open label:"Stellar Wave" review:required`
+   *Action:* Assign a maintainer to review.
 
-### Stellar Wave Exemptions
+4. **Blocked / Needs Input**
+   `is:issue is:open label:"blocked" OR label:"needs info"`
+   *Action:* Follow up on requested information.
 
-Issues containing "Stellar Wave" in the title or body are:
-- Automatically tagged with `stellar-wave` label
-- Exempt from stale triage
-- Receive special acknowledgment comments
+## Weekly Triage Workflow
 
-## 🏷️ Label System
+Every Monday, maintainers should follow this process:
 
-### Triage Labels
-- **`needs-triage`**: New issues awaiting maintainer review
-- **`blocked`**: Issues blocked by dependencies or external factors
-- **`keep-active`**: Issues that should never be marked as stale
-- **`stellar-wave`**: Stellar Wave program issues (exempt from stale triage)
+1. **Review New Issues**: Scan all new issues created in the past week. Apply appropriate labels (`Stellar Wave`, `bug`, `enhancement`, `points: xxx`).
+2. **Check Stale Claims**: Unassign contributors who have not responded for over a week to free up issues for others.
+3. **Unblock Contributors**: Answer questions on issues labeled `needs info` or `blocked`.
+4. **Run Issue Triage Script**: Run the `scripts/issue-triage.js` to get an overview of the issue counts.
 
-### Status Labels
-- **`stale`**: Issues inactive for extended periods
-- **`work-in-progress`**: PRs still being developed
-- **`needs-review`**: PRs ready for maintainer review
-
-### Priority Labels
-- **`good-first-issue`**: Ideal for newcomers
-- **`help-wanted`**: Community assistance needed
-- **`enhancement`**: New features or improvements
-- **`bug`**: Something isn't working correctly
-- **`documentation`**: Documentation improvements
-- **`security`**: Security-related issues
-- **`pinned`**: Important issues pinned to top
-
-## 📋 Maintainer Triage Checklist
-
-### For New Issues (`needs-triage`)
-
-1. **Review Issue Content**
-   - [ ] Clear problem statement?
-   - [ ] Reproduction steps provided (for bugs)?
-   - [ ] Expected vs actual behavior described?
-   - [ ] Relevant environment details included?
-
-2. **Classify and Label**
-   - [ ] Add appropriate priority label (`bug`, `enhancement`, `documentation`, etc.)
-   - [ ] Add `good-first-issue` if appropriate for newcomers
-   - [ ] Add `help-wanted` if community help is needed
-   - [ ] Remove `needs-triage` label
-
-3. **Assess Priority**
-   - [ ] Is this a security issue? Add `security` label and respond immediately
-   - [ ] Is this blocking other work? Add `blocked` or block other issues
-   - [ ] Should this be pinned? Add `pinned` label
-
-4. **Assign and Respond**
-   - [ ] Assign to appropriate maintainer if possible
-   - [ ] Provide initial response or next steps
-   - [ ] Link related issues or pull requests
-
-### For Stale Issues (`stale`)
-
-1. **Evaluate Relevance**
-   - [ ] Is this issue still relevant to the project?
-   - [ ] Has the underlying problem been resolved?
-   - [ ] Are there newer related issues?
-
-2. **Take Action**
-   - [ ] **Keep Active**: Add `keep-active` label and comment why
-   - [ ] **Refresh**: Remove `stale` label and add updated information
-   - [ ] **Close**: Let auto-close happen or close manually with explanation
-
-### For Pull Requests
-
-1. **Initial Triage**
-   - [ ] Check for proper issue linking
-   - [ ] Verify CI checks are passing
-   - [ ] Add appropriate labels (`needs-review`, `work-in-progress`)
-   - [ ] Assign reviewers if needed
-
-2. **Review Process**
-   - [ ] Provide constructive feedback
-   - [ ] Request changes if needed
-   - [ ] Approve when ready
-   - [ ] Merge after approval and CI pass
-
-## 🔄 Manual Triage Process
-
-### Weekly Review (Recommended)
-
-1. **Check `needs-triage` Issues**
-   ```bash
-   # View all issues needing triage
-   gh issue list --repo edehvictor/StellarYield --label "needs-triage"
-   ```
-
-2. **Review `stale` Issues**
-   ```bash
-   # View stale issues
-   gh issue list --repo edehvictor/StellarYield --label "stale"
-   ```
-
-3. **Check `blocked` Issues**
-   ```bash
-   # View blocked issues
-   gh issue list --repo edehvictor/StellarYield --label "blocked"
-   ```
-
-### Monthly Cleanup
-
-1. **Review Old Draft PRs**
-   - Contact authors about inactive drafts
-   - Close drafts with no response after 30 days
-
-2. **Update Milestones**
-   - Review issues with upcoming milestones
-   - Update or remove outdated milestones
-
-3. **Label Maintenance**
-   - Remove duplicate or misapplied labels
-   - Update label descriptions if needed
-
-## 🛠️ Setup and Maintenance
-
-### Initial Setup
-
-1. **Install Required Labels**
-   ```bash
-   cd .github
-   chmod +x setup-labels.sh
-   ./setup-labels.sh
-   ```
-
-2. **Test Workflow**
-   - Manually trigger the stale workflow from GitHub Actions
-   - Verify labels are applied correctly
-   - Check that comments are posted as expected
-
-### Workflow Maintenance
-
-- **Monitor workflow runs** in GitHub Actions tab
-- **Update timing** if the schedule needs adjustment
-- **Modify exemptions** if new label categories are added
-- **Review message templates** for clarity and tone
-
-## 📊 Metrics and Reporting
-
-### Key Metrics to Track
-
-1. **Triage Efficiency**
-   - Time to first response on new issues
-   - Percentage of issues triaged within 48 hours
-   - Number of stale issues resolved
-
-2. **Issue Health**
-   - Ratio of open vs closed issues
-   - Age distribution of open issues
-   - Frequency of stale issue creation
-
-3. **Community Engagement**
-   - Number of `good-first-issue` items completed
-   - Participation from new contributors
-   - Stellar Wave issue resolution rate
-
-### Reporting
-
-Generate monthly reports using:
-```bash
-# Example: Get issue statistics
-gh issue list --repo edehvictor/StellarYield --state all --limit 1000 | \
-  jq -r '.[] | "\(.state),\(.labels[]?.name // "no-label"),\(.created_at)"' | \
-  sort | uniq -c
-```
-
-## 🚨 Special Cases
-
-### Security Issues
-- Never apply `stale` to security issues
-- Respond within 24 hours
-- Consider private disclosure if needed
-
-### Breaking Changes
-- Mark with `keep-active` to prevent auto-close
-- Ensure proper communication and migration plans
-
-### Stellar Wave Issues
-- Always exempt from stale triage
-- Provide additional support and guidance
-- Track separately for program reporting
-
-## 📞 Getting Help
-
-- **GitHub Issues**: For triage process improvements
-- **Discussions**: For general questions about issue management
-- **Maintainer Team**: For urgent triage decisions
-
-Remember: Good triage helps contributors feel heard and keeps the project moving forward! 🚀
+## Public Contributor Considerations
+Ensure that labels are clear, and that any "claimed" state is visibly marked by assigning the user. If the user cannot be assigned due to GitHub permissions, add a comment explicitly stating: `@username has claimed this issue.`

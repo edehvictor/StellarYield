@@ -10,6 +10,14 @@ export function getApiBaseUrl(env: ImportMetaEnv = import.meta.env): string {
     return trimTrailingSlash(configured.trim());
   }
 
+  const isLocalhost = typeof window !== 'undefined' 
+    ? window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'
+    : true;
+
+  if (!isLocalhost) {
+    throw new Error("API_UNAVAILABLE: Backend URL not configured for preview environment. Please set VITE_API_BASE_URL.");
+  }
+
   return LOCAL_API_BASE_URL;
 }
 

@@ -1,45 +1,37 @@
-# PR Description
+## Summary
+This PR implements fixes and documentation enhancements across four primary areas for the StellarYield platform:
+1. **API Fallback Behavior**: Implemented robust API base URL fallback logic to ensure Vercel preview environments fail gracefully when no backend URL is configured, avoiding incorrect default requests to localhost.
+2. **Issue Triage View**: Added a new maintainer workflow and search query documentation for triaging Stellar Wave issues, including a foundational `issue-triage.js` script.
+3. **UI Snapshot Checklist**: Updated the `.github/pull_request_template.md` and `CONTRIBUTING.md` to require UI snapshots (Desktop and Mobile) for any frontend visual changes.
+4. **Release Readiness**: Added a comprehensive `release-checklist.md` to ensure all Wave submissions meet CI, testing, and deployment standards before review.
 
-This PR implements four major features/fixes for the StellarYield platform:
+## Linked Issue
+Closes #435
+Closes #448
+Closes #444
+Closes #443
 
-## 1. Gasless Transactions (Fee Bumping) - #32
-Implemented a sponsor-led onboarding flow where the protocol pays for the first 3 transactions of a new user.
-- **Backend**: Created a secure `/api/relayer/fee-bump` endpoint with rate-limiting (3 requests per IP/15m) to sign FeeBumpTransactions.
-- **Frontend**: Updated the Soroban service to support wrapping transactions in a FeeBump wrapper before submission.
-- **Closes #32**
+## Change Type
+- [x] Bug fix (non-breaking change which fixes an issue)
+- [x] New feature (non-breaking change which adds functionality)
+- [ ] Breaking change (fix or feature that would cause existing functionality to not work as expected)
+- [x] Documentation update
+- [ ] Refactor
+- [ ] Other (please describe):
 
-## 2. Horizon Event Indexer Service - #28
-Built a background Node.js service to track on-chain vault actions in real-time.
-- **Features**: Idempotent processing using unique database constraints (PostgreSQL via Prisma), reorg handling by tracking the last processed ledger, and XDR parsing for event topics/data.
-- **Location**: `/server/src/indexer/`
-- **Closes #28**
+## Testing
+- Added unit tests for `getApiBaseUrl` inside `client/src/lib/api.test.ts` to ensure that environment variables properly override the localhost fallback, and that preview environments without configurations safely throw an error.
+- Ran tests successfully to ensure no regressions with upstream API base URL configurations.
 
-## 3. Emergency Circuit Breaker & Timelock Governance - #27
-Enhanced security with a programmable pause mechanism and admin timelocks.
-- **Circuit Breaker**: `emergency_pause()` and `emergency_unpause()` to immediately halt deposits and rebalancing.
-- **Rescue Funds**: `rescue_funds()` for emergency admin withdrawals.
-- **Timelock**: Implemented a 24-hour timelock for admin changes to prevent governance attacks.
-- **Closes #27**
+### Checklist
+- [x] Frontend changes tested
+- [ ] Backend changes tested
+- [ ] Contracts changes tested
+- [x] Documentation updated
+- [ ] Migrations tested (if applicable)
 
-## 4. Flash-Loan Resistant Price Oracle - #24
-Integrated a secure price oracle with TWAP fallback to protect against price manipulation during share calculations.
-- **Oracle Integration**: Direct fetching from a Soroban-compatible oracle.
-- **TWAP Fallback**: Automated fallback to Time-Weighted Average Price if the oracle feed is stale or delayed.
-- **Location**: `/contracts/yield_vault/src/oracle.rs`
-- **Closes #24**
+## Screenshots (if applicable)
+No visual UI changes were made in this PR (only API configuration logic and documentation updates).
 
-## 5. Backend Metrics API & Tracking - #209
-Implemented a lightweight `metricsMiddleware` in Express to record request latency and cache hit ratios.
-- Exposed safely at `GET /api/metrics`.
-
-## 6. Data Freshness Indicators - #210
-Updated the UI to clearly indicate when data was last fetched. Added "Stale Data" badges and time-ago timestamps.
-
-## 7. Protocol Risk Badge Explanations - #211
-Implemented informative, hoverable tooltips on Risk Badges across `ApyDashboard` and `AIAdvisor` to explain risk rationale (TVL, volatility, etc).
-
-## 8. CI/CD Smoke Tests - #213
-Created a robust bash smoke test `scripts/smoke-test.sh` that checks status codes across backend REST APIs and the frontend serving URL before finalizing a redeploy.
-
----
-Tested with local testing and Jest/Vitest unit tests.
+## Deployment Notes
+For preview deployments on Vercel, ensure that either `VITE_API_BASE_URL` or `VITE_API_URL` is set in the environment variables. If they are missing, the frontend application will explicitly throw an `API_UNAVAILABLE` error to prevent silent failures and timeout requests to localhost.
