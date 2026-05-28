@@ -17,6 +17,7 @@ import {
   Info,
 } from "lucide-react";
 import { apiUrl } from "../../lib/api";
+import { useReducedMotion } from "../../hooks/useReducedMotion";
 import { LiquidityBufferPanel } from "./LiquidityBufferPanel";
 import { computeDecayedFreshnessConfidence } from "./freshnessDecay";
 import { RISK_EXPLANATIONS, RiskLevel } from "../../config/riskConfig";
@@ -60,6 +61,42 @@ interface ApyEntry {
 type SortField = "apy" | "tvl" | "risk" | "protocol";
 type SortDirection = "asc" | "desc";
 type ViewMode = "grid" | "table";
+
+const SORT_LABELS: Record<SortField, string> = {
+  protocol: "Protocol",
+  apy: "APY",
+  tvl: "TVL",
+  risk: "Risk",
+};
+
+function getSortButtonLabel(
+  field: SortField,
+  currentField: SortField,
+  direction: SortDirection,
+): string {
+  if (field !== currentField) {
+    return `Sort by ${SORT_LABELS[field]} descending`;
+  }
+  const nextDirection = direction === "asc" ? "descending" : "ascending";
+  const currentDirection = direction === "asc" ? "ascending" : "descending";
+  return `${SORT_LABELS[field]} sorted ${currentDirection}; activate to sort ${nextDirection}`;
+}
+
+function getAriaSort(
+  field: SortField,
+  currentField: SortField,
+  direction: SortDirection,
+): "ascending" | "descending" | "none" {
+  if (field !== currentField) return "none";
+  return direction === "asc" ? "ascending" : "descending";
+}
+
+function getApyRowId(entry: ApyEntry): string {
+  return `${entry.protocol}-${entry.asset}`
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-|-$/g, "");
+}
 
 interface ApiApyEntry {
   protocol?: unknown;
@@ -238,6 +275,7 @@ export default function ApyDashboard() {
   const [viewMode, setViewMode] = useState<ViewMode>("grid");
   const [selectedCategory, setSelectedCategory] = useState<string>("All");
   const [refreshing, setRefreshing] = useState(false);
+  const reducedMotion = useReducedMotion();
 
   const fetchApyData = async (showLoadingState = true) => {
     if (showLoadingState) {
@@ -324,7 +362,8 @@ export default function ApyDashboard() {
   const protocolCount = new Set(apyData.map((d) => d.protocol)).size;
   const feeAttributionRows = apyData.map((entry) => ({
     vault: entry.protocol,
-    totalFeeDragApy: entry.feeAttribution?.totalFeeDragApy ?? entry.feeDragApy ?? 0,
+    totalFeeDragApy:
+      entry.feeAttribution?.totalFeeDragApy ?? entry.feeDragApy ?? 0,
     managementFeeApy: entry.feeAttribution?.managementFeeApy ?? 0,
     protocolFeeApy: entry.feeAttribution?.protocolFeeApy ?? 0,
     slippageApy: entry.feeAttribution?.slippageApy ?? 0,
@@ -345,17 +384,42 @@ export default function ApyDashboard() {
   const SortIcon = ({ field }: { field: SortField }) => (
     <ChevronDown
       size={14}
+      aria-hidden="true"
       className={`inline-block ml-1 transition-transform ${
         sortField === field ? "opacity-100" : "opacity-0 group-hover:opacity-50"
       } ${sortField === field && sortDirection === "asc" ? "rotate-180" : ""}`}
     />
   );
 
+  const SortHeader = ({ field }: { field: SortField }) => (
+    <th
+      scope="col"
+      aria-sort={getAriaSort(field, sortField, sortDirection)}
+      className="px-6 py-4 font-semibold"
+    >
+      <button
+        type="button"
+        onClick={() => handleSort(field)}
+        aria-label={getSortButtonLabel(field, sortField, sortDirection)}
+        aria-pressed={sortField === field}
+        className="group inline-flex items-center rounded-md text-left uppercase tracking-wider transition-colors hover:text-white focus:outline-none focus:ring-2 focus:ring-[#6C5DD3]/60 focus:ring-offset-2 focus:ring-offset-[#10101A]"
+      >
+        {SORT_LABELS[field]} <SortIcon field={field} />
+      </button>
+    </th>
+  );
+
   // ── Error state ───────────────────────────────────────────────────
 
   if (error && !apyData.length) {
     return (
-      <div className="space-y-8 animate-in fade-in slide-in-from-bottom-4 duration-700">
+      <div
+        className={`space-y-8 ${
+          reducedMotion
+            ? ""
+            : "animate-in fade-in slide-in-from-bottom-4 duration-700"
+        }`}
+      >
         <header className="mb-6">
           <h2 className="text-4xl font-extrabold tracking-tight mb-2">
             APY Comparison
@@ -386,7 +450,13 @@ export default function ApyDashboard() {
   // ── Render ────────────────────────────────────────────────────────
 
   return (
-    <div className="space-y-8 animate-in fade-in slide-in-from-bottom-4 duration-700">
+    <div
+      className={`space-y-8 ${
+        reducedMotion
+          ? ""
+          : "animate-in fade-in slide-in-from-bottom-4 duration-700"
+      }`}
+    >
       {/* Header */}
       <header className="flex flex-col md:flex-row md:items-end justify-between gap-4">
         <div>
@@ -481,9 +551,12 @@ export default function ApyDashboard() {
       {!loading && feeAttributionRows.length > 0 && (
         <section className="glass-panel p-5">
           <div className="mb-3">
-            <h3 className="text-lg font-semibold">Cross-Vault Fee Attribution</h3>
+            <h3 className="text-lg font-semibold">
+              Cross-Vault Fee Attribution
+            </h3>
             <p className="text-xs text-gray-400">
-              Comparative fee drag by management, protocol, slippage, network, reward offsets, and unknown components.
+              Comparative fee drag by management, protocol, slippage, network,
+              reward offsets, and unknown components.
             </p>
           </div>
           <div className="overflow-x-auto">
@@ -504,14 +577,28 @@ export default function ApyDashboard() {
                 {feeAttributionRows.map((row) => (
                   <tr key={row.vault} className="border-t border-white/10">
                     <td className="py-2">{row.vault}</td>
-                    <td className="py-2 text-right text-red-300">{row.totalFeeDragApy.toFixed(2)}%</td>
-                    <td className="py-2 text-right">{row.managementFeeApy.toFixed(2)}%</td>
-                    <td className="py-2 text-right">{row.protocolFeeApy.toFixed(2)}%</td>
-                    <td className="py-2 text-right">{row.slippageApy.toFixed(2)}%</td>
-                    <td className="py-2 text-right">{row.networkFeeApy.toFixed(2)}%</td>
-                    <td className="py-2 text-right text-green-300">-{row.rewardOffsetApy.toFixed(2)}%</td>
+                    <td className="py-2 text-right text-red-300">
+                      {row.totalFeeDragApy.toFixed(2)}%
+                    </td>
                     <td className="py-2 text-right">
-                      {row.unknownFeeApy > 0 ? `${row.unknownFeeApy.toFixed(2)}%` : "Unknown / None"}
+                      {row.managementFeeApy.toFixed(2)}%
+                    </td>
+                    <td className="py-2 text-right">
+                      {row.protocolFeeApy.toFixed(2)}%
+                    </td>
+                    <td className="py-2 text-right">
+                      {row.slippageApy.toFixed(2)}%
+                    </td>
+                    <td className="py-2 text-right">
+                      {row.networkFeeApy.toFixed(2)}%
+                    </td>
+                    <td className="py-2 text-right text-green-300">
+                      -{row.rewardOffsetApy.toFixed(2)}%
+                    </td>
+                    <td className="py-2 text-right">
+                      {row.unknownFeeApy > 0
+                        ? `${row.unknownFeeApy.toFixed(2)}%`
+                        : "Unknown / None"}
                     </td>
                   </tr>
                 ))}
@@ -610,7 +697,11 @@ export default function ApyDashboard() {
                   <div
                     key={`${entry.protocol}-${entry.asset}`}
                     className="glass-card p-6 flex flex-col justify-between group"
-                    style={{ animationDelay: `${i * 60}ms` }}
+                    style={
+                      reducedMotion
+                        ? undefined
+                        : { animationDelay: `${i * 60}ms` }
+                    }
                   >
                     {/* Protocol + Asset */}
                     <div>
@@ -631,7 +722,7 @@ export default function ApyDashboard() {
                         <div
                           className="group/risk relative flex cursor-help outline-none"
                           tabIndex={0}
-                          aria-describedby={`risk-tip-grid-${entry.protocol}-${entry.asset}`}
+                          aria-describedby={`risk-tip-grid-${getApyRowId(entry)}`}
                         >
                           <span
                             className={`${risk.bg} ${risk.color} ${risk.border} border px-2 py-0.5 rounded-lg text-[10px] font-bold uppercase tracking-wider flex items-center gap-1`}
@@ -639,7 +730,7 @@ export default function ApyDashboard() {
                             {entry.risk} <Info size={10} />
                           </span>
                           <div
-                            id={`risk-tip-grid-${entry.protocol}-${entry.asset}`}
+                            id={`risk-tip-grid-${getApyRowId(entry)}`}
                             role="tooltip"
                             className="absolute hidden group-hover/risk:block group-focus-within/risk:block bottom-full mb-2 right-0 w-48 p-2 bg-[#1A1A24] border border-white/10 rounded-lg text-xs leading-relaxed text-gray-300 shadow-xl z-10 transition-opacity"
                           >
@@ -652,11 +743,13 @@ export default function ApyDashboard() {
                       <div className="flex items-center gap-1.5 mb-3 text-[10px] font-medium uppercase tracking-wider">
                         {isStale ? (
                           <span className="text-red-400 flex items-center gap-1 bg-red-400/10 px-2 py-0.5 rounded-full">
-                            <Clock size={10} /> Stale Data ({diffMins}m old)
+                            <Clock size={10} aria-hidden="true" /> Stale Data (
+                            {diffMins}m old)
                           </span>
                         ) : (
                           <span className="text-gray-500 flex items-center gap-1">
-                            <Clock size={10} /> Updated just now (
+                            <Clock size={10} aria-hidden="true" /> Updated just
+                            now (
                             {Math.round((entry.freshnessConfidence ?? 1) * 100)}
                             % confidence)
                           </span>
@@ -773,33 +866,22 @@ export default function ApyDashboard() {
             <table className="w-full text-left border-collapse">
               <thead>
                 <tr className="bg-[rgba(255,255,255,0.02)] text-gray-400 text-xs uppercase tracking-wider">
-                  <th
-                    className="px-6 py-4 font-semibold cursor-pointer group select-none"
-                    onClick={() => handleSort("protocol")}
-                  >
-                    Protocol <SortIcon field="protocol" />
+                  <SortHeader field="protocol" />
+                  <th scope="col" className="px-6 py-4 font-semibold">
+                    Asset
                   </th>
-                  <th className="px-6 py-4 font-semibold">Asset</th>
-                  <th
-                    className="px-6 py-4 font-semibold cursor-pointer group select-none"
-                    onClick={() => handleSort("apy")}
-                  >
-                    APY <SortIcon field="apy" />
+                  <SortHeader field="apy" />
+                  <th scope="col" className="px-6 py-4 font-semibold">
+                    24h Change
                   </th>
-                  <th className="px-6 py-4 font-semibold">24h Change</th>
+                  <SortHeader field="tvl" />
+                  <SortHeader field="risk" />
                   <th
-                    className="px-6 py-4 font-semibold cursor-pointer group select-none"
-                    onClick={() => handleSort("tvl")}
+                    scope="col"
+                    className="px-6 py-4 font-semibold text-right"
                   >
-                    TVL <SortIcon field="tvl" />
+                    Action
                   </th>
-                  <th
-                    className="px-6 py-4 font-semibold cursor-pointer group select-none"
-                    onClick={() => handleSort("risk")}
-                  >
-                    Risk <SortIcon field="risk" />
-                  </th>
-                  <th className="px-6 py-4 font-semibold text-right">Action</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-[rgba(255,255,255,0.05)]">
@@ -823,12 +905,17 @@ export default function ApyDashboard() {
                         (Date.now() - fetchedTime.getTime()) / 60000,
                       );
                       const isStale = diffMins > 5;
+                      const rowId = getApyRowId(entry);
 
                       return (
                         <tr
                           key={`${entry.protocol}-${entry.asset}`}
                           className="group hover:bg-[rgba(255,255,255,0.03)] transition-colors"
-                          style={{ animationDelay: `${i * 40}ms` }}
+                          style={
+                            reducedMotion
+                              ? undefined
+                              : { animationDelay: `${i * 40}ms` }
+                          }
                         >
                           <td className="px-6 py-5">
                             <div className="flex items-center gap-3">
@@ -846,7 +933,11 @@ export default function ApyDashboard() {
                                     {entry.category}
                                   </p>
                                   {isStale && (
-                                    <span className="text-[9px] text-red-400 bg-red-400/10 px-1.5 py-px rounded uppercase">
+                                    <span
+                                      className="text-[9px] text-red-400 bg-red-400/10 px-1.5 py-px rounded uppercase"
+                                      aria-label={`Stale APY data for ${entry.protocol} ${entry.asset}; last updated ${diffMins} minutes ago`}
+                                      title={`Last updated ${diffMins} minutes ago`}
+                                    >
                                       Stale
                                     </span>
                                   )}
@@ -887,15 +978,16 @@ export default function ApyDashboard() {
                             <div
                               className="group/risk relative inline-flex cursor-help outline-none"
                               tabIndex={0}
-                              aria-describedby={`risk-tip-table-${entry.protocol}-${entry.asset}`}
+                              aria-describedby={`risk-tip-table-${rowId}`}
                             >
                               <span
                                 className={`${risk.bg} ${risk.color} ${risk.border} border px-2.5 py-1.5 rounded text-xs font-bold uppercase tracking-wider flex items-center gap-1`}
                               >
-                                {entry.risk} <Info size={12} />
+                                {entry.risk}{" "}
+                                <Info size={12} aria-hidden="true" />
                               </span>
                               <div
-                                id={`risk-tip-table-${entry.protocol}-${entry.asset}`}
+                                id={`risk-tip-table-${rowId}`}
                                 role="tooltip"
                                 className="absolute hidden group-hover/risk:block group-focus-within/risk:block bottom-full mb-2 left-1/2 -translate-x-1/2 w-48 p-2 bg-[#1A1A24] border border-white/10 rounded-lg text-xs leading-relaxed text-gray-300 shadow-xl z-10 transition-opacity"
                               >
