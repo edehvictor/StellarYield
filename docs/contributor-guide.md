@@ -281,18 +281,32 @@ git fetch upstream
 git checkout -b feat/issue-<number>-short-description upstream/main
 ```
 
-Examples:
+Use a prefix that matches the type of work:
 
-| Issue | Branch name |
-|-------|------------|
-| `#559` – contributor guide | `feat/issue-559-wave-contributor-docs` |
-| `#611` – correlation middleware | `feat/issue-611-correlation-id-middleware` |
+| Work type | Branch name |
+|-----------|-------------|
+| Feature | `feat/issue-611-correlation-id-middleware` |
+| Bug fix | `fix/issue-612-apy-rounding` |
+| Docs | `docs/issue-540-pr-naming-guide` |
+| Refactor | `refactor/issue-618-vault-service` |
 
 For PRs that address multiple related issues at once, list all numbers:
 
 ```
 feat/issues-545-549-share-price-chart-and-manifest
 ```
+
+Use conventional commit messages so reviewers can scan history quickly:
+
+```text
+feat: add APY comparison export
+fix: handle missing vault metadata
+docs: document contributor PR naming
+refactor: simplify yield route scoring
+```
+
+PR titles should be short and include the issue number when it fits, for example
+`docs: document contributor naming standards (#540)`.
 
 ### 5. Linking the issue in your PR
 

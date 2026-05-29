@@ -28,6 +28,36 @@ Thanks for contributing to StellarYield, a Stellar-native DeFi yield aggregator 
 
 Issues with `status: needs-update` for more than 14 days may be re-opened for others.
 
+### 🌿 Branch, Commit, and PR Naming
+
+Use short, descriptive names that include the issue number when possible.
+
+**Branches**
+
+| Work type | Branch example |
+|-----------|----------------|
+| Feature | `feat/issue-540-contributor-naming` |
+| Bug fix | `fix/issue-612-apy-rounding` |
+| Docs | `docs/issue-540-pr-naming-guide` |
+| Refactor | `refactor/issue-618-vault-service` |
+
+**Commits**
+
+Follow the conventional commit style:
+
+```text
+feat: add APY comparison export
+fix: handle missing vault metadata
+docs: document contributor PR naming
+refactor: simplify yield route scoring
+```
+
+**Pull requests**
+
+- Include the issue number in the title when it fits, for example `docs: document contributor naming standards (#540)`.
+- Add `Closes #<issue-number>`, `Fixes #<issue-number>`, or `Resolves #<issue-number>` in the PR body so GitHub links and closes the issue on merge.
+- Keep one PR focused on one issue unless a maintainer asks you to combine related work.
+
 ### 💻 Local Setup
 Since StellarYield is a full-stack monorepo, ensure you have the correct environments set up for the stack you are touching:
 
