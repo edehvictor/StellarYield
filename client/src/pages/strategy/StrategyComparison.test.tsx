@@ -88,6 +88,13 @@ describe('StrategyComparison Component', () => {
       expect(screen.getByText('DeFindex')).toBeInTheDocument();
     });
 
+    expect(
+      screen.getByRole('button', { name: /Export strategy comparison as CSV/i }),
+    ).toBeEnabled();
+    expect(
+      screen.getByRole('button', { name: /Export strategy comparison as JSON/i }),
+    ).toBeEnabled();
+
     // Check specific formattings on Blend card
     // APY
     expect(screen.getByText('8.68')).toBeInTheDocument();
@@ -120,5 +127,24 @@ describe('StrategyComparison Component', () => {
       expect(screen.getByText('Failed to Load Strategy Data')).toBeInTheDocument();
       expect(screen.getByText('Network offline')).toBeInTheDocument();
     });
+  });
+
+  it('disables exports and shows an empty state when no strategies match', async () => {
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => [],
+    });
+
+    render(<StrategyComparison />);
+
+    expect(
+      await screen.findByTestId('strategy-export-empty-state'),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole('button', { name: /No strategies available to export as CSV/i }),
+    ).toBeDisabled();
+    expect(
+      screen.getByRole('button', { name: /No strategies available to export as JSON/i }),
+    ).toBeDisabled();
   });
 });

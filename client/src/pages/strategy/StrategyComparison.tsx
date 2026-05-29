@@ -1,6 +1,5 @@
 import { useEffect, useState } from 'react';
 import {
-  BarChart3,
   RefreshCw,
   AlertTriangle,
   Flame,
@@ -10,23 +9,14 @@ import {
   TrendingDown,
   TrendingUp,
   Percent,
+  Download,
 } from 'lucide-react';
 import { apiUrl } from '../../lib/api';
-
-interface StrategyYield {
-  protocolName: string;
-  apy: number;
-  rewardApy: number;
-  totalApy: number;
-  tvl: number;
-  riskScore: number;
-  liquidityUsd: number;
-  rebalancingBehavior: string;
-  managementFeeBps: number;
-  performanceFeeBps: number;
-  capitalEfficiencyPct: number;
-  fetchedAt?: string;
-}
+import {
+  downloadStrategyComparisonExport,
+  type StrategyComparisonExportFormat,
+  type StrategyYield,
+} from './strategyComparisonExport';
 
 const STRATEGY_THEMES: Record<string, { bg: string; text: string; shadow: string }> = {
   Blend: { bg: 'from-violet-500/20 to-indigo-600/20', text: 'text-indigo-400', shadow: 'shadow-indigo-500/20' },
@@ -38,6 +28,12 @@ function formatCurrency(value: number): string {
   if (value >= 1_000_000) return `$${(value / 1_000_000).toFixed(2)}M`;
   if (value >= 1_000) return `$${(value / 1_000).toFixed(1)}K`;
   return `$${value.toLocaleString()}`;
+}
+
+function getErrorMessage(error: unknown): string {
+  return error instanceof Error && error.message
+    ? error.message
+    : 'Failed to fetch strategies';
 }
 
 export default function StrategyComparison() {
@@ -58,11 +54,15 @@ export default function StrategyComparison() {
         ['Blend', 'Soroswap', 'DeFindex'].includes(y.protocolName)
       );
       setData(strategies);
-    } catch (err: any) {
-      setError(err.message || 'Failed to fetch strategies');
+    } catch (err: unknown) {
+      setError(getErrorMessage(err));
     } finally {
       setLoading(false);
     }
+  };
+
+  const handleExport = (format: StrategyComparisonExportFormat) => {
+    downloadStrategyComparisonExport(data, format);
   };
 
   useEffect(() => {
@@ -119,18 +119,60 @@ export default function StrategyComparison() {
             Side-by-side analysis of risk, liquidity, and rebalancing approaches.
           </p>
         </div>
-        <button
-          onClick={fetchStrategies}
-          disabled={loading}
-          className="btn-secondary flex items-center gap-2 text-sm disabled:opacity-50"
-        >
-          <RefreshCw size={14} className={loading ? 'animate-spin' : ''} />
-          {loading ? 'Analyzing...' : 'Refresh Analysis'}
-        </button>
+        <div className="flex flex-wrap gap-2">
+          <button
+            onClick={fetchStrategies}
+            disabled={loading}
+            className="btn-secondary flex items-center gap-2 text-sm disabled:opacity-50"
+          >
+            <RefreshCw size={14} className={loading ? 'animate-spin' : ''} />
+            {loading ? 'Analyzing...' : 'Refresh Analysis'}
+          </button>
+          <button
+            type="button"
+            onClick={() => handleExport('csv')}
+            disabled={loading || data.length === 0}
+            aria-label={
+              data.length === 0
+                ? 'No strategies available to export as CSV'
+                : 'Export strategy comparison as CSV'
+            }
+            className="btn-secondary flex items-center gap-2 text-sm disabled:opacity-50"
+          >
+            <Download size={14} />
+            CSV
+          </button>
+          <button
+            type="button"
+            onClick={() => handleExport('json')}
+            disabled={loading || data.length === 0}
+            aria-label={
+              data.length === 0
+                ? 'No strategies available to export as JSON'
+                : 'Export strategy comparison as JSON'
+            }
+            className="btn-secondary flex items-center gap-2 text-sm disabled:opacity-50"
+          >
+            <Download size={14} />
+            JSON
+          </button>
+        </div>
       </header>
 
       {loading ? (
         renderSkeleton()
+      ) : data.length === 0 ? (
+        <div
+          className="glass-panel p-12 text-center border border-white/10"
+          data-testid="strategy-export-empty-state"
+        >
+          <AlertTriangle size={32} className="text-gray-500 mx-auto mb-4" />
+          <h3 className="text-xl font-bold mb-2">No Strategy Data Available</h3>
+          <p className="text-gray-400 max-w-md mx-auto">
+            Export actions unlock once Blend, Soroswap, or DeFindex strategy
+            rows are available.
+          </p>
+        </div>
       ) : (
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 relative">
           {data.map((strategy, i) => {
