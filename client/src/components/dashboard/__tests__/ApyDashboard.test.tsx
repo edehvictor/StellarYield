@@ -120,4 +120,53 @@ describe('ApyDashboard states', () => {
     expect(screen.getByText('Unknown Asset')).toBeInTheDocument();
     expect(screen.getByText('0.00')).toBeInTheDocument();
   });
+
+  it('exposes accessible sort state, risk tooltips, and stale labels', async () => {
+    const user = userEvent.setup();
+    const fetchedAt = new Date(Date.now() - 20 * 60 * 1000).toISOString();
+
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => [
+        {
+          protocol: 'Blend',
+          asset: 'USDC',
+          apy: 8.42,
+          tvl: 2450000,
+          risk: 'Low',
+          change24h: 0.32,
+          rewardTokens: ['BLND'],
+          category: 'Lending',
+          fetchedAt,
+        },
+      ],
+    });
+
+    render(<ApyDashboard />);
+
+    expect(
+      await screen.findByRole('button', { name: /Blend USDC risk: Low/i }),
+    ).toBeInTheDocument();
+    expect(screen.getByLabelText(/Stale data, \d+ minutes old/i)).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: /Table/i }));
+
+    expect(screen.getByRole('columnheader', { name: /APY/i })).toHaveAttribute(
+      'aria-sort',
+      'descending',
+    );
+
+    const tvlSort = screen.getByRole('button', { name: /^Sort by TVL$/i });
+    expect(tvlSort).toHaveAttribute('aria-pressed', 'false');
+
+    await user.click(tvlSort);
+
+    expect(screen.getByRole('columnheader', { name: /TVL/i })).toHaveAttribute(
+      'aria-sort',
+      'descending',
+    );
+    expect(
+      screen.getByRole('button', { name: /Sort by TVL, currently descending/i }),
+    ).toHaveAttribute('aria-pressed', 'true');
+  });
 });
