@@ -33,7 +33,9 @@ Establish what is actually wrong before communicating or resuming.
 Communicate clearly with users and stakeholders.
 
 - Post status to the official channels (status page, social, governance forum).
-- Record the incident timeline for the post-mortem.
+- Record the incident timeline for the postmortem. Use the
+  [incident postmortem template](./postmortems/TEMPLATE.md) and linking flow
+  once the event is mitigated or resolved.
 - This step is a manual acknowledgement; the panel cannot complete it for you.
 
 ### Resume
