@@ -40,13 +40,7 @@ import governanceRouter from "./routes/governance";
 import activityTimelineRouter from "./routes/activityTimeline";
 import presetsRouter from "./routes/presets";
 import analyticsRouter from "./routes/analytics";
-import fragmentationRouter from "./routes/fragmentation";
-import indexerRouter from "./routes/indexer";
-import rewardsRouter from "./routes/rewards";
-import reliabilityRouter from "./routes/reliability";
-import relayerStatusRouter from "./routes/relayerStatus";
-import auditReplayRouter from "./routes/auditReplay";
-import sharePriceHistoryRouter from "./routes/sharePriceHistory";
+
 import { createAuthChallenge, verifyAuthChallenge } from "./utils/stellarAuth";
 import {
   getRecommendationTimeline,
@@ -133,13 +127,7 @@ export function createApp() {
   app.use("/api/portfolio/activity", activityTimelineRouter);
   app.use("/api/presets", presetsRouter);
   app.use("/api/analytics", analyticsRouter);
-  app.use("/api/liquidity", fragmentationRouter);
-  app.use("/api/indexer", indexerRouter);
-  app.use("/api/rewards", rewardsRouter);
-  app.use("/api/reliability", reliabilityRouter);
-  app.use("/api/relayer/status", relayerStatusRouter);
-  app.use("/api/audit-replay", auditReplayRouter);
-  app.use("/api/vaults", sharePriceHistoryRouter);
+
 
   // Legacy JSON metrics (internal tooling)
   app.get("/api/metrics", getMetrics);
