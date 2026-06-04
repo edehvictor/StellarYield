@@ -1,16 +1,22 @@
 /**
- * Yield Strategy Backtester UI
- * Interactive charting with historical equity curve and APY overlay
+ * Issue #478: Yield Strategy Backtester UI
+ * Interactive charting with enhanced validation for date ranges.
  */
 
 import { useState, useCallback, useMemo } from "react";
-import { Calendar, TrendingUp, AlertCircle, Loader2 } from "lucide-react";
+import { Calendar, TrendingUp, AlertCircle, Loader2, Info } from "lucide-react";
 import type { BacktestRequest, BacktestResult } from "./types";
-import { fetchBacktestData, calculateTotalReturn } from "./backtestService";
+import { fetchBacktestData, calculateTotalReturn, validateBacktestRequest } from "./backtestService";
 
 export interface BacktestPanelProps {
   vaultContractId: string;
   vaultName: string;
+}
+
+interface ValidationError {
+  code: string;
+  message: string;
+  field?: string;
 }
 
 export default function BacktestPanel({
@@ -22,21 +28,22 @@ export default function BacktestPanel({
   const [depositAmount, setDepositAmount] = useState("");
   const [result, setResult] = useState<BacktestResult | null>(null);
   const [loading, setLoading] = useState(false);
-  const [error, setError] = useState("");
+  const [errors, setErrors] = useState<ValidationError[]>([]);
 
   const handleRunBacktest = useCallback(async () => {
+    // Clear previous errors
+    setErrors([]);
+
+    // Validate inputs
     if (!startDate || !endDate || !depositAmount) {
-      setError("Please fill in all fields");
+      setErrors([
+        {
+          code: "FIELD_REQUIRED",
+          message: "All fields are required. Please fill in start date, end date, and deposit amount.",
+        },
+      ]);
       return;
     }
-
-    if (new Date(startDate) >= new Date(endDate)) {
-      setError("Start date must be before end date");
-      return;
-    }
-
-    setError("");
-    setLoading(true);
 
     try {
       const request: BacktestRequest = {
@@ -46,10 +53,23 @@ export default function BacktestPanel({
         depositAmount: BigInt(depositAmount),
       };
 
+      // Perform comprehensive validation
+      const validation = validateBacktestRequest(request);
+      if (!validation.isValid) {
+        setErrors(validation.errors);
+        return;
+      }
+
+      setLoading(true);
       const data = await fetchBacktestData(request);
       setResult(data);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Backtest failed");
+      setErrors([
+        {
+          code: "BACKTEST_ERROR",
+          message: err instanceof Error ? err.message : "Backtest execution failed. Please try again.",
+        },
+      ]);
     } finally {
       setLoading(false);
     }
@@ -109,10 +129,28 @@ export default function BacktestPanel({
           </div>
         </div>
 
-        {error && (
-          <div className="flex items-center gap-2 p-3 bg-red-500/10 border border-red-500/30 rounded-lg">
-            <AlertCircle className="w-5 h-5 text-red-500" />
-            <span className="text-sm text-red-400">{error}</span>
+        {errors.length > 0 && (
+          <div className="space-y-2 p-4 bg-red-500/10 border border-red-500/30 rounded-lg">
+            <div className="flex items-center gap-2">
+              <AlertCircle className="w-5 h-5 text-red-500" />
+              <span className="text-sm font-semibold text-red-400">Validation Errors</span>
+            </div>
+            <div className="space-y-1">
+              {errors.map((error, idx) => (
+                <div key={idx} className="text-sm text-red-300 ml-7">
+                  <span className="font-mono text-xs text-red-400">[{error.code}]</span> {error.message}
+                </div>
+              ))}
+            </div>
+            <div className="mt-2 text-xs text-red-400 ml-7 space-y-1">
+              <p>📝 Tips:</p>
+              <ul className="list-disc pl-4">
+                <li>Maximum backtest window is 2 years</li>
+                <li>Dates must be in the past (no future dates allowed)</li>
+                <li>Start date must be before end date</li>
+                <li>Deposit amount must be greater than zero</li>
+              </ul>
+            </div>
           </div>
         )}
 
