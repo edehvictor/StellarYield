@@ -90,6 +90,8 @@ VITE_APP_URL=http://localhost:5173
 ## Preview and Production Expectations
 
 - `VITE_API_BASE_URL` (preferred) or `VITE_API_URL` must be set in Vercel for Preview and Production. Preview builds intentionally do not fall back to `http://localhost:3001`; API-backed views should show an unavailable state until a backend URL is configured.
+- **Strict Validation**: The API URL is strictly validated at runtime. It must be a valid URL starting with `http://` or `https://`. If it is missing or malformed, the API configuration will be marked as unavailable.
+- **Recoverable UI Degradation**: API-dependent views (e.g. `StrategyComparison`, `PnLChart`, `TaxExport`, `ClaimRewards`, `ReferralDashboard`, etc.) resolve the API base URL dynamically to prevent import-time crashes. If the API is missing, invalid, or unreachable, these views will display a user-friendly error alert or the `BackendUnavailable` fallback view, with a retry button to gracefully recover when the backend is restored.
 - All other required variables above must be set in Vercel for both the Production and Preview environments.
 - Contract IDs must point at the network selected by `VITE_NETWORK_PASSPHRASE` and `VITE_SOROBAN_RPC_URL`. Mixing testnet contracts with mainnet RPC, or vice versa, is the most common deploy-time bug.
 - Do not promote a Preview build to Production without verifying the environment-specific values; Vercel scopes variables per environment so a missing Production override can cause confusing runtime behavior.

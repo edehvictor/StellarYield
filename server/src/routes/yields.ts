@@ -5,6 +5,7 @@ import {
   getYieldDataWithCacheStatus,
 } from "../services/yieldService";
 import { calculateNetYield } from "../services/netYieldEngine";
+import { yieldReliabilityEngine } from "../services/yieldReliabilityService";
 
 const yieldsRouter = Router();
 
@@ -22,7 +23,35 @@ yieldsRouter.get("/", async (_req, res) => {
       slippageBps: parseBps(_req.query.slippageBps),
     };
     const hasCustomAssumptions = Object.values(assumptions).some((value) => value != null);
-    const payload = yields.map((entry) => {
+    const payload = await Promise.all(yields.map(async (entry) => {
+      const providerId = `${entry.protocolName.toLowerCase()}_api`;
+      const score = await yieldReliabilityEngine.calculateReliabilityScore(
+        providerId,
+        entry.protocolName,
+        "api",
+      );
+
+      let isStale = false;
+      const lastFetchMs = new Date(score.signals.lastSuccessfulFetch).getTime();
+      const ageSeconds = Number.isFinite(lastFetchMs)
+        ? Math.max(0, Math.round((Date.now() - lastFetchMs) / 1000))
+        : Number.POSITIVE_INFINITY;
+
+      // 30 minutes stale window
+      if (ageSeconds > 30 * 60 || score.metrics.freshness < 0.5) {
+        isStale = true;
+      }
+
+      const warnings: string[] = [];
+      if (isStale) {
+        warnings.push(`Yield data from ${entry.protocolName} is stale (${Math.round(ageSeconds / 60)}m old).`);
+      }
+      if (score.status === "unreliable") {
+        warnings.push(`Yield source ${entry.protocolName} is unhealthy.`);
+      } else if (score.status === "low" || score.status === "medium") {
+        warnings.push(`Yield source ${entry.protocolName} is degraded.`);
+      }
+
       const netYield = calculateNetYield(
         entry.totalApy,
         hasCustomAssumptions ? assumptions : undefined,
@@ -34,8 +63,11 @@ yieldsRouter.get("/", async (_req, res) => {
         netYieldAssumptions: netYield.assumptions,
         netYieldSensitivity: netYield.sensitivity,
         feeAttribution: netYield.feeAttribution,
+        isStale,
+        reliabilityStatus: score.status,
+        warnings,
       };
-    });
+    }));
     res.setHeader(
       "Cache-Control",
       `public, max-age=${CURRENT_YIELDS_TTL_SECONDS}, stale-while-revalidate=30`,

@@ -10,7 +10,13 @@ interface ClaimData {
   proof: string[];
 }
 
-const API_BASE = getApiBaseUrl();
+const getApiBase = () => {
+  try {
+    return getApiBaseUrl();
+  } catch {
+    return "";
+  }
+};
 
 /**
  * ClaimRewards — Frontend UI for claiming Merkle-tree distributed $YIELD rewards.
@@ -33,7 +39,7 @@ export default function ClaimRewards() {
 
     try {
       const res = await fetch(
-        `${API_BASE}/api/rewards/proof/${encodeURIComponent(walletAddress)}`,
+        `${getApiBase()}/api/rewards/proof/${encodeURIComponent(walletAddress)}`,
       );
       if (res.status === 404) {
         setClaimData(null);
@@ -66,7 +72,7 @@ export default function ClaimRewards() {
     setError(null);
 
     try {
-      const res = await fetch(`${API_BASE}/api/rewards/claim`, {
+      const res = await fetch(`${getApiBase()}/api/rewards/claim`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({

@@ -448,3 +448,19 @@ fn test_admin_can_trigger_rebalance() {
     let deviation = client.auto_rebalance(&admin, &user);
     assert!(deviation > 0);
 }
+
+#[test]
+fn test_storage_ttl_extension() {
+    let t = setup();
+    let user = Address::generate(&t.env);
+    let deposit = 2_000_000_i128;
+
+    mint(&t.env, &t.usdc, &user, deposit);
+    seed_amm(&t.env, &t.spot, &t.amm, deposit);
+
+    t.client.open_position(&user, &deposit, &0);
+
+    // Call get_position to test that persistent position read paths run successfully with TTL extension
+    t.client.get_position(&user);
+}
+

@@ -11,7 +11,13 @@ import {
 } from "lucide-react";
 import { getApiBaseUrl } from "../../lib/api";
 
-const API_BASE = getApiBaseUrl();
+const getApiBase = () => {
+  try {
+    return getApiBaseUrl();
+  } catch {
+    return "";
+  }
+};
 
 // ── Types ─────────────────────────────────────────────────────────────────
 
@@ -106,7 +112,7 @@ export default function RelayerStatusPage() {
 
     async function fetchStatus() {
       try {
-        const res = await fetch(`${API_BASE}/api/relayer/status`);
+        const res = await fetch(`${getApiBase()}/api/relayer/status`);
         if (!res.ok) throw new Error(`Server returned ${res.status}`);
         const data: RelayerStatus = await res.json();
         if (!cancelled) {

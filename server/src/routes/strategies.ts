@@ -10,7 +10,9 @@ import {
 import {
   failoverRegistry,
   type ProtocolHealthInput,
+  type ProtocolHealthStatus,
 } from "../services/protocolFailoverService";
+import { yieldReliabilityEngine } from "../services/yieldReliabilityService";
 import { rotationRegistry } from "../services/strategyRotationService";
 import { exportService } from "../services/exportService";
 import { strategySnapshotVersioningService } from "../services/strategySnapshotVersioningService";
@@ -27,16 +29,32 @@ let cache: { data: unknown; ts: number } | null = null;
  * stub from the protocol registry so the failover layer is wired through
  * end-to-end.
  */
-function buildHealthSnapshot(now: number): Map<string, ProtocolHealthInput> {
+async function buildHealthSnapshot(now: number): Promise<Map<string, ProtocolHealthInput>> {
   const snapshot = new Map<string, ProtocolHealthInput>();
   for (const p of PROTOCOLS) {
+    const providerId = `${p.protocolName.toLowerCase()}_api`;
+    const score = await yieldReliabilityEngine.calculateReliabilityScore(
+      providerId,
+      p.protocolName,
+      "api",
+    );
+
+    let status: ProtocolHealthStatus = "healthy";
+    if (score.status === "unreliable") {
+      status = "down";
+    } else if (score.status === "low") {
+      status = "critical";
+    } else if (score.status === "medium") {
+      status = "degraded";
+    }
+
     snapshot.set(p.protocolName.toLowerCase(), {
       id: p.protocolName.toLowerCase(),
       name: p.protocolName,
-      status: "healthy",
-      lastUpdatedAt: new Date(now).toISOString(),
-      providerUptime: 0.999,
-      recentErrorCount: 0,
+      status,
+      lastUpdatedAt: score.signals.lastSuccessfulFetch || new Date(now).toISOString(),
+      providerUptime: score.metrics.historicalUptime,
+      recentErrorCount: score.signals.consecutiveFailures,
     });
   }
   return snapshot;
@@ -71,7 +89,7 @@ function buildStrategies(): StrategyInput[] {
  *   timeWindow  — 24h | 7d | 30d | all (default: all)
  *   strategyType — blend | soroswap | defindex | all (default: all)
  */
-router.get("/leaderboard", (req: Request, res: Response) => {
+router.get("/leaderboard", async (req: Request, res: Response) => {
   const timeWindow = (req.query.timeWindow as string) || "all";
   if (!VALID_TIME_WINDOWS.includes(timeWindow as TimeWindow)) {
     res.status(400).json({ error: "timeWindow must be one of: 24h, 7d, 30d, all" });
@@ -101,8 +119,18 @@ router.get("/leaderboard", (req: Request, res: Response) => {
   // Apply protocol failover BEFORE ranking so excluded protocols never
   // surface as recommendations. The `failover` block in the response
   // documents every exclusion and recovery for transparency.
-  const failover = failoverRegistry.apply(strategies, buildHealthSnapshot(now));
+  const healthSnapshot = await buildHealthSnapshot(now);
+  const failover = failoverRegistry.apply(strategies, healthSnapshot);
   const ranked = rankStrategies(failover.included);
+
+  const warnings: string[] = [];
+  for (const ev of failover.evaluations) {
+    if (ev.severity === "warn") {
+      warnings.push(`Yield source ${ev.protocolName} is degraded: ${ev.reasons.join(", ")}`);
+    } else if (ev.shouldExclude) {
+      warnings.push(`Yield source ${ev.protocolName} is unhealthy/stale and was excluded: ${ev.reasons.join(", ")}`);
+    }
+  }
 
   const response = {
     items: ranked,
@@ -114,6 +142,7 @@ router.get("/leaderboard", (req: Request, res: Response) => {
       excluded: failover.excluded.map((s) => s.id),
       decisions: failover.decisions,
     },
+    warnings,
   };
 
   if (timeWindow === "all" && strategyType === "all") {

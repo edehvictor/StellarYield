@@ -168,3 +168,30 @@ fn test_exercise() {
     // Contract has 0 balance
     assert_eq!(client_u.balance(&client.address), 0);
 }
+
+#[test]
+fn test_storage_ttl_extension() {
+    let (env, client, _, _, underlying, quote) = setup_env();
+    let minter = Address::generate(&env);
+
+    mint_tokens(&env, &underlying, &minter, 20_000_000);
+
+    let option_id = client.mint(
+        &minter,
+        &OptionType::Call,
+        &underlying,
+        &quote,
+        &100_000_000_i128,
+        &1000u64,
+        &10_000_000_i128,
+    );
+
+    // Advance timestamp and exercise to ensure we cross boundaries cleanly
+    env.ledger().set_timestamp(1000);
+    
+    // Test that client can execute exercise and verify that the TTL extension calls run successfully
+    let exerciser = Address::generate(&env);
+    mint_tokens(&env, &quote, &exerciser, 200_000_000);
+    client.exercise(&exerciser, &option_id);
+}
+

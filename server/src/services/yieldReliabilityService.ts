@@ -106,6 +106,16 @@ export class YieldReliabilityEngine {
   private config: ReliabilityConfig;
   private historicalData: Map<string, DataSourceReliability[]>;
 
+  private signalOverrides = new Map<string, Partial<ReliabilitySignals>>();
+
+  public setSignalOverride(providerId: string, signals: Partial<ReliabilitySignals> | null): void {
+    if (signals === null) {
+      this.signalOverrides.delete(providerId);
+    } else {
+      this.signalOverrides.set(providerId, signals);
+    }
+  }
+
   constructor(config: Partial<ReliabilityConfig> = {}) {
     this.config = { ...DEFAULT_CONFIG, ...config };
     this.historicalData = new Map();
@@ -195,9 +205,8 @@ export class YieldReliabilityEngine {
   /**
    * Collect reliability signals from monitoring systems
    */
-  private async collectReliabilitySignals(_providerId: string, _dataSource: string): Promise<ReliabilitySignals> {
-    // Mock implementation - would query monitoring systems
-    return {
+  private async collectReliabilitySignals(providerId: string, _dataSource: string): Promise<ReliabilitySignals> {
+    const baseSignals = {
       lastSuccessfulFetch: new Date(Date.now() - 5 * 60 * 1000).toISOString(), // 5 minutes ago
       consecutiveFailures: 0,
       totalRequests: 1000,
@@ -209,6 +218,8 @@ export class YieldReliabilityEngine {
       varianceFromMean: 0.02,
       crossSourceDeviation: 0.05,
     };
+    const overrides = this.signalOverrides.get(providerId);
+    return overrides ? { ...baseSignals, ...overrides } : baseSignals;
   }
 
   /**

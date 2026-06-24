@@ -8,6 +8,7 @@ import { context } from "./graphql/context";
 import { graphqlSchema } from "./graphql/schema";
 import { metricsMiddleware, getMetrics } from "./middleware/metrics";
 import { auditMiddleware } from "./middleware/audit";
+import { authMiddleware } from "./middleware/auth";
 import { sendError } from "./utils/errorResponse";
 import { requestContextMiddleware } from "./middleware/requestContext";
 import { correlationIdMiddleware } from "./middleware/correlationId";
@@ -91,6 +92,7 @@ export function createApp() {
   app.use(requestLoggerMiddleware);
   app.use(metricsMiddleware);
   app.use(auditMiddleware);
+  app.use(authMiddleware);
   app.use(yoga.graphqlEndpoint, yoga);
 
   const relayerLimiter = rateLimit({

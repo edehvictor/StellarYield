@@ -220,6 +220,19 @@ The dashboard uses consistent terminology for data freshness states:
 - `server/src/routes/analytics.ts` - Backend analytics endpoints
 - `server/src/services/` - Data aggregation services
 
+## Recommendations Failover and Warnings System (Backend)
+
+To prevent stale or unhealthy yield sources from being recommended on the platform:
+
+1. **Leaderboard Filtering**:
+   - The recommendations engine (`/api/strategies/leaderboard`) filters out yield sources using `protocolFailoverService`.
+   - Data older than 5 minutes (`maxDataAgeMs`) is automatically classified as stale and excluded from the leaderboard ranking.
+   - Unhealthy states (e.g., status is `"critical"` or `"down"`) automatically trigger failover exclusion.
+
+2. **Explicit Warning Propagation**:
+   - The `/api/strategies/leaderboard` endpoint returns a top-level `warnings` array listing degraded or excluded sources.
+   - The `/api/yields` endpoint returns `isStale` (boolean), `reliabilityStatus` (string), and `warnings` (array of strings) properties for each protocol entry.
+
 ## Support
 
 For persistent stale data issues:

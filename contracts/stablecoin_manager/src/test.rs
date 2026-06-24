@@ -237,3 +237,16 @@ fn test_double_initialize_rejected() {
     );
     assert_eq!(result, Err(Ok(crate::Error::AlreadyInitialized)));
 }
+
+#[test]
+fn test_storage_ttl_extension() {
+    let (env, client, _, _, collateral_addr, _, _) = setup_env();
+    let user = Address::generate(&env);
+
+    give_collateral(&env, &collateral_addr, &user, 100_000);
+    client.mint_s_usd(&user, &100_000, &5_000);
+
+    // Call repay_s_usd to verify that read/write paths for CDP run successfully with TTL extension
+    client.repay_s_usd(&user, &0, &0);
+}
+

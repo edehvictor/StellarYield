@@ -30,29 +30,40 @@ pub struct OptionData {
     pub expired: bool,
 }
 
+use storage_helpers::{extend_instance_ttl_default, extend_persistent_ttl_default};
+
 pub fn has_admin(e: &Env) -> bool {
-    e.storage().instance().has(&DataKey::Admin)
+    let has = e.storage().instance().has(&DataKey::Admin);
+    if has {
+        extend_instance_ttl_default(e);
+    }
+    has
 }
 
 #[allow(dead_code)]
 pub fn read_admin(e: &Env) -> Address {
+    extend_instance_ttl_default(e);
     e.storage().instance().get(&DataKey::Admin).unwrap()
 }
 
 pub fn write_admin(e: &Env, id: &Address) {
     e.storage().instance().set(&DataKey::Admin, id);
+    extend_instance_ttl_default(e);
 }
 
 #[allow(dead_code)]
 pub fn read_oracle(e: &Env) -> Address {
+    extend_instance_ttl_default(e);
     e.storage().instance().get(&DataKey::Oracle).unwrap()
 }
 
 pub fn write_oracle(e: &Env, id: &Address) {
     e.storage().instance().set(&DataKey::Oracle, id);
+    extend_instance_ttl_default(e);
 }
 
 pub fn read_option_counter(e: &Env) -> u32 {
+    extend_instance_ttl_default(e);
     e.storage()
         .instance()
         .get(&DataKey::OptionCounter)
@@ -63,12 +74,18 @@ pub fn write_option_counter(e: &Env, counter: u32) {
     e.storage()
         .instance()
         .set(&DataKey::OptionCounter, &counter);
+    extend_instance_ttl_default(e);
 }
 
 pub fn read_option(e: &Env, id: u32) -> OptionData {
-    e.storage().persistent().get(&DataKey::Option(id)).unwrap()
+    let key = DataKey::Option(id);
+    extend_persistent_ttl_default(e, &key);
+    e.storage().persistent().get(&key).unwrap()
 }
 
 pub fn write_option(e: &Env, id: u32, option: &OptionData) {
-    e.storage().persistent().set(&DataKey::Option(id), option);
+    let key = DataKey::Option(id);
+    e.storage().persistent().set(&key, option);
+    extend_persistent_ttl_default(e, &key);
 }
+

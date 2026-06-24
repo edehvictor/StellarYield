@@ -168,3 +168,19 @@ fn test_gauge_voting() {
     let result = client.try_vote(&user, &pool, &5000);
     assert!(result.is_err());
 }
+
+#[test]
+fn test_storage_ttl_extension() {
+    let (env, client, _, _, yield_token_client) = setup_env();
+    let user = Address::generate(&env);
+
+    let amount = 10_000_000_000i128;
+    yield_token_client.mint(&user, &amount);
+    let unlock_time = env.ledger().timestamp() + WEEK * 10;
+    client.create_lock(&user, &amount, &unlock_time);
+
+    // Call get_voting_power and get_unlock_time to test that persistent user lock read paths run with TTL extension
+    client.get_voting_power(&user);
+    client.get_unlock_time(&user);
+}
+

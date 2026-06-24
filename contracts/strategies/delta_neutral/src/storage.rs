@@ -50,94 +50,126 @@ pub struct Position {
 
 // ── Storage helpers ──────────────────────────────────────────────────────
 
+use storage_helpers::{extend_instance_ttl_default, extend_persistent_ttl_default};
+
 #[allow(dead_code)]
 pub fn has_admin(e: &Env) -> bool {
-    e.storage().instance().has(&DataKey::Admin)
+    let has = e.storage().instance().has(&DataKey::Admin);
+    if has {
+        extend_instance_ttl_default(e);
+    }
+    has
 }
 
 pub fn read_admin(e: &Env) -> Address {
+    extend_instance_ttl_default(e);
     e.storage().instance().get(&DataKey::Admin).unwrap()
 }
 
 pub fn write_admin(e: &Env, admin: &Address) {
     e.storage().instance().set(&DataKey::Admin, admin);
+    extend_instance_ttl_default(e);
 }
 
 pub fn read_usdc_token(e: &Env) -> Address {
+    extend_instance_ttl_default(e);
     e.storage().instance().get(&DataKey::UsdcToken).unwrap()
 }
 
 pub fn write_usdc_token(e: &Env, addr: &Address) {
     e.storage().instance().set(&DataKey::UsdcToken, addr);
+    extend_instance_ttl_default(e);
 }
 
 pub fn read_spot_token(e: &Env) -> Address {
+    extend_instance_ttl_default(e);
     e.storage().instance().get(&DataKey::SpotToken).unwrap()
 }
 
 pub fn write_spot_token(e: &Env, addr: &Address) {
     e.storage().instance().set(&DataKey::SpotToken, addr);
+    extend_instance_ttl_default(e);
 }
 
 pub fn read_amm_router(e: &Env) -> Address {
+    extend_instance_ttl_default(e);
     e.storage().instance().get(&DataKey::AmmRouter).unwrap()
 }
 
 pub fn write_amm_router(e: &Env, addr: &Address) {
     e.storage().instance().set(&DataKey::AmmRouter, addr);
+    extend_instance_ttl_default(e);
 }
 
 pub fn read_perp_exchange(e: &Env) -> Address {
+    extend_instance_ttl_default(e);
     e.storage().instance().get(&DataKey::PerpExchange).unwrap()
 }
 
 pub fn write_perp_exchange(e: &Env, addr: &Address) {
     e.storage().instance().set(&DataKey::PerpExchange, addr);
+    extend_instance_ttl_default(e);
 }
 
 pub fn read_oracle(e: &Env) -> Address {
+    extend_instance_ttl_default(e);
     e.storage().instance().get(&DataKey::Oracle).unwrap()
 }
 
 pub fn write_oracle(e: &Env, addr: &Address) {
     e.storage().instance().set(&DataKey::Oracle, addr);
+    extend_instance_ttl_default(e);
 }
 
 pub fn is_initialized(e: &Env) -> bool {
-    e.storage()
+    let init = e.storage()
         .instance()
         .get(&DataKey::Initialized)
-        .unwrap_or(false)
+        .unwrap_or(false);
+    if init {
+        extend_instance_ttl_default(e);
+    }
+    init
 }
 
 pub fn set_initialized(e: &Env) {
     e.storage().instance().set(&DataKey::Initialized, &true);
+    extend_instance_ttl_default(e);
 }
 
 pub fn is_paused(e: &Env) -> bool {
-    e.storage()
+    let paused = e.storage()
         .instance()
         .get(&DataKey::Paused)
-        .unwrap_or(false)
+        .unwrap_or(false);
+    if paused {
+        extend_instance_ttl_default(e);
+    }
+    paused
 }
 
 pub fn set_paused(e: &Env, paused: bool) {
     e.storage().instance().set(&DataKey::Paused, &paused);
+    extend_instance_ttl_default(e);
 }
 
 pub fn read_position(e: &Env, owner: &Address) -> Option<Position> {
-    e.storage()
-        .persistent()
-        .get(&DataKey::Position(owner.clone()))
+    let key = DataKey::Position(owner.clone());
+    let pos_opt = e.storage().persistent().get(&key);
+    if pos_opt.is_some() {
+        extend_persistent_ttl_default(e, &key);
+    }
+    pos_opt
 }
 
 pub fn write_position(e: &Env, owner: &Address, pos: &Position) {
-    e.storage()
-        .persistent()
-        .set(&DataKey::Position(owner.clone()), pos);
+    let key = DataKey::Position(owner.clone());
+    e.storage().persistent().set(&key, pos);
+    extend_persistent_ttl_default(e, &key);
 }
 
 pub fn read_total_deposited(e: &Env) -> i128 {
+    extend_instance_ttl_default(e);
     e.storage()
         .instance()
         .get(&DataKey::TotalDeposited)
@@ -148,9 +180,11 @@ pub fn write_total_deposited(e: &Env, amount: i128) {
     e.storage()
         .instance()
         .set(&DataKey::TotalDeposited, &amount);
+    extend_instance_ttl_default(e);
 }
 
 pub fn read_rebalance_threshold_bps(e: &Env) -> i128 {
+    extend_instance_ttl_default(e);
     e.storage()
         .instance()
         .get(&DataKey::RebalanceThresholdBps)
@@ -161,4 +195,5 @@ pub fn write_rebalance_threshold_bps(e: &Env, bps: i128) {
     e.storage()
         .instance()
         .set(&DataKey::RebalanceThresholdBps, &bps);
+    extend_instance_ttl_default(e);
 }

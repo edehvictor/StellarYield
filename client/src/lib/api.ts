@@ -30,15 +30,25 @@ export function getApiBaseUrlState(
   env: ImportMetaEnv = import.meta.env,
 ): ApiBaseUrlState {
   const configured = env.VITE_API_BASE_URL || env.VITE_API_URL;
-  if (configured?.trim()) {
-    return { available: true, baseUrl: trimTrailingSlash(configured.trim()) };
+  if (configured !== undefined && configured !== null && configured.trim() !== "") {
+    const trimmed = configured.trim();
+    if (!/^https?:\/\//i.test(trimmed)) {
+      return {
+        available: false,
+        reason: `Invalid API URL configuration: "${trimmed}". Must start with http:// or https://`,
+      };
+    }
+    return { available: true, baseUrl: trimTrailingSlash(trimmed) };
   }
 
   if (isLocalRuntime()) {
     return { available: true, baseUrl: LOCAL_API_BASE_URL };
   }
 
-  return { available: true, baseUrl: SAME_ORIGIN_API_BASE_URL };
+  return {
+    available: false,
+    reason: "API base URL configuration is missing.",
+  };
 }
 
 export function isApiUnavailableError(error: unknown): error is ApiUnavailableError {

@@ -30,7 +30,13 @@ import VaultReliabilityPanel from "./VaultReliabilityPanel";
 import AuditReplayReportPanel from "./AuditReplayReportPanel";
 import RegistryDiffPage from "./RegistryDiff";
 
-const API_BASE = getApiBaseUrl();
+const getApiBase = () => {
+  try {
+    return getApiBaseUrl();
+  } catch {
+    return "";
+  }
+};
 
 // ── Types ─────────────────────────────────────────────────────────────────
 
@@ -121,7 +127,7 @@ export default function TransparencyDashboard() {
             setLoading(true);
             setError(null);
             try {
-                const res = await fetch(`${API_BASE}/api/transparency/summary`);
+                const res = await fetch(`${getApiBase()}/api/transparency/summary`);
                 if (!res.ok) {
                     throw new Error(`Server returned ${res.status}`);
                 }
@@ -158,7 +164,7 @@ export default function TransparencyDashboard() {
     }, []);
 
     useEffect(() => {
-        fetch(`${API_BASE}/api/transparency/failover-history`)
+        fetch(`${getApiBase()}/api/transparency/failover-history`)
             .then((res) => (res.ok ? res.json() : Promise.resolve({ incidents: [] })))
             .then((data: { incidents: FailoverIncident[] }) => setFailoverIncidents(data.incidents))
             .catch(() => setFailoverIncidents([]));

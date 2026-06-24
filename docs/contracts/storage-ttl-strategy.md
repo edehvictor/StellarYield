@@ -60,10 +60,15 @@ Notes:
 Notes:
 - `Position(user)` should be bumped on open/close/rebalance/funding operations to avoid expiry for low-frequency users.
 
-## Risky Patterns and Follow-up TODOs
+## Adoption and Standardization
 
-- TODO: Standardize a helper for persistent TTL bump operations across contracts.
-- TODO: Add explicit bump policy constants (`LOW_WATERMARK_LEDGERS`, `BUMP_LEDGER_AMOUNT`) per contract.
+- Standardized reusable storage TTL helpers in a workspace library crate `storage_helpers`.
+- Adopted the helpers across all four audited contracts: `options`, `stablecoin_manager`, `ve_tokenomics`, and `delta_neutral` strategy.
+- Set explicit bump policy constants `LOW_WATERMARK_LEDGERS = 50,000` and `BUMP_LEDGER_AMOUNT = 100,000` inside `storage_helpers` for consistent policy enforcement.
+- Integrated explicit TTL extension calls into all state reads/writes/mutations.
+- Added expiry-boundary regression tests in `tests.rs` for each of the adopted contracts.
+
+## Follow-up TODOs
+
 - TODO: Add migration plan for legacy entries that were written before bump logic.
-- TODO: Add regression tests validating that critical persistent keys are bumped during write paths.
 - TODO: Consider post-expiry cleanup jobs for stale governance/option records to cap state growth.

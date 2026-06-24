@@ -448,6 +448,7 @@ version = "0.1.0"
 dependencies = [
  "soroban-sdk",
  "soroban-token-sdk",
+ "storage_helpers",
 ]
 
 [[package]]
@@ -1023,6 +1024,7 @@ version = "0.1.0"
 dependencies = [
  "soroban-sdk",
  "soroban-token-sdk",
+ "storage_helpers",
 ]
 
 [[package]]
@@ -1674,6 +1676,7 @@ dependencies = [
  "proptest",
  "soroban-sdk",
  "soroban-token-sdk",
+ "storage_helpers",
 ]
 
 [[package]]
@@ -1721,6 +1724,13 @@ dependencies = [
  "serde",
  "serde_with",
  "stellar-strkey",
+]
+
+[[package]]
+name = "storage_helpers"
+version = "0.1.0"
+dependencies = [
+ "soroban-sdk",
 ]
 
 [[package]]
@@ -1860,6 +1870,7 @@ dependencies = [
  "proptest",
  "soroban-sdk",
  "soroban-token-sdk",
+ "storage_helpers",
 ]
 
 [[package]]

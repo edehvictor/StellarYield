@@ -11,7 +11,13 @@ import {
   getUnavailableVaults,
 } from "./batchClaimUtils";
 
-const API_BASE = getApiBaseUrl();
+const getApiBase = () => {
+  try {
+    return getApiBaseUrl();
+  } catch {
+    return "";
+  }
+};
 
 interface BatchClaimPreviewProps {
   vaultIds: string[];
@@ -43,7 +49,7 @@ export default function BatchClaimPreview({
       const proofPromises = vaultIds.map(async (vaultId) => {
         try {
           const res = await fetch(
-            `${API_BASE}/api/rewards/proof/${encodeURIComponent(walletAddress)}?vaultId=${vaultId}`,
+            `${getApiBase()}/api/rewards/proof/${encodeURIComponent(walletAddress)}?vaultId=${vaultId}`,
           );
 
           if (res.status === 404) {

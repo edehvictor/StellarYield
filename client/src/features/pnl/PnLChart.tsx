@@ -30,7 +30,13 @@ interface PnLData {
   dailySnapshots: DailyPnLSnapshot[];
 }
 
-const API_BASE = getApiBaseUrl();
+const getApiBase = () => {
+  try {
+    return getApiBaseUrl();
+  } catch {
+    return "";
+  }
+};
 
 /**
  * Detects if PnL data is empty or insufficient for rendering.
@@ -72,7 +78,7 @@ export default function PnLChart() {
 
     try {
       const res = await fetch(
-        `${API_BASE}/api/users/${encodeURIComponent(walletAddress)}/pnl`,
+        `${getApiBase()}/api/users/${encodeURIComponent(walletAddress)}/pnl`,
       );
       if (!res.ok) {
         throw new Error("Failed to fetch PnL data");

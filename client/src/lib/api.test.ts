@@ -62,14 +62,29 @@ describe("api URL helpers", () => {
     expect(apiUrl("/api/yields", configuredEnv)).toBe("https://api.example.com/api/yields");
   });
 
-  it("falls back to same-origin API routes when hosted env vars are missing", () => {
+  it("returns unavailable state when hosted env vars are missing", () => {
     global.window = { location: { hostname: "stellar-yield-preview.vercel.app" } } as any;
 
     expect(getApiBaseUrlState(env({}))).toEqual({
-      available: true,
-      baseUrl: "",
+      available: false,
+      reason: "API base URL configuration is missing.",
     });
-    expect(getApiBaseUrl(env({}))).toBe("");
-    expect(apiUrl("/api/yields", env({}))).toBe("/api/yields");
+    expect(() => getApiBaseUrl(env({}))).toThrow("API base URL configuration is missing.");
+  });
+
+  it("returns unavailable state for invalid API URL configurations", () => {
+    expect(
+      getApiBaseUrlState(env({ VITE_API_BASE_URL: "ftp://api.example.com" })),
+    ).toEqual({
+      available: false,
+      reason: 'Invalid API URL configuration: "ftp://api.example.com". Must start with http:// or https://',
+    });
+
+    expect(
+      getApiBaseUrlState(env({ VITE_API_BASE_URL: "just-a-string" })),
+    ).toEqual({
+      available: false,
+      reason: 'Invalid API URL configuration: "just-a-string". Must start with http:// or https://',
+    });
   });
 });
