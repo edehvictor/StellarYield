@@ -10,12 +10,10 @@ const SESSION_KEY = "stellar_yield_google_oauth";
 
 export class GoogleSheetsService {
     private clientId: string;
-    private clientSecret: string;
     private redirectUri: string;
 
-    constructor(clientId: string, clientSecret: string, redirectUri: string) {
+    constructor(clientId: string, redirectUri: string) {
         this.clientId = clientId;
-        this.clientSecret = clientSecret;
         this.redirectUri = redirectUri;
     }
 

@@ -84,4 +84,33 @@ yieldsRouter.get("/", async (_req, res) => {
   }
 });
 
+yieldsRouter.get("/ranking", async (req, res) => {
+  try {
+    const customWeights: Partial<RankingWeights> = {};
+    const parseParam = (val: unknown): number | undefined => {
+      if (val === undefined || val === null) return undefined;
+      const parsed = Number(val);
+      return Number.isFinite(parsed) && parsed >= 0 ? parsed : undefined;
+    };
+
+    const apy = parseParam(req.query.apy);
+    if (apy !== undefined) customWeights.apy = apy;
+    const liquidity = parseParam(req.query.liquidity);
+    if (liquidity !== undefined) customWeights.liquidity = liquidity;
+    const volatility = parseParam(req.query.volatility);
+    if (volatility !== undefined) customWeights.volatility = volatility;
+    const maturity = parseParam(req.query.maturity);
+    if (maturity !== undefined) customWeights.maturity = maturity;
+    const tvl = parseParam(req.query.tvl);
+    if (tvl !== undefined) customWeights.tvl = tvl;
+
+    const ranked = await OpportunityRankingService.rankOpportunities(customWeights);
+    res.json(ranked);
+  } catch (error) {
+    console.error("Failed to rank opportunities.", error);
+    sendError(res, 500, "RANKING_FAILED", "Unable to rank opportunities right now.");
+  }
+});
+
 export default yieldsRouter;
+

@@ -1,83 +1,71 @@
-#435 Fix API base URL fallback behavior in deployed preview environments
+#714 Add checked arithmetic and property tests to the matching engine fee and settlement math
 Repo Avatar
 edehvictor/StellarYield
 Summary
-Preview deployments may default to localhost backend URLs unless VITE_API_BASE_URL is configured. Improve fallback behavior and docs so previews fail gracefully.
+Matching and settlement calculations should use explicit arithmetic guarantees so fee and fill math cannot overflow, underflow, or drift silently.
 
+Scope
+Replace unchecked arithmetic in fee and settlement helpers
+Define and document rounding rules
+Add property-style or exhaustive edge-case tests
 Acceptance Criteria
-Audit current API base URL fallback logic.
-Show a clear unavailable state when backend URL is not configured for preview.
-Add tests for VITE_API_BASE_URL, VITE_API_URL, and fallback behavior.
-Document required Vercel env vars for previews.
-Technical Area
-client/src/lib/api.ts, client/src/lib/api.test.ts
-
-Points
-200
-
-Suggested Labels
-Stellar Wave, bug, help wanted, points: 200
+Math errors return explicit failures
+Settlement and fee invariants are covered by tests
 
 
-#448 Create maintainer dashboard issue triage view
+#719 Wire rewards Merkle generation to on-chain distributor verification with anti-double-claim tests
 Repo Avatar
 edehvictor/StellarYield
 Summary
-Maintainers need a quick way to see claimed, unclaimed, blocked, and ready-for-review Wave issues.
+Connect off-chain reward tree generation to contract-side proof verification and claim tracking.
 
+Scope
+Define canonical reward leaf encoding
+Generate fixtures shared by server or scripts and contracts
+Prevent duplicate claims per campaign or epoch
 Acceptance Criteria
-Define issue labels or saved search queries for triage states.
-Document a weekly triage workflow.
-Optionally add a script that prints issue counts by label.
-Ensure the process works with public contributor issues.
-Technical Area
-docs/triage-process.md, .github/, optional scripts/
+Valid proofs verify on-chain
+Wrong recipient, wrong amount, or repeated claims are rejected
 
-Points
-200
-
-Suggested Labels
-Stellar Wave, enhancement, help wanted, points: 200
-
-
-#444 Add UI snapshot checklist for visual contribution reviews
+#717 Remove browser-exposed secret configuration and add CI guardrails for frontend env variables
 Repo Avatar
 edehvictor/StellarYield
 Summary
-Frontend PRs should include screenshots or short notes for changed views. Add a lightweight checklist for visual review expectations.
+Audit public frontend environment variables and move secret-dependent behavior behind server-side endpoints.
 
+Scope
+Identify unsafe VITE_ secrets or privileged keys
+Move sensitive calls to server-owned routes
+Add CI checks for unsafe frontend env names
 Acceptance Criteria
-Document when screenshots are required.
-List suggested viewport sizes for responsive checks.
-Explain how to mention no visual changes.
-Update PR template if appropriate.
-Technical Area
-CONTRIBUTING.md, docs/contributor-guide.md
+Frontend builds do not depend on privileged secrets
+CI fails when new browser-exposed secret patterns are introduced
 
-Points
-200
 
-Suggested Labels
-Stellar Wave, documentation, good first issue, points: 200
-
-#443 Add release readiness checklist for Wave submissions
+#248 Cross-Protocol Yield Opportunity Ranking Engine
 Repo Avatar
 edehvictor/StellarYield
-Summary
-Wave submissions should have a clear checklist for build status, deployment, docs, tests, screenshots, and issue closure.
+Description
+We need an engine that ranks live yield opportunities across supported Stellar DeFi protocols using APY, TVL, volatility, liquidity depth, and protocol risk signals.
 
 Acceptance Criteria
-Create or update a Wave release checklist section.
-Include CI, Vercel production, preview, smoke test, and docs checks.
-Add guidance for linking PRs to issues.
-Keep the checklist concise and actionable.
-Technical Area
-docs/release-checklist.md, README.md
 
-Points
-200
+Build a backend ranking module that scores vault and liquidity opportunities across multiple protocols.
+Include configurable weighting for APY, liquidity, protocol maturity, and volatility.
+Expose a normalized ranked opportunities API for frontend consumption.
+Add tests covering score calculation, tie-breaking, and missing provider data.
+Technical Details
+Stack: Node.js, TypeScript, Express.
+Location: server/src/services/, server/src/routes/.
+Security: Rankings must not silently trust malformed or stale upstream data.
 
-Suggested Labels
-Stellar Wave, documentation, help wanted, points: 200
+Complexity & Scope
+Estimated Time: 3-4 weeks.
+Drips Complexity: High (200 points).
+
+Guidelines for Submission
+Minimum 90 percent test coverage required.
+Clear documentation must be added to public modules and route contracts.
+Timeframe for completion: 2 Wave cycles.
 
 

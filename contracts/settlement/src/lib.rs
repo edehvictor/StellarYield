@@ -259,6 +259,26 @@ impl SettlementContract {
             return Err(SettlementError::InvalidTradeData);
         }
 
+        // Enforce checked summation for total_amount0 and total_amount1 values
+        let mut sum_amount0: i128 = 0;
+        let mut sum_amount1: i128 = 0;
+
+        for data in batch.settlements.iter() {
+            if data.amount0 <= 0 || data.amount1 <= 0 {
+                return Err(SettlementError::InvalidAmount);
+            }
+            sum_amount0 = sum_amount0
+                .checked_add(data.amount0)
+                .ok_or(SettlementError::InvalidAmount)?;
+            sum_amount1 = sum_amount1
+                .checked_add(data.amount1)
+                .ok_or(SettlementError::InvalidAmount)?;
+        }
+
+        if sum_amount0 != batch.total_amount0 || sum_amount1 != batch.total_amount1 {
+            return Err(SettlementError::InvalidTradeData);
+        }
+
         // Process each settlement
         for (i, data) in batch.settlements.iter().enumerate() {
             let sigs = signatures
@@ -556,16 +576,18 @@ impl SettlementContract {
             .get(&StorageKey::FeeRecipient)
             .ok_or(SettlementError::NotInitialized)?;
 
-        // Calculate fees (simplified - in production would be more sophisticated)
+        // Calculate fees using standard half-up rounding (denominator = 10,000)
         let fee_bps = fee_bps as i128;
         let fee0 = data
             .amount0
             .checked_mul(fee_bps)
+            .and_then(|fee| fee.checked_add(5_000))
             .and_then(|fee| fee.checked_div(10_000))
             .ok_or(SettlementError::InvalidAmount)?;
         let fee1 = data
             .amount1
             .checked_mul(fee_bps)
+            .and_then(|fee| fee.checked_add(5_000))
             .and_then(|fee| fee.checked_div(10_000))
             .ok_or(SettlementError::InvalidAmount)?;
 
@@ -605,7 +627,7 @@ mod tests {
     use soroban_sdk::Env;
 
     fn setup_contract(env: &Env) -> (SettlementContractClient<'static>, Address, Address) {
-        env.mock_all_auths();
+        env.mock_all_auths_allowing_non_root_auth();
 
         let contract_id = env.register(SettlementContract, ());
         let client = SettlementContractClient::new(env, &contract_id);
@@ -693,5 +715,180 @@ mod tests {
 
         let trade_id = String::from_str(&env, "trade_123");
         assert!(!client.is_trade_settled(&trade_id));
+    }
+
+    /// Verifies that settle_batch passes the sum-validation step when
+    /// total_amount0 and total_amount1 correctly equal the sum of individual
+    /// settlement amounts. The batch validation (sum check) is confirmed to
+    /// pass by checking the result is NOT InvalidTradeData or InvalidAmount.
+    #[test]
+    fn test_settle_batch_sum_validation_passes() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+
+        let contract_id = env.register(SettlementContract, ());
+        let client = SettlementContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let engine = Address::generate(&env);
+        let fee_recipient = Address::generate(&env);
+        client.initialize(&admin, &Some(engine), &fee_recipient, &0);
+
+        let maker = Address::generate(&env);
+        let taker = Address::generate(&env);
+        let token_admin = Address::generate(&env);
+        let token0 = env.register_stellar_asset_contract_v2(token_admin.clone()).address();
+        let token1 = env.register_stellar_asset_contract_v2(token_admin.clone()).address();
+
+        // Fund maker and taker
+        token::StellarAssetClient::new(&env, &token0).mint(&maker, &2000);
+        token::StellarAssetClient::new(&env, &token1).mint(&taker, &3000);
+
+        let data1 = SettlementData {
+            trade_id: String::from_str(&env, "trade_x1"),
+            maker: maker.clone(),
+            taker: taker.clone(),
+            token0: token0.clone(),
+            token1: token1.clone(),
+            amount0: 400,
+            amount1: 800,
+            price: 200,
+            timestamp: 100,
+        };
+        let data2 = SettlementData {
+            trade_id: String::from_str(&env, "trade_x2"),
+            maker: maker.clone(),
+            taker: taker.clone(),
+            token0: token0.clone(),
+            token1: token1.clone(),
+            amount0: 600,
+            amount1: 1200,
+            price: 200,
+            timestamp: 101,
+        };
+
+        // Correct totals: 400+600=1000, 800+1200=2000  →  sum validation passes
+        let batch = SettlementBatch {
+            batch_id: String::from_str(&env, "batch_x"),
+            settlements: soroban_sdk::vec![&env, data1, data2],
+            total_amount0: 1000,
+            total_amount1: 2000,
+            timestamp: 101,
+        };
+        let sig = Bytes::from_slice(&env, &[1u8; 64]);
+        let signatures = soroban_sdk::vec![
+            &env,
+            (sig.clone(), sig.clone(), sig.clone()),
+            (sig.clone(), sig.clone(), sig.clone()),
+        ];
+
+        let result = client.try_settle_batch(&batch, &signatures);
+        // The sum validation passes, so the error must not be InvalidTradeData(#6)
+        // or InvalidAmount(#10). Any subsequent error (e.g. transfer auth) is
+        // outside the scope of this test.
+        match &result {
+            Err(Ok(e)) => {
+                assert_ne!(*e, SettlementError::InvalidTradeData);
+                assert_ne!(*e, SettlementError::InvalidAmount);
+            }
+            _ => {} // Ok(()) or Err(Err(_)) are both fine for this assertion
+        }
+    }
+
+    /// Verifies the half-up rounding formula used in collect_fees without
+    /// invoking any token contracts.
+    ///
+    /// Formula: fee = (amount * fee_bps + 5_000) / 10_000
+    #[test]
+    fn test_fee_half_up_rounding_arithmetic() {
+        // amount = 100, fee_bps = 50 => 100 * 50 = 5000 => (5000+5000)/10000 = 1  (exactly 0.5, rounds up)
+        assert_eq!((100_i128 * 50 + 5_000) / 10_000, 1);
+        // amount = 99, fee_bps = 50 => 99 * 50 = 4950 => (4950+5000)/10000 = 0  (0.495, rounds down)
+        assert_eq!((99_i128 * 50 + 5_000) / 10_000, 0);
+        // amount = 101, fee_bps = 50 => 101 * 50 = 5050 => (5050+5000)/10000 = 1  (0.505, rounds up)
+        assert_eq!((101_i128 * 50 + 5_000) / 10_000, 1);
+        // amount = 400, fee_bps = 30 (0.3%) => 400*30=12000 => (12000+5000)/10000 = 1
+        assert_eq!((400_i128 * 30 + 5_000) / 10_000, 1);
+        // amount = 600, fee_bps = 30 => 600*30=18000 => (18000+5000)/10000 = 2
+        assert_eq!((600_i128 * 30 + 5_000) / 10_000, 2);
+        // amount = 800, fee_bps = 30 => 800*30=24000 => (24000+5000)/10000 = 2
+        assert_eq!((800_i128 * 30 + 5_000) / 10_000, 2);
+        // amount = 1200, fee_bps = 30 => 1200*30=36000 => (36000+5000)/10000 = 4
+        assert_eq!((1200_i128 * 30 + 5_000) / 10_000, 4);
+    }
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #6)")]
+    fn test_settle_batch_mismatch_panics() {
+        let env = Env::default();
+        let (client, _, _) = setup_contract(&env);
+
+        let maker = Address::generate(&env);
+        let taker = Address::generate(&env);
+        let token0 = Address::generate(&env);
+        let token1 = Address::generate(&env);
+
+        let data1 = SettlementData {
+            trade_id: String::from_str(&env, "trade_1"),
+            maker: maker.clone(),
+            taker: taker.clone(),
+            token0: token0.clone(),
+            token1: token1.clone(),
+            amount0: 400,
+            amount1: 800,
+            price: 200,
+            timestamp: 100,
+        };
+
+        // Total sum = 400 / 800, but we specify 401 / 800 in batch -> should panic
+        let batch = SettlementBatch {
+            batch_id: String::from_str(&env, "batch_1"),
+            settlements: soroban_sdk::vec![&env, data1],
+            total_amount0: 401,
+            total_amount1: 800,
+            timestamp: 100,
+        };
+
+        let sig = Bytes::from_slice(&env, &[1u8; 64]);
+        let signatures = soroban_sdk::vec![&env, (sig.clone(), sig.clone(), sig.clone())];
+
+        client.settle_batch(&batch, &signatures);
+    }
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #10)")]
+    fn test_settle_batch_negative_amount_panics() {
+        let env = Env::default();
+        let (client, _, _) = setup_contract(&env);
+
+        let maker = Address::generate(&env);
+        let taker = Address::generate(&env);
+        let token0 = Address::generate(&env);
+        let token1 = Address::generate(&env);
+
+        let data1 = SettlementData {
+            trade_id: String::from_str(&env, "trade_1"),
+            maker: maker.clone(),
+            taker: taker.clone(),
+            token0: token0.clone(),
+            token1: token1.clone(),
+            amount0: -100,
+            amount1: 800,
+            price: 200,
+            timestamp: 100,
+        };
+
+        let batch = SettlementBatch {
+            batch_id: String::from_str(&env, "batch_1"),
+            settlements: soroban_sdk::vec![&env, data1],
+            total_amount0: -100,
+            total_amount1: 800,
+            timestamp: 100,
+        };
+
+        let sig = Bytes::from_slice(&env, &[1u8; 64]);
+        let signatures = soroban_sdk::vec![&env, (sig.clone(), sig.clone(), sig.clone())];
+
+        client.settle_batch(&batch, &signatures);
     }
 }

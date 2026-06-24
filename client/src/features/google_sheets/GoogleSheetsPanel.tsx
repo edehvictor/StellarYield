@@ -28,9 +28,10 @@ export default function GoogleSheetsPanel({
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
 
+  // Only the public client_id is needed here; the client secret lives
+  // server-side inside /api/google-sheets/token (process.env.GOOGLE_CLIENT_SECRET).
   const service = new GoogleSheetsService(
     import.meta.env.VITE_GOOGLE_CLIENT_ID || "",
-    import.meta.env.VITE_GOOGLE_CLIENT_SECRET || "",
     `${window.location.origin}/auth/google-sheets/callback`,
   );
 
