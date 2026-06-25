@@ -11,6 +11,7 @@ import path from "path";
  * don't need to refactor the CJS script into ESM modules.
  */
 import { execSync } from "child_process";
+import crypto from "crypto";
 
 const SCRIPT = path.resolve(__dirname, "../scripts/generate-manifest.js");
 
@@ -26,6 +27,10 @@ function writeDeployed(dir: string, data: Record<string, string>): string {
   const p = path.join(dir, "deployed.json");
   fs.writeFileSync(p, JSON.stringify(data));
   return p;
+}
+
+function sha256File(filePath: string): string {
+  return crypto.createHash("sha256").update(fs.readFileSync(filePath)).digest("hex");
 }
 
 function runScript(args: string, cwd?: string): { stdout: string; status: number } {
@@ -73,6 +78,17 @@ describe("generate-manifest.js", () => {
     expect(manifest.contracts.zap).toBe(VALID_ID_2);
     expect(typeof manifest.generatedAt).toBe("string");
     expect(typeof manifest.commitSha).toBe("string");
+    expect(manifest.provenance).toMatchObject({
+      generatedBy: "contracts/scripts/generate-manifest.js",
+      generatedAt: manifest.generatedAt,
+      network: { name: "testnet", rpcUrl: "unknown", passphrase: "unknown" },
+      git: { commitSha: manifest.commitSha, branch: manifest.branch },
+    });
+    expect(manifest.provenance.sourceInput.path).toBe(inputPath);
+    expect(manifest.provenance.sourceInput.sha256).toBe(sha256File(inputPath));
+    expect(manifest.provenance.registryInput.path).toBe("contracts/registry.json");
+    expect(manifest.provenance.registryInput.sha256).toMatch(/^[a-f0-9]{64}$/);
+    expect(typeof manifest.provenance.ci.provider).toBe("string");
   });
 
   it("rejects an invalid network name", () => {
@@ -148,6 +164,23 @@ describe("generate-manifest.js", () => {
 
     const manifest = JSON.parse(fs.readFileSync(outputPath, "utf8"));
     expect(() => new Date(manifest.generatedAt).toISOString()).not.toThrow();
+  });
+
+  it("records explicit network source inputs in provenance", () => {
+    const inputPath = writeDeployed(tmpDir, { yield_vault: VALID_ID_1 });
+    const outputPath = path.join(tmpDir, "manifest.json");
+
+    const result = runScript(
+      `--input "${inputPath}" --network testnet --rpc-url "https://example-rpc.invalid" --network-passphrase "Test SDF Network ; September 2015" --output "${outputPath}"`,
+    );
+
+    expect(result.status).toBe(0);
+    const manifest = JSON.parse(fs.readFileSync(outputPath, "utf8"));
+    expect(manifest.provenance.network).toEqual({
+      name: "testnet",
+      rpcUrl: "https://example-rpc.invalid",
+      passphrase: "Test SDF Network ; September 2015",
+    });
   });
 
   // ── Alias regression tests (issue #781) ────────────────────────────────────

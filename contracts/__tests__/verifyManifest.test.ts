@@ -23,6 +23,25 @@ function makeTmpDir(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), "verify-manifest-test-"));
 }
 
+const VALID_SHA = "a".repeat(64);
+
+function validProvenance(overrides: Record<string, unknown> = {}) {
+  const generatedAt = "2026-05-28T12:00:00.000Z";
+  return {
+    generatedAt,
+    provenance: {
+      generatedBy: "contracts/scripts/generate-manifest.js",
+      generatedAt,
+      sourceInput: { path: "contracts/scripts/deployed.json", sha256: VALID_SHA },
+      registryInput: { path: "contracts/registry.json", sha256: VALID_SHA },
+      network: { name: "testnet", rpcUrl: "https://soroban-testnet.stellar.org", passphrase: "Test SDF Network ; September 2015" },
+      git: { commitSha: "abc123", branch: "main", remoteUrl: "https://github.com/Kappa16/StellarYield.git" },
+      ci: { provider: "local", runId: "local", workflow: "local", actor: "test" },
+    },
+    ...overrides,
+  };
+}
+
 function writeManifest(dir: string, data: object): string {
   const p = path.join(dir, "deployment-manifest.json");
   fs.writeFileSync(p, JSON.stringify(data, null, 2));
@@ -79,7 +98,7 @@ describe("verify-manifest.js", () => {
     // manifest: yield_vault=ID_A (maps to vault), zap=ID_B
     const manifestPath = writeManifest(tmpDir, {
       schemaVersion: "1.0",
-      generatedAt: new Date().toISOString(),
+      ...validProvenance(),
       network: "testnet",
       commitSha: "abc123",
       branch: "main",
@@ -109,7 +128,7 @@ describe("verify-manifest.js", () => {
 
     const manifestPath = writeManifest(tmpDir, {
       schemaVersion: "1.0",
-      generatedAt: new Date().toISOString(),
+      ...validProvenance(),
       network: "testnet",
       commitSha: "abc123",
       branch: "main",
@@ -142,7 +161,7 @@ describe("verify-manifest.js", () => {
     // manifest: yield_vault=ID_A — but registry has vault="" (stale manifest)
     const manifestPath = writeManifest(tmpDir, {
       schemaVersion: "1.0",
-      generatedAt: new Date().toISOString(),
+      ...validProvenance(),
       network: "testnet",
       commitSha: "abc123",
       branch: "main",
@@ -173,7 +192,7 @@ describe("verify-manifest.js", () => {
 
     const manifestPath = writeManifest(tmpDir, {
       schemaVersion: "1.0",
-      generatedAt: new Date().toISOString(),
+      ...validProvenance(),
       network: "testnet",
       commitSha: "abc123",
       branch: "main",
@@ -190,6 +209,61 @@ describe("verify-manifest.js", () => {
     expect(result.stdout).toContain("MISMATCH");
     expect(result.stdout).toContain("zap");
     expect(result.stdout).toContain("FAILED");
+  });
+
+  it("exits 1 when provenance metadata is missing", () => {
+    const registryPath = writeRegistry(tmpDir, {
+      testnet: { vault: ID_A, zap: "", token: "", governance: "", strategy: "", emissionController: "", liquidStaking: "", stableswap: "", vesting: "" },
+      mainnet: { vault: "", zap: "", token: "", governance: "", strategy: "", emissionController: "", liquidStaking: "", stableswap: "", vesting: "" },
+      local:   { vault: "", zap: "", token: "", governance: "", strategy: "", emissionController: "", liquidStaking: "", stableswap: "", vesting: "" },
+    });
+
+    const manifestPath = writeManifest(tmpDir, {
+      schemaVersion: "1.0",
+      generatedAt: "2026-05-28T12:00:00.000Z",
+      network: "testnet",
+      commitSha: "abc123",
+      branch: "main",
+      contracts: { yield_vault: ID_A },
+    });
+
+    const result = runScript(
+      ["--manifest", manifestPath, "--registry", registryPath, "--network", "testnet"]
+    );
+
+    expect(result.status).toBe(1);
+    expect(result.stdout).toContain("provenance");
+    expect(result.stdout).toContain("missing or malformed");
+  });
+
+  it("exits 1 when provenance metadata has malformed source hash", () => {
+    const registryPath = writeRegistry(tmpDir, {
+      testnet: { vault: ID_A, zap: "", token: "", governance: "", strategy: "", emissionController: "", liquidStaking: "", stableswap: "", vesting: "" },
+      mainnet: { vault: "", zap: "", token: "", governance: "", strategy: "", emissionController: "", liquidStaking: "", stableswap: "", vesting: "" },
+      local:   { vault: "", zap: "", token: "", governance: "", strategy: "", emissionController: "", liquidStaking: "", stableswap: "", vesting: "" },
+    });
+    const base = validProvenance();
+    const provenance = {
+      ...base.provenance,
+      sourceInput: { path: "contracts/scripts/deployed.json", sha256: "not-a-sha" },
+    };
+
+    const manifestPath = writeManifest(tmpDir, {
+      schemaVersion: "1.0",
+      ...base,
+      provenance,
+      network: "testnet",
+      commitSha: "abc123",
+      branch: "main",
+      contracts: { yield_vault: ID_A },
+    });
+
+    const result = runScript(
+      ["--manifest", manifestPath, "--registry", registryPath, "--network", "testnet"]
+    );
+
+    expect(result.status).toBe(1);
+    expect(result.stdout).toContain("sourceInput.sha256");
   });
 
   // ── 5. Absent manifest file — graceful skip ───────────────────────────

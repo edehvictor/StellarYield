@@ -4,6 +4,34 @@
   "network": "testnet",
   "commitSha": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
   "branch": "main",
+  "provenance": {
+    "generatedBy": "contracts/scripts/generate-manifest.js",
+    "generatedAt": "2026-05-28T12:00:00.000Z",
+    "sourceInput": {
+      "path": "contracts/scripts/deployed.json",
+      "sha256": "1111111111111111111111111111111111111111111111111111111111111111"
+    },
+    "registryInput": {
+      "path": "contracts/registry.json",
+      "sha256": "2222222222222222222222222222222222222222222222222222222222222222"
+    },
+    "network": {
+      "name": "testnet",
+      "rpcUrl": "https://soroban-testnet.stellar.org",
+      "passphrase": "Test SDF Network ; September 2015"
+    },
+    "git": {
+      "commitSha": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
+      "branch": "main",
+      "remoteUrl": "https://github.com/Kappa16/StellarYield.git"
+    },
+    "ci": {
+      "provider": "github-actions",
+      "runId": "123456789",
+      "workflow": "Deploy Contracts",
+      "actor": "maintainer"
+    }
+  },
   "contracts": {
     "yield_vault": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4",
     "zap": "CBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBSC4",

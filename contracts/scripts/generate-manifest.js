@@ -3,8 +3,9 @@
  * generate-manifest.js
  *
  * Generates a deployment manifest after a contract deployment run.
- * The manifest captures contract IDs, the target network, the git commit SHA,
- * and the deployment timestamp so that deployments are fully traceable.
+ * The manifest captures contract IDs plus a structured provenance block with
+ * network details, source input hashes, git metadata, and CI context so that
+ * deployments are fully traceable.
  *
  * Usage:
  *   node contracts/scripts/generate-manifest.js [--input <deployed.json>] \
@@ -18,6 +19,10 @@
  *             (default: testnet)
  *   --output  Where to write the manifest JSON
  *             (default: contracts/scripts/deployment-manifest.json)
+ *   --rpc-url Network RPC URL recorded in provenance
+ *             (default: STELLAR_RPC_URL or "unknown")
+ *   --network-passphrase Network passphrase recorded in provenance
+ *             (default: STELLAR_NETWORK_PASSPHRASE or "unknown")
  *
  * Example:
  *   node contracts/scripts/generate-manifest.js \
@@ -34,6 +39,7 @@
 const fs = require("fs");
 const path = require("path");
 const { execSync } = require("child_process");
+const crypto = require("crypto");
 
 // ---------------------------------------------------------------------------
 // Soroban contract ID validation
@@ -82,6 +88,77 @@ function getGitBranch() {
   }
 }
 
+function getGitRemoteUrl() {
+  try {
+    return execSync("git config --get remote.origin.url", { encoding: "utf8" }).trim() || "unknown";
+  } catch {
+    return "unknown";
+  }
+}
+
+function getFileSha256(filePath) {
+  return crypto.createHash("sha256").update(fs.readFileSync(filePath)).digest("hex");
+}
+
+function normalizePathForManifest(filePath) {
+  const repoRoot = path.resolve(__dirname, "../..");
+  const absolutePath = path.resolve(filePath);
+  const relativePath = path.relative(repoRoot, absolutePath);
+
+  if (relativePath && !relativePath.startsWith("..") && !path.isAbsolute(relativePath)) {
+    return relativePath.split(path.sep).join("/");
+  }
+
+  return absolutePath;
+}
+
+function detectCiProvider() {
+  if (process.env.GITHUB_ACTIONS === "true") return "github-actions";
+  if (process.env.CI) return "ci";
+  return "local";
+}
+
+function buildProvenance({
+  generatedAt,
+  inputPath,
+  registryPath,
+  registryExists,
+  network,
+  rpcUrl,
+  networkPassphrase,
+  commitSha,
+  branch,
+}) {
+  return {
+    generatedBy: "contracts/scripts/generate-manifest.js",
+    generatedAt,
+    sourceInput: {
+      path: normalizePathForManifest(inputPath),
+      sha256: getFileSha256(inputPath),
+    },
+    registryInput: {
+      path: normalizePathForManifest(registryPath),
+      sha256: registryExists ? getFileSha256(registryPath) : null,
+    },
+    network: {
+      name: network,
+      rpcUrl: rpcUrl || "unknown",
+      passphrase: networkPassphrase || "unknown",
+    },
+    git: {
+      commitSha,
+      branch,
+      remoteUrl: getGitRemoteUrl(),
+    },
+    ci: {
+      provider: detectCiProvider(),
+      runId: process.env.GITHUB_RUN_ID || process.env.CI_PIPELINE_ID || "local",
+      workflow: process.env.GITHUB_WORKFLOW || "local",
+      actor: process.env.GITHUB_ACTOR || process.env.USER || process.env.USERNAME || "unknown",
+    },
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
@@ -94,6 +171,8 @@ function main() {
   const inputPath = args.input ?? path.join(SCRIPTS_DIR, "deployed.json");
   const network = args.network ?? "testnet";
   const outputPath = args.output ?? path.join(SCRIPTS_DIR, "deployment-manifest.json");
+  const rpcUrl = args["rpc-url"] ?? process.env.STELLAR_RPC_URL ?? "unknown";
+  const networkPassphrase = args["network-passphrase"] ?? process.env.STELLAR_NETWORK_PASSPHRASE ?? "unknown";
 
   // Validate network
   if (!ALLOWED_NETWORKS.has(network)) {
@@ -174,12 +253,28 @@ function main() {
   }
 
   // Build manifest
+  const generatedAt = new Date().toISOString();
+  const commitSha = getGitCommitSha();
+  const branch = getGitBranch();
+  const provenance = buildProvenance({
+    generatedAt,
+    inputPath,
+    registryPath,
+    registryExists: fs.existsSync(registryPath),
+    network,
+    rpcUrl,
+    networkPassphrase,
+    commitSha,
+    branch,
+  });
+
   const manifest = {
     schemaVersion: "1.0",
-    generatedAt: new Date().toISOString(),
+    generatedAt,
     network,
-    commitSha: getGitCommitSha(),
-    branch: getGitBranch(),
+    commitSha,
+    branch,
+    provenance,
     contracts: validContracts,
     ...(registryNote ? { registryNote } : {}),
   };
@@ -196,6 +291,8 @@ function main() {
   console.log(`  Network:    ${manifest.network}`);
   console.log(`  Commit:     ${manifest.commitSha}`);
   console.log(`  Branch:     ${manifest.branch}`);
+  console.log(`  Source:     ${manifest.provenance.sourceInput.path} (${manifest.provenance.sourceInput.sha256})`);
+  console.log(`  Registry:   ${manifest.provenance.registryInput.path} (${manifest.provenance.registryInput.sha256 ?? "not found"})`);
   console.log(`  Contracts:  ${Object.keys(manifest.contracts).join(", ") || "(none)"}`);
 }
 

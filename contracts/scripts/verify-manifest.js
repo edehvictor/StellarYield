@@ -2,8 +2,9 @@
 /**
  * verify-manifest.js
  *
- * Compares a deployment manifest (deployment-manifest.json) against the
- * contract registry (registry.json) for a given network and reports drift.
+ * Validates deployment manifest provenance and compares the manifest
+ * (deployment-manifest.json) against the contract registry (registry.json) for
+ * a given network, reporting drift.
  *
  * Three drift types are detected:
  *   MISSING  — registry has a non-empty address but the manifest has no entry
@@ -28,7 +29,7 @@
  *
  * Exit codes:
  *   0 — manifest absent (skip) or all entries agree
- *   1 — one or more drift issues found
+ *   1 — malformed provenance or one or more drift issues found
  */
 
 "use strict";
@@ -52,6 +53,116 @@ const MANIFEST_TO_REGISTRY = {
 const REGISTRY_TO_MANIFEST = Object.fromEntries(
   Object.entries(MANIFEST_TO_REGISTRY).map(([m, r]) => [r, m])
 );
+
+
+const ALLOWED_NETWORKS = new Set(["testnet", "mainnet", "local"]);
+const SHA256_RE = /^[a-f0-9]{64}$/;
+
+function isPlainObject(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isNonEmptyString(value) {
+  return typeof value === "string" && value.trim().length > 0;
+}
+
+function isIsoTimestamp(value) {
+  if (!isNonEmptyString(value)) return false;
+  const date = new Date(value);
+  return !Number.isNaN(date.getTime()) && date.toISOString() === value;
+}
+
+function validateSha256(value) {
+  return isNonEmptyString(value) && SHA256_RE.test(value);
+}
+
+function validateProvenance(manifest, selectedNetwork) {
+  const errors = [];
+  const provenance = manifest.provenance;
+
+  if (!isPlainObject(provenance)) {
+    return ["manifest.provenance is missing or not an object."];
+  }
+
+  if (!isNonEmptyString(provenance.generatedBy)) {
+    errors.push("manifest.provenance.generatedBy must be a non-empty string.");
+  }
+
+  if (!isIsoTimestamp(provenance.generatedAt)) {
+    errors.push("manifest.provenance.generatedAt must be an ISO-8601 UTC timestamp.");
+  } else if (manifest.generatedAt !== provenance.generatedAt) {
+    errors.push("manifest.provenance.generatedAt must match manifest.generatedAt.");
+  }
+
+  if (!isPlainObject(provenance.sourceInput)) {
+    errors.push("manifest.provenance.sourceInput must be an object.");
+  } else {
+    if (!isNonEmptyString(provenance.sourceInput.path)) {
+      errors.push("manifest.provenance.sourceInput.path must be a non-empty string.");
+    }
+    if (!validateSha256(provenance.sourceInput.sha256)) {
+      errors.push("manifest.provenance.sourceInput.sha256 must be a 64-character lowercase hex SHA-256 digest.");
+    }
+  }
+
+  if (!isPlainObject(provenance.registryInput)) {
+    errors.push("manifest.provenance.registryInput must be an object.");
+  } else {
+    if (!isNonEmptyString(provenance.registryInput.path)) {
+      errors.push("manifest.provenance.registryInput.path must be a non-empty string.");
+    }
+    if (provenance.registryInput.sha256 !== null && !validateSha256(provenance.registryInput.sha256)) {
+      errors.push("manifest.provenance.registryInput.sha256 must be null or a 64-character lowercase hex SHA-256 digest.");
+    }
+  }
+
+  if (!isPlainObject(provenance.network)) {
+    errors.push("manifest.provenance.network must be an object.");
+  } else {
+    if (!ALLOWED_NETWORKS.has(provenance.network.name)) {
+      errors.push(`manifest.provenance.network.name must be one of: ${[...ALLOWED_NETWORKS].join(", ")}.`);
+    } else if (provenance.network.name !== selectedNetwork) {
+      errors.push(`manifest.provenance.network.name (${provenance.network.name}) must match the verified network (${selectedNetwork}).`);
+    }
+    if (manifest.network !== provenance.network.name) {
+      errors.push("manifest.provenance.network.name must match manifest.network.");
+    }
+    if (!isNonEmptyString(provenance.network.rpcUrl)) {
+      errors.push("manifest.provenance.network.rpcUrl must be a non-empty string.");
+    }
+    if (!isNonEmptyString(provenance.network.passphrase)) {
+      errors.push("manifest.provenance.network.passphrase must be a non-empty string.");
+    }
+  }
+
+  if (!isPlainObject(provenance.git)) {
+    errors.push("manifest.provenance.git must be an object.");
+  } else {
+    for (const field of ["commitSha", "branch", "remoteUrl"]) {
+      if (!isNonEmptyString(provenance.git[field])) {
+        errors.push(`manifest.provenance.git.${field} must be a non-empty string.`);
+      }
+    }
+    if (isNonEmptyString(manifest.commitSha) && provenance.git.commitSha !== manifest.commitSha) {
+      errors.push("manifest.provenance.git.commitSha must match manifest.commitSha.");
+    }
+    if (isNonEmptyString(manifest.branch) && provenance.git.branch !== manifest.branch) {
+      errors.push("manifest.provenance.git.branch must match manifest.branch.");
+    }
+  }
+
+  if (!isPlainObject(provenance.ci)) {
+    errors.push("manifest.provenance.ci must be an object.");
+  } else {
+    for (const field of ["provider", "runId", "workflow", "actor"]) {
+      if (!isNonEmptyString(provenance.ci[field])) {
+        errors.push(`manifest.provenance.ci.${field} must be a non-empty string.`);
+      }
+    }
+  }
+
+  return errors;
+}
 
 // ---------------------------------------------------------------------------
 // CLI argument parsing
@@ -104,6 +215,15 @@ function main() {
   const network = args.network ?? manifest.network;
   if (!network) {
     console.error("ERROR: --network is required (or manifest.network must be set).");
+    process.exit(1);
+  }
+
+  const provenanceErrors = validateProvenance(manifest, network);
+  if (provenanceErrors.length > 0) {
+    console.error("ERROR: manifest provenance metadata is missing or malformed:");
+    for (const error of provenanceErrors) {
+      console.error(`  - ${error}`);
+    }
     process.exit(1);
   }
 
