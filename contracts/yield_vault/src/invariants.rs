@@ -122,7 +122,7 @@ impl _YieldVault {
     pub fn check_token_balance_invariant(env: &Env) -> Result<bool, VaultError> {
         _YieldVault::require_init(env)?;
 
-        let token_addr: Address = env.storage().instance().get(&DataKey::Token).unwrap();
+        let token_addr: Address = _YieldVault::get_storage_required(env, &DataKey::Token)?;
         let token_client = token::Client::new(env, &token_addr);
         let vault_addr = env.current_contract_address();
         let actual_balance = token_client.balance(&vault_addr);

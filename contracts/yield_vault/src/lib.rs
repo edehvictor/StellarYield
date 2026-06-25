@@ -66,6 +66,8 @@ pub enum VaultError {
     TimelockActive = 8,
     InvalidPrice = 9,
     SlippageExceeded = 10,
+    /// Storage key not found (maps to error code 11).
+    StorageKeyNotFound = 11,
     /// Invalid donation basis points — must be 0–10_000 (maps to error code 2001).
     InvalidDonationBps = 2001,
     /// Charity address is not on the protocol whitelist (maps to error code 2002).
@@ -146,9 +148,9 @@ impl YieldVault {
             return Err(VaultError::ZeroAmount);
         }
 
-        let token_addr: Address = env.storage().instance().get(&DataKey::Token).unwrap();
-        let total_shares: i128 = env.storage().instance().get(&DataKey::TotalShares).unwrap();
-        let total_assets: i128 = env.storage().instance().get(&DataKey::TotalAssets).unwrap();
+        let token_addr: Address = Self::get_storage_required(&env, &DataKey::Token)?;
+        let total_shares: i128 = Self::get_storage_required(&env, &DataKey::TotalShares)?;
+        let total_assets: i128 = Self::get_storage_required(&env, &DataKey::TotalAssets)?;
 
         // Get secure price for validation (flash-loan resistance)
         let _price = YieldVault::get_secure_price(&env)?;
@@ -229,9 +231,9 @@ impl YieldVault {
             return Err(VaultError::ZeroAmount);
         }
 
-        let token_addr: Address = env.storage().instance().get(&DataKey::Token).unwrap();
-        let total_shares: i128 = env.storage().instance().get(&DataKey::TotalShares).unwrap();
-        let total_assets: i128 = env.storage().instance().get(&DataKey::TotalAssets).unwrap();
+        let token_addr: Address = Self::get_storage_required(&env, &DataKey::Token)?;
+        let total_shares: i128 = Self::get_storage_required(&env, &DataKey::TotalShares)?;
+        let total_assets: i128 = Self::get_storage_required(&env, &DataKey::TotalAssets)?;
 
         let _price = YieldVault::get_secure_price(&env)?;
 
@@ -304,8 +306,8 @@ impl YieldVault {
             return Err(VaultError::InsufficientShares);
         }
 
-        let total_shares: i128 = env.storage().instance().get(&DataKey::TotalShares).unwrap();
-        let total_assets: i128 = env.storage().instance().get(&DataKey::TotalAssets).unwrap();
+        let total_shares: i128 = Self::get_storage_required(&env, &DataKey::TotalShares)?;
+        let total_assets: i128 = Self::get_storage_required(&env, &DataKey::TotalAssets)?;
 
         if total_shares == 0 {
             return Err(VaultError::ZeroSupply);
@@ -320,7 +322,7 @@ impl YieldVault {
         YieldVault::validate_withdrawal_invariant(&env, amount, shares)?;
 
         // Transfer tokens to user
-        let token_addr: Address = env.storage().instance().get(&DataKey::Token).unwrap();
+        let token_addr: Address = Self::get_storage_required(&env, &DataKey::Token)?;
         let client = token::Client::new(&env, &token_addr);
         client.transfer(&env.current_contract_address(), &to, &amount);
 
@@ -375,7 +377,7 @@ impl YieldVault {
             return Err(VaultError::Paused);
         }
 
-        let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+        let admin: Address = Self::get_storage_required(&env, &DataKey::Admin)?;
         if caller != admin {
             return Err(VaultError::Unauthorized);
         }
@@ -392,8 +394,8 @@ impl YieldVault {
             return Err(VaultError::Paused);
         }
 
-        let token_addr: Address = env.storage().instance().get(&DataKey::Token).unwrap();
-        let total_assets: i128 = env.storage().instance().get(&DataKey::TotalAssets).unwrap();
+        let token_addr: Address = Self::get_storage_required(&env, &DataKey::Token)?;
+        let total_assets: i128 = Self::get_storage_required(&env, &DataKey::TotalAssets)?;
 
         let client = token::Client::new(&env, &token_addr);
         client.transfer(&env.current_contract_address(), &target, &amount);
@@ -491,13 +493,13 @@ impl YieldVault {
     /// Returns the admin address.
     pub fn get_admin(env: Env) -> Result<Address, VaultError> {
         YieldVault::require_init(&env)?;
-        Ok(env.storage().instance().get(&DataKey::Admin).unwrap())
+        Self::get_storage_required(&env, &DataKey::Admin)
     }
 
     /// Returns the deposit token address.
     pub fn get_token(env: Env) -> Result<Address, VaultError> {
         YieldVault::require_init(&env)?;
-        Ok(env.storage().instance().get(&DataKey::Token).unwrap())
+        Self::get_storage_required(&env, &DataKey::Token)
     }
 
     // ── Strategy: Harvest & Auto-Compound ───────────────────────────
@@ -551,7 +553,7 @@ impl YieldVault {
     pub fn harvest(env: Env, caller: Address, min_amount_out: i128) -> Result<i128, VaultError> {
         YieldVault::require_init(&env)?;
         caller.require_auth();
-        let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+        let admin: Address = Self::get_storage_required(&env, &DataKey::Admin)?;
         let legacy_keeper: Option<Address> = env.storage().instance().get(&DataKey::Keeper);
         let is_admin = caller == admin;
         let is_legacy_keeper = match &legacy_keeper {
@@ -562,7 +564,7 @@ impl YieldVault {
         if !is_admin && !is_legacy_keeper && !is_registered {
             return Err(VaultError::Unauthorized);
         }
-        let base_token: Address = env.storage().instance().get(&DataKey::Token).unwrap();
+        let base_token: Address = Self::get_storage_required(&env, &DataKey::Token)?;
         let reward_token: Address = env
             .storage()
             .instance()
@@ -624,7 +626,7 @@ impl YieldVault {
         }
 
         // Step 6: Auto-compound net amount (increase TVL, no new shares)
-        let total_assets: i128 = env.storage().instance().get(&DataKey::TotalAssets).unwrap();
+        let total_assets: i128 = Self::get_storage_required(&env, &DataKey::TotalAssets)?;
         env.storage()
             .instance()
             .set(&DataKey::TotalAssets, &(total_assets + net_amount));
@@ -778,6 +780,30 @@ impl YieldVault {
             return Err(VaultError::Unauthorized);
         }
         Ok(())
+    }
+
+    // ── Safe Storage Access Helpers ─────────────────────────────────
+
+    /// Safely retrieve a required storage value, returning StorageKeyNotFound if missing.
+    fn get_storage_required<T: soroban_sdk::TryFromVal<Env, soroban_sdk::Val>>(
+        env: &Env,
+        key: &DataKey,
+    ) -> Result<T, VaultError> {
+        env.storage()
+            .instance()
+            .get(key)
+            .ok_or(VaultError::StorageKeyNotFound)
+    }
+
+    /// Safely retrieve a persistent storage value, returning StorageKeyNotFound if missing.
+    fn get_persistent_required<T: soroban_sdk::TryFromVal<Env, soroban_sdk::Val>>(
+        env: &Env,
+        key: &DataKey,
+    ) -> Result<T, VaultError> {
+        env.storage()
+            .persistent()
+            .get(key)
+            .ok_or(VaultError::StorageKeyNotFound)
     }
 }
 

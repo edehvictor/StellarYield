@@ -72,7 +72,7 @@ impl YieldVault {
             return Err(VaultError::ZeroAmount);
         }
 
-        let token_addr: Address = env.storage().instance().get(&DataKey::Token).unwrap();
+        let token_addr: Address = Self::get_storage_required(env, &DataKey::Token)?;
         let token_client = token::Client::new(env, &token_addr);
         let vault_addr = env.current_contract_address();
 
@@ -106,7 +106,7 @@ impl YieldVault {
         }
 
         // Step 6: Update vault accounting (fee increases total assets)
-        let total_assets: i128 = env.storage().instance().get(&DataKey::TotalAssets).unwrap();
+        let total_assets: i128 = YieldVault::get_storage_required(env, &DataKey::TotalAssets)?;
         env.storage()
             .instance()
             .set(&DataKey::TotalAssets, &(total_assets + fee));
@@ -140,7 +140,7 @@ impl YieldVault {
     pub fn max_flash_amount(env: &Env) -> Result<i128, VaultError> {
         YieldVault::require_init(env)?;
 
-        let token_addr: Address = env.storage().instance().get(&DataKey::Token).unwrap();
+        let token_addr: Address = YieldVault::get_storage_required(env, &DataKey::Token)?;
         let token_client = token::Client::new(env, &token_addr);
         let balance = token_client.balance(&env.current_contract_address());
 

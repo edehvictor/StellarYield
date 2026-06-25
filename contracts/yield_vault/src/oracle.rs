@@ -31,7 +31,7 @@ impl YieldVault {
             return Ok(1);
         };
 
-        let token_addr: Address = env.storage().instance().get(&DataKey::Token).unwrap();
+        let token_addr: Address = Self::get_storage_required(env, &DataKey::Token)?;
 
         let client = OracleClient::new(env, &oracle_addr);
         let now = env.ledger().timestamp();

@@ -75,7 +75,7 @@ impl YieldVault {
         }
 
         // Determine idle reserves = actual token balance of this contract
-        let token_addr: Address = env.storage().instance().get(&DataKey::Token).unwrap();
+        let token_addr: Address = Self::get_storage_required(env, &DataKey::Token)?;
         let client = token::Client::new(env, &token_addr);
         let vault_addr = env.current_contract_address();
         let idle_balance = client.balance(&vault_addr);

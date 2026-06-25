@@ -40,8 +40,8 @@ impl YieldVault {
             return Err(VaultError::ZeroAmount);
         }
 
-        let token_addr: Address = env.storage().instance().get(&DataKey::Token).unwrap();
-        let total_assets: i128 = env.storage().instance().get(&DataKey::TotalAssets).unwrap();
+        let token_addr: Address = Self::get_storage_required(&env, &DataKey::Token)?;
+        let total_assets: i128 = Self::get_storage_required(&env, &DataKey::TotalAssets)?;
 
         // Check balance directly from the token client
         let client = soroban_sdk::token::Client::new(&env, &token_addr);

@@ -104,7 +104,7 @@ impl YieldVault {
             .persistent()
             .set(&ReferralKey::ReferralRewards(referrer.clone()), &0i128);
 
-        let token_addr: Address = env.storage().instance().get(&DataKey::Token).unwrap();
+        let token_addr: Address = Self::get_storage_required(&env, &DataKey::Token)?;
         let client = soroban_sdk::token::Client::new(&env, &token_addr);
         client.transfer(&env.current_contract_address(), &referrer, &rewards);
 
