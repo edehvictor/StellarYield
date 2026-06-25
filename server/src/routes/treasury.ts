@@ -5,6 +5,8 @@ import {
   getScenario,
   listScenarios,
   deleteScenario,
+  assertValidScenarioInput,
+  TreasuryValidationError,
   type TreasuryScenario,
   type AllocationPosition,
 } from "../services/treasurySimulationService";
@@ -35,39 +37,29 @@ function validateAllocations(allocations: unknown): allocations is AllocationPos
  * Run a treasury simulation. Optionally saves the scenario.
  */
 router.post("/simulate", (req: Request, res: Response) => {
-  const { name, totalCapitalUsd, allocations, save: shouldSave } = req.body as {
-    name?: string;
-    totalCapitalUsd?: number;
-    allocations?: unknown;
-    save?: boolean;
-  };
-
-  if (typeof totalCapitalUsd !== "number" || totalCapitalUsd <= 0) {
-    res.status(400).json({ error: "totalCapitalUsd must be a positive number" });
-    return;
-  }
-
-  if (!validateAllocations(allocations)) {
-    res.status(400).json({
-      error: "allocations must be a non-empty array summing to 100% with required fields",
+  try {
+    const scenario = assertValidScenarioInput({
+      ...req.body,
+      id: req.body.id ?? `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
     });
-    return;
+
+    if (req.body.save) {
+      saveScenario(scenario);
+    }
+
+    const result = simulateTreasury(scenario);
+    res.json(result);
+  } catch (err) {
+    if (err instanceof TreasuryValidationError) {
+      res.status(err.statusCode).json({
+        error: err.message,
+        code: err.code,
+        details: err.details,
+      });
+      return;
+    }
+    res.status(400).json({ error: "Invalid request body" });
   }
-
-  const scenario: TreasuryScenario = {
-    id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-    name: typeof name === "string" && name.trim() ? name.trim() : "Unnamed Scenario",
-    totalCapitalUsd,
-    allocations,
-    createdAt: new Date().toISOString(),
-  };
-
-  if (shouldSave) {
-    saveScenario(scenario);
-  }
-
-  const result = simulateTreasury(scenario);
-  res.json(result);
 });
 
 /**
@@ -75,34 +67,25 @@ router.post("/simulate", (req: Request, res: Response) => {
  * Save a scenario without simulating.
  */
 router.post("/scenarios", (req: Request, res: Response) => {
-  const { name, totalCapitalUsd, allocations } = req.body as {
-    name?: string;
-    totalCapitalUsd?: number;
-    allocations?: unknown;
-  };
-
-  if (typeof totalCapitalUsd !== "number" || totalCapitalUsd <= 0) {
-    res.status(400).json({ error: "totalCapitalUsd must be a positive number" });
-    return;
-  }
-
-  if (!validateAllocations(allocations)) {
-    res.status(400).json({
-      error: "allocations must be a non-empty array summing to 100% with required fields",
+  try {
+    const scenario = assertValidScenarioInput({
+      ...req.body,
+      id: req.body.id ?? `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
     });
-    return;
+
+    saveScenario(scenario);
+    res.status(201).json({ id: scenario.id, name: scenario.name, createdAt: scenario.createdAt });
+  } catch (err) {
+    if (err instanceof TreasuryValidationError) {
+      res.status(err.statusCode).json({
+        error: err.message,
+        code: err.code,
+        details: err.details,
+      });
+      return;
+    }
+    res.status(400).json({ error: "Invalid request body" });
   }
-
-  const scenario: TreasuryScenario = {
-    id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-    name: typeof name === "string" && name.trim() ? name.trim() : "Unnamed Scenario",
-    totalCapitalUsd,
-    allocations,
-    createdAt: new Date().toISOString(),
-  };
-
-  saveScenario(scenario);
-  res.status(201).json({ id: scenario.id, name: scenario.name, createdAt: scenario.createdAt });
 });
 
 /**

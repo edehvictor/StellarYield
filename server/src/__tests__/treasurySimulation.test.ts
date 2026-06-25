@@ -1,12 +1,5 @@
-import {
-  simulateTreasury,
-  saveScenario,
-  getScenario,
-  listScenarios,
-  deleteScenario,
-  type TreasuryScenario,
-  type AllocationPosition,
-} from "../services/treasurySimulationService";
+import http from "http";
+import { simulateTreasury, saveScenario, getScenario, listScenarios, deleteScenario, assertValidScenarioInput, TreasuryValidationError, type TreasuryScenario, type AllocationPosition } from "../services/treasurySimulationService";
 
 const baseAllocations: AllocationPosition[] = [
   { vaultId: "blend", vaultName: "Blend", allocationPct: 60, apy: 6.5, tvlUsd: 12_000_000, riskScore: 8, rotationCostPct: 0.1 },
@@ -100,5 +93,98 @@ describe("scenario persistence", () => {
 
   it("returns false when deleting non-existent scenario", () => {
     expect(deleteScenario("does-not-exist")).toBe(false);
+  });
+});
+
+describe("assertValidScenarioInput - invalid input", () => {
+  const baseAlloc: AllocationPosition = {
+    vaultId: "v1",
+    vaultName: "V1",
+    allocationPct: 100,
+    apy: 5,
+    tvlUsd: 1_000_000,
+    riskScore: 5,
+    rotationCostPct: 0.1,
+  };
+
+  it("rejects non-object body", () => {
+    expect(() => assertValidScenarioInput(null)).toThrow();
+    expect(() => assertValidScenarioInput("string")).toThrow();
+    expect(() => assertValidScenarioInput(123)).toThrow();
+  });
+
+  it("rejects missing id", () => {
+    expect(() =>
+      assertValidScenarioInput({
+        name: "n",
+        totalCapitalUsd: 1000,
+        allocations: [baseAlloc],
+      }),
+    ).toThrow();
+  });
+
+  it("rejects missing name", () => {
+    expect(() =>
+      assertValidScenarioInput({
+        id: "1",
+        totalCapitalUsd: 1000,
+        allocations: [baseAlloc],
+      }),
+    ).toThrow();
+  });
+
+  it("rejects invalid totalCapitalUsd", () => {
+    expect(() =>
+      assertValidScenarioInput({
+        id: "1",
+        name: "n",
+        totalCapitalUsd: -1,
+        allocations: [baseAlloc],
+      }),
+    ).toThrow();
+  });
+
+  it("rejects missing allocations array", () => {
+    expect(() =>
+      assertValidScenarioInput({
+        id: "1",
+        name: "n",
+        totalCapitalUsd: 1000,
+        allocations: [],
+      }),
+    ).toThrow();
+  });
+
+  it("rejects allocation item missing required fields", () => {
+    expect(() =>
+      assertValidScenarioInput({
+        id: "1",
+        name: "n",
+        totalCapitalUsd: 1000,
+        allocations: [{ ...baseAlloc, apy: "bad" as any }],
+      }),
+    ).toThrow();
+  });
+
+  it("rejects allocations not summing to 100", () => {
+    expect(() =>
+      assertValidScenarioInput({
+        id: "1",
+        name: "n",
+        totalCapitalUsd: 1000,
+        allocations: [baseAlloc, { ...baseAlloc, allocationPct: 50 }],
+      }),
+    ).toThrow();
+  });
+
+  it("returns typed scenario on valid input", () => {
+    const scenario = assertValidScenarioInput({
+      id: "1",
+      name: "ok",
+      totalCapitalUsd: 1000,
+      allocations: [baseAlloc],
+    });
+    expect(scenario.id).toBe("1");
+    expect(scenario.allocations).toHaveLength(1);
   });
 });
