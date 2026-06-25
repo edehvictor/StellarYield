@@ -5,7 +5,7 @@
  * Target: ≥ 90 % line / statement / function coverage.
  */
 import { describe, it, expect } from "vitest";
-import { decodeTransactionError, extractErrorCode } from "./errorDecoder";
+import { decodeTransactionError, extractErrorCode, KNOWN_CONTRACT_ERROR_CODES } from "./errorDecoder";
 
 // ── extractErrorCode ─────────────────────────────────────────────────────
 
@@ -159,7 +159,7 @@ describe("decodeTransactionError", () => {
         expect(result.raw).toBe(raw);
     });
 
-    it("decodes all vault error codes 1–10", () => {
+    it("decodes all vault error codes 1–11", () => {
         const knownTitles: Record<number, string> = {
             1: "Contract Not Initialized",
             2: "Already Initialized",
@@ -171,11 +171,54 @@ describe("decodeTransactionError", () => {
             8: "Timelock Active",
             9: "Invalid Oracle Price",
             10: "Slippage Exceeded",
+            11: "Storage Key Not Found",
         };
         for (const [code, title] of Object.entries(knownTitles)) {
             const result = decodeTransactionError(`Error(Contract, #${code})`);
             expect(result.title).toBe(title);
             expect(result.code).toBe(Number(code));
+        }
+    });
+
+    it("decodes vault error code 11 → Storage Key Not Found", () => {
+        const result = decodeTransactionError("Error(Contract, #11)");
+        expect(result.code).toBe(11);
+        expect(result.title).toBe("Storage Key Not Found");
+        expect(result.message).toContain("storage");
+        expect(result.suggestion).toBeTruthy();
+    });
+});
+
+// ── KNOWN_CONTRACT_ERROR_CODES drift-detection guardrail ─────────────────
+
+describe("KNOWN_CONTRACT_ERROR_CODES", () => {
+    it("contains all vault error codes documented in ERROR_CODES.md (1–11)", () => {
+        for (let code = 1; code <= 11; code++) {
+            expect(KNOWN_CONTRACT_ERROR_CODES.has(code)).toBe(true);
+        }
+    });
+
+    it("contains vesting error codes 1001–1003", () => {
+        expect(KNOWN_CONTRACT_ERROR_CODES.has(1001)).toBe(true);
+        expect(KNOWN_CONTRACT_ERROR_CODES.has(1002)).toBe(true);
+        expect(KNOWN_CONTRACT_ERROR_CODES.has(1003)).toBe(true);
+    });
+
+    it("contains donation error codes 2001–2002", () => {
+        expect(KNOWN_CONTRACT_ERROR_CODES.has(2001)).toBe(true);
+        expect(KNOWN_CONTRACT_ERROR_CODES.has(2002)).toBe(true);
+    });
+
+    it("contains swap error codes 3001–3002", () => {
+        expect(KNOWN_CONTRACT_ERROR_CODES.has(3001)).toBe(true);
+        expect(KNOWN_CONTRACT_ERROR_CODES.has(3002)).toBe(true);
+    });
+
+    it("every code in the set decodes to a non-fallback title", () => {
+        for (const code of KNOWN_CONTRACT_ERROR_CODES) {
+            const result = decodeTransactionError(`Error(Contract, #${code})`);
+            expect(result.title).not.toBe("Transaction Failed");
+            expect(result.code).toBe(code);
         }
     });
 });

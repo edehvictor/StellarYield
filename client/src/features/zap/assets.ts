@@ -11,7 +11,16 @@ export function loadZapAssetOptions(): ZapAssetOption[] {
     try {
       const parsed = JSON.parse(raw) as ZapAssetOption[];
       if (Array.isArray(parsed) && parsed.length > 0) {
-        return parsed;
+        const validationErrors = validateZapAssets(parsed);
+        if (validationErrors.length > 0) {
+          console.error(
+            "[ZapAssets] VITE_ZAP_ASSETS_JSON validation failed:",
+            validationErrors,
+          );
+          /* fall through to env-var fallback */
+        } else {
+          return parsed;
+        }
       }
     } catch {
       /* fall through */
@@ -64,8 +73,49 @@ function isZapAssetOption(v: unknown): v is ZapAssetOption {
     typeof v.name === "string" &&
     typeof v.contractId === "string" &&
     typeof v.decimals === "number" &&
-    Number.isFinite(v.decimals)
+    Number.isFinite(v.decimals) &&
+    Number.isInteger(v.decimals) &&
+    (v.decimals as number) >= 0
   );
+}
+
+/**
+ * Validates a list of zap asset options for duplicates and malformed values.
+ * Returns an array of human-readable error messages; an empty array means valid.
+ */
+export function validateZapAssets(assets: ZapAssetOption[]): string[] {
+  const errors: string[] = [];
+  const seenSymbols = new Set<string>();
+  const seenContractIds = new Set<string>();
+
+  for (const asset of assets) {
+    if (seenSymbols.has(asset.symbol)) {
+      errors.push(`Duplicate symbol: "${asset.symbol}"`);
+    }
+    seenSymbols.add(asset.symbol);
+
+    if (asset.contractId && seenContractIds.has(asset.contractId)) {
+      errors.push(`Duplicate contractId: "${asset.contractId}"`);
+    }
+    if (asset.contractId) seenContractIds.add(asset.contractId);
+
+    if (!Number.isInteger(asset.decimals) || asset.decimals < 0) {
+      errors.push(
+        `Asset "${asset.symbol}" has invalid decimals: ${asset.decimals} (must be a non-negative integer)`,
+      );
+    }
+
+    if (
+      asset.iconUrl !== undefined &&
+      !(asset.iconUrl.startsWith("http://") || asset.iconUrl.startsWith("https://"))
+    ) {
+      errors.push(
+        `Asset "${asset.symbol}" has a malformed iconUrl: "${asset.iconUrl}" (must start with http:// or https://)`,
+      );
+    }
+  }
+
+  return errors;
 }
 
 /** Fetches `/api/zap/supported-assets`; returns null on network or schema errors. */

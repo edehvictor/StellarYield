@@ -149,4 +149,84 @@ describe("generate-manifest.js", () => {
     const manifest = JSON.parse(fs.readFileSync(outputPath, "utf8"));
     expect(() => new Date(manifest.generatedAt).toISOString()).not.toThrow();
   });
+
+  // ── Alias regression tests (issue #781) ────────────────────────────────────
+  // These tests guard against accidental alias renames. If a deployment script
+  // starts emitting `yieldVault` instead of `yield_vault`, the manifest will
+  // contain the wrong key and downstream consumers silently break.
+
+  it("manifest preserves the exact alias key from deployed.json", () => {
+    const inputPath = writeDeployed(tmpDir, { yield_vault: VALID_ID_1, zap: VALID_ID_2 });
+    const outputPath = path.join(tmpDir, "manifest.json");
+
+    const result = runScript(
+      `--input "${inputPath}" --network testnet --output "${outputPath}"`,
+    );
+
+    expect(result.status).toBe(0);
+    const manifest = JSON.parse(fs.readFileSync(outputPath, "utf8"));
+    // snake_case aliases must survive intact
+    expect(manifest.contracts["yield_vault"]).toBe(VALID_ID_1);
+    expect(manifest.contracts["zap"]).toBe(VALID_ID_2);
+  });
+
+  it("manifest does NOT contain camelCase alias when deployed.json uses snake_case", () => {
+    // Regression: deploy.sh emits `yield_vault`; a renamed alias `yieldVault` must
+    // NOT appear in the manifest — consumers would silently get undefined.
+    const inputPath = writeDeployed(tmpDir, { yield_vault: VALID_ID_1 });
+    const outputPath = path.join(tmpDir, "manifest.json");
+
+    runScript(`--input "${inputPath}" --network testnet --output "${outputPath}"`);
+
+    const manifest = JSON.parse(fs.readFileSync(outputPath, "utf8"));
+    expect(manifest.contracts["yieldVault"]).toBeUndefined();
+    expect(manifest.contracts["yield_vault"]).toBe(VALID_ID_1);
+  });
+
+  it("manifest built from renamed alias yieldVault is missing expected yield_vault key", () => {
+    // This documents the failure mode: if deploy.sh starts emitting camelCase,
+    // the manifest will have `yieldVault` but not `yield_vault`, breaking indexers.
+    const inputPath = writeDeployed(tmpDir, { yieldVault: VALID_ID_1 });
+    const outputPath = path.join(tmpDir, "manifest.json");
+
+    runScript(`--input "${inputPath}" --network testnet --output "${outputPath}"`);
+
+    const manifest = JSON.parse(fs.readFileSync(outputPath, "utf8"));
+    expect(manifest.contracts["yield_vault"]).toBeUndefined();
+    expect(manifest.contracts["yieldVault"]).toBe(VALID_ID_1);
+  });
+
+  it("manifest includes extra/unexpected aliases without failing", () => {
+    // The script does not whitelist alias names; extra keys are included verbatim.
+    // This test ensures that adding a new contract to deployed.json doesn't break generation.
+    const inputPath = writeDeployed(tmpDir, {
+      yield_vault: VALID_ID_1,
+      new_contract: VALID_ID_2,
+    });
+    const outputPath = path.join(tmpDir, "manifest.json");
+
+    const result = runScript(
+      `--input "${inputPath}" --network testnet --output "${outputPath}"`,
+    );
+
+    expect(result.status).toBe(0);
+    const manifest = JSON.parse(fs.readFileSync(outputPath, "utf8"));
+    expect(manifest.contracts["new_contract"]).toBe(VALID_ID_2);
+  });
+
+  it("manifest from deployed.json missing required alias omits that key", () => {
+    // When a required alias (e.g. `zap`) is simply absent from deployed.json,
+    // the manifest must not contain it. Consumers that look up `manifest.contracts.zap`
+    // will get undefined — this makes the missing deployment visible at integration time.
+    const inputPath = writeDeployed(tmpDir, { yield_vault: VALID_ID_1 });
+    const outputPath = path.join(tmpDir, "manifest.json");
+
+    const result = runScript(
+      `--input "${inputPath}" --network testnet --output "${outputPath}"`,
+    );
+
+    expect(result.status).toBe(0);
+    const manifest = JSON.parse(fs.readFileSync(outputPath, "utf8"));
+    expect(manifest.contracts["zap"]).toBeUndefined();
+  });
 });

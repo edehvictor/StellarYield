@@ -26,6 +26,22 @@ export interface DecodedError {
     code?: number;
 }
 
+/**
+ * The authoritative set of contract error codes known to the frontend.
+ * Import this in tests to guard against on-chain enum drift — if a code
+ * appears in ERROR_CODES.md but not here, tests should fail.
+ */
+export const KNOWN_CONTRACT_ERROR_CODES = new Set([
+    // YieldVault
+    1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11,
+    // Vesting
+    1001, 1002, 1003,
+    // Donations
+    2001, 2002,
+    // Intent Swap
+    3001, 3002,
+]);
+
 /** Maps known contract error codes to user-facing messages. */
 const CONTRACT_ERROR_MAP: Record<
     number,
@@ -81,6 +97,11 @@ const CONTRACT_ERROR_MAP: Record<
         title: "Slippage Exceeded",
         message: "The price moved too much during your swap. Your slippage tolerance was exceeded.",
         suggestion: "Increase your slippage tolerance or try again when markets are calmer.",
+    },
+    11: {
+        title: "Storage Key Not Found",
+        message: "A required storage entry is missing from the contract. The vault may not be fully initialized.",
+        suggestion: "Contact support — the contract admin may need to re-initialize or migrate storage.",
     },
     // ── Vesting ────────────────────────────────────────────────────────
     1001: {

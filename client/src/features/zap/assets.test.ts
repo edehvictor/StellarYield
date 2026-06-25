@@ -7,7 +7,9 @@ import {
   mergeVaultIntoZapSelectableAssets,
   shouldLoadZapMetadataFromApi,
   buildSelectableZapAssetsFromMetadata,
+  validateZapAssets,
 } from "./assets";
+import type { ZapAssetOption } from "./types";
 
 describe("loadZapAssetOptions", () => {
   afterEach(() => {
@@ -41,6 +43,58 @@ describe("loadZapAssetOptions", () => {
     vi.stubEnv("VITE_USDC_SAC_CONTRACT_ID", "");
     vi.stubEnv("VITE_AQUA_SAC_CONTRACT_ID", "");
     expect(loadZapAssetOptions().every((a) => a.contractId.length > 0)).toBe(true);
+  });
+
+  it("falls back to env vars when VITE_ZAP_ASSETS_JSON contains duplicate symbols", () => {
+    const assets: ZapAssetOption[] = [
+      { symbol: "XLM", name: "Stellar Lumens", contractId: "CDXLM", decimals: 7 },
+      { symbol: "XLM", name: "Duplicate", contractId: "CDDUP", decimals: 7 },
+    ];
+    vi.stubEnv("VITE_ZAP_ASSETS_JSON", JSON.stringify(assets));
+    vi.stubEnv("VITE_XLM_SAC_CONTRACT_ID", "CDXLMFALLBACK");
+    vi.stubEnv("VITE_USDC_SAC_CONTRACT_ID", "");
+    vi.stubEnv("VITE_AQUA_SAC_CONTRACT_ID", "");
+    const list = loadZapAssetOptions();
+    // Should have fallen back to env vars, not returned the invalid JSON list
+    expect(list.some((a) => a.contractId === "CDDUP")).toBe(false);
+  });
+
+  it("falls back when VITE_ZAP_ASSETS_JSON contains duplicate contractIds", () => {
+    const assets: ZapAssetOption[] = [
+      { symbol: "XLM", name: "Stellar Lumens", contractId: "CDSHARED", decimals: 7 },
+      { symbol: "USDC", name: "USD Coin", contractId: "CDSHARED", decimals: 6 },
+    ];
+    vi.stubEnv("VITE_ZAP_ASSETS_JSON", JSON.stringify(assets));
+    vi.stubEnv("VITE_XLM_SAC_CONTRACT_ID", "CDXLMENV");
+    vi.stubEnv("VITE_USDC_SAC_CONTRACT_ID", "");
+    vi.stubEnv("VITE_AQUA_SAC_CONTRACT_ID", "");
+    const list = loadZapAssetOptions();
+    expect(list.some((a) => a.contractId === "CDSHARED")).toBe(false);
+  });
+
+  it("falls back when VITE_ZAP_ASSETS_JSON has negative decimals", () => {
+    const assets: ZapAssetOption[] = [
+      { symbol: "XLM", name: "Stellar Lumens", contractId: "CDXLM", decimals: -1 },
+    ];
+    vi.stubEnv("VITE_ZAP_ASSETS_JSON", JSON.stringify(assets));
+    vi.stubEnv("VITE_XLM_SAC_CONTRACT_ID", "CDXLMENV");
+    vi.stubEnv("VITE_USDC_SAC_CONTRACT_ID", "");
+    vi.stubEnv("VITE_AQUA_SAC_CONTRACT_ID", "");
+    const list = loadZapAssetOptions();
+    // Negative decimals asset must not appear in the returned list
+    expect(list.every((a) => a.decimals >= 0)).toBe(true);
+  });
+
+  it("falls back when VITE_ZAP_ASSETS_JSON has non-integer decimals", () => {
+    const assets: ZapAssetOption[] = [
+      { symbol: "XLM", name: "Stellar Lumens", contractId: "CDXLM", decimals: 7.5 },
+    ];
+    vi.stubEnv("VITE_ZAP_ASSETS_JSON", JSON.stringify(assets));
+    vi.stubEnv("VITE_XLM_SAC_CONTRACT_ID", "CDXLMENV");
+    vi.stubEnv("VITE_USDC_SAC_CONTRACT_ID", "");
+    vi.stubEnv("VITE_AQUA_SAC_CONTRACT_ID", "");
+    const list = loadZapAssetOptions();
+    expect(list.every((a) => Number.isInteger(a.decimals))).toBe(true);
   });
 });
 
@@ -303,5 +357,90 @@ describe("getVaultContractIdFromEnv", () => {
   it("falls back to VITE_CONTRACT_ID", () => {
     vi.stubEnv("VITE_CONTRACT_ID", "CCC");
     expect(getVaultContractIdFromEnv()).toBe("CCC");
+  });
+});
+
+// ── validateZapAssets (issue #783) ──────────────────────────────────────────
+
+describe("validateZapAssets", () => {
+  it("returns no errors for a valid list", () => {
+    const assets: ZapAssetOption[] = [
+      { symbol: "XLM", name: "Stellar Lumens", contractId: "CDXLM", decimals: 7 },
+      { symbol: "USDC", name: "USD Coin", contractId: "CDUSDC", decimals: 6 },
+    ];
+    expect(validateZapAssets(assets)).toHaveLength(0);
+  });
+
+  it("reports duplicate symbol", () => {
+    const assets: ZapAssetOption[] = [
+      { symbol: "XLM", name: "Stellar Lumens", contractId: "CDX1", decimals: 7 },
+      { symbol: "XLM", name: "Duplicate XLM", contractId: "CDX2", decimals: 7 },
+    ];
+    const errors = validateZapAssets(assets);
+    expect(errors.some((e) => e.includes("Duplicate symbol") && e.includes("XLM"))).toBe(true);
+  });
+
+  it("reports duplicate contractId", () => {
+    const assets: ZapAssetOption[] = [
+      { symbol: "XLM", name: "Stellar Lumens", contractId: "CDSHARED", decimals: 7 },
+      { symbol: "USDC", name: "USD Coin", contractId: "CDSHARED", decimals: 6 },
+    ];
+    const errors = validateZapAssets(assets);
+    expect(errors.some((e) => e.includes("Duplicate contractId") && e.includes("CDSHARED"))).toBe(true);
+  });
+
+  it("reports negative decimals", () => {
+    const assets: ZapAssetOption[] = [
+      { symbol: "XLM", name: "Stellar Lumens", contractId: "CDXLM", decimals: -1 },
+    ];
+    const errors = validateZapAssets(assets);
+    expect(errors.some((e) => e.includes("XLM") && e.includes("invalid decimals"))).toBe(true);
+  });
+
+  it("reports non-integer decimals", () => {
+    const assets: ZapAssetOption[] = [
+      { symbol: "XLM", name: "Stellar Lumens", contractId: "CDXLM", decimals: 7.5 },
+    ];
+    const errors = validateZapAssets(assets);
+    expect(errors.some((e) => e.includes("XLM") && e.includes("invalid decimals"))).toBe(true);
+  });
+
+  it("accepts decimals=0 as valid", () => {
+    const assets: ZapAssetOption[] = [
+      { symbol: "XLM", name: "Stellar Lumens", contractId: "CDXLM", decimals: 0 },
+    ];
+    expect(validateZapAssets(assets)).toHaveLength(0);
+  });
+
+  it("reports malformed iconUrl that does not start with http:// or https://", () => {
+    const assets: ZapAssetOption[] = [
+      { symbol: "XLM", name: "Stellar Lumens", contractId: "CDXLM", decimals: 7, iconUrl: "ftp://bad.example/icon.png" },
+    ];
+    const errors = validateZapAssets(assets);
+    expect(errors.some((e) => e.includes("iconUrl"))).toBe(true);
+  });
+
+  it("accepts valid https iconUrl without error", () => {
+    const assets: ZapAssetOption[] = [
+      { symbol: "XLM", name: "Stellar Lumens", contractId: "CDXLM", decimals: 7, iconUrl: "https://example.com/xlm.png" },
+    ];
+    expect(validateZapAssets(assets)).toHaveLength(0);
+  });
+
+  it("accepts undefined iconUrl without error", () => {
+    const assets: ZapAssetOption[] = [
+      { symbol: "XLM", name: "Stellar Lumens", contractId: "CDXLM", decimals: 7 },
+    ];
+    expect(validateZapAssets(assets)).toHaveLength(0);
+  });
+
+  it("reports all errors together for a fully malformed asset list", () => {
+    const assets: ZapAssetOption[] = [
+      { symbol: "XLM", name: "Stellar Lumens", contractId: "CDSHARED", decimals: -1 },
+      { symbol: "XLM", name: "Duplicate", contractId: "CDSHARED", decimals: 7.5 },
+    ];
+    const errors = validateZapAssets(assets);
+    // Expect: duplicate symbol, duplicate contractId, negative decimals on first, non-integer on second
+    expect(errors.length).toBeGreaterThanOrEqual(3);
   });
 });
