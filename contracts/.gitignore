@@ -1,5 +1,0 @@
-/target
-
-# Deployment secrets and output
-scripts/.env.deploy
-scripts/deployed.json
