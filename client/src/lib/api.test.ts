@@ -88,6 +88,14 @@ describe("api URL helpers", () => {
       reason: 'Invalid API URL configuration: "just-a-string". Must start with http:// or https://',
     });
   });
+
+  it("returns unavailable state when VITE_API_BASE_URL is blank in preview", () => {
+    global.window = { location: { hostname: "stellaryield-pr-123.vercel.app" } } as any;
+    expect(getApiBaseUrlState(env({ VITE_API_BASE_URL: "" }))).toEqual({
+      available: false,
+      reason: "API base URL configuration is missing.",
+    });
+  });
 });
 
 describe("apiFetch", () => {

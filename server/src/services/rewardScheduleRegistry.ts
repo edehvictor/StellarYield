@@ -139,14 +139,16 @@ export class RewardScheduleRegistry {
       .sort((left, right) => left.daysUntilEnd - right.daysUntilEnd);
   }
 
+  static async getMaintainerScheduleRaw(date: Date = new Date()): Promise<RewardScheduleMonitorInput[]> {
+    const schedules = await RewardScheduleModel.find({}).lean();
+    return schedules as RewardScheduleMonitorInput[];
+  }
+
   static async getMaintainerScheduleSummary(
     date: Date = new Date()
   ): Promise<RewardScheduleHealthSummary[]> {
-    const schedules = await RewardScheduleModel.find({}).lean();
-    return this.summarizeSchedulesForMaintainers(
-      schedules as RewardScheduleMonitorInput[],
-      date,
-    );
+    const schedules = await this.getMaintainerScheduleRaw(date);
+    return this.summarizeSchedulesForMaintainers(schedules, date);
   }
 
   private static getConfidenceLevels(min: string): string[] {

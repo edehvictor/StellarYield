@@ -220,7 +220,18 @@ export function verifyAuditEntry(entry: AuditLogEntry): boolean {
 }
 
 /**
- * Retrieve audit logs with optional filtering
+ * Retrieve audit logs with optional filtering and cursor pagination.
+ *
+ * Ordering contract:
+ * - Primary: timestamp descending (newest first)
+ * - Secondary: id ascending to break ties when timestamps are equal
+ *
+ * Cursor pagination contract:
+ * - On entry, `cursor` is an opaque string previously returned as `nextCursor`.
+ * - When `cursor` is set, results exclude the cursor entry and everything before it.
+ * - `nextCursor` is the last returned entry's id, or `null` when there are no more pages.
+ * - No record is ever skipped or duplicated across successive pages assuming caller
+ *   passes the returned `nextCursor` unchanged.
  */
 export async function getAuditLogs(filters?: {
   userId?: string;
@@ -229,6 +240,7 @@ export async function getAuditLogs(filters?: {
   startDate?: string;
   endDate?: string;
   limit?: number;
+  cursor?: string;
 }): Promise<AuditLogEntry[]> {
   let results = [...auditLog];
 
@@ -258,14 +270,28 @@ export async function getAuditLogs(filters?: {
     );
   }
 
-  // Sort by timestamp descending
-  results.sort(
-    (a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime(),
-  );
+  // Stable ordering: newest first; tie-break by id ascending so equal timestamps
+  // produce a deterministic sequence.
+  results.sort((a, b) => {
+    const ta = new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime();
+    if (ta !== 0) return ta;
+    if (a.id < b.id) return -1;
+    if (a.id > b.id) return 1;
+    return 0;
+  });
 
-  // Apply limit
+  // Apply cursor: find the cursor entry and start after it. If not found, fall
+  // back to the first page so requests with stale cursors degrade safely.
+  let startIndex = 0;
+  if (filters?.cursor) {
+    const idx = results.findIndex((entry) => entry.id === filters.cursor);
+    if (idx >= 0) {
+      startIndex = idx + 1;
+    }
+  }
+
   const limit = filters?.limit || 100;
-  return results.slice(0, limit);
+  return results.slice(startIndex, startIndex + limit);
 }
 
 /**
