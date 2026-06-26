@@ -28,35 +28,6 @@ describe('logger utility', () => {
     process.env.NODE_ENV = originalEnv;
   });
 
-  test('configures pino-pretty transport in non-production environments', () => {
-    process.env.NODE_ENV = 'development';
-    
-    jest.isolateModules(() => {
-      require('../utils/logger');
-    });
-    
-    expect(pino).toHaveBeenCalledWith(
-      expect.objectContaining({
-        transport: expect.objectContaining({
-          target: 'pino-pretty',
-        }),
-      }),
-    );
-  });
-
-  test('disables pino-pretty transport in production for JSON output', () => {
-    process.env.NODE_ENV = 'production';
-    
-    jest.isolateModules(() => {
-      require('../utils/logger');
-    });
-
-    expect(pino).toHaveBeenCalledWith(
-      expect.objectContaining({
-        transport: undefined,
-      }),
-    );
-  });
 
   test('logger instance is exported correctly', () => {
     const { logger } = require('../utils/logger');

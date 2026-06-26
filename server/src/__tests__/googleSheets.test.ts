@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, jest, beforeEach } from "@jest/globals";
 import { mapGoogleAuthError, refreshAccessToken } from "../routes/googleSheets";
 
 describe("googleSheets route helpers", () => {

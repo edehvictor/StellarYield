@@ -12,11 +12,13 @@ pub fn extend_instance_ttl(e: &Env, threshold: u32, extend_to: u32) {
 }
 
 /// Extends the TTL for a persistent storage key if it is below the low watermark
-pub fn extend_persistent_ttl<K>(e: &Env, key: &K, threshold: u32, extend_to: u32) 
+pub fn extend_persistent_ttl<K>(e: &Env, key: &K, threshold: u32, extend_to: u32)
 where
     K: IntoVal<Env, soroban_sdk::Val> + TryFromVal<Env, soroban_sdk::Val> + Clone,
 {
-    e.storage().persistent().extend_ttl(key, threshold, extend_to);
+    e.storage()
+        .persistent()
+        .extend_ttl(key, threshold, extend_to);
 }
 
 /// Extends instance storage with default constants

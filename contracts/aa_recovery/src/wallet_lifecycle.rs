@@ -433,7 +433,13 @@ impl super::RecoveryModule {
     // ═══════════════════════════════════════════════════════════════════
 
     /// Record a guardian event in the audit trail
-    fn record_guardian_event(env: &Env, event_type: u32, guardian: Address, old_threshold: u32, new_threshold: u32) -> Result<(), RecoveryError> {
+    fn record_guardian_event(
+        env: &Env,
+        event_type: u32,
+        guardian: Address,
+        old_threshold: u32,
+        new_threshold: u32,
+    ) -> Result<(), RecoveryError> {
         let mut audit_trail: Vec<GuardianEventRecord> = env
             .storage()
             .persistent()
@@ -479,10 +485,7 @@ impl super::RecoveryModule {
     // ═══════════════════════════════════════════════════════════════════
 
     /// Internal: add guardian to storage (called after timelock)
-    pub(crate) fn add_guardian_internal(
-        env: &Env,
-        guardian: Address,
-    ) -> Result<(), RecoveryError> {
+    pub(crate) fn add_guardian_internal(env: &Env, guardian: Address) -> Result<(), RecoveryError> {
         // Implementation: add to Guardians map
         Ok(())
     }

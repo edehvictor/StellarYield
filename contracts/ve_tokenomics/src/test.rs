@@ -183,4 +183,3 @@ fn test_storage_ttl_extension() {
     client.get_voting_power(&user);
     client.get_unlock_time(&user);
 }
-

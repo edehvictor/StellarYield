@@ -409,8 +409,7 @@ impl YieldVault {
         YieldVault::record_rebalance(&env, amount, target.clone())?;
 
         // Post-operation invariant check: token balance should decrease
-        YieldVault::check_token_balance_invariant(&env)
-            .ok(); // Non-fatal, log for audit
+        YieldVault::check_token_balance_invariant(&env).ok(); // Non-fatal, log for audit
 
         env.events()
             .publish((symbol_short!("rebal"),), (target, amount));

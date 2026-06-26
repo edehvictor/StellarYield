@@ -1,5 +1,5 @@
-use soroban_sdk::{contracttype, Address, BytesN, Env, Map, Vec, symbol_short};
-use crate::{CrossChainMessage, BridgeRelayerError, NONCE_KEY};
+use crate::{BridgeRelayerError, CrossChainMessage, NONCE_KEY};
+use soroban_sdk::{contracttype, symbol_short, Address, BytesN, Env, Map, Vec};
 
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -13,13 +13,18 @@ pub struct ReplayStats {
 pub struct ReplayProtection;
 
 impl ReplayProtection {
-    pub fn validate_and_update_nonce(env: &Env, message: &CrossChainMessage) -> Result<(), BridgeRelayerError> {
+    pub fn validate_and_update_nonce(
+        env: &Env,
+        message: &CrossChainMessage,
+    ) -> Result<(), BridgeRelayerError> {
         let current_nonce = Self::get_current_nonce(env);
         let expected = if current_nonce == 0 { 1 } else { current_nonce };
         if message.nonce != expected {
             return Err(BridgeRelayerError::InvalidNonce);
         }
-        env.storage().instance().set(&NONCE_KEY, &(message.nonce + 1));
+        env.storage()
+            .instance()
+            .set(&NONCE_KEY, &(message.nonce + 1));
         Ok(())
     }
 
@@ -27,10 +32,17 @@ impl ReplayProtection {
         env.storage().instance().get(&NONCE_KEY).unwrap_or(0)
     }
 
-    pub fn check_message_processed(env: &Env, message: &CrossChainMessage) -> Result<(), BridgeRelayerError> {
+    pub fn check_message_processed(
+        env: &Env,
+        message: &CrossChainMessage,
+    ) -> Result<(), BridgeRelayerError> {
         let hash = Self::compute_message_hash(env, message);
         let processed_key = symbol_short!("HASHES");
-        let processed_hashes: Map<BytesN<32>, u64> = env.storage().instance().get(&processed_key).unwrap_or_else(|| Map::new(env));
+        let processed_hashes: Map<BytesN<32>, u64> = env
+            .storage()
+            .instance()
+            .get(&processed_key)
+            .unwrap_or_else(|| Map::new(env));
         if processed_hashes.contains_key(hash) {
             return Err(BridgeRelayerError::MessageAlreadyProcessed);
         }
@@ -40,9 +52,15 @@ impl ReplayProtection {
     pub fn mark_message_processed(env: &Env, message: &CrossChainMessage) {
         let hash = Self::compute_message_hash(env, message);
         let processed_key = symbol_short!("HASHES");
-        let mut processed_hashes: Map<BytesN<32>, u64> = env.storage().instance().get(&processed_key).unwrap_or_else(|| Map::new(env));
+        let mut processed_hashes: Map<BytesN<32>, u64> = env
+            .storage()
+            .instance()
+            .get(&processed_key)
+            .unwrap_or_else(|| Map::new(env));
         processed_hashes.set(hash, env.ledger().timestamp());
-        env.storage().instance().set(&processed_key, &processed_hashes);
+        env.storage()
+            .instance()
+            .set(&processed_key, &processed_hashes);
     }
 
     pub fn compute_message_hash(env: &Env, message: &CrossChainMessage) -> BytesN<32> {
@@ -117,7 +135,11 @@ impl ReplayProtection {
 
     pub fn cleanup_processed_hashes(env: &Env, max_age: u64) {
         let processed_key = symbol_short!("HASHES");
-        let processed_hashes: Map<BytesN<32>, u64> = env.storage().instance().get(&processed_key).unwrap_or_else(|| Map::new(env));
+        let processed_hashes: Map<BytesN<32>, u64> = env
+            .storage()
+            .instance()
+            .get(&processed_key)
+            .unwrap_or_else(|| Map::new(env));
         let current_time = env.ledger().timestamp();
         let mut updated = Map::new(env);
         for (hash, timestamp) in processed_hashes.iter() {
@@ -131,7 +153,11 @@ impl ReplayProtection {
     pub fn get_replay_stats(env: &Env) -> ReplayStats {
         let current_nonce = Self::get_current_nonce(env);
         let processed_key = symbol_short!("HASHES");
-        let processed_hashes: Map<BytesN<32>, u64> = env.storage().instance().get(&processed_key).unwrap_or_else(|| Map::new(env));
+        let processed_hashes: Map<BytesN<32>, u64> = env
+            .storage()
+            .instance()
+            .get(&processed_key)
+            .unwrap_or_else(|| Map::new(env));
         let current_time = env.ledger().timestamp();
         let mut total_processed = 0;
         let mut recent_processed = 0;

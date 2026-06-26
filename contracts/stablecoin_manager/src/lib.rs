@@ -106,15 +106,11 @@ impl StablecoinManager {
         Self::accrue_interest(&env)?;
 
         let cdp_key = DataKey::Cdp(from.clone());
-        let mut cdp = env
-            .storage()
-            .persistent()
-            .get(&cdp_key)
-            .unwrap_or(Cdp {
-                collateral: 0,
-                debt_shares: 0,
-                last_index: SCALAR_18,
-            });
+        let mut cdp = env.storage().persistent().get(&cdp_key).unwrap_or(Cdp {
+            collateral: 0,
+            debt_shares: 0,
+            last_index: SCALAR_18,
+        });
         if env.storage().persistent().has(&cdp_key) {
             extend_persistent_ttl_default(&env, &cdp_key);
         }
@@ -145,9 +141,7 @@ impl StablecoinManager {
         }
 
         Self::verify_cr(&env, &cdp, true)?;
-        env.storage()
-            .persistent()
-            .set(&cdp_key, &cdp);
+        env.storage().persistent().set(&cdp_key, &cdp);
         extend_persistent_ttl_default(&env, &cdp_key);
 
         env.events().publish(
@@ -218,13 +212,9 @@ impl StablecoinManager {
         }
 
         if cdp.collateral == 0 && cdp.debt_shares == 0 {
-            env.storage()
-                .persistent()
-                .remove(&cdp_key);
+            env.storage().persistent().remove(&cdp_key);
         } else {
-            env.storage()
-                .persistent()
-                .set(&cdp_key, &cdp);
+            env.storage().persistent().set(&cdp_key, &cdp);
             extend_persistent_ttl_default(&env, &cdp_key);
         }
         Ok(())
@@ -274,9 +264,7 @@ impl StablecoinManager {
             &cdp.collateral,
         );
 
-        env.storage()
-            .persistent()
-            .remove(&cdp_key);
+        env.storage().persistent().remove(&cdp_key);
         Ok(())
     }
 

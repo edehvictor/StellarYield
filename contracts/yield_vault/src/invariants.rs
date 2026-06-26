@@ -51,13 +51,7 @@ pub struct AuditEventData {
 // ═════════════════════════════════════════════════════════════════════════
 
 /// Log an audit event for off-chain indexing and compliance.
-pub fn audit_log_event(
-    env: &Env,
-    event_type: u32,
-    amount: i128,
-    shares: i128,
-    keeper_fee: i128,
-) {
+pub fn audit_log_event(env: &Env, event_type: u32, amount: i128, shares: i128, keeper_fee: i128) {
     let counter: i128 = env
         .storage()
         .instance()
@@ -208,11 +202,7 @@ impl _YieldVault {
 
     /// **Post-Rebalance Audit**
     /// Logs the rebalance and checks that total_assets decreased correctly.
-    pub fn record_rebalance(
-        env: &Env,
-        amount: i128,
-        _target: Address,
-    ) -> Result<(), VaultError> {
+    pub fn record_rebalance(env: &Env, amount: i128, _target: Address) -> Result<(), VaultError> {
         let total_rebalanced: i128 = env
             .storage()
             .instance()
@@ -263,10 +253,9 @@ impl _YieldVault {
             .get(&InvariantKey::CumulativeYield)
             .unwrap_or(0);
 
-        env.storage().instance().set(
-            &InvariantKey::CumulativeYield,
-            &(cumulative + amount_out),
-        );
+        env.storage()
+            .instance()
+            .set(&InvariantKey::CumulativeYield, &(cumulative + amount_out));
 
         let accumulated_fees: i128 = env
             .storage()
@@ -313,10 +302,9 @@ impl _YieldVault {
             .get(&InvariantKey::AccumulatedFees)
             .unwrap_or(0);
 
-        env.storage().instance().set(
-            &InvariantKey::AccumulatedFees,
-            &(accumulated_fees + fee),
-        );
+        env.storage()
+            .instance()
+            .set(&InvariantKey::AccumulatedFees, &(accumulated_fees + fee));
 
         audit_log_event(env, 5, amount, fee, 0); // Type 5: FlashLoan
 

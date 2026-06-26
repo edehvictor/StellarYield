@@ -76,7 +76,7 @@ sharePriceHistoryRouter.get(
 
     const prisma = await loadPrismaClient();
 
-    if (!prisma) {
+    if (!prisma || !(\"sharePriceSnapshot\" in prisma) || !prisma.sharePriceSnapshot) {
       const fixture = generateFixtureSnapshots(vaultId, days);
       res.json(fixture);
       return;

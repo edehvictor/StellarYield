@@ -15,20 +15,7 @@ import { apiUrl } from '../../lib/api';
 import { useBackendStatus } from '../../hooks/useBackendStatus';
 import { BackendUnavailable } from '../../components/BackendUnavailable';
 
-interface StrategyYield {
-  protocolName: string;
-  apy: number;
-  rewardApy: number;
-  totalApy: number;
-  tvl: number;
-  riskScore: number;
-  liquidityUsd: number;
-  rebalancingBehavior: string;
-  managementFeeBps: number;
-  performanceFeeBps: number;
-  capitalEfficiencyPct: number;
-  fetchedAt?: string;
-}
+
 import {
   downloadStrategyComparisonExport,
   type StrategyComparisonExportFormat,

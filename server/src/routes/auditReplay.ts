@@ -58,6 +58,7 @@ router.get("/summary", async (req: Request, res: Response) => {
       : null;
 
     res.json({
+      success: true,
       data: {
         summary: {
           total: report.total,

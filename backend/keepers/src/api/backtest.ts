@@ -111,7 +111,7 @@ export function createBacktestRouter(): Router {
 
     router.get("/backtest", (req: Request, res: Response) => {
         try {
-            const { vaultContractId, startDate, endDate, depositAmount } = req.query as BacktestQuery;
+            const { vaultContractId, startDate, endDate, depositAmount } = req.query as unknown as BacktestQuery;
 
             if (!vaultContractId || !startDate || !endDate || !depositAmount) {
                 res.status(400).json({ error: "Missing required parameters" });

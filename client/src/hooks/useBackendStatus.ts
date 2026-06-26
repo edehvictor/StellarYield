@@ -15,7 +15,7 @@ export type BackendStatus = "checking" | "available" | "unavailable";
  */
 export function useBackendStatus(checkInterval?: number): BackendStatus {
   const [status, setStatus] = useState<BackendStatus>("checking");
-  const timeoutRef = useRef<NodeJS.Timeout>();
+  const timeoutRef = useRef<NodeJS.Timeout | undefined>(undefined);
 
   const checkBackend = useCallback(async () => {
     try {

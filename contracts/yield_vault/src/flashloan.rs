@@ -112,12 +112,7 @@ impl YieldVault {
             .set(&DataKey::TotalAssets, &(total_assets + fee));
 
         // AUDIT: Record flash loan and verify invariants
-        crate::YieldVault::validate_flash_loan_invariant(
-            env,
-            balance_before,
-            balance_after,
-            fee,
-        )?;
+        crate::YieldVault::validate_flash_loan_invariant(env, balance_before, balance_after, fee)?;
         crate::YieldVault::record_flash_loan(env, amount, fee)?;
 
         env.events().publish(
