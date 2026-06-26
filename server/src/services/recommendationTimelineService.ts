@@ -23,6 +23,8 @@ export interface RecommendationInputSnapshot {
   expectedApy: number;
   liquidityDepthUsd: number;
   volatilityPct: number;
+  timeHorizon?: string;
+  liquidityNeeds?: string;
 }
 
 export interface RecommendationTimelineEntry {

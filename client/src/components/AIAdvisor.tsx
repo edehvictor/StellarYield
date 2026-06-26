@@ -11,6 +11,7 @@ import {
 } from "lucide-react";
 import { apiUrl } from "../lib/api";
 import { getRiskExplanation } from "../config/riskConfig";
+import DepositRecommendationWizard from "./AIAdvisor/DepositRecommendationWizard";
 
 interface ReasonCodeDetail {
   code: string;
@@ -90,9 +91,7 @@ export default function AIAdvisor() {
       </p>
 
       <div className="glass-panel p-8 mt-12 max-w-3xl w-full text-left">
-        <div className="h-40 border-2 border-dashed border-[#6C5DD3]/30 rounded-xl flex items-center justify-center text-gray-500 mb-6">
-          Coming Soon: Interactive AI Chatbot Widget
-        </div>
+        <DepositRecommendationWizard />
 
         {/* Risk Badge Integration Demo */}
         <div className="p-4 bg-white/5 border border-white/10 rounded-xl mb-5">

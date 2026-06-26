@@ -1,12 +1,24 @@
 /**
  * Google Sheets Integration Service
- * Handles OAuth and spreadsheet sync
+ * Handles OAuth, token refresh, and spreadsheet sync
  */
 
 import type { GoogleSheetsConfig, GoogleOAuthSession, DailyYieldMetric } from "./types";
+import {
+  GoogleAuthError,
+  GOOGLE_AUTH_MESSAGES,
+  REQUIRED_SHEETS_SCOPE,
+  type GoogleAuthErrorCode,
+} from "./errors";
 
 const STORAGE_KEY = "stellar_yield_google_sheets";
 const SESSION_KEY = "stellar_yield_google_oauth";
+const EXPIRY_SKEW_MS = 5 * 60 * 1000;
+
+interface ApiErrorBody {
+  error?: string;
+  code?: GoogleAuthErrorCode;
+}
 
 export class GoogleSheetsService {
     private clientId: string;
@@ -17,15 +29,12 @@ export class GoogleSheetsService {
         this.redirectUri = redirectUri;
     }
 
-    /**
-     * Get OAuth authorization URL
-     */
     getAuthorizationUrl(): string {
         const params = new URLSearchParams({
             client_id: this.clientId,
             redirect_uri: this.redirectUri,
             response_type: "code",
-            scope: "https://www.googleapis.com/auth/spreadsheets",
+            scope: REQUIRED_SHEETS_SCOPE,
             access_type: "offline",
             prompt: "consent",
         });
@@ -33,9 +42,6 @@ export class GoogleSheetsService {
         return `https://accounts.google.com/o/oauth2/v2/auth?${params}`;
     }
 
-    /**
-     * Exchange authorization code for tokens
-     */
     async exchangeCodeForTokens(code: string): Promise<GoogleOAuthSession> {
         const response = await fetch("/api/google-sheets/token", {
             method: "POST",
@@ -44,7 +50,7 @@ export class GoogleSheetsService {
         });
 
         if (!response.ok) {
-            throw new Error(`Token exchange failed: ${response.statusText}`);
+            throw await this.parseApiError(response, "Token exchange failed");
         }
 
         const data = (await response.json()) as {
@@ -52,6 +58,7 @@ export class GoogleSheetsService {
             refreshToken: string;
             expiresIn: number;
             email: string;
+            scope?: string;
         };
 
         const session: GoogleOAuthSession = {
@@ -59,22 +66,75 @@ export class GoogleSheetsService {
             refreshToken: data.refreshToken,
             expiresAt: Date.now() + data.expiresIn * 1000,
             email: data.email,
+            grantedScopes: data.scope?.split(" ").filter(Boolean),
+            authStatus: "active",
         };
 
         this.saveSession(session);
         return session;
     }
 
-    /**
-     * Link Google account to spreadsheet
-     */
-    async linkSpreadsheet(spreadsheetId: string, sheetName: string): Promise<GoogleSheetsConfig> {
-        const session = this.getSession();
-        if (!session) {
-            throw new Error("Not authenticated with Google");
+    async refreshAccessToken(): Promise<GoogleOAuthSession> {
+        const raw = this.getRawSession();
+        if (!raw?.refreshToken) {
+            this.clearSession();
+            throw new GoogleAuthError(GOOGLE_AUTH_MESSAGES.REAUTH_REQUIRED, "REAUTH_REQUIRED");
         }
 
-        // Verify spreadsheet access
+        const response = await fetch("/api/google-sheets/refresh", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ refreshToken: raw.refreshToken }),
+        });
+
+        if (!response.ok) {
+            const err = await this.parseApiError(response, "Token refresh failed");
+            if (err.code === "REAUTH_REQUIRED") {
+                this.clearSession();
+            }
+            throw err;
+        }
+
+        const data = (await response.json()) as {
+            accessToken: string;
+            refreshToken: string;
+            expiresIn: number;
+            scope?: string;
+        };
+
+        const session: GoogleOAuthSession = {
+            accessToken: data.accessToken,
+            refreshToken: data.refreshToken || raw.refreshToken,
+            expiresAt: Date.now() + data.expiresIn * 1000,
+            email: raw.email,
+            grantedScopes: data.scope?.split(" ").filter(Boolean) ?? raw.grantedScopes,
+            authStatus: "active",
+        };
+
+        this.saveSession(session);
+        return session;
+    }
+
+    async ensureValidSession(): Promise<GoogleOAuthSession> {
+        const raw = this.getRawSession();
+        if (!raw) {
+            throw new GoogleAuthError(GOOGLE_AUTH_MESSAGES.REAUTH_REQUIRED, "REAUTH_REQUIRED");
+        }
+
+        if (!this.hasRequiredScopes(raw)) {
+            throw new GoogleAuthError(GOOGLE_AUTH_MESSAGES.INSUFFICIENT_SCOPE, "INSUFFICIENT_SCOPE");
+        }
+
+        if (!this.isSessionExpired(raw)) {
+            return raw;
+        }
+
+        return this.refreshAccessToken();
+    }
+
+    async linkSpreadsheet(spreadsheetId: string, sheetName: string): Promise<GoogleSheetsConfig> {
+        const session = await this.ensureValidSession();
+
         const response = await fetch(`/api/google-sheets/verify`, {
             method: "POST",
             headers: {
@@ -85,7 +145,7 @@ export class GoogleSheetsService {
         });
 
         if (!response.ok) {
-            throw new Error("Cannot access spreadsheet");
+            throw await this.parseApiError(response, "Cannot access spreadsheet");
         }
 
         const config: GoogleSheetsConfig = {
@@ -99,14 +159,11 @@ export class GoogleSheetsService {
         return config;
     }
 
-    /**
-     * Append daily yield metrics to spreadsheet
-     */
     async appendYieldMetrics(metrics: DailyYieldMetric[]): Promise<void> {
-        const session = this.getSession();
+        const session = await this.ensureValidSession();
         const config = this.getConfig();
 
-        if (!session || !config) {
+        if (!config) {
             throw new Error("Google Sheets not configured");
         }
 
@@ -133,21 +190,15 @@ export class GoogleSheetsService {
         });
 
         if (!response.ok) {
-            throw new Error("Failed to append metrics");
+            throw await this.parseApiError(response, "Failed to append metrics");
         }
     }
 
-    /**
-     * Unlink Google account
-     */
     unlinkAccount(): void {
         localStorage.removeItem(STORAGE_KEY);
-        localStorage.removeItem(SESSION_KEY);
+        this.clearSession();
     }
 
-    /**
-     * Get current configuration
-     */
     getConfig(): GoogleSheetsConfig | null {
         try {
             const stored = localStorage.getItem(STORAGE_KEY);
@@ -157,25 +208,61 @@ export class GoogleSheetsService {
         }
     }
 
-    /**
-     * Get current session
-     */
     getSession(): GoogleOAuthSession | null {
+        const raw = this.getRawSession();
+        if (!raw) return null;
+        if (this.isSessionExpired(raw)) return null;
+        return raw;
+    }
+
+    getRawSession(): GoogleOAuthSession | null {
         try {
             const stored = localStorage.getItem(SESSION_KEY);
             if (!stored) return null;
-
-            const session = JSON.parse(stored) as GoogleOAuthSession;
-
-            // Check if token expired
-            if (session.expiresAt < Date.now()) {
-                return null; // Token expired, need refresh
-            }
-
-            return session;
+            return JSON.parse(stored) as GoogleOAuthSession;
         } catch {
             return null;
         }
+    }
+
+    getAuthStatus(): "connected" | "expired" | "missing_scope" | "not_connected" {
+        const raw = this.getRawSession();
+        if (!raw) return "not_connected";
+        if (!this.hasRequiredScopes(raw)) return "missing_scope";
+        if (this.isSessionExpired(raw)) {
+            return raw.refreshToken ? "expired" : "not_connected";
+        }
+        return "connected";
+    }
+
+    hasRequiredScopes(session: GoogleOAuthSession): boolean {
+        if (!session.grantedScopes || session.grantedScopes.length === 0) {
+            return true;
+        }
+        return session.grantedScopes.some(
+            (s) => s === REQUIRED_SHEETS_SCOPE || s.endsWith("/auth/spreadsheets"),
+        );
+    }
+
+    isSessionExpired(session: GoogleOAuthSession): boolean {
+        return session.expiresAt <= Date.now() + EXPIRY_SKEW_MS;
+    }
+
+    private async parseApiError(response: Response, fallback: string): Promise<GoogleAuthError> {
+        let body: ApiErrorBody = {};
+        try {
+            body = (await response.json()) as ApiErrorBody;
+        } catch {
+            // ignore
+        }
+
+        const code = body.code ?? (response.status === 401 ? "REAUTH_REQUIRED" : "ACCESS_DENIED");
+        const message =
+            body.error ??
+            GOOGLE_AUTH_MESSAGES[code] ??
+            fallback;
+
+        return new GoogleAuthError(message, code);
     }
 
     private saveConfig(config: GoogleSheetsConfig): void {
@@ -184,5 +271,9 @@ export class GoogleSheetsService {
 
     private saveSession(session: GoogleOAuthSession): void {
         localStorage.setItem(SESSION_KEY, JSON.stringify(session));
+    }
+
+    private clearSession(): void {
+        localStorage.removeItem(SESSION_KEY);
     }
 }

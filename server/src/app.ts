@@ -48,12 +48,18 @@ import sharePriceHistoryRouter from "./routes/sharePriceHistory";
 import reliabilityRouter from "./routes/reliability";
 import relayerStatusRouter from "./routes/relayerStatus";
 import riskRouter from "./routes/risk";
+import googleSheetsRouter from "./routes/googleSheets";
 
 import { createAuthChallenge, verifyAuthChallenge } from "./utils/stellarAuth";
 import {
   getRecommendationTimeline,
   recordRecommendation,
 } from "./services/recommendationTimelineService";
+import {
+  generateDepositRecommendations,
+  type DepositWizardInput,
+  type UserRiskProfile,
+} from "./services/depositRecommendationService";
 import { runStressScenario, StressScenarioType } from "./services/stressScenarioService";
 
 type EventsPrismaClient = {
@@ -143,6 +149,7 @@ export function createApp() {
   app.use("/api/reliability", reliabilityRouter);
   app.use("/api/relayer", relayerStatusRouter);
   app.use("/api/risk", riskRouter);
+  app.use("/api", googleSheetsRouter);
 
   // Legacy JSON metrics (internal tooling)
   app.get("/api/metrics", getMetrics);
@@ -172,34 +179,59 @@ export function createApp() {
   });
 
   app.post("/api/recommend", (req: Request, res: Response) => {
-    const { preferences, riskTolerance, expectedApy, liquidityDepthUsd, volatilityPct } = req.body;
-    void preferences;
-    const recommendation = {
-      recommendation: `Based on your ${riskTolerance || "moderate"} risk tolerance, we recommend the Yield Index vault on DeFindex for diversified, stable returns.`,
-      targetVault: "DeFindex Yield Index",
-      expectedApy: typeof expectedApy === "number" ? expectedApy : 8.9,
-      rationale:
-        "The recommendation balances projected yield, risk tolerance, and liquidity depth while minimizing fee drag.",
+    const {
+      riskTolerance,
+      timeHorizon,
+      liquidityNeeds,
+      userId: bodyUserId,
+    } = req.body as {
+      riskTolerance?: UserRiskProfile;
+      timeHorizon?: DepositWizardInput["timeHorizon"];
+      liquidityNeeds?: DepositWizardInput["liquidityNeeds"];
+      userId?: string;
     };
-    const userId = String(req.body.userId || "anonymous");
+
+    const validProfiles: UserRiskProfile[] = ["conservative", "balanced", "aggressive"];
+    const profile = validProfiles.includes(riskTolerance as UserRiskProfile)
+      ? (riskTolerance as UserRiskProfile)
+      : "balanced";
+
+    const input: DepositWizardInput = {
+      riskTolerance: profile,
+      timeHorizon:
+        timeHorizon === "short" || timeHorizon === "long" ? timeHorizon : "medium",
+      liquidityNeeds:
+        liquidityNeeds === "high" || liquidityNeeds === "low" ? liquidityNeeds : "medium",
+    };
+
+    const result = generateDepositRecommendations(input);
+    const top = result.recommendations[0];
+
+    const recommendation = top
+      ? `Based on your ${profile} risk tolerance, we recommend ${top.name} (rank #${top.rank}) with ${top.riskAdjustedYield.toFixed(2)}% risk-adjusted yield.`
+      : "No vault recommendations available for your profile.";
+
+    const userId = String(bodyUserId || "anonymous");
     const timelineEntry = recordRecommendation(userId, {
-      recommendation: recommendation.recommendation,
-      targetVault: recommendation.targetVault,
-      rationale: recommendation.rationale,
+      recommendation,
+      targetVault: top?.name ?? "None",
+      rationale: top?.explanation ?? result.summary,
       inputSnapshot: {
-        riskTolerance: String(riskTolerance || "moderate"),
-        expectedApy:
-          typeof expectedApy === "number" && Number.isFinite(expectedApy) ? expectedApy : 8.9,
-        liquidityDepthUsd:
-          typeof liquidityDepthUsd === "number" && Number.isFinite(liquidityDepthUsd)
-            ? liquidityDepthUsd
-            : 1_000_000,
-        volatilityPct:
-          typeof volatilityPct === "number" && Number.isFinite(volatilityPct) ? volatilityPct : 5,
+        riskTolerance: profile,
+        timeHorizon: input.timeHorizon,
+        liquidityNeeds: input.liquidityNeeds,
+        expectedApy: top?.apy ?? 0,
+        liquidityDepthUsd: top?.tvlUsd ?? 0,
+        volatilityPct: top?.ilVolatilityPct ?? 0,
       },
     });
+
     res.json({
-      ...recommendation,
+      ...result,
+      recommendation,
+      targetVault: top?.name ?? null,
+      expectedApy: top?.apy ?? null,
+      rationale: top?.explanation ?? result.summary,
       timelineEntry,
     });
   });

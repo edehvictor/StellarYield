@@ -108,6 +108,19 @@ describe("rankStrategies", () => {
     const ranked = rankStrategies([makeStrategy({ ilVolatilityPct: 4 })]);
     expect(ranked[0].drawdownProxy).toBeCloseTo(0.4);
   });
+
+  it.each(["conservative", "balanced", "tolerant"] as const)(
+    "rankStrategies honors %s drawdown profile",
+    (profile) => {
+      const strategies = [
+        makeStrategy({ id: "high-vol", ilVolatilityPct: 15, apy: 20, riskScore: 5 }),
+        makeStrategy({ id: "low-vol", ilVolatilityPct: 2, apy: 8, riskScore: 9 }),
+      ];
+      const ranked = rankStrategies(strategies, profile);
+      expect(ranked[0].rank).toBe(1);
+      expect(ranked[0].drawdownMultiplier).toBeDefined();
+    },
+  );
 });
 
 describe("filterByTimeWindow", () => {

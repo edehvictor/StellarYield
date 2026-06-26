@@ -15,6 +15,46 @@ import {
 
 export class FragmentationCalculator {
   /**
+   * Filter invalid and zero-liquidity pools before HHI calculation.
+   * Zero-TVL entries are excluded so they cannot skew routing estimates.
+   */
+  private normalizeProtocols(protocols: ProtocolLiquidityData[]): ProtocolLiquidityData[] {
+    const seen = new Set<string>();
+    const active: ProtocolLiquidityData[] = [];
+
+    for (const protocol of protocols) {
+      if (!Number.isFinite(protocol.tvlUsd)) {
+        throw new FragmentationError(
+          `Invalid TVL for protocol ${protocol.protocol}: must be a finite number`,
+          'INVALID_TVL',
+          { protocol: protocol.protocol, tvl: protocol.tvlUsd }
+        );
+      }
+
+      if (protocol.tvlUsd < 0) {
+        throw new FragmentationError(
+          `Invalid TVL for protocol ${protocol.protocol}: ${protocol.tvlUsd}`,
+          'NEGATIVE_TVL',
+          { protocol: protocol.protocol, tvl: protocol.tvlUsd }
+        );
+      }
+
+      if (protocol.tvlUsd === 0) {
+        continue;
+      }
+
+      const key = protocol.protocol.toLowerCase();
+      if (seen.has(key)) {
+        continue;
+      }
+      seen.add(key);
+      active.push(protocol);
+    }
+
+    return active;
+  }
+
+  /**
    * Calculate Herfindahl-Hirschman Index from TVL distribution
    * 
    * HHI = Σ(market_share_i)^2 where market_share is in percentage points
@@ -32,8 +72,18 @@ export class FragmentationCalculator {
       );
     }
 
+    const activeProtocols = this.normalizeProtocols(protocols);
+
+    if (activeProtocols.length === 0) {
+      throw new FragmentationError(
+        'Cannot calculate HHI: no protocols with positive liquidity',
+        'INVALID_TVL',
+        { totalTvl: 0 }
+      );
+    }
+
     // Calculate total TVL
-    const totalTvl = protocols.reduce((sum, p) => sum + p.tvlUsd, 0);
+    const totalTvl = activeProtocols.reduce((sum, p) => sum + p.tvlUsd, 0);
 
     if (totalTvl <= 0) {
       throw new FragmentationError(
@@ -47,15 +97,7 @@ export class FragmentationCalculator {
     const protocolShares = new Map<string, number>();
     let hhi = 0;
 
-    for (const protocol of protocols) {
-      if (protocol.tvlUsd < 0) {
-        throw new FragmentationError(
-          `Invalid TVL for protocol ${protocol.protocol}: ${protocol.tvlUsd}`,
-          'NEGATIVE_TVL',
-          { protocol: protocol.protocol, tvl: protocol.tvlUsd }
-        );
-      }
-
+    for (const protocol of activeProtocols) {
       // Market share in percentage points (0-100)
       const sharePercentage = (protocol.tvlUsd / totalTvl) * 100;
       protocolShares.set(protocol.protocol, sharePercentage);
@@ -144,13 +186,14 @@ export class FragmentationCalculator {
       return 0;
     }
 
-    if (protocols.length === 1) {
-      // Only one protocol - no multi-protocol routing possible
+    const activeProtocols = this.normalizeProtocols(protocols);
+
+    if (activeProtocols.length <= 1) {
       return 0;
     }
 
     // Calculate HHI to determine fragmentation level
-    const { hhi } = this.calculateHHI(protocols);
+    const { hhi } = this.calculateHHI(activeProtocols);
 
     // Estimate routing complexity based on HHI
     // Lower HHI (more concentration) -> less multi-protocol routing

@@ -87,10 +87,20 @@ describe("Route audit — mounted routes match client API calls (#723)", () => {
   it("GET /api/rebalances/:vaultId/stats is mounted", () =>
     probeRouteExists("get", "/api/rebalances/test-vault/stats"));
 
+  // ── Google Sheets OAuth routes (#818) ────────────────────────────────
+  it("POST /api/google-sheets/token is mounted", () =>
+    probeRouteExists("post", "/api/google-sheets/token"));
+
+  it("POST /api/google-sheets/refresh is mounted", () =>
+    probeRouteExists("post", "/api/google-sheets/refresh"));
+
+  it("POST /api/google-sheets/verify is mounted", () =>
+    probeRouteExists("post", "/api/google-sheets/verify"));
+
+  it("POST /api/google-sheets/append is mounted", () =>
+    probeRouteExists("post", "/api/google-sheets/append"));
+
   // ── Unimplemented endpoints flagged as stale integrations ────────────
-  it.todo(
-    "#723 /api/google-sheets/* — no backend route exists; client calls are dead integrations",
-  );
   it.todo(
     "#723 /api/backtest — client calls relative path; backend route is /api/simulator/rebalance-backtest",
   );

@@ -290,4 +290,62 @@ describe("calculatePnL", () => {
     expect(result.totalWithdrawn).toBe(550);
     expect(result.currentValue).toBe(600); // 500 shares * 1.2
   });
+
+  it("returns empty snapshots when price history is missing but txs exist", () => {
+    const txs: UserTransaction[] = [
+      {
+        action: "DEPOSIT",
+        amount: 1000,
+        shares: 1000,
+        sharePriceAtTx: 1.0,
+        timestamp: new Date("2025-01-01"),
+      },
+    ];
+    const result = calculatePnL(txs, [], 1.1);
+
+    expect(result.totalDeposited).toBe(1000);
+    expect(result.currentValue).toBe(1100);
+    expect(result.dailySnapshots).toHaveLength(0);
+  });
+
+  it("handles sparse price history with large gaps", () => {
+    const txs: UserTransaction[] = [
+      {
+        action: "DEPOSIT",
+        amount: 1000,
+        shares: 1000,
+        sharePriceAtTx: 1.0,
+        timestamp: new Date("2025-01-01"),
+      },
+    ];
+    const prices: SharePriceSnapshot[] = [
+      { sharePrice: 1.0, snapshotAt: new Date("2025-01-01") },
+      { sharePrice: 1.1, snapshotAt: new Date("2025-01-15") },
+    ];
+    const result = calculatePnL(txs, prices, 1.2);
+
+    expect(result.dailySnapshots.length).toBeGreaterThanOrEqual(2);
+    expect(result.dailySnapshots[0].date).toBe("2025-01-01");
+  });
+
+  it("sorts out-of-order price history before snapshot generation", () => {
+    const txs: UserTransaction[] = [
+      {
+        action: "DEPOSIT",
+        amount: 1000,
+        shares: 1000,
+        sharePriceAtTx: 1.0,
+        timestamp: new Date("2025-01-01"),
+      },
+    ];
+    const prices: SharePriceSnapshot[] = [
+      { sharePrice: 1.1, snapshotAt: new Date("2025-01-03") },
+      { sharePrice: 1.0, snapshotAt: new Date("2025-01-01") },
+      { sharePrice: 1.05, snapshotAt: new Date("2025-01-02") },
+    ];
+    const result = calculatePnL(txs, prices, 1.15);
+
+    const dates = result.dailySnapshots.map((s) => s.date);
+    expect(dates).toEqual([...dates].sort());
+  });
 });

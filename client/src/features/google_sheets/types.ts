@@ -9,11 +9,15 @@ export interface GoogleSheetsConfig {
     linkedAt?: number;
 }
 
+export type GoogleAuthStatus = "active" | "needs_refresh" | "needs_reconnect";
+
 export interface GoogleOAuthSession {
     accessToken: string;
     refreshToken: string;
     expiresAt: number;
     email: string;
+    grantedScopes?: string[];
+    authStatus?: GoogleAuthStatus;
 }
 
 export interface DailyYieldMetric {
