@@ -115,6 +115,7 @@ export function createApp() {
   });
 
   app.post("/api/relayer/fee-bump", relayerLimiter, signFeeBump);
+  app.post("/relay/sign-fee-bump", relayerLimiter, signFeeBump);
   app.use("/api/yields", yieldsRouter);
   app.use("/api/leaderboard", leaderboardRouter);
   app.use("/api/notifications", notificationsRouter);

@@ -34,6 +34,9 @@ describe("Route audit — mounted routes match client API calls (#723)", () => {
   it("GET /api/relayer/status is mounted", () =>
     probeRouteExists("get", "/api/relayer/status"));
 
+  it("POST /relay/sign-fee-bump is mounted", () =>
+    probeRouteExists("post", "/relay/sign-fee-bump"));
+
   it("POST /api/risk/drift/detect is mounted", () =>
     probeRouteExists("post", "/api/risk/drift/detect"));
 

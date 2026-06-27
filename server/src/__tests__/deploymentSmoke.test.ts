@@ -158,6 +158,7 @@ describe("Backend runtime wiring — client-facing routes must not 404", () => {
     ["get", "/api/analytics/providers/uptime"],
     ["get", "/api/analytics/sources/health"],
     ["get", "/api/vaults/test-vault/share-price-history"],
+    ["post", "/relay/sign-fee-bump"],
     ["post", "/api/auth/challenge"],
     ["post", "/api/stress-scenarios/run"],
   ];
