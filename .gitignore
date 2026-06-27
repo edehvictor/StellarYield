@@ -36,15 +36,17 @@ frontend-build.log
 # ── Runtime data ─────────────────────────────────────────────────────────────
 server/audit-logs/
 
-# ── Package manager artifacts ─────────────────────────────────────────────────
-package-lock.json
-yarn.lock
-pnpm-lock.yaml
+# ── Local env overrides ───────────────────────────────────────────────────────
+.env.local
+.env.*.local
 
-# ── Editor / OS artifacts ─────────────────────────────────────────────────────
+# ── Editor and OS artifacts ───────────────────────────────────────────────────
 .DS_Store
 Thumbs.db
-.vscode/
-.idea/
 *.swp
 *.swo
+
+# ── Test output ───────────────────────────────────────────────────────────────
+junit.xml
+test-results/
+*.snap

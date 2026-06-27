@@ -10,6 +10,7 @@ import freighter from "@stellar/freighter-api";
 import type { TxPhase } from "./transactionPhase";
 import { resolveDeadlineSeconds, type TxSettings } from "../features/settings/types";
 import { getContractId, validateContractRegistryEntry } from "./contractRegistry";
+import { apiFetch } from "../lib/api";
 
 // ── Configuration ───────────────────────────────────────────────────────
 

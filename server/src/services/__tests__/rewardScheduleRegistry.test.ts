@@ -149,4 +149,102 @@ describe("RewardScheduleRegistry", () => {
       );
     });
   });
+
+  describe("timezone and date rollover behavior", () => {
+    const timezoneSchedule: RewardSchedule = {
+      protocolName: "TZProtocol",
+      tokenSymbol: "TZT",
+      dailyEmission: 50,
+      startDate: new Date("2026-06-01T00:00:00Z"),
+      endDate: new Date("2026-06-30T23:59:59Z"),
+      sourceProvenance: "Test source",
+      confidence: "medium",
+      isActive: true,
+      events: []
+    };
+
+    it("handles transition at exactly midnight UTC", () => {
+      // 1 millisecond before start
+      expect(RewardScheduleRegistry.calculateEmissionAt(timezoneSchedule, new Date("2026-05-31T23:59:59.999Z"))).toBe(0);
+      // Exactly start
+      expect(RewardScheduleRegistry.calculateEmissionAt(timezoneSchedule, new Date("2026-06-01T00:00:00.000Z"))).toBe(50);
+      // Exactly end
+      expect(RewardScheduleRegistry.calculateEmissionAt(timezoneSchedule, new Date("2026-06-30T23:59:59.000Z"))).toBe(50);
+      // 1 second after end
+      expect(RewardScheduleRegistry.calculateEmissionAt(timezoneSchedule, new Date("2026-07-01T00:00:00.000Z"))).toBe(0);
+    });
+
+    it("handles month-boundary transition (February to March in Leap and Non-Leap years)", () => {
+      const nonLeapFebSchedule: RewardSchedule = {
+        ...timezoneSchedule,
+        startDate: new Date("2026-02-01T00:00:00Z"),
+        endDate: new Date("2026-02-28T23:59:59Z")
+      };
+
+      // Non-leap year 2026
+      expect(RewardScheduleRegistry.calculateEmissionAt(nonLeapFebSchedule, new Date("2026-02-28T23:59:59.000Z"))).toBe(50);
+      expect(RewardScheduleRegistry.calculateEmissionAt(nonLeapFebSchedule, new Date("2026-03-01T00:00:00.000Z"))).toBe(0);
+
+      // Leap year 2028
+      const leapFebSchedule: RewardSchedule = {
+        ...timezoneSchedule,
+        startDate: new Date("2028-02-01T00:00:00Z"),
+        endDate: new Date("2028-02-29T23:59:59Z")
+      };
+
+      expect(RewardScheduleRegistry.calculateEmissionAt(leapFebSchedule, new Date("2028-02-28T23:59:59.000Z"))).toBe(50);
+      expect(RewardScheduleRegistry.calculateEmissionAt(leapFebSchedule, new Date("2028-02-29T23:59:59.000Z"))).toBe(50);
+      expect(RewardScheduleRegistry.calculateEmissionAt(leapFebSchedule, new Date("2028-03-01T00:00:00.000Z"))).toBe(0);
+    });
+
+    it("processes timezone-sensitive date handling with offsets", () => {
+      // 2026-06-01T00:00:00Z is equivalent to 2026-05-31T20:00:00-04:00 (EDT)
+      const inputEDTBefore = new Date("2026-05-31T19:59:59-04:00"); // before start in UTC
+      const inputEDTActive = new Date("2026-05-31T20:00:00-04:00"); // exactly start in UTC
+
+      expect(RewardScheduleRegistry.calculateEmissionAt(timezoneSchedule, inputEDTBefore)).toBe(0);
+      expect(RewardScheduleRegistry.calculateEmissionAt(timezoneSchedule, inputEDTActive)).toBe(50);
+
+      // 2026-06-30T23:59:59Z is equivalent to 2026-07-01T09:59:59+10:00 (AEST)
+      const inputAESTActive = new Date("2026-07-01T09:59:59+10:00"); // exactly end in UTC
+      const inputAESTAfter = new Date("2026-07-01T10:00:00+10:00"); // after end in UTC
+
+      expect(RewardScheduleRegistry.calculateEmissionAt(timezoneSchedule, inputAESTActive)).toBe(50);
+      expect(RewardScheduleRegistry.calculateEmissionAt(timezoneSchedule, inputAESTAfter)).toBe(0);
+    });
+
+    it("validates schedule health summaries at boundary timestamps", () => {
+      const mockMonitorInput = {
+        protocolName: "TZProtocol",
+        tokenSymbol: "TZT",
+        dailyEmission: 50,
+        startDate: new Date("2026-06-01T00:00:00Z"),
+        endDate: new Date("2026-06-30T23:59:59Z"),
+        sourceProvenance: "Test source",
+        confidence: "medium" as const,
+        isActive: true,
+        events: [],
+        lastClaimAt: new Date("2026-06-25T00:00:00Z")
+      };
+
+      // 1 ms before expiration (2026-06-30T23:59:58.999Z) -> should be expiring
+      const expiringTime = new Date("2026-06-30T23:59:58.999Z");
+      const expiringSummary = RewardScheduleRegistry.summarizeSchedulesForMaintainers([mockMonitorInput], expiringTime)[0];
+      expect(expiringSummary.status).toBe("expiring");
+
+      // Exactly at expiration (2026-06-30T23:59:59.000Z) -> is NOT expired yet (it is inclusive boundary or < comparison depending on implementation)
+      // Wait, summarizeRewardScheduleHealth has: `if (schedule.endDate.getTime() < now.getTime()) { status: "expired" }`
+      // So at exactly endDate, end.getTime() < now.getTime() is false. So it is still "expiring".
+      const exactEndTime = new Date("2026-06-30T23:59:59.000Z");
+      const exactEndSummary = RewardScheduleRegistry.summarizeSchedulesForMaintainers([mockMonitorInput], exactEndTime)[0];
+      expect(exactEndSummary.status).toBe("expiring");
+
+      // 1 ms after expiration -> expired
+      const expiredTime = new Date("2026-06-30T23:59:59.001Z");
+      const expiredSummary = RewardScheduleRegistry.summarizeSchedulesForMaintainers([mockMonitorInput], expiredTime)[0];
+      expect(expiredSummary.status).toBe("expired");
+      expect(expiredSummary.warningLevel).toBe("critical");
+    });
+  });
 });
+

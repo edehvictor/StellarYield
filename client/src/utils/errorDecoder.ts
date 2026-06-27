@@ -26,6 +26,22 @@ export interface DecodedError {
     code?: number;
 }
 
+/**
+ * The authoritative set of contract error codes known to the frontend.
+ * Import this in tests to guard against on-chain enum drift — if a code
+ * appears in ERROR_CODES.md but not here, tests should fail.
+ */
+export const KNOWN_CONTRACT_ERROR_CODES = new Set([
+    // YieldVault
+    1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11,
+    // Vesting
+    1001, 1002, 1003,
+    // Donations
+    2001, 2002,
+    // Intent Swap
+    3001, 3002,
+]);
+
 /** Maps known contract error codes to user-facing messages. */
 const CONTRACT_ERROR_MAP: Record<
     number,
@@ -81,6 +97,11 @@ const CONTRACT_ERROR_MAP: Record<
         title: "Slippage Exceeded",
         message: "The price moved too much during your swap. Your slippage tolerance was exceeded.",
         suggestion: "Increase your slippage tolerance or try again when markets are calmer.",
+    },
+    11: {
+        title: "Storage Key Not Found",
+        message: "A required storage entry is missing from the contract. The vault may not be fully initialized.",
+        suggestion: "Contact support — the contract admin may need to re-initialize or migrate storage.",
     },
     // ── Vesting ────────────────────────────────────────────────────────
     1001: {
@@ -151,14 +172,20 @@ export function extractErrorCode(raw: string): number | undefined {
     // JSON structured payload
     try {
         const parsed = JSON.parse(raw) as unknown;
-        if (
-            parsed !== null &&
-            typeof parsed === "object" &&
-            "code" in parsed &&
-            typeof (parsed as Record<string, unknown>).code === "number"
-        ) {
-            return (parsed as Record<string, number>).code;
-        }
+        const findCode = (obj: any): number | undefined => {
+            if (obj === null || typeof obj !== "object") return undefined;
+            if ("code" in obj && typeof obj.code === "number") return obj.code;
+            if ("contract_code" in obj && typeof obj.contract_code === "number") return obj.contract_code;
+            for (const key of Object.keys(obj)) {
+                if (typeof obj[key] === "object") {
+                    const res = findCode(obj[key]);
+                    if (res !== undefined) return res;
+                }
+            }
+            return undefined;
+        };
+        const deepCode = findCode(parsed);
+        if (deepCode !== undefined) return deepCode;
     } catch {
         // not JSON — continue to next strategy
     }

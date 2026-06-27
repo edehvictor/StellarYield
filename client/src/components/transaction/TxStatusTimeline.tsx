@@ -5,6 +5,7 @@ import {
   isStepActive,
   isStepCompleted,
 } from "../../services/transactionPhase";
+import { decodeTransactionError } from "../../utils/errorDecoder";
 
 function stepIsDone(
   steps: readonly TxPhase[],
@@ -133,31 +134,44 @@ export default function TxStatusTimeline({
         </p>
       )}
 
-      {phase === "failure" && errorMessage && (
-        <div className="pt-2 border-t border-white/10 space-y-2">
-          <p className="text-xs text-red-300 break-words">{errorMessage}</p>
-          <div className="flex flex-wrap gap-2">
-            <button
-              type="button"
-              onClick={() => void copyText(errorMessage)}
-              className="inline-flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-lg bg-white/10 hover:bg-white/15 text-gray-200"
-            >
-              <Copy className="w-3.5 h-3.5" />
-              Copy error
-            </button>
-            {onRetry && (
+      {phase === "failure" && errorMessage && (() => {
+        const decoded = decodeTransactionError(errorMessage);
+        const isGeneric = decoded.title === "Transaction Failed" && decoded.code === undefined;
+        return (
+          <div className="pt-2 border-t border-white/10 space-y-2">
+            <p className="text-sm font-bold text-red-300 break-words">
+              {decoded.title} {decoded.code !== undefined && `(Code: ${decoded.code})`}
+            </p>
+            <p className="text-xs text-gray-300 break-words">{isGeneric ? errorMessage : decoded.message}</p>
+            {!isGeneric && decoded.suggestion && (
+              <p className="text-xs text-indigo-300 bg-indigo-500/10 border border-indigo-500/20 px-2.5 py-1.5 rounded-lg">
+                <span className="font-semibold text-indigo-200">Suggestion: </span>
+                {decoded.suggestion}
+              </p>
+            )}
+            <div className="flex flex-wrap gap-2 pt-1">
               <button
                 type="button"
-                onClick={onRetry}
-                className="inline-flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-lg bg-indigo-600/40 hover:bg-indigo-600/60 text-white"
+                onClick={() => void copyText(errorMessage)}
+                className="inline-flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-lg bg-white/10 hover:bg-white/15 text-gray-200"
               >
-                <RotateCcw className="w-3.5 h-3.5" />
-                Retry
+                <Copy className="w-3.5 h-3.5" />
+                Copy error
               </button>
-            )}
+              {onRetry && (
+                <button
+                  type="button"
+                  onClick={onRetry}
+                  className="inline-flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-lg bg-indigo-600/40 hover:bg-indigo-600/60 text-white"
+                >
+                  <RotateCcw className="w-3.5 h-3.5" />
+                  Retry
+                </button>
+              )}
+            </div>
           </div>
-        </div>
-      )}
+        );
+      })()}
     </div>
   );
 }

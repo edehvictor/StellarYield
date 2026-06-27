@@ -1,9 +1,34 @@
 import { Router, Request, Response } from "express";
+import rateLimit from "express-rate-limit";
 import { riskPreferenceDriftService, type RiskPreference, type UserRiskProfile, type PortfolioBehavior } from "../services/riskPreferenceDriftService";
 import { stressMatrixService } from "../services/stressMatrixService";
 import { apyDispersionService, type ProviderApyInput } from "../services/apyDispersionService";
 
 const router = Router();
+
+const riskAnalysisLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 20,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: "Too many risk analysis requests. Please try again later." },
+});
+
+const stressMatrixLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: "Too many stress matrix requests. Please try again later." },
+});
+
+const scenarioMutationLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 5,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: "Too many scenario mutation requests. Please try again later." },
+});
 
 const VALID_PREFERENCES: RiskPreference[] = ["conservative", "balanced", "aggressive"];
 
@@ -11,7 +36,7 @@ const VALID_PREFERENCES: RiskPreference[] = ["conservative", "balanced", "aggres
  * POST /api/risk/drift/detect
  * Detect risk preference drift for a user's portfolio.
  */
-router.post("/drift/detect", (req: Request, res: Response) => {
+router.post("/drift/detect", riskAnalysisLimiter, (req: Request, res: Response) => {
   try {
     const { userId, statedPreference, positions } = req.body as {
       userId?: string;
@@ -79,7 +104,7 @@ router.get("/drift/thresholds/:preference", (req: Request, res: Response) => {
  * POST /api/risk/dispersion/compute
  * Compute APY dispersion for a strategy with provider inputs.
  */
-router.post("/dispersion/compute", (req: Request, res: Response) => {
+router.post("/dispersion/compute", riskAnalysisLimiter, (req: Request, res: Response) => {
   try {
     const { strategyId, strategyName, inputs } = req.body as {
       strategyId?: string;
@@ -140,7 +165,7 @@ router.post("/dispersion/config", (req: Request, res: Response) => {
  * GET /api/risk/stress-matrix/run
  * Run the full stress matrix.
  */
-router.get("/stress-matrix/run", (_req: Request, res: Response) => {
+router.get("/stress-matrix/run", stressMatrixLimiter, (_req: Request, res: Response) => {
   try {
     const result = stressMatrixService.runMatrix();
     res.json({ success: true, data: result });
@@ -164,7 +189,7 @@ router.get("/stress-matrix/scenarios", (_req: Request, res: Response) => {
  * POST /api/risk/stress-matrix/scenarios
  * Add a custom stress scenario.
  */
-router.post("/stress-matrix/scenarios", (req: Request, res: Response) => {
+router.post("/stress-matrix/scenarios", scenarioMutationLimiter, (req: Request, res: Response) => {
   try {
     const scenario = req.body;
     if (!scenario.id || !scenario.name || !scenario.factors) {

@@ -2,6 +2,7 @@ import React, { useState } from "react";
 import { Vault, TrendingUp, AlertTriangle, Save, RotateCcw, Info } from "lucide-react";
 import { FeeAssumptionsModal } from "../../components/FeeAssumptionsModal";
 import { apiUrl } from "../../lib/api";
+import { decodeTransactionError } from "../../utils/errorDecoder";
 
 interface AllocationRow {
   vaultId: string;
@@ -199,12 +200,29 @@ const TreasurySimulation: React.FC = () => {
         </div>
       </div>
 
-      {error && (
-        <div className="flex items-center gap-2 p-3 bg-red-500/10 border border-red-500/30 rounded-lg">
-          <AlertTriangle className="w-5 h-5 text-red-400" />
-          <span className="text-sm text-red-400">{error}</span>
-        </div>
-      )}
+      {error && (() => {
+        const decoded = decodeTransactionError(error);
+        const isGeneric = decoded.title === "Transaction Failed" && decoded.code === undefined;
+        return (
+          <div className="flex flex-col gap-2 p-4 bg-red-500/10 border border-red-500/30 rounded-xl">
+            <div className="flex items-center gap-2">
+              <AlertTriangle className="w-5 h-5 text-red-400 shrink-0" />
+              <span className="text-sm font-bold text-red-400">
+                {isGeneric ? "Simulation Error" : decoded.title}
+              </span>
+            </div>
+            <p className="text-sm text-red-300 pl-7 break-words">
+              {isGeneric ? error : decoded.message}
+            </p>
+            {!isGeneric && decoded.suggestion && (
+              <div className="mt-1 ml-7 text-xs text-indigo-300 bg-indigo-500/10 border border-indigo-500/20 px-3 py-2 rounded-lg">
+                <span className="font-semibold text-indigo-200">Suggestion: </span>
+                {decoded.suggestion}
+              </div>
+            )}
+          </div>
+        );
+      })()}
 
       <div className="flex gap-3">
         <button

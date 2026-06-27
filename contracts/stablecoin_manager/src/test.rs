@@ -249,4 +249,3 @@ fn test_storage_ttl_extension() {
     // Call repay_s_usd to verify that read/write paths for CDP run successfully with TTL extension
     client.repay_s_usd(&user, &0, &0);
 }
-

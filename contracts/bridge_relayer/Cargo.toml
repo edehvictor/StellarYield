@@ -2,9 +2,10 @@
 name = "bridge_relayer"
 version = "0.1.0"
 edition = "2021"
+autotests = false
 
 [lib]
-crate-type = ["cdylib"]
+crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 soroban-sdk = "22.0.0"
@@ -17,3 +18,11 @@ unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }
 [dev-dependencies]
 soroban-sdk = { version = "22.0.0", features = ["testutils"] }
 proptest = "1.4.0"
+
+[[test]]
+name = "test_replay"
+path = "tests/test_replay.rs"
+
+[[test]]
+name = "test_basic"
+path = "tests/test_basic.rs"

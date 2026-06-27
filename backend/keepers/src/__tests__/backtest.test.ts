@@ -2,7 +2,7 @@
  * Backtest API Tests
  */
 
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach } from '@jest/globals';
 
 describe("Backtest API", () => {
     it("should validate date range", () => {
@@ -33,8 +33,8 @@ describe("Backtest API", () => {
     });
 
     it("should calculate compound interest", () => {
-        const initial = 10000n;
-        const dailyRate = 0.1 / 365 / 100; // 10% APY
+        const initial = 1000000000n;
+        const dailyRate = 0.1 / 365; // 10% APY
         const multiplier = BigInt(Math.round((1 + dailyRate) * 1e9));
         const afterOneDay = (initial * multiplier) / BigInt(1e9);
 
@@ -42,8 +42,8 @@ describe("Backtest API", () => {
     });
 
     it("should handle multiple days of compounding", () => {
-        let value = 10000n;
-        const dailyRate = 0.1 / 365 / 100;
+        let value = 1000000000n;
+        const dailyRate = 0.1 / 365;
         const multiplier = BigInt(Math.round((1 + dailyRate) * 1e9));
 
         for (let i = 0; i < 365; i++) {
@@ -51,7 +51,7 @@ describe("Backtest API", () => {
         }
 
         // After 1 year at 10% APY, should be ~11000
-        expect(value).toBeGreaterThan(10900n);
-        expect(value).toBeLessThan(11100n);
+        expect(value).toBeGreaterThan(1090000000n);
+        expect(value).toBeLessThan(1110000000n);
     });
 });

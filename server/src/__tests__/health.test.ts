@@ -175,3 +175,87 @@ describe("GET /api/health/queues", () => {
     expect(names).toContain("rebalance-execution");
   });
 });
+
+describe("GET /api/health/startup", () => {
+  const app = express();
+  app.use("/api/health", healthRouter);
+
+  const originalEnvValues: Record<string, string | undefined> = {};
+
+  beforeAll(() => {
+    originalEnvValues.NODE_ENV = process.env.NODE_ENV;
+    originalEnvValues.DATABASE_URL = process.env.DATABASE_URL;
+    originalEnvValues.MONGODB_URI = process.env.MONGODB_URI;
+    originalEnvValues.RELAYER_SECRET_KEY = process.env.RELAYER_SECRET_KEY;
+    originalEnvValues.SOROBAN_RPC_URL = process.env.SOROBAN_RPC_URL;
+    originalEnvValues.STELLAR_HORIZON_URL = process.env.STELLAR_HORIZON_URL;
+  });
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  afterEach(() => {
+    const keys = ["NODE_ENV", "DATABASE_URL", "MONGODB_URI", "RELAYER_SECRET_KEY", "SOROBAN_RPC_URL", "STELLAR_HORIZON_URL"];
+    for (const key of keys) {
+      const val = originalEnvValues[key];
+      if (val === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = val;
+      }
+    }
+  });
+
+  it("returns 200 and healthy when all required env vars are set", async () => {
+    process.env.NODE_ENV = "development";
+    process.env.DATABASE_URL = "postgres://localhost:5432/db";
+    process.env.MONGODB_URI = "mongodb://localhost:27017/db";
+    process.env.RELAYER_SECRET_KEY = "SAH2_SECRET";
+    process.env.SOROBAN_RPC_URL = "https://soroban.example.com";
+    process.env.STELLAR_HORIZON_URL = "https://horizon.example.com";
+
+    const response = await request(app).get("/api/health/startup");
+    expect(response.status).toBe(200);
+    expect(response.body.status).toBe("healthy");
+    expect(response.body.capabilities.database).toBe("operational");
+    expect(response.body.capabilities.mongodb).toBe("operational");
+    expect(response.body.capabilities.feeBumpRelayer).toBe("operational");
+    expect(response.body.capabilities.sorobanRpc).toBe("operational");
+    expect(response.body.capabilities.horizonRpc).toBe("operational");
+    expect(response.body.errors).toEqual([]);
+    expect(response.body.warnings).toEqual([]);
+  });
+
+  it("returns 200 and degraded in development when optional vars are missing", async () => {
+    process.env.NODE_ENV = "development";
+    delete process.env.DATABASE_URL;
+    delete process.env.MONGODB_URI;
+    delete process.env.RELAYER_SECRET_KEY;
+    delete process.env.SOROBAN_RPC_URL;
+    delete process.env.STELLAR_HORIZON_URL;
+
+    const response = await request(app).get("/api/health/startup");
+    expect(response.status).toBe(200);
+    expect(response.body.status).toBe("degraded");
+    expect(response.body.capabilities.database).toBe("disabled");
+    expect(response.body.capabilities.mongodb).toBe("disabled");
+    expect(response.body.capabilities.feeBumpRelayer).toBe("disabled");
+    expect(response.body.capabilities.sorobanRpc).toBe("fallback");
+    expect(response.body.capabilities.horizonRpc).toBe("fallback");
+    expect(response.body.warnings.length).toBeGreaterThan(0);
+    expect(response.body.errors).toEqual([]);
+  });
+
+  it("returns 503 and failed in production when required vars are missing", async () => {
+    process.env.NODE_ENV = "production";
+    delete process.env.DATABASE_URL;
+    delete process.env.MONGODB_URI;
+    delete process.env.METRICS_TOKEN;
+
+    const response = await request(app).get("/api/health/startup");
+    expect(response.status).toBe(503);
+    expect(response.body.status).toBe("failed");
+    expect(response.body.errors.length).toBeGreaterThan(0);
+  });
+});

@@ -2,9 +2,7 @@
  * Google Sheets API Tests
  */
 
-import { describe, it, expect } from "@jest/globals";
 
-describe("Google Sheets API", () => {
 
     it("should validate token exchange parameters", () => {
         const code = "auth-code";

@@ -122,7 +122,8 @@ pub fn write_oracle(e: &Env, addr: &Address) {
 }
 
 pub fn is_initialized(e: &Env) -> bool {
-    let init = e.storage()
+    let init = e
+        .storage()
         .instance()
         .get(&DataKey::Initialized)
         .unwrap_or(false);
@@ -138,7 +139,8 @@ pub fn set_initialized(e: &Env) {
 }
 
 pub fn is_paused(e: &Env) -> bool {
-    let paused = e.storage()
+    let paused = e
+        .storage()
         .instance()
         .get(&DataKey::Paused)
         .unwrap_or(false);

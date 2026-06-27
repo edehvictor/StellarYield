@@ -11,8 +11,8 @@
 //! - Direct vault interactions (deposit, withdraw)
 
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, symbol_short, Address, Bytes, BytesN,
-    Env, IntoVal, Map, Vec,
+    contract, contracterror, contractimpl, contracttype, symbol_short, Address, Bytes, BytesN, Env,
+    IntoVal, Map, Vec,
 };
 
 // ── Storage Keys ────────────────────────────────────────────────────────
@@ -100,15 +100,9 @@ impl ProxyWallet {
     // CONSTRUCTOR (called automatically by env.deployer().deploy_v2)
     // ═══════════════════════════════════════════════════════════════════
 
-    pub fn __constructor(
-        env: Env,
-        owner: Address,
-        factory: Address,
-        relayer: Option<Address>,
-    ) {
+    pub fn __constructor(env: Env, owner: Address, factory: Address, relayer: Option<Address>) {
         // Delegate to initialize so both deployment paths share one code path.
-        Self::initialize(env, owner, factory, relayer)
-            .expect("proxy wallet constructor failed");
+        Self::initialize(env, owner, factory, relayer).expect("proxy wallet constructor failed");
     }
 
     // ═══════════════════════════════════════════════════════════════════
@@ -169,9 +163,7 @@ impl ProxyWallet {
             x: public_key_x,
             y: public_key_y,
         };
-        env.storage()
-            .instance()
-            .set(&StorageKey::WebAuthnKey, &key);
+        env.storage().instance().set(&StorageKey::WebAuthnKey, &key);
 
         env.events().publish((symbol_short!("wa_reg"),), (owner,));
 
@@ -545,7 +537,8 @@ impl ProxyWallet {
 
         // secp256r1_verify panics with a host error when the signature is invalid.
         // That host error bubbles up as a contract error to the caller.
-        env.crypto().secp256r1_verify(&public_key, &challenge, &sig_bytes);
+        env.crypto()
+            .secp256r1_verify(&public_key, &challenge, &sig_bytes);
 
         Ok(())
     }
@@ -584,7 +577,9 @@ impl ProxyWallet {
     /// XDR encoding once soroban-sdk exposes it.
     fn hash_address(env: &Env, _addr: &Address) -> [u8; 32] {
         let domain = b"stellaryield_addr_hash_v1\x00\x00\x00\x00\x00\x00\x00";
-        env.crypto().sha256(&Bytes::from_array(env, domain)).to_array()
+        env.crypto()
+            .sha256(&Bytes::from_array(env, domain))
+            .to_array()
     }
 
     fn execute_call(

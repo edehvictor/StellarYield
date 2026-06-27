@@ -57,8 +57,11 @@ jobs:
       - name: Generate Prisma client
         run: npx prisma generate
 
-      - name: Push Prisma schema
-        run: npx prisma db push
+      - name: Run Prisma migrations
+        run: npx prisma migrate deploy
+
+      - name: Check for unapplied schema changes
+        run: npx prisma migrate status || (echo "Unapplied schema changes detected" && exit 1)
 
       - name: Run backend tests
         run: npm test

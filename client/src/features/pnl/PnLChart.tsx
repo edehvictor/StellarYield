@@ -12,23 +12,13 @@ import { useWallet } from "../../context/useWallet";
 import { TrendingUp, TrendingDown, Loader2, DollarSign, BarChart3 } from "lucide-react";
 import { getApiBaseUrl } from "../../lib/api";
 import ApiErrorBanner from "../../components/ApiErrorBanner/ApiErrorBanner";
-
-interface DailyPnLSnapshot {
-  date: string;
-  cumulativePnL: number;
-  portfolioValue: number;
-  sharePrice: number;
-}
-
-interface PnLData {
-  totalDeposited: number;
-  totalWithdrawn: number;
-  currentValue: number;
-  costBasis: number;
-  absolutePnL: number;
-  twrPercent: number;
-  dailySnapshots: DailyPnLSnapshot[];
-}
+import {
+  normalizePnLData,
+  hasNoData,
+  hasPartialData,
+  isSparseChartData,
+  type PnLData,
+} from "./pnlChartUtils";
 
 const getApiBase = () => {
   try {
@@ -37,27 +27,6 @@ const getApiBase = () => {
     return "";
   }
 };
-
-/**
- * Detects if PnL data is empty or insufficient for rendering.
- */
-function hasNoData(data: PnLData | null): boolean {
-  if (!data) return true;
-  // No deposits and no snapshots = completely empty
-  if (data.totalDeposited === 0 && data.dailySnapshots.length === 0) {
-    return true;
-  }
-  return false;
-}
-
-/**
- * Detects if we have summary data but no chart data.
- */
-function hasPartialData(data: PnLData | null): boolean {
-  if (!data) return false;
-  // Has deposits but no daily snapshots
-  return data.totalDeposited > 0 && data.dailySnapshots.length === 0;
-}
 
 /**
  * PnLChart — Visualizes a user's historical profit & loss with an area chart.
@@ -83,7 +52,8 @@ export default function PnLChart() {
       if (!res.ok) {
         throw new Error("Failed to fetch PnL data");
       }
-      const data: PnLData = await res.json();
+      const raw = await res.json();
+      const data: PnLData = normalizePnLData(raw);
       setPnlData(data);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to fetch PnL data");
@@ -196,6 +166,13 @@ export default function PnLChart() {
 
       {/* PnL Chart */}
       {data.dailySnapshots.length > 0 ? (
+        <div className="space-y-2">
+          {isSparseChartData(data.dailySnapshots) && (
+            <p className="text-xs text-amber-400/80">
+              Limited history available — chart shows {data.dailySnapshots.length} data point
+              {data.dailySnapshots.length === 1 ? "" : "s"}.
+            </p>
+          )}
         <div className="h-64">
           <ResponsiveContainer width="100%" height="100%">
             <AreaChart data={data.dailySnapshots}>
@@ -237,6 +214,7 @@ export default function PnLChart() {
               />
             </AreaChart>
           </ResponsiveContainer>
+        </div>
         </div>
       ) : (
         <div className="h-64 flex flex-col items-center justify-center bg-white/5 rounded-lg border border-gray-700/50">

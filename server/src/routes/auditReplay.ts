@@ -1,5 +1,6 @@
 import { Request, Response, Router } from "express";
 import { createAuditReplayService } from "../services/auditReplayService";
+import { parsePaginationLimit } from "../types/pagination";
 
 const router = Router();
 const auditReplayService = createAuditReplayService();
@@ -38,11 +39,24 @@ router.post("/record", (req: Request, res: Response) => {
 
 router.get("/summary", async (req: Request, res: Response) => {
   const strategyId = String(req.query.strategyId || "default-strategy");
-  const limitRaw = Number(req.query.limit ?? 25);
-  const limit = Number.isFinite(limitRaw) ? Math.max(1, Math.min(200, limitRaw)) : 25;
+  const limit = parsePaginationLimit(req.query.limit);
+  const cursor = req.query.cursor as string | undefined;
 
   try {
-    const report = await auditReplayService.replaySummary(strategyId, limit);
+    const report = await auditReplayService.replaySummary(strategyId, limit + 1);
+
+    let items = report.items;
+    if (cursor) {
+      const idx = items.findIndex((item: Record<string, unknown>) => (item as any).id === cursor || (item as any).executionId === cursor);
+      items = idx >= 0 ? items.slice(idx + 1) : items;
+    }
+
+    const hasMore = items.length > limit;
+    const page = hasMore ? items.slice(0, limit) : items;
+    const nextCursor = hasMore && page.length > 0
+      ? ((page[page.length - 1] as any).id || (page[page.length - 1] as any).executionId || null)
+      : null;
+
     res.json({
       success: true,
       data: {
@@ -55,8 +69,9 @@ router.get("/summary", async (req: Request, res: Response) => {
               ? 0
               : Number((report.discrepancyCount / report.total).toFixed(4)),
         },
-        items: report.items,
+        items: page,
       },
+      pagination: { nextCursor, hasMore, limit },
     });
   } catch (error) {
     res.status(500).json({

@@ -8,6 +8,7 @@ import {
 } from "../middleware/audit";
 import { uploadVaultMetadata } from "../services/ipfs/vaultMetadataService";
 import { freezeService } from "../services/freezeService";
+import { parsePaginationLimit, type PaginatedResponse } from "../types/pagination";
 import { PROTOCOLS } from "../config/protocols";
 import { strategyStateTransitionAuditService } from "../services/strategyStateTransitionAuditService";
 
@@ -287,7 +288,9 @@ adminRouter.get(
   requireAdmin,
   async (req: Request, res: Response): Promise<void> => {
     try {
-      const { userId, action, resource, startDate, endDate, limit } = req.query;
+      const { userId, action, resource, startDate, endDate, limit, cursor } = req.query;
+
+      const effectiveLimit = parsePaginationLimit(limit);
 
       const logs = await getAuditLogs({
         userId: userId as string,
@@ -295,14 +298,20 @@ adminRouter.get(
         resource: resource as string,
         startDate: startDate as string,
         endDate: endDate as string,
-        limit: limit ? parseInt(limit as string) : undefined,
+        limit: effectiveLimit + 1,
+        cursor: cursor as string | undefined,
       });
 
-      res.json({
-        success: true,
-        count: logs.length,
-        logs,
-      });
+      const hasMore = logs.length > effectiveLimit;
+      const page = hasMore ? logs.slice(0, effectiveLimit) : logs;
+      const nextCursor = hasMore ? page[page.length - 1].id : null;
+
+      const response: PaginatedResponse<(typeof page)[0]> = {
+        data: page,
+        pagination: { nextCursor, hasMore, limit: effectiveLimit },
+      };
+
+      res.json(response);
     } catch (error) {
       res.status(500).json({
         error:

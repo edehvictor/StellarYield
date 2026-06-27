@@ -395,7 +395,9 @@ impl WalletFactory {
         preimage[..8].copy_from_slice(&nonce.to_be_bytes());
         preimage[8..].copy_from_slice(&user_salt.to_be_bytes());
 
-        env.crypto().sha256(&Bytes::from_array(env, &preimage)).to_bytes()
+        env.crypto()
+            .sha256(&Bytes::from_array(env, &preimage))
+            .to_bytes()
     }
 }
 

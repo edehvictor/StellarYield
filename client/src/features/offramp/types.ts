@@ -32,6 +32,8 @@ export interface OffRampTransaction {
     memo: string;
     createdAt: number;
     completedAt?: number;
+    /** Unix ms timestamp after which the provider quote is no longer valid. */
+    quoteExpiresAt?: number;
     errorMessage?: string;
     isRetryable?: boolean;
     request?: WithdrawalRequest;

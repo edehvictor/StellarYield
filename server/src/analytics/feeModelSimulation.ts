@@ -8,12 +8,12 @@
  * Run: npx ts-node src/analytics/feeModelSimulation.ts
  */
 
-interface ApyDataPoint {
+export interface ApyDataPoint {
   day: number;
   apyBps: number;
 }
 
-interface SimulationResult {
+export interface SimulationResult {
   period: string;
   staticFeeRevenue: number;
   dynamicFeeRevenue: number;
@@ -22,17 +22,17 @@ interface SimulationResult {
   avgApyBps: number;
 }
 
-const BPS_DENOMINATOR = 10_000;
-const MIN_FEE_BPS = 100;
-const MAX_FEE_BPS = 1_000;
-const MOVING_AVG_WINDOW = 10;
-const STATIC_FEE_BPS = 500; // 5% static baseline for comparison
+export const BPS_DENOMINATOR = 10_000;
+export const MIN_FEE_BPS = 100;
+export const MAX_FEE_BPS = 1_000;
+export const MOVING_AVG_WINDOW = 10;
+export const STATIC_FEE_BPS = 500; // 5% static baseline for comparison
 
-function clamp(value: number, min: number, max: number): number {
+export function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value));
 }
 
-function computeDynamicFee(apyHistory: number[]): number {
+export function computeDynamicFee(apyHistory: number[]): number {
   if (apyHistory.length === 0) return MIN_FEE_BPS;
 
   const window = apyHistory.slice(-MOVING_AVG_WINDOW);
@@ -46,7 +46,7 @@ function computeDynamicFee(apyHistory: number[]): number {
  * realistic market conditions: a low-yield consolidation phase,
  * a bull run, a correction, and recovery.
  */
-function generateSyntheticData(): ApyDataPoint[] {
+export function generateSyntheticData(): ApyDataPoint[] {
   const data: ApyDataPoint[] = [];
 
   for (let day = 0; day < 180; day++) {
@@ -77,7 +77,7 @@ function generateSyntheticData(): ApyDataPoint[] {
   return data;
 }
 
-function runSimulation(data: ApyDataPoint[]): SimulationResult[] {
+export function runSimulation(data: ApyDataPoint[]): SimulationResult[] {
   const results: SimulationResult[] = [];
   const tvl = 1_000_000; // $1M TVL for normalization
 

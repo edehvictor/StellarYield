@@ -88,4 +88,3 @@ pub fn write_option(e: &Env, id: u32, option: &OptionData) {
     e.storage().persistent().set(&key, option);
     extend_persistent_ttl_default(e, &key);
 }
-

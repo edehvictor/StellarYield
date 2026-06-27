@@ -463,4 +463,3 @@ fn test_storage_ttl_extension() {
     // Call get_position to test that persistent position read paths run successfully with TTL extension
     t.client.get_position(&user);
 }
-

@@ -188,10 +188,9 @@ fn test_storage_ttl_extension() {
 
     // Advance timestamp and exercise to ensure we cross boundaries cleanly
     env.ledger().set_timestamp(1000);
-    
+
     // Test that client can execute exercise and verify that the TTL extension calls run successfully
     let exerciser = Address::generate(&env);
     mint_tokens(&env, &quote, &exerciser, 200_000_000);
     client.exercise(&exerciser, &option_id);
 }
-

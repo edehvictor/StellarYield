@@ -1,6 +1,13 @@
 type Env = NodeJS.ProcessEnv;
 
 const PLACEHOLDER_RELAYER_SECRET = "SAH2...";
+const PLACEHOLDER_METRICS_TOKENS = ["change-this", "replace-with-a-real-token", "your-token", "placeholder"];
+const PLACEHOLDER_AUDIT_SIGNING_KEYS = [
+  "your-secure-signing-key-change-this-in-production",
+  "change-this-in-production",
+  "your-signing-key",
+  "placeholder",
+];
 
 export interface EnvValidationResult {
   errors: string[];
@@ -9,6 +16,12 @@ export interface EnvValidationResult {
 
 function hasValue(value: string | undefined): boolean {
   return typeof value === "string" && value.trim().length > 0;
+}
+
+function isPlaceholder(value: string | undefined, placeholders: string[]): boolean {
+  if (!value) return false;
+  const lower = value.trim().toLowerCase();
+  return placeholders.some((p) => lower === p.toLowerCase() || lower.includes(p.toLowerCase()));
 }
 
 function isProduction(env: Env): boolean {
@@ -36,14 +49,26 @@ export function validateServerEnv(env: Env = process.env): EnvValidationResult {
     else warnings.push(message);
   }
 
-  if (isProduction(env) && !hasValue(env.METRICS_TOKEN)) {
-    errors.push("METRICS_TOKEN is required in production to protect /api/metrics.");
+  if (isProduction(env)) {
+    if (!hasValue(env.METRICS_TOKEN)) {
+      errors.push("METRICS_TOKEN is required in production to protect /api/metrics.");
+    } else if (isPlaceholder(env.METRICS_TOKEN, PLACEHOLDER_METRICS_TOKENS)) {
+      errors.push("METRICS_TOKEN must not be a placeholder value in production.");
+    }
   }
 
   if (!hasValue(env.RELAYER_SECRET_KEY) || env.RELAYER_SECRET_KEY === PLACEHOLDER_RELAYER_SECRET) {
     const message = "RELAYER_SECRET_KEY must be set to a real Stellar secret before using /api/relayer/fee-bump.";
     if (isProduction(env)) errors.push(message);
     else warnings.push(message);
+  }
+
+  if (isProduction(env)) {
+    if (!hasValue(env.AUDIT_SIGNING_KEY)) {
+      errors.push("AUDIT_SIGNING_KEY is required in production for audit log integrity.");
+    } else if (isPlaceholder(env.AUDIT_SIGNING_KEY, PLACEHOLDER_AUDIT_SIGNING_KEYS)) {
+      errors.push("AUDIT_SIGNING_KEY must not be a placeholder value in production.");
+    }
   }
 
   if (hasValue(env.DEX_ROUTER_CONTRACT_ID) !== hasValue(env.ZAP_QUOTE_SIM_SOURCE_ACCOUNT)) {

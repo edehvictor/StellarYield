@@ -646,5 +646,30 @@ describe("PnLChart", () => {
         expect(screen.getByText("$1,500,000.50")).toBeInTheDocument();
       });
     });
+
+    it("renders sparse out-of-order snapshots safely", async () => {
+      (useWallet as ReturnType<typeof vi.fn>).mockReturnValue({
+        isConnected: true,
+        walletAddress: mockWalletAddress,
+      });
+
+      (global.fetch as ReturnType<typeof vi.fn>).mockResolvedValue({
+        ok: true,
+        json: async () => ({
+          ...mockPnLDataWithChart,
+          dailySnapshots: [
+            { date: "2024-01-03", cumulativePnL: 500, portfolioValue: 10500, sharePrice: 1.05 },
+            { date: "invalid-date", cumulativePnL: 999, portfolioValue: 10999, sharePrice: 1.1 },
+            { date: "2024-01-01", cumulativePnL: 100, portfolioValue: 10100, sharePrice: 1.01 },
+          ],
+        }),
+      } as Response);
+
+      render(<PnLChart />);
+
+      await waitFor(() => {
+        expect(screen.getByText(/Limited history available/)).toBeInTheDocument();
+      });
+    });
   });
 });

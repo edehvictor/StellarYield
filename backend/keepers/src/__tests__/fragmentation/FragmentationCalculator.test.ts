@@ -100,7 +100,6 @@ describe('FragmentationCalculator - Unit Tests', () => {
       ];
 
       expect(() => calculator.calculateHHI(protocols)).toThrow(FragmentationError);
-      expect(() => calculator.calculateHHI(protocols)).toThrow('total TVL is zero or negative');
     });
   });
 
@@ -207,6 +206,91 @@ describe('FragmentationCalculator - Unit Tests', () => {
       const routingPct = calculator.estimateMultiProtocolRouting(protocols);
       expect(routingPct).toBeGreaterThanOrEqual(0);
       expect(routingPct).toBeLessThanOrEqual(100);
+    });
+  });
+
+  describe('degenerate liquidity edge cases (#817)', () => {
+    it('excludes zero-liquidity pools from HHI calculation', () => {
+      const protocols: ProtocolLiquidityData[] = [
+        { protocol: 'Blend', tvlUsd: 10_000_000, poolCount: 50, avgDepthUsd: 200000, fetchedAt: timestamp },
+        { protocol: 'Ghost', tvlUsd: 0, poolCount: 0, avgDepthUsd: 0, fetchedAt: timestamp },
+        { protocol: 'Empty', tvlUsd: 0, poolCount: 0, avgDepthUsd: 0, fetchedAt: timestamp },
+      ];
+
+      const result = calculator.calculateHHI(protocols);
+      expect(result.hhi).toBe(10000);
+      expect(result.fragmentationScore).toBe(0);
+      expect(result.protocolShares.has('Ghost')).toBe(false);
+    });
+
+    it('handles extreme skew (99.9/0.1) with bounded output', () => {
+      const protocols: ProtocolLiquidityData[] = [
+        { protocol: 'Dominant', tvlUsd: 9_990_000, poolCount: 45, avgDepthUsd: 200000, fetchedAt: timestamp },
+        { protocol: 'Minor', tvlUsd: 10_000, poolCount: 5, avgDepthUsd: 200000, fetchedAt: timestamp },
+      ];
+
+      const result = calculator.calculateHHI(protocols);
+      expect(result.hhi).toBeGreaterThan(9800);
+      expect(result.fragmentationScore).toBeGreaterThanOrEqual(0);
+      expect(result.fragmentationScore).toBeLessThanOrEqual(100);
+      expect(result.effectiveProtocolCount).toBeGreaterThan(1);
+      expect(result.effectiveProtocolCount).toBeLessThan(1.1);
+    });
+
+    it('handles highly dispersed inputs (20 equal protocols)', () => {
+      const protocols: ProtocolLiquidityData[] = Array.from({ length: 20 }, (_, i) => ({
+        protocol: `Protocol${i}`,
+        tvlUsd: 1_000_000,
+        poolCount: 5,
+        avgDepthUsd: 200000,
+        fetchedAt: timestamp,
+      }));
+
+      const result = calculator.calculateHHI(protocols);
+      expect(result.hhi).toBeCloseTo(500, 0);
+      expect(result.fragmentationScore).toBeCloseTo(95, 0);
+      expect(result.effectiveProtocolCount).toBeCloseTo(20, 0);
+    });
+
+    it('produces identical results on repeated recomputation', () => {
+      const protocols: ProtocolLiquidityData[] = [
+        { protocol: 'Blend', tvlUsd: 4_000_000, poolCount: 20, avgDepthUsd: 200000, fetchedAt: timestamp },
+        { protocol: 'Soroswap', tvlUsd: 3_000_000, poolCount: 15, avgDepthUsd: 200000, fetchedAt: timestamp },
+        { protocol: 'DeFindex', tvlUsd: 3_000_000, poolCount: 15, avgDepthUsd: 200000, fetchedAt: timestamp },
+      ];
+
+      const first = calculator.calculateHHI(protocols);
+      const second = calculator.calculateHHI(protocols);
+
+      expect(second).toEqual(first);
+    });
+
+    it('throws for NaN TVL inputs', () => {
+      const protocols: ProtocolLiquidityData[] = [
+        { protocol: 'Blend', tvlUsd: NaN, poolCount: 10, avgDepthUsd: 100000, fetchedAt: timestamp },
+      ];
+
+      expect(() => calculator.calculateHHI(protocols)).toThrow(FragmentationError);
+    });
+
+    it('throws when all pools have zero liquidity', () => {
+      const protocols: ProtocolLiquidityData[] = [
+        { protocol: 'A', tvlUsd: 0, poolCount: 0, avgDepthUsd: 0, fetchedAt: timestamp },
+        { protocol: 'B', tvlUsd: 0, poolCount: 0, avgDepthUsd: 0, fetchedAt: timestamp },
+      ];
+
+      expect(() => calculator.calculateHHI(protocols)).toThrow('no protocols with positive liquidity');
+    });
+
+    it('zero-liquidity ghosts do not inflate routing percentage', () => {
+      const protocols: ProtocolLiquidityData[] = [
+        { protocol: 'Blend', tvlUsd: 10_000_000, poolCount: 50, avgDepthUsd: 200000, fetchedAt: timestamp },
+        { protocol: 'Ghost1', tvlUsd: 0, poolCount: 0, avgDepthUsd: 0, fetchedAt: timestamp },
+        { protocol: 'Ghost2', tvlUsd: 0, poolCount: 0, avgDepthUsd: 0, fetchedAt: timestamp },
+      ];
+
+      const routingPct = calculator.estimateMultiProtocolRouting(protocols);
+      expect(routingPct).toBe(0);
     });
   });
 });

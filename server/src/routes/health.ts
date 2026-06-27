@@ -3,6 +3,7 @@ import { PrismaClient } from "@prisma/client";
 import { Horizon, rpc as SorobanRpc } from "@stellar/stellar-sdk";
 import { Queue } from "bullmq";
 import { Redis } from "ioredis";
+import { validateServerEnv } from "../config/env";
 
 const router = Router();
 const prisma = new PrismaClient();
@@ -361,6 +362,44 @@ router.get("/dependencies", async (_req: Request, res: Response) => {
   };
 
   res.status(overallStatus === "down" ? 503 : 200).json(body);
+});
+
+/**
+ * GET /health/startup
+ *
+ * Exposes a startup health summary backing environment validation checks without leaking credentials.
+ */
+router.get("/startup", async (_req: Request, res: Response) => {
+  const env = process.env;
+  const validation = validateServerEnv(env);
+
+  const hasValue = (val: string | undefined): boolean =>
+    typeof val === "string" && val.trim().length > 0;
+
+  const capabilities = {
+    database: hasValue(env.DATABASE_URL) ? "operational" : "disabled",
+    mongodb: hasValue(env.MONGODB_URI) ? "operational" : "disabled",
+    feeBumpRelayer: (hasValue(env.RELAYER_SECRET_KEY) && env.RELAYER_SECRET_KEY !== "SAH2...") ? "operational" : "disabled",
+    zapQuoting: (hasValue(env.DEX_ROUTER_CONTRACT_ID) && hasValue(env.ZAP_QUOTE_SIM_SOURCE_ACCOUNT)) ? "operational" : "disabled",
+    sorobanRpc: hasValue(env.SOROBAN_RPC_URL) ? "operational" : "fallback",
+    horizonRpc: hasValue(env.STELLAR_HORIZON_URL) ? "operational" : "fallback",
+  };
+
+  const status = validation.errors.length > 0
+    ? "failed"
+    : validation.warnings.length > 0
+      ? "degraded"
+      : "healthy";
+
+  const body = {
+    status,
+    capabilities,
+    errors: validation.errors,
+    warnings: validation.warnings,
+    timestamp: new Date().toISOString(),
+  };
+
+  res.status(status === "failed" ? 503 : 200).json(body);
 });
 
 export default router;

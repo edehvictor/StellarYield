@@ -14,9 +14,12 @@ from external bridges (Axelar, LayerZero, etc.) and minting wrapped assets.
 */
 
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, symbol_short, log,
-    Address, Bytes, BytesN, Env, Symbol, Vec, Map,
+    contract, contracterror, contractimpl, contracttype, log, symbol_short, Address, Bytes, BytesN,
+    Env, Map, Symbol, Vec,
 };
+
+pub mod replay;
+pub use replay::{ReplayProtection, ReplayStats};
 
 // ========== CONSTANTS ==========
 /// Contract metadata
@@ -197,12 +200,12 @@ pub struct BridgeRelayer;
 #[contractimpl]
 impl BridgeRelayer {
     /// Initialize the bridge relayer contract
-    /// 
+    ///
     /// # Arguments
     /// * `admin` - The admin address that can manage the contract
     /// * `initial_validators` - Initial set of validator addresses
     /// * `config` - Initial bridge configuration
-    /// 
+    ///
     /// # Panics
     /// * If admin is invalid
     /// * If initial validators are empty
@@ -217,17 +220,22 @@ impl BridgeRelayer {
         if admin.to_string().is_empty() {
             panic!("Invalid admin address");
         }
-        
+
         if initial_validators.is_empty() {
             panic!("Initial validators cannot be empty");
         }
-        
+
         if config.min_validators == 0 || config.min_validators > initial_validators.len() as u32 {
             panic!("Invalid min_validators configuration");
         }
 
         // Check if already initialized
-        if env.storage().instance().get(&INITIALIZED_KEY).unwrap_or(false) {
+        if env
+            .storage()
+            .instance()
+            .get(&INITIALIZED_KEY)
+            .unwrap_or(false)
+        {
             panic!("Contract already initialized");
         }
 
@@ -247,7 +255,11 @@ impl BridgeRelayer {
                 added_at: current_time,
             };
             let validators_key = symbol_short!("VALS");
-            let mut validators: Map<Address, ValidatorInfo> = env.storage().instance().get(&validators_key).unwrap_or_else(|| Map::new(&env));
+            let mut validators: Map<Address, ValidatorInfo> = env
+                .storage()
+                .instance()
+                .get(&validators_key)
+                .unwrap_or_else(|| Map::new(&env));
             validators.set(validator, validator_info);
             env.storage().instance().set(&validators_key, &validators);
         }
@@ -260,14 +272,14 @@ impl BridgeRelayer {
     }
 
     /// Receive a cross-chain message with Merkle proof validation
-    /// 
+    ///
     /// # Arguments
     /// * `message` - The cross-chain message to process
     /// * `proof` - Merkle proof for message validation
-    /// 
+    ///
     /// # Returns
     /// * `BytesN<32>` - Transaction hash for tracking
-    /// 
+    ///
     /// # Errors
     /// * `InvalidMessage` - If message format is invalid
     /// * `InvalidMerkleProof` - If Merkle proof is invalid
@@ -280,14 +292,18 @@ impl BridgeRelayer {
         proof: MerkleProof,
     ) -> Result<BytesN<32>, BridgeRelayerError> {
         // Check if contract is paused
-        let config: BridgeConfig = env.storage().instance().get(&CONFIG_KEY).unwrap_or(BridgeConfig {
-            min_validators: DEFAULT_MIN_VALIDATORS,
-            queue_threshold: DEFAULT_QUEUE_THRESHOLD,
-            time_lock: DEFAULT_TIME_LOCK,
-            max_queue_size: MAX_QUEUE_SIZE,
-            paused: false,
-        });
-        
+        let config: BridgeConfig =
+            env.storage()
+                .instance()
+                .get(&CONFIG_KEY)
+                .unwrap_or(BridgeConfig {
+                    min_validators: DEFAULT_MIN_VALIDATORS,
+                    queue_threshold: DEFAULT_QUEUE_THRESHOLD,
+                    time_lock: DEFAULT_TIME_LOCK,
+                    max_queue_size: MAX_QUEUE_SIZE,
+                    paused: false,
+                });
+
         if config.paused {
             return Err(BridgeRelayerError::ContractPaused);
         }
@@ -295,14 +311,14 @@ impl BridgeRelayer {
         // Validate message format
         Self::validate_message_format(&message)?;
 
-        // Validate and update nonce
-        Self::validate_and_update_nonce(&env, &message)?;
-
         // Check if message already processed
         Self::check_message_processed(&env, &message)?;
 
+        // Validate and update nonce
+        Self::validate_and_update_nonce(&env, &message)?;
+
         // Compute message hash
-        let message_hash = Self::compute_message_hash(&message);
+        let message_hash = Self::compute_message_hash(&env, &message);
 
         // Verify Merkle proof (simplified for compilation)
         // In a real implementation, this would use proper Merkle verification
@@ -323,14 +339,14 @@ impl BridgeRelayer {
     }
 
     /// Receive a cross-chain message with multi-signature validation
-    /// 
+    ///
     /// # Arguments
     /// * `message` - The cross-chain message to process
     /// * `multi_sig` - Multi-signature structure for validation
-    /// 
+    ///
     /// # Returns
     /// * `BytesN<32>` - Transaction hash for tracking
-    /// 
+    ///
     /// # Errors
     /// * `InvalidMessage` - If message format is invalid
     /// * `InvalidMultiSignature` - If multi-signature is invalid
@@ -343,14 +359,18 @@ impl BridgeRelayer {
         multi_sig: MultiSignature,
     ) -> Result<BytesN<32>, BridgeRelayerError> {
         // Check if contract is paused
-        let config: BridgeConfig = env.storage().instance().get(&CONFIG_KEY).unwrap_or(BridgeConfig {
-            min_validators: DEFAULT_MIN_VALIDATORS,
-            queue_threshold: DEFAULT_QUEUE_THRESHOLD,
-            time_lock: DEFAULT_TIME_LOCK,
-            max_queue_size: MAX_QUEUE_SIZE,
-            paused: false,
-        });
-        
+        let config: BridgeConfig =
+            env.storage()
+                .instance()
+                .get(&CONFIG_KEY)
+                .unwrap_or(BridgeConfig {
+                    min_validators: DEFAULT_MIN_VALIDATORS,
+                    queue_threshold: DEFAULT_QUEUE_THRESHOLD,
+                    time_lock: DEFAULT_TIME_LOCK,
+                    max_queue_size: MAX_QUEUE_SIZE,
+                    paused: false,
+                });
+
         if config.paused {
             return Err(BridgeRelayerError::ContractPaused);
         }
@@ -358,11 +378,11 @@ impl BridgeRelayer {
         // Validate message format
         Self::validate_message_format(&message)?;
 
-        // Validate and update nonce
-        Self::validate_and_update_nonce(&env, &message)?;
-
         // Check if message already processed
         Self::check_message_processed(&env, &message)?;
+
+        // Validate and update nonce
+        Self::validate_and_update_nonce(&env, &message)?;
 
         // Verify multi-signature (simplified for compilation)
         if multi_sig.signatures.len() < config.min_validators {
@@ -377,19 +397,19 @@ impl BridgeRelayer {
         } else {
             // Process immediately
             Self::process_message(&env, &message)?;
-            let message_hash = Self::compute_message_hash(&message);
+            let message_hash = Self::compute_message_hash(&env, &message);
             Ok(message_hash)
         }
     }
 
     /// Execute a queued transfer
-    /// 
+    ///
     /// # Arguments
     /// * `transfer_id` - ID of the queued transfer to execute
-    /// 
+    ///
     /// # Returns
     /// * `bool` - True if transfer was executed successfully
-    /// 
+    ///
     /// # Errors
     /// * `TransferNotExecutable` - If transfer is not yet executable
     /// * `InvalidMessage` - If transfer message is invalid
@@ -399,35 +419,39 @@ impl BridgeRelayer {
     ) -> Result<bool, BridgeRelayerError> {
         // Get queued transfer (simplified)
         let current_time = env.ledger().timestamp();
-        
+
         // In a real implementation, this would retrieve the actual queued transfer
         // For now, we'll simulate execution
-        if current_time < 1000 { // Simple time check
+        if current_time < 1000 {
+            // Simple time check
             return Err(BridgeRelayerError::TransferNotExecutable);
         }
 
         // Process the message (simplified)
         log!(&env, "Executing queued transfer: {:?}", transfer_id);
-        
+
         Ok(true)
     }
 
     /// Get current bridge configuration
-    /// 
+    ///
     /// # Returns
     /// * `BridgeConfig` - Current configuration
     pub fn get_config(env: Env) -> BridgeConfig {
-        env.storage().instance().get(&CONFIG_KEY).unwrap_or(BridgeConfig {
-            min_validators: DEFAULT_MIN_VALIDATORS,
-            queue_threshold: DEFAULT_QUEUE_THRESHOLD,
-            time_lock: DEFAULT_TIME_LOCK,
-            max_queue_size: MAX_QUEUE_SIZE,
-            paused: false,
-        })
+        env.storage()
+            .instance()
+            .get(&CONFIG_KEY)
+            .unwrap_or(BridgeConfig {
+                min_validators: DEFAULT_MIN_VALIDATORS,
+                queue_threshold: DEFAULT_QUEUE_THRESHOLD,
+                time_lock: DEFAULT_TIME_LOCK,
+                max_queue_size: MAX_QUEUE_SIZE,
+                paused: false,
+            })
     }
 
     /// Get current nonce
-    /// 
+    ///
     /// # Returns
     /// * `u64` - Current nonce value
     pub fn get_nonce(env: Env) -> u64 {
@@ -435,23 +459,20 @@ impl BridgeRelayer {
     }
 
     /// Get queued transfer by ID
-    /// 
+    ///
     /// # Arguments
     /// * `transfer_id` - ID of the queued transfer
-    /// 
+    ///
     /// # Returns
     /// * `Option<QueuedTransfer>` - Queued transfer if exists
-    pub fn get_queued_transfer(
-        env: Env,
-        transfer_id: BytesN<32>,
-    ) -> Option<QueuedTransfer> {
+    pub fn get_queued_transfer(env: Env, transfer_id: BytesN<32>) -> Option<QueuedTransfer> {
         // Simplified implementation
         log!(&env, "Getting queued transfer: {:?}", transfer_id);
         None
     }
 
     /// Get all queued transfers
-    /// 
+    ///
     /// # Returns
     /// * `Vec<QueuedTransfer>` - All queued transfers
     pub fn get_all_queued_transfers(env: Env) -> Vec<QueuedTransfer> {
@@ -460,24 +481,28 @@ impl BridgeRelayer {
     }
 
     /// Check if a message hash has been processed
-    /// 
+    ///
     /// # Arguments
     /// * `message_hash` - Hash of the message to check
-    /// 
+    ///
     /// # Returns
     /// * `bool` - True if message has been processed
     pub fn is_message_processed(env: Env, message_hash: BytesN<32>) -> bool {
         let processed_key = symbol_short!("HASHES");
-        let processed_hashes: Map<BytesN<32>, u64> = env.storage().instance().get(&processed_key).unwrap_or_else(|| Map::new(&env));
+        let processed_hashes: Map<BytesN<32>, u64> = env
+            .storage()
+            .instance()
+            .get(&processed_key)
+            .unwrap_or_else(|| Map::new(&env));
         processed_hashes.contains_key(message_hash)
     }
 
     /// Admin function to update configuration
-    /// 
+    ///
     /// # Arguments
     /// * `admin` - Admin address for authorization
     /// * `new_config` - New configuration to set
-    /// 
+    ///
     /// # Errors
     /// * `Unauthorized` - If caller is not admin
     /// * `InvalidConfig` - If configuration is invalid
@@ -487,8 +512,12 @@ impl BridgeRelayer {
         new_config: BridgeConfig,
     ) -> Result<(), BridgeRelayerError> {
         // Check admin authorization
-        let stored_admin: Address = env.storage().instance().get(&ADMIN_KEY).ok_or(BridgeRelayerError::Unauthorized)?;
-        
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&ADMIN_KEY)
+            .ok_or(BridgeRelayerError::Unauthorized)?;
+
         if admin != stored_admin {
             return Err(BridgeRelayerError::Unauthorized);
         }
@@ -504,12 +533,12 @@ impl BridgeRelayer {
     }
 
     /// Admin function to add a validator
-    /// 
+    ///
     /// # Arguments
     /// * `admin` - Admin address for authorization
     /// * `validator` - Validator address to add
     /// * `weight` - Validator weight for voting
-    /// 
+    ///
     /// # Errors
     /// * `Unauthorized` - If caller is not admin
     /// * `InvalidValidator` - If validator is invalid
@@ -520,8 +549,12 @@ impl BridgeRelayer {
         weight: u32,
     ) -> Result<(), BridgeRelayerError> {
         // Check admin authorization
-        let stored_admin: Address = env.storage().instance().get(&ADMIN_KEY).ok_or(BridgeRelayerError::Unauthorized)?;
-        
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&ADMIN_KEY)
+            .ok_or(BridgeRelayerError::Unauthorized)?;
+
         if admin != stored_admin {
             return Err(BridgeRelayerError::Unauthorized);
         }
@@ -533,7 +566,11 @@ impl BridgeRelayer {
 
         // Check if validator already exists
         let validators_key = symbol_short!("VALS");
-        let validators: Map<Address, ValidatorInfo> = env.storage().instance().get(&validators_key).unwrap_or_else(|| Map::new(&env));
+        let validators: Map<Address, ValidatorInfo> = env
+            .storage()
+            .instance()
+            .get(&validators_key)
+            .unwrap_or_else(|| Map::new(&env));
         if validators.contains_key(validator.clone()) {
             return Err(BridgeRelayerError::InvalidValidator);
         }
@@ -545,20 +582,22 @@ impl BridgeRelayer {
             weight,
             added_at: env.ledger().timestamp(),
         };
-        
+
         let mut updated_validators = validators;
         updated_validators.set(validator, validator_info);
-        env.storage().instance().set(&validators_key, &updated_validators);
-        
+        env.storage()
+            .instance()
+            .set(&validators_key, &updated_validators);
+
         Ok(())
     }
 
     /// Admin function to remove a validator
-    /// 
+    ///
     /// # Arguments
     /// * `admin` - Admin address for authorization
     /// * `validator` - Validator address to remove
-    /// 
+    ///
     /// # Errors
     /// * `Unauthorized` - If caller is not admin
     /// * `InvalidValidator` - If validator is not found
@@ -568,38 +607,54 @@ impl BridgeRelayer {
         validator: Address,
     ) -> Result<(), BridgeRelayerError> {
         // Check admin authorization
-        let stored_admin: Address = env.storage().instance().get(&ADMIN_KEY).ok_or(BridgeRelayerError::Unauthorized)?;
-        
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&ADMIN_KEY)
+            .ok_or(BridgeRelayerError::Unauthorized)?;
+
         if admin != stored_admin {
             return Err(BridgeRelayerError::Unauthorized);
         }
 
         // Check if validator exists
         let validators_key = symbol_short!("VALS");
-        let validators: Map<Address, ValidatorInfo> = env.storage().instance().get(&validators_key).unwrap_or_else(|| Map::new(&env));
-        let mut validator_info = validators.get(validator.clone()).ok_or(BridgeRelayerError::InvalidValidator)?;
+        let validators: Map<Address, ValidatorInfo> = env
+            .storage()
+            .instance()
+            .get(&validators_key)
+            .unwrap_or_else(|| Map::new(&env));
+        let mut validator_info = validators
+            .get(validator.clone())
+            .ok_or(BridgeRelayerError::InvalidValidator)?;
 
         // Deactivate validator (don't remove to maintain history)
         validator_info.active = false;
-        
+
         let mut updated_validators = validators;
         updated_validators.set(validator, validator_info);
-        env.storage().instance().set(&validators_key, &updated_validators);
-        
+        env.storage()
+            .instance()
+            .set(&validators_key, &updated_validators);
+
         Ok(())
     }
 
     /// Emergency pause function
-    /// 
+    ///
     /// # Arguments
     /// * `admin` - Admin address for authorization
-    /// 
+    ///
     /// # Errors
     /// * `Unauthorized` - If caller is not admin
     pub fn emergency_pause(env: Env, admin: Address) -> Result<(), BridgeRelayerError> {
         // Check admin authorization
-        let stored_admin: Address = env.storage().instance().get(&ADMIN_KEY).ok_or(BridgeRelayerError::Unauthorized)?;
-        
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&ADMIN_KEY)
+            .ok_or(BridgeRelayerError::Unauthorized)?;
+
         if admin != stored_admin {
             return Err(BridgeRelayerError::Unauthorized);
         }
@@ -608,21 +663,25 @@ impl BridgeRelayer {
         let mut config = Self::get_config(env.clone());
         config.paused = true;
         env.storage().instance().set(&CONFIG_KEY, &config);
-        
+
         Ok(())
     }
 
     /// Emergency unpause function
-    /// 
+    ///
     /// # Arguments
     /// * `admin` - Admin address for authorization
-    /// 
+    ///
     /// # Errors
     /// * `Unauthorized` - If caller is not admin
     pub fn emergency_unpause(env: Env, admin: Address) -> Result<(), BridgeRelayerError> {
         // Check admin authorization
-        let stored_admin: Address = env.storage().instance().get(&ADMIN_KEY).ok_or(BridgeRelayerError::Unauthorized)?;
-        
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&ADMIN_KEY)
+            .ok_or(BridgeRelayerError::Unauthorized)?;
+
         if admin != stored_admin {
             return Err(BridgeRelayerError::Unauthorized);
         }
@@ -631,7 +690,7 @@ impl BridgeRelayer {
         let mut config = Self::get_config(env.clone());
         config.paused = false;
         env.storage().instance().set(&CONFIG_KEY, &config);
-        
+
         Ok(())
     }
 }
@@ -673,7 +732,10 @@ impl BridgeRelayer {
     }
 
     /// Validate and update nonce
-    fn validate_and_update_nonce(env: &Env, message: &CrossChainMessage) -> Result<(), BridgeRelayerError> {
+    fn validate_and_update_nonce(
+        env: &Env,
+        message: &CrossChainMessage,
+    ) -> Result<(), BridgeRelayerError> {
         let current_nonce: u64 = env.storage().instance().get(&NONCE_KEY).unwrap_or(0);
 
         // Check nonce sequentiality
@@ -682,16 +744,25 @@ impl BridgeRelayer {
         }
 
         // Update nonce atomically
-        env.storage().instance().set(&NONCE_KEY, &(message.nonce + 1));
+        env.storage()
+            .instance()
+            .set(&NONCE_KEY, &(message.nonce + 1));
 
         Ok(())
     }
 
     /// Check if message has already been processed
-    fn check_message_processed(env: &Env, message: &CrossChainMessage) -> Result<(), BridgeRelayerError> {
-        let message_hash = Self::compute_message_hash(message);
+    fn check_message_processed(
+        env: &Env,
+        message: &CrossChainMessage,
+    ) -> Result<(), BridgeRelayerError> {
+        let message_hash = Self::compute_message_hash(env, message);
         let processed_key = symbol_short!("HASHES");
-        let processed_hashes: Map<BytesN<32>, u64> = env.storage().instance().get(&processed_key).unwrap_or_else(|| Map::new(env));
+        let processed_hashes: Map<BytesN<32>, u64> = env
+            .storage()
+            .instance()
+            .get(&processed_key)
+            .unwrap_or_else(|| Map::new(env));
 
         if processed_hashes.contains_key(message_hash) {
             return Err(BridgeRelayerError::MessageAlreadyProcessed);
@@ -701,17 +772,16 @@ impl BridgeRelayer {
     }
 
     /// Compute message hash
-    fn compute_message_hash(message: &CrossChainMessage) -> BytesN<32> {
+    fn compute_message_hash(env: &Env, message: &CrossChainMessage) -> BytesN<32> {
         // Simplified hash computation for compilation
         // In a real implementation, this would use proper cryptographic hashing
-        let env = Env::default();
-        let mut hash_input = Vec::new(&env);
+        let mut hash_input = Vec::new(env);
         hash_input.push_back(message.source_chain);
         hash_input.push_back(message.target_chain);
         hash_input.push_back(message.nonce as u32);
-        
+
         // Return a mock hash for now
-        BytesN::from_array(&env, &[message.nonce as u8; 32])
+        BytesN::from_array(env, &[message.nonce as u8; 32])
     }
 
     /// Generate transfer ID
@@ -723,45 +793,73 @@ impl BridgeRelayer {
     /// Process a cross-chain message
     fn process_message(env: &Env, message: &CrossChainMessage) -> Result<(), BridgeRelayerError> {
         // Mark message as processed
-        let message_hash = Self::compute_message_hash(message);
+        let message_hash = Self::compute_message_hash(env, message);
         let processed_key = symbol_short!("HASHES");
-        let mut processed_hashes: Map<BytesN<32>, u64> = env.storage().instance().get(&processed_key).unwrap_or_else(|| Map::new(env));
+        let mut processed_hashes: Map<BytesN<32>, u64> = env
+            .storage()
+            .instance()
+            .get(&processed_key)
+            .unwrap_or_else(|| Map::new(env));
         processed_hashes.set(message_hash, env.ledger().timestamp());
-        env.storage().instance().set(&processed_key, &processed_hashes);
+        env.storage()
+            .instance()
+            .set(&processed_key, &processed_hashes);
 
         // Process based on message type
         match message.message_type {
             MessageType::Mint => {
                 // Mint wrapped assets to recipient
                 Self::mint_wrapped_asset(env, &message.recipient, &message.asset, message.amount)?;
-            },
+            }
             MessageType::Burn => {
                 // Burn wrapped assets from sender
                 Self::burn_wrapped_asset(env, &message.sender, &message.asset, message.amount)?;
-            },
+            }
             MessageType::Transfer => {
                 // Transfer wrapped assets
-                Self::transfer_wrapped_asset(env, &message.sender, &message.recipient, &message.asset, message.amount)?;
-            },
+                Self::transfer_wrapped_asset(
+                    env,
+                    &message.sender,
+                    &message.recipient,
+                    &message.asset,
+                    message.amount,
+                )?;
+            }
             MessageType::Emergency => {
                 // Handle emergency operations
                 Self::handle_emergency_operation(env, message)?;
-            },
+            }
         }
 
         Ok(())
     }
 
     /// Mint wrapped assets (placeholder implementation)
-    fn mint_wrapped_asset(env: &Env, recipient: &Address, asset: &Address, amount: u64) -> Result<(), BridgeRelayerError> {
+    fn mint_wrapped_asset(
+        env: &Env,
+        recipient: &Address,
+        asset: &Address,
+        amount: u64,
+    ) -> Result<(), BridgeRelayerError> {
         // In a real implementation, this would interact with a token contract
         // to mint wrapped assets to the recipient
-        log!(env, "Minting {} of asset {} to {}", amount, asset, recipient);
+        log!(
+            env,
+            "Minting {} of asset {} to {}",
+            amount,
+            asset,
+            recipient
+        );
         Ok(())
     }
 
     /// Burn wrapped assets (placeholder implementation)
-    fn burn_wrapped_asset(env: &Env, sender: &Address, asset: &Address, amount: u64) -> Result<(), BridgeRelayerError> {
+    fn burn_wrapped_asset(
+        env: &Env,
+        sender: &Address,
+        asset: &Address,
+        amount: u64,
+    ) -> Result<(), BridgeRelayerError> {
         // In a real implementation, this would interact with a token contract
         // to burn wrapped assets from the sender
         log!(env, "Burning {} of asset {} from {}", amount, asset, sender);
@@ -769,15 +867,31 @@ impl BridgeRelayer {
     }
 
     /// Transfer wrapped assets (placeholder implementation)
-    fn transfer_wrapped_asset(env: &Env, sender: &Address, recipient: &Address, asset: &Address, amount: u64) -> Result<(), BridgeRelayerError> {
+    fn transfer_wrapped_asset(
+        env: &Env,
+        sender: &Address,
+        recipient: &Address,
+        asset: &Address,
+        amount: u64,
+    ) -> Result<(), BridgeRelayerError> {
         // In a real implementation, this would interact with a token contract
         // to transfer wrapped assets from sender to recipient
-        log!(env, "Transferring {} of asset {} from {} to {}", amount, asset, sender, recipient);
+        log!(
+            env,
+            "Transferring {} of asset {} from {} to {}",
+            amount,
+            asset,
+            sender,
+            recipient
+        );
         Ok(())
     }
 
     /// Handle emergency operations (placeholder implementation)
-    fn handle_emergency_operation(env: &Env, message: &CrossChainMessage) -> Result<(), BridgeRelayerError> {
+    fn handle_emergency_operation(
+        env: &Env,
+        message: &CrossChainMessage,
+    ) -> Result<(), BridgeRelayerError> {
         // In a real implementation, this would handle emergency operations
         // based on the message metadata
         log!(env, "Handling emergency operation from {}", message.sender);

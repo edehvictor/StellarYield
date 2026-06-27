@@ -5,8 +5,16 @@
  * All calculations must produce identical results to the server simulator.
  */
 
-import { PROTOCOLS } from "@stellar-yield/config"; // Adjust import path as needed
-
+interface ProtocolDef {
+  protocolName: string;
+  protocolType: string;
+  baseApyBps: number;
+}
+const PROTOCOLS: ProtocolDef[] = [
+  { protocolName: "Blend", protocolType: "blend", baseApyBps: 500 },
+  { protocolName: "Soroswap", protocolType: "amm", baseApyBps: 300 },
+  { protocolName: "DeFindex", protocolType: "index", baseApyBps: 400 },
+];
 export interface SimulationParams {
   strategyId: string;
   amount: number;

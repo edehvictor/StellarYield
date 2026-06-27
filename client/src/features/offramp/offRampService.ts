@@ -28,6 +28,18 @@ function httpErrorType(status: number): OffRampErrorType {
     return "NETWORK_ERROR";
 }
 
+/** Default quote validity window: 5 minutes. */
+export const QUOTE_TTL_MS = 5 * 60 * 1_000;
+
+/**
+ * Returns true when the transaction's provider quote has expired.
+ * A transaction without a quoteExpiresAt is treated as non-expiring.
+ */
+export function isQuoteExpired(tx: import("./types").OffRampTransaction, nowMs = Date.now()): boolean {
+    if (tx.quoteExpiresAt === undefined) return false;
+    return nowMs > tx.quoteExpiresAt;
+}
+
 const STORAGE_KEY = "stellar_yield_offramp_txns";
 
 const OFFRAMP_PROXY = "/api/offramp";
@@ -46,6 +58,7 @@ export class OffRampService {
     async initiateWithdrawal(request: WithdrawalRequest): Promise<OffRampTransaction> {
         const txId = `offramp_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
 
+        const now = Date.now();
         const transaction: OffRampTransaction = {
             id: txId,
             status: "pending",
@@ -53,7 +66,8 @@ export class OffRampService {
             currency: "USDC",
             bankAccount: request.bankAccount,
             memo: this.generateMemo(request),
-            createdAt: Date.now(),
+            createdAt: now,
+            quoteExpiresAt: now + QUOTE_TTL_MS,
             request, // Store request for potential retries
         };
 

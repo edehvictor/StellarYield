@@ -146,3 +146,19 @@ export function getAllVaultPressure(
 export function clearVaultEvents(vaultId: string): void {
   _events.delete(vaultId);
 }
+
+/** Clear custom thresholds for a vault, reverting to DEFAULT_THRESHOLDS. */
+export function clearVaultThresholds(vaultId: string): void {
+  _thresholds.delete(vaultId);
+}
+
+/**
+ * Classify a velocity directly against thresholds without event recording.
+ * Useful for threshold calibration tests and panel state verification.
+ */
+export function getPressureLevel(
+  velocity: number,
+  thresholds: PressureThresholds = DEFAULT_THRESHOLDS,
+): PressureLevel {
+  return classifyPressure(velocity, thresholds);
+}

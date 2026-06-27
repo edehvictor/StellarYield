@@ -737,8 +737,12 @@ mod tests {
         let maker = Address::generate(&env);
         let taker = Address::generate(&env);
         let token_admin = Address::generate(&env);
-        let token0 = env.register_stellar_asset_contract_v2(token_admin.clone()).address();
-        let token1 = env.register_stellar_asset_contract_v2(token_admin.clone()).address();
+        let token0 = env
+            .register_stellar_asset_contract_v2(token_admin.clone())
+            .address();
+        let token1 = env
+            .register_stellar_asset_contract_v2(token_admin.clone())
+            .address();
 
         // Fund maker and taker
         token::StellarAssetClient::new(&env, &token0).mint(&maker, &2000);
@@ -875,8 +879,12 @@ mod tests {
         let maker = Address::generate(&env);
         let taker = Address::generate(&env);
         let token_admin = Address::generate(&env);
-        let token0 = env.register_stellar_asset_contract_v2(token_admin.clone()).address();
-        let token1 = env.register_stellar_asset_contract_v2(token_admin.clone()).address();
+        let token0 = env
+            .register_stellar_asset_contract_v2(token_admin.clone())
+            .address();
+        let token1 = env
+            .register_stellar_asset_contract_v2(token_admin.clone())
+            .address();
 
         token::StellarAssetClient::new(&env, &token0).mint(&maker, &2000);
         token::StellarAssetClient::new(&env, &token1).mint(&taker, &2000);

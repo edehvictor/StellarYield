@@ -80,11 +80,7 @@ impl VeTokenomics {
         }
 
         let lock_key = DataKey::UserLock(from.clone());
-        if env
-            .storage()
-            .persistent()
-            .has(&lock_key)
-        {
+        if env.storage().persistent().has(&lock_key) {
             extend_persistent_ttl_default(&env, &lock_key);
             return Err(Error::LockUnderway);
         }
@@ -99,9 +95,7 @@ impl VeTokenomics {
             end: unlock_time,
         };
 
-        env.storage()
-            .persistent()
-            .set(&lock_key, &lock);
+        env.storage().persistent().set(&lock_key, &lock);
         extend_persistent_ttl_default(&env, &lock_key);
 
         env.events()
@@ -144,9 +138,7 @@ impl VeTokenomics {
         // Update lock
         lock.amount += amount;
 
-        env.storage()
-            .persistent()
-            .set(&lock_key, &lock);
+        env.storage().persistent().set(&lock_key, &lock);
         extend_persistent_ttl_default(&env, &lock_key);
 
         env.events()
@@ -184,9 +176,7 @@ impl VeTokenomics {
         // Update lock
         lock.end = unlock_time;
 
-        env.storage()
-            .persistent()
-            .set(&lock_key, &lock);
+        env.storage().persistent().set(&lock_key, &lock);
         extend_persistent_ttl_default(&env, &lock_key);
 
         env.events()
@@ -222,9 +212,7 @@ impl VeTokenomics {
         client.transfer(&env.current_contract_address(), &from, &lock.amount);
 
         // Remove lock
-        env.storage()
-            .persistent()
-            .remove(&lock_key);
+        env.storage().persistent().remove(&lock_key);
 
         env.events()
             .publish((symbol_short!("withdraw"), from), (lock.amount,));

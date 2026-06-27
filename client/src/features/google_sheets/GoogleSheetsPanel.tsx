@@ -13,6 +13,7 @@ import {
 } from "lucide-react";
 import { GoogleSheetsService } from "./googleSheetsService";
 import type { GoogleSheetsConfig } from "./types";
+import { GoogleAuthError, GOOGLE_AUTH_MESSAGES } from "./errors";
 
 export interface GoogleSheetsPanelProps {
   walletAddress: string | null;
@@ -27,6 +28,9 @@ export default function GoogleSheetsPanel({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
+  const [authStatus, setAuthStatus] = useState<
+    "connected" | "expired" | "missing_scope" | "not_connected"
+  >("not_connected");
 
   // Only the public client_id is needed here; the client secret lives
   // server-side inside /api/google-sheets/token (process.env.GOOGLE_CLIENT_SECRET).
@@ -35,9 +39,10 @@ export default function GoogleSheetsPanel({
     `${window.location.origin}/auth/google-sheets/callback`,
   );
 
-  // Load config on mount
+  // Load config and auth status on mount
   useEffect(() => {
     setConfig(service.getConfig());
+    setAuthStatus(service.getAuthStatus());
   }, []);
 
   const handleConnectGoogle = useCallback(() => {
@@ -58,12 +63,18 @@ export default function GoogleSheetsPanel({
     try {
       const newConfig = await service.linkSpreadsheet(spreadsheetId, sheetName);
       setConfig(newConfig);
+      setAuthStatus(service.getAuthStatus());
       setSuccess("Spreadsheet linked successfully!");
       setSpreadsheetId("");
     } catch (err) {
-      setError(
-        err instanceof Error ? err.message : "Failed to link spreadsheet",
-      );
+      if (err instanceof GoogleAuthError) {
+        setAuthStatus(service.getAuthStatus());
+        setError(GOOGLE_AUTH_MESSAGES[err.code] ?? err.message);
+      } else {
+        setError(
+          err instanceof Error ? err.message : "Failed to link spreadsheet",
+        );
+      }
     } finally {
       setLoading(false);
     }
@@ -73,6 +84,7 @@ export default function GoogleSheetsPanel({
     if (confirm("Unlink Google Sheets? Daily syncs will stop.")) {
       service.unlinkAccount();
       setConfig(null);
+      setAuthStatus("not_connected");
       setSuccess("Google Sheets unlinked");
     }
   }, []);
@@ -84,6 +96,42 @@ export default function GoogleSheetsPanel({
         <h2 className="text-xl font-semibold mb-4">
           Google Sheets Integration
         </h2>
+
+        {authStatus === "expired" && (
+          <div className="flex items-center gap-3 p-4 mb-4 bg-amber-500/10 border border-amber-500/30 rounded-lg">
+            <AlertCircle className="w-5 h-5 text-amber-500 shrink-0" />
+            <div className="flex-1">
+              <p className="font-semibold text-amber-400">Session Expired</p>
+              <p className="text-sm text-gray-400">
+                {GOOGLE_AUTH_MESSAGES.REAUTH_REQUIRED}
+              </p>
+            </div>
+            <button
+              onClick={handleConnectGoogle}
+              className="px-3 py-1.5 text-sm bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 rounded-lg"
+            >
+              Reconnect
+            </button>
+          </div>
+        )}
+
+        {authStatus === "missing_scope" && (
+          <div className="flex items-center gap-3 p-4 mb-4 bg-amber-500/10 border border-amber-500/30 rounded-lg">
+            <AlertCircle className="w-5 h-5 text-amber-500 shrink-0" />
+            <div className="flex-1">
+              <p className="font-semibold text-amber-400">Missing Sheets Permission</p>
+              <p className="text-sm text-gray-400">
+                {GOOGLE_AUTH_MESSAGES.INSUFFICIENT_SCOPE}
+              </p>
+            </div>
+            <button
+              onClick={handleConnectGoogle}
+              className="px-3 py-1.5 text-sm bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 rounded-lg"
+            >
+              Reconnect
+            </button>
+          </div>
+        )}
 
         {config?.isLinked ? (
           <div className="space-y-4">
