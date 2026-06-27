@@ -84,13 +84,14 @@ The validator checks for:
 
 ## Deployment Manifest Generator
 
-After each deployment run, generate a traceable manifest that captures contract IDs,
-network, commit SHA, and timestamp:
+After each deployment run, generate a traceable manifest that captures contract IDs and structured provenance: network details, source input hashes, git metadata, and CI/local generation context:
 
 ```bash
 node contracts/scripts/generate-manifest.js \
   --input contracts/scripts/deployed.json \
   --network testnet \
+  --rpc-url "$STELLAR_RPC_URL" \
+  --network-passphrase "$STELLAR_NETWORK_PASSPHRASE" \
   --output contracts/scripts/deployment-manifest.json
 ```
 
@@ -101,8 +102,12 @@ Options:
 | `--input` | `contracts/scripts/deployed.json` | Path to the deployed.json from deploy.sh |
 | `--network` | `testnet` | Target network: `testnet`, `mainnet`, or `local` |
 | `--output` | `contracts/scripts/deployment-manifest.json` | Output path for the manifest |
+| `--rpc-url` | `STELLAR_RPC_URL` or `unknown` | RPC URL recorded under `provenance.network.rpcUrl` |
+| `--network-passphrase` | `STELLAR_NETWORK_PASSPHRASE` or `unknown` | Network passphrase recorded under `provenance.network.passphrase` |
 
-The script validates all contract IDs (must be 56-char Soroban/Stellar addresses starting with `C` or `G`), skips empty entries, and cross-references the output against `contracts/registry.json` to warn if any deployed contract is not yet registered.
+The script validates all contract IDs (must be 56-char Soroban/Stellar addresses starting with `C` or `G`), skips empty entries, records SHA-256 hashes for `deployed.json` and `registry.json`, and cross-references the output against `contracts/registry.json` to warn if any deployed contract is not yet registered.
+
+The generated `provenance` block is part of the manifest contract. Maintainers should use `provenance.sourceInput.sha256` and `provenance.registryInput.sha256` to verify the exact files used, confirm that `provenance.network.name` matches the top-level `network`, and use `provenance.git.*` plus `provenance.ci.*` to trace the artifact back to a repository revision and CI/local run. See [`docs/deployment-manifest-provenance.md`](../../docs/deployment-manifest-provenance.md) for field-by-field guidance.
 
 **Sample output** is in `contracts/scripts/deployment-manifest.example.json`.
 
@@ -115,7 +120,9 @@ bash contracts/scripts/deploy.sh
 # 2. Generate the manifest
 node contracts/scripts/generate-manifest.js \
   --input contracts/scripts/deployed.json \
-  --network testnet
+  --network testnet \
+  --rpc-url "$STELLAR_RPC_URL" \
+  --network-passphrase "$STELLAR_NETWORK_PASSPHRASE"
 
 # 3. Validate the registry is up-to-date
 node contracts/scripts/validate-registry.js
@@ -143,7 +150,7 @@ Options:
 | `--registry` | `contracts/registry.json` | Path to registry.json |
 | `--network` | *(from manifest)* | Network to verify: `testnet`, `mainnet`, or `local` |
 
-The verifier reports three types of drift:
+Before drift checks, the verifier rejects manifests whose provenance is missing or malformed (for example, absent `sourceInput.sha256`, invalid SHA-256 digests, or a provenance network that disagrees with the verified network). After provenance validation, it reports three types of drift:
 
 | Type | Meaning |
 |------|---------|
@@ -151,7 +158,7 @@ The verifier reports three types of drift:
 | `MISMATCH` | Both have an entry for the same contract but the addresses differ |
 | `STALE` | Manifest has an entry that the registry doesn't know about (or has empty) |
 
-Exits 0 if clean; exits 1 on any drift (CI-friendly). If the manifest file does not
+Exits 0 if clean; exits 1 on malformed provenance or any drift (CI-friendly). If the manifest file does not
 exist the verifier exits 0 — no deployment has run on this branch yet, which is fine.
 
 **Full post-deployment workflow:**
@@ -163,7 +170,9 @@ bash contracts/scripts/deploy.sh
 # 2. Generate the manifest
 node contracts/scripts/generate-manifest.js \
   --input contracts/scripts/deployed.json \
-  --network testnet
+  --network testnet \
+  --rpc-url "$STELLAR_RPC_URL" \
+  --network-passphrase "$STELLAR_NETWORK_PASSPHRASE"
 
 # 3. Validate the registry format
 node contracts/scripts/validate-registry.js
