@@ -286,7 +286,7 @@ export async function executeContractCallOn(
     let finalXdr = signedXdr;
     if (useFeeBump) {
       onPhase?.("submitting");
-      const resp = await fetch("/api/relayer/fee-bump", {
+      const resp = await apiFetch("/api/relayer/fee-bump", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ innerTxXdr: signedXdr }),

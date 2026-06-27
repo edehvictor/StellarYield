@@ -271,7 +271,7 @@ export class RebalanceExecutorService {
   }
 
   private async signWithRelayer(innerXdr: string): Promise<string> {
-    const response = await fetch(`${this.config.relayerUrl}/relay/sign-fee-bump`, {
+    const response = await fetch(`${this.config.relayerUrl}/api/relayer/fee-bump`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ innerTxXdr: innerXdr }),
