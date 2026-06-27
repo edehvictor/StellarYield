@@ -27,3 +27,18 @@ frontend-build.log
 
 # ── Runtime data ─────────────────────────────────────────────────────────────
 server/audit-logs/
+
+# ── Local env overrides ───────────────────────────────────────────────────────
+.env.local
+.env.*.local
+
+# ── Editor and OS artifacts ───────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+
+# ── Test output ───────────────────────────────────────────────────────────────
+junit.xml
+test-results/
+*.snap

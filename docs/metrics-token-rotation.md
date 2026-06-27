@@ -117,3 +117,57 @@ This script **never prints the token**, it only validates presence when `NODE_EN
 - **Metrics scrape is rate-limited (429)**
   - `/metrics` is rate-limited to reduce brute-force attempts. Adjust scrape intervals or spread scrapes across time.
 
+---
+
+## Recovery steps
+
+Use this section when a rotation goes wrong or the backend fails startup validation due to missing or placeholder secrets.
+
+### Symptom: server fails to start in production (`METRICS_TOKEN` error)
+
+The startup validator (`assertValidServerEnv`) will throw if `METRICS_TOKEN` is missing or is a known placeholder value like `replace-with-a-real-token` or `change-this`.
+
+**Recovery:**
+
+1. Generate a new token (see step 1 of the rotation guide above).
+2. Set `METRICS_TOKEN` in your production secrets manager / deployment platform to the new value.
+3. Redeploy the backend.
+4. Verify startup succeeds and `/api/metrics` returns 200 with the correct header.
+
+### Symptom: server fails to start in production (`AUDIT_SIGNING_KEY` error)
+
+The startup validator will also reject a missing or placeholder `AUDIT_SIGNING_KEY` (e.g. `your-secure-signing-key-change-this-in-production`).
+
+**Recovery:**
+
+1. Generate a strong random key:
+   ```bash
+   openssl rand -base64 48
+   ```
+2. Set `AUDIT_SIGNING_KEY` in your production secrets manager to the new value. Do not commit it.
+3. Redeploy the backend.
+
+> **Note:** Changing `AUDIT_SIGNING_KEY` invalidates existing HMAC signatures on stored audit entries. If your audit replay/verification pipeline checks historical signatures, re-sign affected entries or note the rotation timestamp as a boundary in your audit log policy.
+
+### Symptom: startup error after rotation — old placeholder still in env
+
+If the deployment platform cached a previous env snapshot with a placeholder value:
+
+1. Force-update the secret in the platform (some platforms require explicit re-save even if the value appears set).
+2. Trigger a fresh deployment (do not reuse the cached image).
+3. Confirm the new value is active by checking that the backend starts without validation errors.
+
+### Checking validation locally before deploying
+
+Run the preflight check script against your staging config without deploying:
+
+```bash
+cd server
+NODE_ENV=production \
+  METRICS_TOKEN="your-real-token" \
+  AUDIT_SIGNING_KEY="your-real-key" \
+  node scripts/check-metrics-token.js
+```
+
+For a full env validation check, set all required production variables and run the backend briefly in dry-run mode, or write a small script that calls `validateServerEnv` directly from `server/src/config/env.ts`.
+
