@@ -16,6 +16,7 @@ import { yieldReliabilityEngine } from "../services/yieldReliabilityService";
 import { rotationRegistry } from "../services/strategyRotationService";
 import { exportService } from "../services/exportService";
 import { strategySnapshotVersioningService } from "../services/strategySnapshotVersioningService";
+import { strategyLifecycleAuditService } from "../services/strategyLifecycleAuditService";
 
 const router = Router();
 
@@ -252,5 +253,44 @@ router.get(
     }
   },
 );
+
+/**
+ * GET /api/strategies/:strategyId/lifecycle
+ *
+ * Returns the full event-sourced lifecycle history for a strategy.
+ * Events are returned in insertion (chronological) order.
+ *
+ * Query params:
+ *   correlationId — when provided, scopes results to a single chain and
+ *                   includes a traceability summary.
+ */
+router.get("/:strategyId/lifecycle", (req: Request, res: Response) => {
+  const { strategyId } = req.params;
+  const correlationId = req.query.correlationId as string | undefined;
+
+  if (correlationId) {
+    const summary = strategyLifecycleAuditService.getCorrelationSummary(correlationId);
+    // Guard: only return events that belong to the requested strategy.
+    const filtered = summary.events.filter((e) => e.strategyId === strategyId);
+    res.json({
+      strategyId,
+      correlationId,
+      events: filtered,
+      path: filtered.map((e) => e.type),
+      isComplete: summary.isComplete,
+      isTraceable: strategyLifecycleAuditService.isTraceable(strategyId),
+    });
+    return;
+  }
+
+  const events = strategyLifecycleAuditService.getHistory(strategyId);
+  res.json({
+    strategyId,
+    events,
+    path: events.map((e) => e.type),
+    isTraceable: strategyLifecycleAuditService.isTraceable(strategyId),
+    total: events.length,
+  });
+});
 
 export default router;
