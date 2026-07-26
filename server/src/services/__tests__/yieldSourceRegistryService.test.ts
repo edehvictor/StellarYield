@@ -3,6 +3,7 @@ import {
   summarizeSourceHealth,
   toSourceHealth,
   getSourceHealthRegistry,
+  invalidateSourceCache,
   SOURCE_HEALTH_THRESHOLDS,
   type SourceHealthInput,
   type SourceHealthSummary,
@@ -131,6 +132,7 @@ describe("toSourceHealth", () => {
     expect(summary.reliabilityScore).toBe(89); // rounded
     expect(summary.uptimePct).toBeCloseTo(98.5, 1);
     expect(summary.status).toBe("healthy");
+    expect(summary.cacheVersion).toBe(0);
   });
 
   it("flags stale when the last fetch is far in the past", () => {
@@ -151,11 +153,11 @@ describe("toSourceHealth", () => {
 describe("summarizeSourceHealth", () => {
   it("counts every status bucket", () => {
     const sources = [
-      { status: "healthy" },
-      { status: "healthy" },
-      { status: "degraded" },
-      { status: "unavailable" },
-    ] as SourceHealthSummary[];
+      { status: "healthy", cacheVersion: 1 } as SourceHealthSummary,
+      { status: "healthy", cacheVersion: 1 } as SourceHealthSummary,
+      { status: "degraded", cacheVersion: 1 } as SourceHealthSummary,
+      { status: "unavailable", cacheVersion: 1 } as SourceHealthSummary,
+    ];
     expect(summarizeSourceHealth(sources)).toEqual({
       healthy: 2,
       degraded: 1,
@@ -185,5 +187,37 @@ describe("getSourceHealthRegistry", () => {
         source.status,
       );
     }
+  });
+
+  it("exposes cacheVersion and cacheAge in diagnostics", async () => {
+    const registry = await getSourceHealthRegistry();
+    expect(typeof registry.cacheVersion).toBe("number");
+    expect(registry.cacheVersion).toBeGreaterThanOrEqual(1);
+    expect(typeof registry.cacheAge).toBe("number");
+    expect(registry.cacheAge).toBeGreaterThanOrEqual(0);
+
+    for (const source of registry.sources) {
+      expect(source.cacheVersion).toBe(registry.cacheVersion);
+    }
+  });
+
+  it("invalidateSourceCache increments cacheVersion", async () => {
+    const before = await getSourceHealthRegistry();
+    const versionBefore = before.cacheVersion;
+
+    invalidateSourceCache();
+
+    const after = await getSourceHealthRegistry();
+    expect(after.cacheVersion).toBeGreaterThan(versionBefore);
+  });
+
+  it("invalidateSourceCache with specific provider id refreshes version", async () => {
+    const before = await getSourceHealthRegistry();
+    const versionBefore = before.cacheVersion;
+
+    invalidateSourceCache("blend_api");
+
+    const after = await getSourceHealthRegistry();
+    expect(after.cacheVersion).toBeGreaterThan(versionBefore);
   });
 });

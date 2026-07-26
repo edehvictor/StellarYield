@@ -11,6 +11,7 @@
  * than the engine's internal reliability tiers.
  */
 
+import NodeCache from "node-cache";
 import {
   yieldReliabilityEngine,
   type DataSourceReliability,
@@ -37,6 +38,7 @@ export interface SourceHealthSummary {
   consecutiveFailures: number;
   failureReason: string | null;
   trend: DataSourceReliability["trend"];
+  cacheVersion: number;
 }
 
 export interface SourceHealthRegistry {
@@ -44,6 +46,8 @@ export interface SourceHealthRegistry {
   totalSources: number;
   counts: Record<SourceHealthStatus, number>;
   sources: SourceHealthSummary[];
+  cacheVersion: number;
+  cacheAge: number;
 }
 
 // ── Classification thresholds ─────────────────────────────────────────────
@@ -174,6 +178,7 @@ export function toSourceHealth(
     consecutiveFailures: signals.consecutiveFailures,
     failureReason,
     trend: reliability.trend,
+    cacheVersion: 0,
   };
 }
 
@@ -205,22 +210,98 @@ const REGISTERED_SOURCES: Array<{ id: string; name: string; source: string }> =
     { id: "coingecko", name: "CoinGecko", source: "oracle" },
   ];
 
+// ── Bounded cache ─────────────────────────────────────────────────────────
+// Each registry entry is cached with a version number. When source metadata or
+// health status changes the affected entries are invalidated so the next read
+// produces fresh data.  The cache is bounded by TTL and maximum size.
+
+const CACHE_TTL_SECONDS = 5 * 60; // 5 minutes
+const CACHE_MAX_KEYS = 100;
+
+interface CacheEntry {
+  summary: SourceHealthSummary;
+  cachedAt: number;
+}
+
+const registryCache = new NodeCache({
+  stdTTL: CACHE_TTL_SECONDS,
+  maxKeys: CACHE_MAX_KEYS,
+  checkperiod: 120,
+});
+
+let globalCacheVersion = 1;
+
+function nextCacheVersion(): number {
+  globalCacheVersion += 1;
+  return globalCacheVersion;
+}
+
+/**
+ * Invalidate cache entries for one or all yield sources.
+ * Call this when source metadata or health status changes upstream.
+ *
+ * @param providerId - Optional specific provider to invalidate. Omitting
+ *                     invalidates the entire registry cache.
+ */
+export function invalidateSourceCache(providerId?: string): void {
+  if (providerId) {
+    registryCache.del(`registry:${providerId}`);
+  } else {
+    registryCache.flushAll();
+  }
+  nextCacheVersion();
+}
+
 /**
  * Read-only health registry for every registered yield data source.
+ * Results are cached with versioning and automatically invalidated on TTL
+ * expiry or when {@link invalidateSourceCache} is called.
  */
 export async function getSourceHealthRegistry(): Promise<SourceHealthRegistry> {
+  const now = Date.now();
+
+  // Attempt a full-registry cache hit.
+  const cachedRegistry = registryCache.get<{
+    sources: SourceHealthSummary[];
+    cachedAt: number;
+  }>("registry:full");
+  if (cachedRegistry) {
+    return {
+      generatedAt: new Date(now).toISOString(),
+      totalSources: cachedRegistry.sources.length,
+      counts: summarizeSourceHealth(cachedRegistry.sources),
+      sources: cachedRegistry.sources,
+      cacheVersion: globalCacheVersion,
+      cacheAge: Math.round((now - cachedRegistry.cachedAt) / 1000),
+    };
+  }
+
   const reliabilityScores =
     await yieldReliabilityEngine.getReliabilityScores(REGISTERED_SOURCES);
 
-  const now = Date.now();
   const sources = reliabilityScores
     .map((reliability) => toSourceHealth(reliability, now))
     .sort((a, b) => a.reliabilityScore - b.reliabilityScore);
+
+  // Assign cache version to each entry and store individually.
+  const version = globalCacheVersion;
+  for (const source of sources) {
+    source.cacheVersion = version;
+    registryCache.set(
+      `registry:${source.providerId}`,
+      { summary: source, cachedAt: now } satisfies CacheEntry,
+    );
+  }
+
+  // Store the full result for bulk reads.
+  registryCache.set("registry:full", { sources, cachedAt: now });
 
   return {
     generatedAt: new Date(now).toISOString(),
     totalSources: sources.length,
     counts: summarizeSourceHealth(sources),
     sources,
+    cacheVersion: version,
+    cacheAge: 0,
   };
 }
