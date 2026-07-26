@@ -4,6 +4,15 @@ import { Horizon, rpc as SorobanRpc } from "@stellar/stellar-sdk";
 import { Queue } from "bullmq";
 import { Redis } from "ioredis";
 import { validateServerEnv } from "../config/env";
+import type {
+  DependencyHealthStatus,
+  HealthSnapshot,
+  HorizonHealthSnapshot,
+  SorobanRpcHealthSnapshot,
+  DatabaseHealthSnapshot,
+  IndexerHealthSnapshot,
+  ReadinessResponse,
+} from "../monitoring/healthSnapshots";
 
 const router = Router();
 const prisma = new PrismaClient();
@@ -362,6 +371,180 @@ router.get("/dependencies", async (_req: Request, res: Response) => {
   };
 
   res.status(overallStatus === "down" ? 503 : 200).json(body);
+});
+
+// ── Typed snapshot helpers ────────────────────────────────────────────────
+
+async function checkHorizonSnapshot(): Promise<HorizonHealthSnapshot> {
+  const start = Date.now();
+  const checkedAt = new Date().toISOString();
+  try {
+    const horizon = new Horizon.Server(HORIZON_URL);
+    const resp = await withTimeout(
+      horizon.ledgers().limit(1).order("desc").call(),
+      HEALTH_TIMEOUT_MS,
+    );
+    return {
+      status: "healthy",
+      latencyMs: Date.now() - start,
+      checkedAt,
+      latestLedger: resp.records[0]?.sequence,
+      errorCode: null,
+      retryable: false,
+    };
+  } catch {
+    return {
+      status: "unavailable",
+      latencyMs: Date.now() - start,
+      checkedAt,
+      errorCode: "HORIZON_UNREACHABLE",
+      retryable: true,
+    };
+  }
+}
+
+async function checkSorobanRpcSnapshot(): Promise<SorobanRpcHealthSnapshot> {
+  const start = Date.now();
+  const checkedAt = new Date().toISOString();
+  try {
+    const server = new SorobanRpc.Server(SOROBAN_RPC_URL);
+    const network = await withTimeout(server.getNetwork(), HEALTH_TIMEOUT_MS);
+    return {
+      status: "healthy",
+      latencyMs: Date.now() - start,
+      checkedAt,
+      networkPassphrase: network.passphrase,
+      errorCode: null,
+      retryable: false,
+    };
+  } catch {
+    return {
+      status: "unavailable",
+      latencyMs: Date.now() - start,
+      checkedAt,
+      errorCode: "SOROBAN_RPC_UNREACHABLE",
+      retryable: true,
+    };
+  }
+}
+
+async function checkDatabaseSnapshot(): Promise<DatabaseHealthSnapshot> {
+  const start = Date.now();
+  const checkedAt = new Date().toISOString();
+  try {
+    await withTimeout(prisma.$queryRaw`SELECT 1`, HEALTH_TIMEOUT_MS);
+    return {
+      status: "healthy",
+      latencyMs: Date.now() - start,
+      checkedAt,
+      errorCode: null,
+      retryable: false,
+    };
+  } catch {
+    return {
+      status: "unavailable",
+      latencyMs: Date.now() - start,
+      checkedAt,
+      errorCode: "DB_UNREACHABLE",
+      retryable: true,
+    };
+  }
+}
+
+async function checkIndexerSnapshot(
+  latestLedger?: number,
+): Promise<IndexerHealthSnapshot> {
+  const start = Date.now();
+  const checkedAt = new Date().toISOString();
+  try {
+    const state = await withTimeout(
+      prisma.indexerState.findFirst(),
+      HEALTH_TIMEOUT_MS,
+    );
+    const syncedLedger = state?.lastLedger ?? 0;
+    const lagLedgers = latestLedger !== undefined && latestLedger !== 0
+      ? Math.max(0, latestLedger - syncedLedger)
+      : undefined;
+
+    if (lagLedgers !== undefined && lagLedgers >= 720) {
+      return {
+        status: "unavailable",
+        latencyMs: Date.now() - start,
+        checkedAt,
+        syncedLedger,
+        lagLedgers,
+        errorCode: "INDEXER_LAG_EXCESSIVE",
+        retryable: true,
+      };
+    }
+    if (lagLedgers !== undefined && lagLedgers >= 50) {
+      return {
+        status: "degraded",
+        latencyMs: Date.now() - start,
+        checkedAt,
+        syncedLedger,
+        lagLedgers,
+        errorCode: "INDEXER_LAG_ELEVATED",
+        retryable: true,
+      };
+    }
+    return {
+      status: "healthy",
+      latencyMs: Date.now() - start,
+      checkedAt,
+      syncedLedger,
+      lagLedgers,
+      errorCode: null,
+      retryable: false,
+    };
+  } catch {
+    return {
+      status: "unavailable",
+      latencyMs: Date.now() - start,
+      checkedAt,
+      errorCode: "INDEXER_STATE_UNREADABLE",
+      retryable: true,
+    };
+  }
+}
+
+/**
+ * GET /health/readiness
+ *
+ * Combined readiness endpoint for deployment smoke tests. Returns typed health
+ * snapshots for each dependency with latency, checkedAt, errorCode, and
+ * retryable flag.  Returns 503 if any dependency is unavailable.
+ */
+router.get("/readiness", async (_req: Request, res: Response) => {
+  const [horizon, sorobanRpc, database] = await Promise.all([
+    checkHorizonSnapshot(),
+    checkSorobanRpcSnapshot(),
+    checkDatabaseSnapshot(),
+  ]);
+
+  const indexer = await checkIndexerSnapshot(horizon.latestLedger);
+
+  const deps = { horizon, sorobanRpc, database, indexer };
+  const statuses: DependencyHealthStatus[] = [
+    deps.horizon.status,
+    deps.sorobanRpc.status,
+    deps.database.status,
+    deps.indexer.status,
+  ];
+
+  const overallStatus: ReadinessResponse["status"] = statuses.includes("unavailable")
+    ? "unavailable"
+    : statuses.includes("degraded")
+      ? "degraded"
+      : "healthy";
+
+  const body: ReadinessResponse = {
+    status: overallStatus,
+    dependencies: deps,
+    checkedAt: new Date().toISOString(),
+  };
+
+  res.status(overallStatus === "unavailable" ? 503 : 200).json(body);
 });
 
 /**
