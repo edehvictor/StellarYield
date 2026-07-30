@@ -43,7 +43,7 @@
 
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, symbol_short, token, vec, Address, Bytes,
-    Env, IntoVal, Symbol, Val,
+    BytesN, Env, IntoVal, Symbol, Val,
 };
 #[path = "../../interfaces/vault_standard.rs"]
 mod vault_standard;
@@ -68,6 +68,7 @@ enum DataKey {
     Paused,
     Timelock(Symbol), // Key for different timelocked actions
     PendingAdmin,
+    PendingUpgrade, // Timelocked WASM upgrade (new_wasm_hash, unlock_timestamp)
     Oracle,
     // Emergency settings
     EmergencyPenaltyBps, // optional haircut on withdrawals during emergency
@@ -599,6 +600,9 @@ impl YieldVault {
     pub fn harvest(env: Env, caller: Address, min_amount_out: i128) -> Result<i128, VaultError> {
         YieldVault::require_init(&env)?;
         caller.require_auth();
+        if YieldVault::is_paused(&env) {
+            return Err(VaultError::Paused);
+        }
         let admin: Address = Self::get_storage_required(&env, &DataKey::Admin)?;
         let legacy_keeper: Option<Address> = env.storage().instance().get(&DataKey::Keeper);
         let is_admin = caller == admin;
