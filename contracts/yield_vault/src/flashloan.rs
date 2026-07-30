@@ -67,6 +67,9 @@ impl YieldVault {
         params: &Bytes,
     ) -> Result<i128, VaultError> {
         YieldVault::require_init(env)?;
+        if YieldVault::is_paused(env) {
+            return Err(VaultError::Paused);
+        }
 
         if amount <= 0 {
             return Err(VaultError::ZeroAmount);

@@ -1,12 +1,9 @@
 use crate::{events, DataKey, VaultError, YieldVault};
-use soroban_sdk::{symbol_short, xdr::ToXdr, Address, Bytes, Env};
+use soroban_sdk::{contractimpl, symbol_short, xdr::ToXdr, Address, Bytes, BytesN, Env};
 
+#[contractimpl]
 impl YieldVault {
-    /// Note: `emergency_pause` and `emergency_unpause` have moved to emergency.rs.
-    /// They now support guardian authority, bounded durations, automatic expiry,
-    /// and governance oversight. Use `YieldVault::emergency_pause(env, caller, duration)`
-    /// and `YieldVault::emergency_unpause(env, caller)` instead.
-    /// Immediately pause all vault operations (deposit, withdraw, rebalance).
+    /// Immediately pause all vault operations (deposit, rebalance, harvest, flash loan).
     /// Callable only by admin.
     pub fn emergency_pause(env: Env, admin: Address) -> Result<(), VaultError> {
         Self::require_admin(&env, &admin)?;
@@ -84,8 +81,12 @@ impl YieldVault {
                 .set(&DataKey::TotalAssets, &new_total);
         }
 
-        env.events()
-            .publish((symbol_short!("rescue"),), (admin, target, rescue_amount));
+        events::emit_versioned_event(
+            &env,
+            symbol_short!("rescue"),
+            events::ADMIN_ACTION_EVENT_V1.schema_version,
+            (admin, target, rescue_amount),
+        );
         Ok(())
     }
 
@@ -107,8 +108,12 @@ impl YieldVault {
             if pending.0 == new_admin && now >= pending.1 {
                 env.storage().instance().set(&DataKey::Admin, &new_admin);
                 env.storage().instance().remove(&DataKey::PendingAdmin);
-                env.events()
-                    .publish((symbol_short!("set_adm"),), (admin, new_admin));
+                events::emit_versioned_event(
+                    &env,
+                    symbol_short!("set_adm"),
+                    events::ADMIN_ACTION_EVENT_V1.schema_version,
+                    (admin, new_admin),
+                );
                 return Ok(());
             }
         }
@@ -118,19 +123,93 @@ impl YieldVault {
         env.storage()
             .instance()
             .set(&DataKey::PendingAdmin, &(new_admin.clone(), unlock_time));
-        env.events()
-            .publish((symbol_short!("adm_tm"),), (admin, new_admin, unlock_time));
+        events::emit_versioned_event(
+            &env,
+            symbol_short!("adm_tm"),
+            events::ADMIN_ACTION_EVENT_V1.schema_version,
+            (admin, new_admin, unlock_time),
+        );
 
         Err(VaultError::TimelockActive)
+    }
+
+    /// Propose a new WASM code upgrade with a 24-hour timelock.
+    ///
+    /// # Arguments
+    /// * `admin` - The admin address proposing the upgrade.
+    /// * `new_wasm_hash` - SHA256 hash of the compiled Soroban WASM code.
+    pub fn propose_upgrade(
+        env: Env,
+        admin: Address,
+        new_wasm_hash: BytesN<32>,
+    ) -> Result<(), VaultError> {
+        Self::require_admin(&env, &admin)?;
+
+        let now = env.ledger().timestamp();
+        let unlock_time = now + 86400; // 24-hour timelock
+
+        env.storage()
+            .instance()
+            .set(&DataKey::PendingUpgrade, &(new_wasm_hash.clone(), unlock_time));
+
+        events::emit_versioned_event(
+            &env,
+            symbol_short!("prp_upg"),
+            events::ADMIN_ACTION_EVENT_V1.schema_version,
+            (admin, new_wasm_hash, unlock_time),
+        );
+
+        Err(VaultError::TimelockActive)
+    }
+
+    /// Commit a previously proposed WASM code upgrade after the 24-hour timelock.
+    ///
+    /// # Arguments
+    /// * `admin` - The admin address executing the upgrade.
+    /// * `new_wasm_hash` - The expected WASM hash previously proposed.
+    pub fn commit_upgrade(
+        env: Env,
+        admin: Address,
+        new_wasm_hash: BytesN<32>,
+    ) -> Result<(), VaultError> {
+        Self::require_admin(&env, &admin)?;
+
+        let pending: Option<(BytesN<32>, u64)> = env
+            .storage()
+            .instance()
+            .get(&DataKey::PendingUpgrade);
+
+        let (pending_hash, unlock_time) = pending.ok_or(VaultError::Unauthorized)?;
+
+        if pending_hash != new_wasm_hash {
+            return Err(VaultError::Unauthorized);
+        }
+
+        let now = env.ledger().timestamp();
+        if now < unlock_time {
+            return Err(VaultError::TimelockActive);
+        }
+
+        // Apply contract code upgrade using Soroban deployer API
+        env.deployer().update_current_contract_wasm(new_wasm_hash.clone());
+
+        // Remove pending upgrade record
+        env.storage().instance().remove(&DataKey::PendingUpgrade);
+
+        events::emit_versioned_event(
+            &env,
+            symbol_short!("upgraded"),
+            events::ADMIN_ACTION_EVENT_V1.schema_version,
+            (admin, new_wasm_hash),
+        );
+
+        Ok(())
     }
 
     /// View function to check if the vault is currently paused.
     /// Delegates to emergency.rs implementation which handles automatic expiry
     /// and guardian-based pause state.
     pub fn is_paused(env: &Env) -> bool {
-        // Check legacy pause flag (DataKey::Paused) for backward compatibility
-        // and delegate to emergency.rs for the new timelocked pause system.
-        // The emergency module's is_paused handles automatic expiry.
         let legacy_paused: bool = env
             .storage()
             .instance()
@@ -139,17 +218,25 @@ impl YieldVault {
         if legacy_paused {
             return true;
         }
-        // Check emergency module pause state (handles automatic expiry)
-        let pause_start: Option<u64> = env.storage().instance().get(&crate::emergency::EmergencyKey::PauseStart);
-        let pause_duration: Option<u64> = env.storage().instance().get(&crate::emergency::EmergencyKey::PauseDuration);
+        let pause_start: Option<u64> = env
+            .storage()
+            .instance()
+            .get(&crate::emergency::EmergencyKey::PauseStart);
+        let pause_duration: Option<u64> = env
+            .storage()
+            .instance()
+            .get(&crate::emergency::EmergencyKey::PauseDuration);
         match (pause_start, pause_duration) {
             (Some(start), Some(duration)) => {
                 let now = env.ledger().timestamp();
                 let elapsed = now.saturating_sub(start);
                 if elapsed >= duration {
-                    // Pause has expired - auto-cleanup
-                    env.storage().instance().remove(&crate::emergency::EmergencyKey::PauseStart);
-                    env.storage().instance().remove(&crate::emergency::EmergencyKey::PauseDuration);
+                    env.storage()
+                        .instance()
+                        .remove(&crate::emergency::EmergencyKey::PauseStart);
+                    env.storage()
+                        .instance()
+                        .remove(&crate::emergency::EmergencyKey::PauseDuration);
                     false
                 } else {
                     true
@@ -158,26 +245,9 @@ impl YieldVault {
             _ => false,
         }
     }
-}
 
     // ── Replay Protection for Admin Operations (#902) ───────────────────
     /// Verify and consume an admin operation intent with domain separation.
-    ///
-    /// Domain includes:
-    /// - Network passphrase (prevents cross-network replay)
-    /// - Contract address (prevents cross-contract replay)
-    /// - Operation type (pause, unpause, set_admin, etc.)
-    /// - Nonce (prevents replay of same operation)
-    /// - Expiry timestamp (operations expire after 1 hour)
-    ///
-    /// # Arguments
-    /// * `operation_type` - Symbolic operation identifier (e.g., "pause", "admin")
-    /// * `nonce` - Unique nonce for this operation
-    /// * `expiry_timestamp` - Unix timestamp when this operation expires
-    ///
-    /// # Returns
-    /// Ok if the operation is valid and hasn't been executed before.
-    /// Err if expired or already executed.
     pub fn verify_admin_operation(
         env: &Env,
         operation_type: soroban_sdk::Symbol,
@@ -186,25 +256,20 @@ impl YieldVault {
     ) -> Result<(), VaultError> {
         let now = env.ledger().timestamp();
 
-        // Check expiry
         if now > expiry_timestamp {
             return Err(VaultError::OperationExpired);
         }
 
-        // Build domain-separated hash
-        // Domain = network || contract || operation || nonce || expiry
         let network = env.ledger().network_id();
         let contract = env.current_contract_address();
 
         let preimage = (network, contract, operation_type, nonce, expiry_timestamp).to_xdr(env);
         let op_hash: Bytes = env.crypto().sha256(&preimage).into();
 
-        // Check if already executed
         if env.storage().instance().has(&DataKey::ExecutedAdminOp(op_hash.clone())) {
             return Err(VaultError::OperationReplayed);
         }
 
-        // Mark as executed
         env.storage()
             .instance()
             .set(&DataKey::ExecutedAdminOp(op_hash), &true);
@@ -214,14 +279,6 @@ impl YieldVault {
 
     // ── Cross-Contract Allowlist with Network Binding (#905) ──────────────
     /// Register an allowed contract for a given role on this network.
-    ///
-    /// Only the admin can call this. Once registered, only that contract
-    /// (on this network) can call functions that check this role.
-    ///
-    /// # Arguments
-    /// * `admin` - Must be the vault admin
-    /// * `role` - Symbolic role identifier (e.g., "zap", "keeper", "oracle")
-    /// * `contract` - The contract address to allowlist for this role
     pub fn set_allowed_contract(
         env: Env,
         admin: Address,
@@ -230,8 +287,6 @@ impl YieldVault {
     ) -> Result<(), VaultError> {
         Self::require_admin(&env, &admin)?;
 
-        // Store the allowed contract for this role
-        // Network binding is implicit: contracts are tied to their deployment network
         env.storage()
             .instance()
             .set(&DataKey::AllowedContractRole(role.clone()), &contract);
@@ -244,24 +299,118 @@ impl YieldVault {
     }
 
     /// Verify that a calling contract is allowed for the given role.
-    ///
-    /// # Arguments
-    /// * `role` - The role to verify (e.g., "zap", "keeper")
-    /// * `caller` - The address attempting to call
-    ///
-    /// # Returns
-    /// Ok if caller is the allowed contract for this role.
-    /// Err if caller is unknown or wrong for this role.
     pub fn require_allowed_contract(
         env: &Env,
         role: soroban_sdk::Symbol,
         caller: &Address,
     ) -> Result<(), VaultError> {
-        let allowed: Option<Address> = env.storage().instance().get(&DataKey::AllowedContractRole(role));
+        let allowed: Option<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey::AllowedContractRole(role));
 
         match allowed {
             Some(allowed_contract) if &allowed_contract == caller => Ok(()),
             _ => Err(VaultError::UnauthorizedContract),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{YieldVault, YieldVaultClient};
+    use soroban_sdk::testutils::Address as _;
+    use soroban_sdk::{BytesN, Env};
+
+    fn setup_env() -> (Env, YieldVaultClient<'static>, Address, Address) {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register(YieldVault, ());
+        let client = YieldVaultClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let token_admin = Address::generate(&env);
+        let token_contract = env.register_stellar_asset_contract_v2(token_admin);
+        let token_addr = token_contract.address();
+
+        client.initialize(&admin, &token_addr);
+
+        (env, client, admin, token_addr)
+    }
+
+    #[test]
+    fn test_emergency_pause_and_unpause_circuit_breaker() {
+        let (env, client, admin, _) = setup_env();
+        let user = Address::generate(&env);
+
+        // Initially not paused
+        assert!(!YieldVault::is_paused(&env));
+
+        // Admin triggers emergency pause
+        client.emergency_pause(&admin);
+        assert!(YieldVault::is_paused(&env));
+
+        // Deposits should be blocked while paused
+        let deposit_res = client.try_deposit(&user, &1000, &1000);
+        assert!(deposit_res.is_err());
+
+        // Admin unpauses
+        client.emergency_unpause(&admin);
+        assert!(!YieldVault::is_paused(&env));
+    }
+
+    #[test]
+    fn test_rescue_funds() {
+        let (env, client, admin, token_addr) = setup_env();
+        let target = Address::generate(&env);
+
+        // Mint tokens directly to the contract (simulating accidental transfer)
+        let token_client = soroban_sdk::token::StellarAssetClient::new(&env, &token_addr);
+        token_client.mint(&client.address, &5000);
+
+        // Rescue funds
+        let rescue_res = client.try_rescue_funds(&admin, &target, &2000);
+        assert!(rescue_res.is_ok());
+    }
+
+    #[test]
+    fn test_set_admin_24h_timelock() {
+        let (env, client, admin, _) = setup_env();
+        let new_admin = Address::generate(&env);
+
+        // Step 1: Initiate set_admin (returns TimelockActive error)
+        let res1 = client.try_set_admin(&admin, &new_admin);
+        assert!(res1.is_err());
+
+        // Jump forward 12 hours (43200s) - should still fail
+        env.ledger().set_timestamp(env.ledger().timestamp() + 43200);
+        let res2 = client.try_set_admin(&admin, &new_admin);
+        assert!(res2.is_err());
+
+        // Jump forward another 12 hours (86400s total) - should succeed
+        env.ledger().set_timestamp(env.ledger().timestamp() + 43200);
+        let res3 = client.try_set_admin(&admin, &new_admin);
+        assert!(res3.is_ok());
+    }
+
+    #[test]
+    fn test_propose_and_commit_upgrade_timelock() {
+        let (env, client, admin, _) = setup_env();
+        let fake_wasm_hash = BytesN::from_array(&env, &[7u8; 32]);
+
+        // Propose upgrade
+        let prop_res = client.try_propose_upgrade(&admin, &fake_wasm_hash);
+        assert!(prop_res.is_err());
+
+        // Commit upgrade before 24h should fail
+        let commit_early = client.try_commit_upgrade(&admin, &fake_wasm_hash);
+        assert!(commit_early.is_err());
+
+        // Jump forward 24h (86401 seconds)
+        env.ledger().set_timestamp(env.ledger().timestamp() + 86401);
+        let commit_res = client.try_commit_upgrade(&admin, &fake_wasm_hash);
+        assert!(commit_res.is_ok());
     }
 }
