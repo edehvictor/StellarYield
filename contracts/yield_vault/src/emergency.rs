@@ -25,9 +25,9 @@
 //! Emergency withdrawal penalty uses floor division (user-favorable).
 //! Maximum rounding dust: 1 unit per withdrawal.
 
-use soroban_sdk::{contracttype, symbol_short, token, Address, Env};
+use soroban_sdk::{contractimpl, contracttype, symbol_short, token, Address, Env};
 
-use crate::{DataKey, VaultError, YieldVault};
+use crate::{DataKey, VaultError, YieldVault, YieldVaultArgs, YieldVaultClient};
 
 /// Storage keys for emergency pause state.
 #[contracttype]
@@ -47,17 +47,14 @@ pub enum EmergencyKey {
 /// Default maximum pause duration: 24 hours (86400 seconds).
 const DEFAULT_MAX_PAUSE_DURATION: u64 = 86400;
 
+#[contractimpl]
 impl YieldVault {
     /// Set the guardian address. Admin-only.
     ///
     /// # Arguments
     /// * `admin` - Current admin address.
     /// * `guardian` - New guardian address.
-    pub fn set_guardian(
-        env: Env,
-        admin: Address,
-        guardian: Address,
-    ) -> Result<(), VaultError> {
+    pub fn set_guardian(env: Env, admin: Address, guardian: Address) -> Result<(), VaultError> {
         Self::require_init(&env)?;
         Self::require_admin(&env, &admin)?;
 
@@ -77,11 +74,7 @@ impl YieldVault {
     /// Set the governance address. Admin-only.
     ///
     /// Governance can confirm long pauses or rotate the guardian.
-    pub fn set_governance(
-        env: Env,
-        admin: Address,
-        governance: Address,
-    ) -> Result<(), VaultError> {
+    pub fn set_governance(env: Env, admin: Address, governance: Address) -> Result<(), VaultError> {
         Self::require_init(&env)?;
         Self::require_admin(&env, &admin)?;
 
@@ -89,10 +82,8 @@ impl YieldVault {
             .instance()
             .set(&EmergencyKey::Governance, &governance);
 
-        env.events().publish(
-            (symbol_short!("gov_set"),),
-            (admin, governance),
-        );
+        env.events()
+            .publish((symbol_short!("gov_set"),), (admin, governance));
 
         Ok(())
     }
@@ -107,11 +98,7 @@ impl YieldVault {
     /// # Arguments
     /// * `caller` - Must be guardian or admin.
     /// * `duration` - Pause duration in seconds. Clamped to MAX_PAUSE_DURATION.
-    pub fn emergency_pause(
-        env: Env,
-        caller: Address,
-        duration: u64,
-    ) -> Result<(), VaultError> {
+    pub fn emergency_pause(env: Env, caller: Address, duration: u64) -> Result<(), VaultError> {
         Self::require_init(&env)?;
         caller.require_auth();
         Self::require_guardian_or_admin(&env, &caller)?;
@@ -138,10 +125,8 @@ impl YieldVault {
             .instance()
             .set(&EmergencyKey::PauseDuration, &clamped_duration);
 
-        env.events().publish(
-            (symbol_short!("pause"),),
-            (caller, now, clamped_duration),
-        );
+        env.events()
+            .publish((symbol_short!("pause"),), (caller, now, clamped_duration));
 
         Ok(())
     }
@@ -165,8 +150,7 @@ impl YieldVault {
             .instance()
             .remove(&EmergencyKey::PauseDuration);
 
-        env.events()
-            .publish((symbol_short!("unpause"),), (caller,));
+        env.events().publish((symbol_short!("unpause"),), (caller,));
 
         Ok(())
     }
@@ -184,8 +168,7 @@ impl YieldVault {
         Self::require_init(&env)?;
         caller.require_auth();
 
-        let is_authorized = Self::is_governance(&env, &caller)
-            || Self::is_admin(&env, &caller);
+        let is_authorized = Self::is_governance(&env, &caller) || Self::is_admin(&env, &caller);
 
         if !is_authorized {
             return Err(VaultError::Unauthorized);
@@ -195,10 +178,8 @@ impl YieldVault {
             .instance()
             .set(&EmergencyKey::MaxPauseDuration, &new_max_duration);
 
-        env.events().publish(
-            (symbol_short!("max_pd"),),
-            (caller, new_max_duration),
-        );
+        env.events()
+            .publish((symbol_short!("max_pd"),), (caller, new_max_duration));
 
         Ok(())
     }
@@ -212,8 +193,7 @@ impl YieldVault {
         Self::require_init(&env)?;
         caller.require_auth();
 
-        let is_authorized = Self::is_governance(&env, &caller)
-            || Self::is_admin(&env, &caller);
+        let is_authorized = Self::is_governance(&env, &caller) || Self::is_admin(&env, &caller);
 
         if !is_authorized {
             return Err(VaultError::Unauthorized);
@@ -237,7 +217,8 @@ impl YieldVault {
     /// is considered expired and the vault is unpaused.
     pub fn is_paused(env: &Env) -> bool {
         let pause_start: Option<u64> = env.storage().instance().get(&EmergencyKey::PauseStart);
-        let pause_duration: Option<u64> = env.storage().instance().get(&EmergencyKey::PauseDuration);
+        let pause_duration: Option<u64> =
+            env.storage().instance().get(&EmergencyKey::PauseDuration);
 
         match (pause_start, pause_duration) {
             (Some(start), Some(duration)) => {
@@ -246,11 +227,10 @@ impl YieldVault {
                 if elapsed >= duration {
                     // Pause has expired - auto-cleanup
                     env.storage().instance().remove(&EmergencyKey::PauseStart);
-                    env.storage().instance().remove(&EmergencyKey::PauseDuration);
-                    env.events().publish(
-                        (symbol_short!("expire"),),
-                        (),
-                    );
+                    env.storage()
+                        .instance()
+                        .remove(&EmergencyKey::PauseDuration);
+                    env.events().publish((symbol_short!("expire"),), ());
                     false
                 } else {
                     true
@@ -465,7 +445,7 @@ impl YieldVault {
 mod tests {
     use super::*;
     use crate::{YieldVault, YieldVaultClient};
-    use soroban_sdk::testutils::Address as _;
+    use soroban_sdk::testutils::{Address as _, Ledger};
     use soroban_sdk::Env;
 
     fn setup_env() -> (Env, YieldVaultClient<'static>, Address, Address, Address) {
@@ -500,11 +480,11 @@ mod tests {
 
         // Guardian can pause
         let _ = client.emergency_pause(&guardian, &3600); // 1 hour
-        assert!(YieldVault::is_paused(&env));
+        assert!(client.get_pause_state().0);
 
         // Guardian can unpause
         let _ = client.emergency_unpause(&guardian);
-        assert!(!YieldVault::is_paused(&env));
+        assert!(!client.get_pause_state().0);
     }
 
     #[test]
@@ -513,11 +493,11 @@ mod tests {
 
         // Admin can pause directly
         let _ = client.emergency_pause(&admin, &3600);
-        assert!(YieldVault::is_paused(&env));
+        assert!(client.get_pause_state().0);
 
         // Admin can unpause
         let _ = client.emergency_unpause(&admin);
-        assert!(!YieldVault::is_paused(&env));
+        assert!(!client.get_pause_state().0);
     }
 
     #[test]
@@ -551,13 +531,13 @@ mod tests {
 
         // Pause for 1 second
         let _ = client.emergency_pause(&admin, &1);
-        assert!(YieldVault::is_paused(&env));
+        assert!(client.get_pause_state().0);
 
         // Jump forward 2 seconds
         env.ledger().set_timestamp(env.ledger().timestamp() + 2);
 
         // Pause should have expired
-        assert!(!YieldVault::is_paused(&env));
+        assert!(!client.get_pause_state().0);
     }
 
     #[test]
@@ -565,11 +545,11 @@ mod tests {
         let (env, client, admin, token_addr, token_admin) = setup_env();
         let user = Address::generate(&env);
 
-        mint_tokens(&env, &token_addr, &token_admin, &user, 1000);
+        mint_tokens(&env, &token_addr, &user, 1000);
 
         // Pause
         let _ = client.emergency_pause(&admin, &3600);
-        assert!(YieldVault::is_paused(&env));
+        assert!(client.get_pause_state().0);
 
         // Deposit should fail during pause
         let result = client.try_deposit(&user, &1000, &1000);
@@ -581,7 +561,7 @@ mod tests {
         let (env, client, admin, token_addr, token_admin) = setup_env();
         let user = Address::generate(&env);
 
-        mint_tokens(&env, &token_addr, &token_admin, &user, 1000);
+        mint_tokens(&env, &token_addr, &user, 1000);
 
         // Deposit first
         client.deposit(&user, &1000, &1000);
@@ -600,7 +580,7 @@ mod tests {
         let user = Address::generate(&env);
         let target = Address::generate(&env);
 
-        mint_tokens(&env, &token_addr, &token_admin, &user, 1000);
+        mint_tokens(&env, &token_addr, &user, 1000);
         client.deposit(&user, &1000, &1000);
 
         // Pause
@@ -689,12 +669,12 @@ mod tests {
         let (env, client, admin, token_addr, token_admin) = setup_env();
         let user = Address::generate(&env);
 
-        mint_tokens(&env, &token_addr, &token_admin, &user, 1000);
+        mint_tokens(&env, &token_addr, &user, 1000);
         client.deposit(&user, &1000, &1000);
 
         // Pause for a short duration
         let _ = client.emergency_pause(&admin, &5);
-        assert!(YieldVault::is_paused(&env));
+        assert!(client.get_pause_state().0);
 
         // Withdrawals are always allowed even during pause
         let result = client.try_withdraw(&user, &500);
@@ -702,10 +682,10 @@ mod tests {
 
         // Jump past pause expiry
         env.ledger().set_timestamp(env.ledger().timestamp() + 10);
-        assert!(!YieldVault::is_paused(&env), "Pause should auto-expire");
+        assert!(!client.get_pause_state().0, "Pause should auto-expire");
 
         // After expiry, deposits work again
-        mint_tokens(&env, &token_addr, &token_admin, &user, 500);
+        mint_tokens(&env, &token_addr, &user, 500);
         let result = client.try_deposit(&user, &500, &500);
         assert!(result.is_ok(), "Deposits should work after pause expiry");
     }
@@ -715,7 +695,7 @@ mod tests {
         let (env, client, admin, token_addr, token_admin) = setup_env();
         let user = Address::generate(&env);
 
-        mint_tokens(&env, &token_addr, &token_admin, &user, 1000);
+        mint_tokens(&env, &token_addr, &user, 1000);
         client.deposit(&user, &1000, &1000);
 
         // Guardian pauses but cannot block withdraw

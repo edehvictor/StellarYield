@@ -1,0 +1,164 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+      - dev
+  pull_request:
+
+jobs:
+  changes:
+    name: Detect changed areas
+    runs-on: ubuntu-latest
+    outputs:
+      client: ${{ steps.filter.outputs.client }}
+      server: ${{ steps.filter.outputs.server }}
+      contracts: ${{ steps.filter.outputs.contracts }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Detect changed files
+        id: filter
+        shell: bash
+        run: |
+          if [[ "${{ github.event_name }}" != "pull_request" ]]; then
+            echo "client=true" >> "$GITHUB_OUTPUT"
+            echo "server=true" >> "$GITHUB_OUTPUT"
+            echo "contracts=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          git fetch --no-tags --depth=1 origin "+refs/heads/${{ github.base_ref }}:refs/remotes/origin/${{ github.base_ref }}"
+          changed_files="$(git diff --name-only "refs/remotes/origin/${{ github.base_ref }}" HEAD)"
+
+          if grep -Eq '^(client/|packages/sdk/|shared/|vercel\.json|\.github/workflows/ci\.yml)$' <<< "$changed_files"; then
+            echo "client=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "client=false" >> "$GITHUB_OUTPUT"
+          fi
+
+          if grep -Eq '^(server/|shared/|\.github/workflows/ci\.yml)$' <<< "$changed_files"; then
+            echo "server=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "server=false" >> "$GITHUB_OUTPUT"
+          fi
+
+          if grep -Eq '^(contracts/|\.github/workflows/ci\.yml)$' <<< "$changed_files"; then
+            echo "contracts=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "contracts=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  client:
+    name: Client CI
+    needs: changes
+    if: needs.changes.outputs.client == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: client
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: client/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Build
+        run: npm run build
+
+  server:
+    name: Server CI
+    needs: changes
+    if: needs.changes.outputs.server == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: server
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: server/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Generate Prisma client
+        run: npx prisma generate
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Build
+        run: npm run build
+
+  contracts:
+    name: Contracts CI
+    needs: changes
+    if: needs.changes.outputs.contracts == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: contracts
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          components: rustfmt, clippy
+
+      - name: Rust versions
+        run: |
+          rustc --version
+          cargo fmt --version
+
+      - name: Format check
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: >
+          cargo clippy --workspace --all-targets --
+          -D warnings
+          -A unused-imports
+          -A unused-variables
+          -A unused-mut
+          -A dead-code
+          -A clippy::erasing_op
+          -A clippy::single_match
+          -A clippy::match_like_matches_macro
+          -A clippy::manual_memcpy
+          -A clippy::unnecessary_cast
+          -A clippy::absurd_extreme_comparisons
+          -A unused-comparisons
+          -A clippy::let_unit_value
+          -A clippy::manual_range_contains
+
+      - name: Test
+        run: cargo test --workspace

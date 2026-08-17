@@ -40,11 +40,6 @@ jest.mock("@stellar/stellar-sdk", () => {
   const actual = jest.requireActual("@stellar/stellar-sdk");
   return {
     ...actual,
-    rpc: {
-      Server: jest.fn().mockImplementation(() => ({
-        getNetwork: jest.fn().mockResolvedValue({ id: "testnet" }),
-      })),
-    },
     Horizon: {
       Server: jest.fn().mockImplementation(() => ({
         ledgers: () => ({

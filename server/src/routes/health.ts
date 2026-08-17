@@ -6,12 +6,11 @@ import { Redis } from "ioredis";
 import { validateServerEnv } from "../config/env";
 import type {
   DependencyHealthStatus,
-  HealthSnapshot,
   HorizonHealthSnapshot,
   SorobanRpcHealthSnapshot,
   DatabaseHealthSnapshot,
   IndexerHealthSnapshot,
-  ReadinessResponse,
+  ReadinessResponse as DeploymentReadinessResponse,
 } from "../monitoring/healthSnapshots";
 
 const router = Router();
@@ -658,13 +657,13 @@ router.get("/readiness", async (_req: Request, res: Response) => {
     deps.indexer.status,
   ];
 
-  const overallStatus: ReadinessResponse["status"] = statuses.includes("unavailable")
+  const overallStatus: DeploymentReadinessResponse["status"] = statuses.includes("unavailable")
     ? "unavailable"
     : statuses.includes("degraded")
       ? "degraded"
       : "healthy";
 
-  const body: ReadinessResponse = {
+  const body: DeploymentReadinessResponse = {
     status: overallStatus,
     dependencies: deps,
     checkedAt: new Date().toISOString(),

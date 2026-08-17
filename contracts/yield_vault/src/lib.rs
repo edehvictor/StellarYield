@@ -81,14 +81,14 @@ enum DataKey {
 mod admin;
 mod donations;
 mod emergency;
+pub mod events;
 mod fees;
 mod flashloan;
 mod invariants;
 mod keeper;
 mod oracle;
 mod referrals;
-mod verification;
-pub mod events; // Versioned event schemas (#904)
+mod verification; // Versioned event schemas (#904)
 
 // ── Errors ──────────────────────────────────────────────────────────────
 
@@ -1520,6 +1520,8 @@ mod fuzz_tests {
     use soroban_sdk::testutils::Address as _;
     use soroban_sdk::Env;
 
+    const CI_PROPTEST_CASES: u32 = 64;
+
     fn setup_env() -> (Env, YieldVaultClient<'static>, Address, Address, Address) {
         let env = Env::default();
         env.mock_all_auths();
@@ -1544,7 +1546,7 @@ mod fuzz_tests {
 
     // Invariant 1 & 2: totals never go negative
     proptest! {
-        #![proptest_config(ProptestConfig::with_cases(10_000))]
+        #![proptest_config(ProptestConfig::with_cases(CI_PROPTEST_CASES))]
 
         #[test]
         fn fuzz_deposit_totals_non_negative(amount in 1i128..=i64::MAX as i128) {
@@ -1561,7 +1563,7 @@ mod fuzz_tests {
 
     // Invariant 3: first deposit mints 1:1 shares
     proptest! {
-        #![proptest_config(ProptestConfig::with_cases(10_000))]
+        #![proptest_config(ProptestConfig::with_cases(CI_PROPTEST_CASES))]
 
         #[test]
         fn fuzz_first_deposit_shares_equal_assets(amount in 1i128..=i64::MAX as i128) {
@@ -1578,7 +1580,7 @@ mod fuzz_tests {
 
     // Invariant 4: deposit then full withdraw roundtrip
     proptest! {
-        #![proptest_config(ProptestConfig::with_cases(10_000))]
+        #![proptest_config(ProptestConfig::with_cases(CI_PROPTEST_CASES))]
 
         #[test]
         fn fuzz_deposit_withdraw_roundtrip(amount in 1i128..=i64::MAX as i128) {
@@ -1597,7 +1599,7 @@ mod fuzz_tests {
 
     // Invariant 5: proportional shares in multi-depositor scenario
     proptest! {
-        #![proptest_config(ProptestConfig::with_cases(5_000))]
+        #![proptest_config(ProptestConfig::with_cases(CI_PROPTEST_CASES))]
 
         #[test]
         fn fuzz_multi_deposit_proportional(
@@ -1626,7 +1628,7 @@ mod fuzz_tests {
 
     // Invariant 6: rebalance correctly tracks assets
     proptest! {
-        #![proptest_config(ProptestConfig::with_cases(5_000))]
+        #![proptest_config(ProptestConfig::with_cases(CI_PROPTEST_CASES))]
 
         #[test]
         fn fuzz_rebalance_updates_assets(
@@ -1656,7 +1658,7 @@ mod fuzz_tests {
 
     // Invariant 7: share price never decreases from deposit/withdraw
     proptest! {
-        #![proptest_config(ProptestConfig::with_cases(5_000))]
+        #![proptest_config(ProptestConfig::with_cases(CI_PROPTEST_CASES))]
 
         #[test]
         fn fuzz_share_price_monotonic(

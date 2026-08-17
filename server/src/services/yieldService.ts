@@ -190,7 +190,7 @@ export async function getYieldData(): Promise<NormalizedYield[]> {
       return lastGood;
     }
 
-    return normalizeYields(
+    const fallback = normalizeYields(
       PROTOCOLS.map((p) => ({
         protocolName: p.protocolName,
         protocolType: p.protocolType,
@@ -213,26 +213,6 @@ export async function getYieldData(): Promise<NormalizedYield[]> {
           compounding: (p.baseApyBps / 100) * 0.05,
           tacticalRotation: (p.baseApyBps / 100) * 0.05,
         },
-      })),
-    );
-
-    const fallback = normalizeYields(
-      PROTOCOLS.map((protocol) => ({
-        protocolName: protocol.protocolName,
-        protocolType: protocol.protocolType,
-        apyBps: protocol.baseApyBps,
-        tvlUsd: protocol.baseTvlUsd,
-        volatilityPct: protocol.volatilityPct,
-        protocolAgeDays: protocol.protocolAgeDays,
-        network: "mainnet",
-        source: protocol.source,
-        fetchedAt: new Date().toISOString(),
-        liquidityUsd: protocol.liquidityUsd,
-        rebalancingBehavior: protocol.rebalancingBehavior,
-        managementFeeBps: protocol.managementFeeBps,
-        performanceFeeBps: protocol.performanceFeeBps,
-        capitalEfficiencyPct: protocol.capitalEfficiencyPct,
-        rewards: protocol.rewardStreams,
       })),
     );
 

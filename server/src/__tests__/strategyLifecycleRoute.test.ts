@@ -47,7 +47,6 @@ jest.mock("../services/exportService", () => ({
 jest.mock("../config/protocols", () => ({ PROTOCOLS: [] }));
 jest.mock("../utils/riskScoring", () => ({ calculateRiskScore: jest.fn(() => ({ score: 5 })) }));
 
-// eslint-disable-next-line import/first
 import strategiesRouter from "../routes/strategies";
 
 const app = express();

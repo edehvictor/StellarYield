@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback, useRef } from "react";
-import { getApiBaseUrl } from "../lib/api";
+import { getApiBaseUrl, getApiBaseUrlState } from "../lib/api";
 
 /**
  * Status of the backend API availability
@@ -98,6 +98,6 @@ export function useApiEndpointAvailable(endpoint: string, method: "HEAD" | "GET"
  * Useful for determining if a production backend is expected.
  */
 export function isBackendConfigured(): boolean {
-  const baseUrl = getApiBaseUrl();
-  return baseUrl !== "http://localhost:3001";
+  const state = getApiBaseUrlState();
+  return state.available && state.baseUrl !== "http://localhost:3001";
 }

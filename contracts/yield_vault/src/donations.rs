@@ -215,10 +215,8 @@ impl YieldVault {
 
         // INVARIANT: net must be non-negative
         if net < 0 {
-            env.events().publish(
-                (symbol_short!("don_err"),),
-                (user.clone(), net, 0i128),
-            );
+            env.events()
+                .publish((symbol_short!("don_err"),), (user.clone(), net, 0i128));
             return yield_amount;
         }
 

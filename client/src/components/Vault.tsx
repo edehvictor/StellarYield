@@ -7,7 +7,7 @@ import { useWallet } from "../context/useWallet";
 import { useVaultOgMeta } from "../hooks/useVaultOgMeta";
 import { useBackendStatus } from "../hooks/useBackendStatus";
 import { useVaultActionAvailability } from "../hooks/useVaultActionAvailability";
-import type { VaultAction, VaultActionAvailabilityMap } from "../hooks/useVaultActionAvailability";
+import type { VaultActionAvailabilityMap } from "../hooks/useVaultActionAvailability";
 import { RecoveryAdvisor } from "./AIAdvisor/RecoveryAdvisor";
 import { fetchVaultStats, type VaultStats, formatTvl, validateVaultSlug } from "../lib/vaultData";
 import VaultCapacityWarning, { type VaultCapacityStatus } from "./VaultCapacityWarning";
@@ -170,11 +170,13 @@ export default function Vault() {
 
   // ── Helpers ──────────────────────────────────────────────────────────────
 
+  type VaultTabAction = "deposit" | "withdraw";
+
   function ActionTab({
     action,
     label,
   }: {
-    action: VaultAction;
+    action: VaultTabAction;
     label: string;
   }) {
     const avail = availability[action];
@@ -203,7 +205,7 @@ export default function Vault() {
     );
   }
 
-  function ActionDisabledBanner({ action }: { action: VaultAction }) {
+  function ActionDisabledBanner({ action }: { action: VaultTabAction }) {
     const avail = availability[action];
     if (avail.available) return null;
 

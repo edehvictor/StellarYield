@@ -1,0 +1,292 @@
+name: Dev PR Automation
+
+on:
+  pull_request_target:
+    branches:
+      - dev
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - ready_for_review
+  workflow_dispatch:
+
+permissions:
+  checks: read
+  contents: write
+  issues: write
+  pull-requests: write
+  statuses: read
+
+concurrency:
+  group: dev-pr-automation
+  cancel-in-progress: false
+
+jobs:
+  manage-dev-prs:
+    name: Manage dev pull requests
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Wait 10 minutes after pull request opens
+        if: ${{ github.event_name == 'pull_request_target' && github.event.action == 'opened' }}
+        run: sleep 600
+
+      - name: Merge passing PRs and notify assignees
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const okConclusions = new Set(["success", "neutral", "skipped"]);
+            const selfCheckNames = new Set(["Manage dev pull requests"]);
+
+            const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+            function unique(values) {
+              return [...new Set(values.filter(Boolean))];
+            }
+
+            function mentionTargets(pr) {
+              const assignees = (pr.assignees || []).map((assignee) => assignee.login);
+              const targets = assignees.length ? assignees : [pr.user?.login];
+              return unique(targets).map((login) => `@${login}`).join(" ");
+            }
+
+            function formatList(items) {
+              const uniqueItems = unique(items);
+              const shown = uniqueItems.slice(0, 10).map((item) => `- ${item}`);
+              const remaining = uniqueItems.length - shown.length;
+
+              if (remaining > 0) {
+                shown.push(`- and ${remaining} more`);
+              }
+
+              return shown.join("\n");
+            }
+
+            async function commentOnce(issue_number, marker, body) {
+              const comments = await github.paginate(github.rest.issues.listComments, {
+                owner,
+                repo,
+                issue_number,
+                per_page: 100
+              });
+
+              if (comments.some((comment) => comment.body?.includes(marker))) {
+                return;
+              }
+
+              await github.rest.issues.createComment({
+                owner,
+                repo,
+                issue_number,
+                body
+              });
+            }
+
+            async function listTargetPulls() {
+              const eventPull = context.payload.pull_request;
+
+              if (eventPull?.base?.ref === "dev" && eventPull.state === "open") {
+                return [eventPull];
+              }
+
+              return github.paginate(github.rest.pulls.list, {
+                owner,
+                repo,
+                base: "dev",
+                state: "open",
+                sort: "updated",
+                direction: "desc",
+                per_page: 100
+              });
+            }
+
+            async function getPullWithMergeability(pull_number) {
+              let pull;
+
+              for (let attempt = 0; attempt < 4; attempt += 1) {
+                const response = await github.rest.pulls.get({
+                  owner,
+                  repo,
+                  pull_number
+                });
+
+                pull = response.data;
+
+                if (pull.mergeable !== null) {
+                  return pull;
+                }
+
+                await wait(3000);
+              }
+
+              return pull;
+            }
+
+            async function getCiState(sha) {
+              const [statusResponse, checkResponse] = await Promise.all([
+                github.rest.repos.getCombinedStatusForRef({
+                  owner,
+                  repo,
+                  ref: sha
+                }),
+                github.rest.checks.listForRef({
+                  owner,
+                  repo,
+                  ref: sha,
+                  per_page: 100
+                })
+              ]);
+
+              const statuses = statusResponse.data.statuses || [];
+              const checkRuns = (checkResponse.data.check_runs || []).filter((run) => {
+                const isCurrentRun = run.details_url?.includes(`/actions/runs/${context.runId}`);
+                const isSelfCheck = selfCheckNames.has(run.name);
+
+                return !isCurrentRun && !isSelfCheck;
+              });
+
+              const failedStatuses = statuses
+                .filter((status) => ["error", "failure"].includes(status.state))
+                .map((status) => status.context);
+              const pendingStatuses = statuses
+                .filter((status) => status.state === "pending")
+                .map((status) => status.context);
+              const failedChecks = checkRuns
+                .filter((run) => run.status === "completed" && !okConclusions.has(run.conclusion))
+                .map((run) => run.name);
+              const pendingChecks = checkRuns
+                .filter((run) => run.status !== "completed")
+                .map((run) => run.name);
+
+              if (failedStatuses.length || failedChecks.length) {
+                return {
+                  state: "failed",
+                  names: [...failedStatuses, ...failedChecks]
+                };
+              }
+
+              if (pendingStatuses.length || pendingChecks.length) {
+                return {
+                  state: "pending",
+                  names: [...pendingStatuses, ...pendingChecks]
+                };
+              }
+
+              if (statuses.length + checkRuns.length === 0) {
+                return {
+                  state: "pending",
+                  names: ["CI checks have not reported yet"]
+                };
+              }
+
+              return {
+                state: "passed",
+                names: []
+              };
+            }
+
+            async function mergePullRequest(pr) {
+              const mergeMethods = ["squash", "merge", "rebase"];
+              let lastError;
+
+              for (const merge_method of mergeMethods) {
+                try {
+                  await github.rest.pulls.merge({
+                    owner,
+                    repo,
+                    pull_number: pr.number,
+                    merge_method
+                  });
+
+                  core.info(`Merged PR #${pr.number} into dev using ${merge_method}.`);
+                  return;
+                } catch (error) {
+                  lastError = error;
+
+                  if (![405, 409, 422].includes(error.status)) {
+                    throw error;
+                  }
+                }
+              }
+
+              const marker = `<!-- stellar-dev-pr-automation:merge-blocked:${pr.head.sha} -->`;
+              const mentions = mentionTargets(pr);
+              const reason = lastError?.message || "GitHub did not allow the merge.";
+
+              await commentOnce(
+                pr.number,
+                marker,
+                [
+                  marker,
+                  `${mentions} CI has passed, but this PR could not be auto-merged yet.`,
+                  "",
+                  `Reason: ${reason}`
+                ].join("\n")
+              );
+            }
+
+            async function handlePullRequest(candidate) {
+              const pr = await getPullWithMergeability(candidate.number);
+
+              if (!pr || pr.state !== "open" || pr.base.ref !== "dev" || pr.draft) {
+                return;
+              }
+
+              const mentions = mentionTargets(pr);
+
+              if (pr.mergeable === null) {
+                core.info(`Mergeability is still being calculated for PR #${pr.number}.`);
+                return;
+              }
+
+              if (pr.mergeable === false || pr.mergeable_state === "dirty") {
+                const marker = `<!-- stellar-dev-pr-automation:conflicts:${pr.head.sha} -->`;
+
+                await commentOnce(
+                  pr.number,
+                  marker,
+                  [
+                    marker,
+                    `${mentions} this PR targets \`dev\`, but it has merge conflicts.`,
+                    "",
+                    "Please resolve the conflicts so it can be merged automatically after CI passes."
+                  ].join("\n")
+                );
+                return;
+              }
+
+              const ci = await getCiState(pr.head.sha);
+
+              if (ci.state === "failed") {
+                const marker = `<!-- stellar-dev-pr-automation:ci-failed:${pr.head.sha} -->`;
+
+                await commentOnce(
+                  pr.number,
+                  marker,
+                  [
+                    marker,
+                    `${mentions} CI is failing for this PR targeting \`dev\`.`,
+                    "",
+                    "Please fix the failing checks so it can be merged automatically.",
+                    "",
+                    formatList(ci.names)
+                  ].join("\n")
+                );
+                return;
+              }
+
+              if (ci.state === "pending") {
+                core.info(`CI is still pending for PR #${pr.number}: ${ci.names.join(", ")}`);
+                return;
+              }
+
+              await mergePullRequest(pr);
+            }
+
+            const pullRequests = await listTargetPulls();
+
+            for (const pr of pullRequests) {
+              await handlePullRequest(pr);
+            }

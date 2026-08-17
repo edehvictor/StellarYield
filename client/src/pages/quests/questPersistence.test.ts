@@ -37,7 +37,7 @@ const TEMPLATE: Quest[] = [
 ];
 
 function mockStorage(initial: Record<string, string> = {}) {
-  let store = { ...initial };
+  const store = { ...initial };
   return {
     getItem(key: string) {
       return store[key] ?? null;

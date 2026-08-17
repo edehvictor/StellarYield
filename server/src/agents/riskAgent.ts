@@ -88,10 +88,10 @@ function logAudit(metadata: {
       clean = clean.split(apiKey).join("[REDACTED]");
     }
     // Also scan for common credentials pattern
-    clean = clean.replace(/Bearer\s+[a-zA-Z0-9_\-\.]+/gi, "Bearer [REDACTED]");
-    clean = clean.replace(/key=[a-zA-Z0-9_\-\.]+/gi, "key=[REDACTED]");
-    clean = clean.replace(/api_key=[a-zA-Z0-9_\-\.]+/gi, "api_key=[REDACTED]");
-    clean = clean.replace(/apikey=[a-zA-Z0-9_\-\.]+/gi, "apikey=[REDACTED]");
+    clean = clean.replace(/Bearer\s+[a-zA-Z0-9_.-]+/gi, "Bearer [REDACTED]");
+    clean = clean.replace(/key=[a-zA-Z0-9_.-]+/gi, "key=[REDACTED]");
+    clean = clean.replace(/api_key=[a-zA-Z0-9_.-]+/gi, "api_key=[REDACTED]");
+    clean = clean.replace(/apikey=[a-zA-Z0-9_.-]+/gi, "apikey=[REDACTED]");
 
     // Truncate overly large raw payloads
     if (clean.length > 4000) {
@@ -201,20 +201,6 @@ async function callLLM(systemPrompt: string, userPrompt: string): Promise<string
     });
     throw err;
   }
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        contents: [{ parts: [{ text: `${systemPrompt}\n\n${userPrompt}` }] }],
-        generationConfig: { temperature: 0.3, maxOutputTokens: 500 },
-      }),
-    },
-    "gemini-risk-agent",
-    { timeoutMs: LLM_TIMEOUT_MS, maxRetries: LLM_MAX_RETRIES },
-  );
-  const data = (await res.json()) as {
-    candidates: { content: { parts: { text: string }[] } }[];
-  };
-  return data.candidates[0].content.parts[0].text;
 }
 
 

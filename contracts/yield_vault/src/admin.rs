@@ -33,6 +33,11 @@ impl YieldVault {
         Ok(())
     }
 
+use crate::{DataKey, VaultError, YieldVault, YieldVaultArgs, YieldVaultClient};
+use soroban_sdk::{contractimpl, symbol_short, xdr::ToXdr, Address, Bytes, Env};
+
+#[contractimpl]
+impl YieldVault {
     /// Rescue tokens sent to the contract by mistake.
     ///
     /// # Arguments
@@ -245,8 +250,10 @@ impl YieldVault {
             _ => false,
         }
     }
+}
 
-    // ── Replay Protection for Admin Operations (#902) ───────────────────
+// ── Replay Protection for Admin Operations (#902) ───────────────────
+impl YieldVault {
     /// Verify and consume an admin operation intent with domain separation.
     pub fn verify_admin_operation(
         env: &Env,
@@ -267,6 +274,12 @@ impl YieldVault {
         let op_hash: Bytes = env.crypto().sha256(&preimage).into();
 
         if env.storage().instance().has(&DataKey::ExecutedAdminOp(op_hash.clone())) {
+        // Check if already executed
+        if env
+            .storage()
+            .instance()
+            .has(&DataKey::ExecutedAdminOp(op_hash.clone()))
+        {
             return Err(VaultError::OperationReplayed);
         }
 
@@ -291,10 +304,8 @@ impl YieldVault {
             .instance()
             .set(&DataKey::AllowedContractRole(role.clone()), &contract);
 
-        env.events().publish(
-            (symbol_short!("allow"),),
-            (admin, role, contract),
-        );
+        env.events()
+            .publish((symbol_short!("allow"),), (admin, role, contract));
         Ok(())
     }
 

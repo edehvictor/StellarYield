@@ -70,9 +70,9 @@ describe("api URL helpers", () => {
       expect(apiUrl("/api/yields", configuredEnv)).toBe("https://api.example.com/api/yields");
     });
 
-    it("throws error if no env vars set and hostname is not localhost (preview env)", () => {
-      global.window = { location: { hostname: 'stellar-yield-preview.vercel.app' } } as any;
-      expect(() => getApiBaseUrl(env({}))).toThrow('API_UNAVAILABLE: Backend URL not configured for preview environment. Please set VITE_API_BASE_URL.');
+    it("throws from strict lookup when no env vars are set outside localhost", () => {
+      global.window = { location: { hostname: "stellar-yield-preview.vercel.app" } } as any;
+      expect(() => getApiBaseUrl(env({}))).toThrow("API base URL configuration is missing.");
     });
 
     it("trims whitespace from configured URLs", () => {
@@ -126,6 +126,18 @@ describe("api URL helpers", () => {
     it("preserves nested paths", () => {
       const configuredEnv = env({ VITE_API_BASE_URL: "https://api.example.com" });
       expect(apiUrl("api/v1/yields", configuredEnv)).toBe("https://api.example.com/api/v1/yields");
+    });
+
+    it("falls back to same-origin paths when hosted API config is missing", () => {
+      global.window = { location: { hostname: "stellaryield.vercel.app" } } as any;
+      expect(apiUrl("/api/yields", env({}))).toBe("/api/yields");
+      expect(apiUrl("api/alerts", env({}))).toBe("/api/alerts");
+    });
+
+    it("still rejects invalid configured API URLs", () => {
+      expect(() => apiUrl("/api/yields", env({ VITE_API_BASE_URL: "api.example.com" }))).toThrow(
+        'Invalid API URL configuration: "api.example.com". Must start with http:// or https://',
+      );
     });
   });
 

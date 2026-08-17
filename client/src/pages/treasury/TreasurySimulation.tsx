@@ -1,6 +1,20 @@
 import React, { useState } from "react";
-import { Vault, TrendingUp, AlertTriangle, Save, RotateCcw, Info, Upload, FileText, Download, FileSpreadsheet, FileCode, Sliders, CheckSquare, Square } from "lucide-react";
-import { Vault, TrendingUp, AlertTriangle, AlertCircle, Info, Save, RotateCcw, Upload, FileText } from "lucide-react";
+import {
+  AlertCircle,
+  AlertTriangle,
+  CheckSquare,
+  FileCode,
+  FileSpreadsheet,
+  FileText,
+  Info,
+  RotateCcw,
+  Save,
+  Sliders,
+  Square,
+  TrendingUp,
+  Upload,
+  Vault,
+} from "lucide-react";
 import { FeeAssumptionsModal } from "../../components/FeeAssumptionsModal";
 import { apiUrl } from "../../lib/api";
 import { decodeTransactionError } from "../../utils/errorDecoder";
@@ -99,6 +113,7 @@ interface ScenarioComparisonData {
     maxYieldLossPct: number;
     totalWarningsCount: number;
   };
+}
 // ── Structured warning renderer ─────────────────────────────────────────────
 
 const SEVERITY_ICON: Record<SimulationWarning["severity"], React.ReactElement> = {

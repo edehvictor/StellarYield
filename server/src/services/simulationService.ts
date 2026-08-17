@@ -128,12 +128,6 @@ export function simulateDeposit(params: SimulationParams): SimulationResult {
   }
 
   if (!isKnownStrategy || targetProtocols.length === 0) {
-    result.warnings.push("Unsupported strategy or asset combination.");
-    if (targetProtocols.length === 0) {
-      targetProtocols = [PROTOCOLS[0]];
-      baseApySum = targetProtocols[0].baseApyBps;
-    }
-  if (targetProtocols.length === 0) {
     result.warnings.push({
       code: "UNSUPPORTED_STRATEGY",
       severity: "warning",
@@ -141,8 +135,10 @@ export function simulateDeposit(params: SimulationParams): SimulationResult {
       message: "Unsupported strategy or asset combination.",
       remediation: "Select a recognised strategy (e.g. blend-stable or aggressive-yield) and retry.",
     });
-    targetProtocols = [PROTOCOLS[0]]; // fallback
-    baseApySum = targetProtocols[0].baseApyBps;
+    if (targetProtocols.length === 0) {
+      targetProtocols = [PROTOCOLS[0]]; // fallback
+      baseApySum = targetProtocols[0].baseApyBps;
+    }
   }
 
   // Allocate proportionally based on APY (just a mock logic for simulation)

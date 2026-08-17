@@ -248,7 +248,10 @@ fn test_dispute_at_exact_boundary_fails() {
 
     let disputer = Address::generate(&env);
     let result = client.try_dispute(&disputer, &proposal_id);
-    assert!(result.is_err(), "dispute must fail once the window has closed");
+    assert!(
+        result.is_err(),
+        "dispute must fail once the window has closed"
+    );
 }
 
 // ── Post-resolution storage cleanup tests (#875) ──────────────────────
@@ -305,7 +308,10 @@ fn test_double_execute_fails() {
 
     // second execute must be rejected
     let result = client.try_execute(&proposal_id);
-    assert!(result.is_err(), "re-executing a resolved proposal must fail");
+    assert!(
+        result.is_err(),
+        "re-executing a resolved proposal must fail"
+    );
 }
 
 #[test]
@@ -463,7 +469,8 @@ fn test_before_start_execute_fails_and_after_expiry_execute_ok() {
     let proposal_id = client.propose(&admin, &target, &Symbol::new(&env, "action"), &args);
 
     // Before end (= still inside window / "before executable")
-    env.ledger().with_mut(|li| li.timestamp = challenge_window - 1);
+    env.ledger()
+        .with_mut(|li| li.timestamp = challenge_window - 1);
     assert!(client.try_execute(&proposal_id).is_err());
 
     // After expiry

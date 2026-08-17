@@ -1,5 +1,5 @@
-use crate::{VaultError, YieldVault};
-use soroban_sdk::{contracttype, symbol_short, Address, Env, Vec};
+use crate::{VaultError, YieldVault, YieldVaultArgs, YieldVaultClient};
+use soroban_sdk::{contractimpl, contracttype, symbol_short, Address, Env, Vec};
 
 /// Storage keys for the dynamic fee system.
 #[contracttype]
@@ -40,6 +40,7 @@ const DEFAULT_MAX_FEE_BPS: i128 = 1_000;
 /// Number of APY snapshots to consider for moving average.
 const MOVING_AVERAGE_WINDOW: u32 = 10;
 
+#[contractimpl]
 impl YieldVault {
     /// Record a new APY observation and recalculate the dynamic fee.
     /// Callable by admin.
@@ -315,6 +316,17 @@ mod tests {
         (env, client, admin, token_addr, token_admin)
     }
 
+    fn apply_fee_in_contract(
+        env: &Env,
+        client: &YieldVaultClient<'static>,
+        amount: i128,
+    ) -> (i128, i128) {
+        let contract_id = client.address.clone();
+        env.as_contract(&contract_id, || {
+            YieldVault::apply_performance_fee(env, amount)
+        })
+    }
+
     #[test]
     fn test_apply_performance_fee_rounding_dust() {
         let (env, client, admin, _, _) = setup_env();
@@ -326,19 +338,19 @@ mod tests {
 
         // Test with amounts that produce rounding dust
         // 100 * 123 / 10000 = 1.23 -> floor = 1
-        let (net, fee) = YieldVault::apply_performance_fee(&env, 100);
+        let (net, fee) = apply_fee_in_contract(&env, &client, 100);
         assert_eq!(fee, 1, "Fee should be floor(1.23) = 1");
         assert_eq!(net, 99, "Net should be 100 - 1 = 99");
         assert_eq!(net + fee, 100, "Invariant: net + fee == gross");
 
         // Test with larger amount: 10000 * 123 / 10000 = 123 (exact)
-        let (net, fee) = YieldVault::apply_performance_fee(&env, 10_000);
+        let (net, fee) = apply_fee_in_contract(&env, &client, 10_000);
         assert_eq!(fee, 123, "Fee should be exact 123");
         assert_eq!(net, 9_877, "Net should be 10000 - 123 = 9877");
         assert_eq!(net + fee, 10_000, "Invariant: net + fee == gross");
 
         // Test with very small amount: 1 * 123 / 10000 = 0 (floor)
-        let (net, fee) = YieldVault::apply_performance_fee(&env, 1);
+        let (net, fee) = apply_fee_in_contract(&env, &client, 1);
         assert_eq!(fee, 0, "Fee should be 0 for tiny amount");
         assert_eq!(net, 1, "Net should be 1");
         assert_eq!(net + fee, 1, "Invariant: net + fee == gross");
@@ -360,9 +372,10 @@ mod tests {
         let (env, client, admin, _, _) = setup_env();
         // Set max fee: 1000 bps (10%)
         client.set_fee_bounds(&admin, &1000, &1000);
+        client.record_apy_and_adjust_fee(&admin, &20_000);
 
         // 1000 * 1000 / 10000 = 100 (exact 10%)
-        let (net, fee) = YieldVault::apply_performance_fee(&env, 1000);
+        let (net, fee) = apply_fee_in_contract(&env, &client, 1000);
         assert_eq!(fee, 100);
         assert_eq!(net, 900);
         assert_eq!(net + fee, 1000);
@@ -375,7 +388,7 @@ mod tests {
         client.set_fee_bounds(&admin, &100, &100);
 
         // 1000 * 100 / 10000 = 10 (exact 1%)
-        let (net, fee) = YieldVault::apply_performance_fee(&env, 1000);
+        let (net, fee) = apply_fee_in_contract(&env, &client, 1000);
         assert_eq!(fee, 10);
         assert_eq!(net, 990);
         assert_eq!(net + fee, 1000);

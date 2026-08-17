@@ -47,20 +47,13 @@ pub const HARVEST_EVENT_V1: EventVersion = EventVersion {
 /// * `topic` - The event topic (e.g., "deposit")
 /// * `version` - The schema version for this event
 /// * `data` - The event data payload
-pub fn emit_versioned_event<T>(
-    env: &Env,
-    topic: Symbol,
-    version: u32,
-    data: T,
-) where
+pub fn emit_versioned_event<T>(env: &Env, topic: Symbol, version: u32, data: T)
+where
     T: IntoVal<Env, Val>,
 {
     // Emit event with version information
     // Topic format: "event_v<version>" to allow version-aware filtering
-    env.events().publish(
-        (topic, version),
-        data,
-    );
+    env.events().publish((topic, version), data);
 }
 
 /// Marker type for unknown/future event versions
@@ -79,10 +72,7 @@ pub enum EventDecodeStatus {
 }
 
 /// Verify if an event version is compatible with this decoder
-pub fn check_event_version(
-    event_type: &str,
-    version: u32,
-) -> EventDecodeStatus {
+pub fn check_event_version(event_type: &str, version: u32) -> EventDecodeStatus {
     match (event_type, version) {
         ("deposit", 1) => EventDecodeStatus::Recognized,
         ("withdrawal", 1) => EventDecodeStatus::Recognized,

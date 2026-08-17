@@ -27,14 +27,18 @@ export function loadDensity(): DensityMode {
     if (stored === "compact" || stored === "comfortable" || stored === "spacious") {
       return stored;
     }
-  } catch {}
+  } catch {
+    return "comfortable";
+  }
   return "comfortable";
 }
 
 function saveDensity(mode: DensityMode) {
   try {
     localStorage.setItem(STORAGE_KEY, mode);
-  } catch {}
+  } catch {
+    return;
+  }
 }
 
 export const DensityContext = createContext<DensityContextValue | undefined>(undefined);

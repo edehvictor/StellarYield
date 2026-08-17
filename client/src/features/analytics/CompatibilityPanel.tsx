@@ -154,6 +154,22 @@ export default function CompatibilityPanel() {
     }
   };
 
+  // Protocol issues grouped by action (used for the protocol detail view)
+  const protocolActionGroups = useMemo(() => {
+    if (!selectedProtocol) return [];
+    const grouped: Record<ActionType, CompatibilityIssue[]> = {
+      deposit: [], withdraw: [], rebalance: [], quote: [], reporting: [],
+    };
+    for (const issue of selectedProtocol.issues) {
+      const actions = ((issue.affectedActions?.length ?? 0) > 0
+        ? issue.affectedActions
+        : ['deposit', 'withdraw', 'rebalance', 'quote', 'reporting']) as ActionType[];
+      for (const a of actions) grouped[a].push(issue);
+    }
+    return (['deposit', 'withdraw', 'rebalance', 'quote', 'reporting'] as ActionType[])
+      .map(action => ({ action, issues: sortIssues(grouped[action]) }));
+  }, [selectedProtocol]);
+
   // ── Loading ───────────────────────────────────────────────────────────
 
   if (isLoading) {
@@ -230,22 +246,6 @@ export default function CompatibilityPanel() {
 
   // Sort issues within the active group
   const sortedIssues = sortIssues(activeGroup?.issues ?? []);
-
-  // Protocol issues grouped by action (used for the protocol detail view)
-  const protocolActionGroups = useMemo(() => {
-    if (!selectedProtocol) return [];
-    const grouped: Record<ActionType, CompatibilityIssue[]> = {
-      deposit: [], withdraw: [], rebalance: [], quote: [], reporting: [],
-    };
-    for (const issue of selectedProtocol.issues) {
-      const actions = ((issue.affectedActions?.length ?? 0) > 0
-        ? issue.affectedActions
-        : ['deposit', 'withdraw', 'rebalance', 'quote', 'reporting']) as ActionType[];
-      for (const a of actions) grouped[a].push(issue);
-    }
-    return (['deposit', 'withdraw', 'rebalance', 'quote', 'reporting'] as ActionType[])
-      .map(action => ({ action, issues: sortIssues(grouped[action]) }));
-  }, [selectedProtocol]);
 
   // ── Render ────────────────────────────────────────────────────────────
 
