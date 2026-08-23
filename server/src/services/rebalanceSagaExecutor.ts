@@ -337,6 +337,14 @@ export function classifySagaError(error: unknown): FailureClass {
 
 /**
  * Recover stuck sagas (expired locks, interrupted executions).
+ *
+ * Phase-aware recovery — NEVER blindly resets a saga that may already have an
+ * on-chain action. A saga in SUBMITTED state persisted its transactionHash at
+ * the SUBMIT checkpoint; resetting it to pending would cause the retry worker
+ * to re-build and re-submit the transaction, resulting in a duplicate on-chain
+ * rebalance. The recovery path for SUBMITTED sagas instead verifies the
+ * persisted hash on-chain and either confirms it or leaves it in SUBMITTED so
+ * the executor resumes from the CONFIRM phase (which never re-submits).
  */
 export async function recoverStuckSagas(workerId: string): Promise<{
   recovered: number;
@@ -347,10 +355,54 @@ export async function recoverStuckSagas(workerId: string): Promise<{
 
   for (const saga of stuckSagas) {
     const lockResult = await rebalanceSagaService.acquireLock(saga.id, workerId);
-    if (lockResult.acquired && lockResult.saga) {
-      await rebalanceSagaService.transitionState(saga.id, SAGA_STATE.PENDING);
+    if (!lockResult.acquired || !lockResult.saga) continue;
+
+    const locked = lockResult.saga;
+    try {
+      // ── SUBMITTED sagas may have landed on-chain. ──────────────────────
+      // Verify the persisted hash BEFORE deciding anything else. If confirmed,
+      // flip to the confirmed terminal state. If not confirmed, leave the saga
+      // in SUBMITTED — `executeRebalanceSaga` resumption starts at the CONFIRM
+      // phase and polls the same hash instead of re-submitting.
+      if (locked.state === SAGA_STATE.SUBMITTED) {
+        if (locked.transactionHash) {
+          try {
+            const confirmed = await rebalanceExecutorService.confirmTransaction(
+              locked.transactionHash,
+            );
+            if (confirmed) {
+              await rebalanceSagaService.transitionState(
+                saga.id,
+                SAGA_STATE.CONFIRMED,
+                { transactionHash: locked.transactionHash },
+              );
+              recovered.push(locked);
+            }
+          } catch (error) {
+            // RPC check failed — keep saga in SUBMITTED so the next recovery
+            // pass re-polls. Never degrade to pending here.
+            console.error(
+              `Saga ${saga.id} recovery confirm poll failed: ${error instanceof Error ? error.message : String(error)}`,
+            );
+          }
+        }
+        // No persisted hash: safe to reset only when we know we never
+        // contacted the relayer (phase still INIT).
+        if (!locked.transactionHash && locked.currentPhase === SAGA_PHASE.INIT) {
+          await rebalanceSagaService.transitionState(saga.id, SAGA_STATE.PENDING);
+          recovered.push(locked);
+        }
+        continue;
+      }
+
+      // ── Pre-submission sagas (PENDING / SIMULATED with no tx hash) are
+      // safe to reset to PENDING — no on-chain action has been performed.
+      if (!locked.transactionHash) {
+        await rebalanceSagaService.transitionState(saga.id, SAGA_STATE.PENDING);
+        recovered.push(locked);
+      }
+    } finally {
       await rebalanceSagaService.releaseLock(saga.id, workerId);
-      recovered.push(lockResult.saga);
     }
   }
 

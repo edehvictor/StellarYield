@@ -394,6 +394,14 @@ export class RebalanceSagaService {
       },
     });
 
+    // When the saga reaches a terminal state, sync the queue entry so the
+    // failure/review state is visible in the queue and the processor stops
+    // spinning retries on a dead job (acceptance: "A failed transaction
+    // records the reason and does not silently disappear from the queue").
+    if (isTerminal) {
+      await this.syncQueueEntryWithTerminalState(saga);
+    }
+
     return this.mapSagaToDTO(saga);
   }
 
@@ -559,6 +567,25 @@ export class RebalanceSagaService {
       },
     });
 
+    // Sync queue entry: retry → back to PENDING so the processor picks it up;
+    // cancel → terminal CANCELLED so it stays out of the retry pool.
+    await prisma.rebalanceQueueEntry.update({
+      where: { id: saga.queueEntryId },
+      data:
+        decision === 'retry'
+          ? {
+              status: 'PENDING',
+              lastError: null,
+              nextRetryAt: new Date(),
+              completedAt: undefined,
+            }
+          : {
+              status: 'CANCELLED',
+              lastError: reason ?? saga.reviewReason ?? 'Cancelled via review',
+              completedAt: new Date(),
+            },
+    });
+
     return this.mapSagaToDTO(updated);
   }
 
@@ -615,6 +642,56 @@ export class RebalanceSagaService {
   }
 
   // ── Private helpers ──────────────────────────────────────────────────────
+
+  /**
+   * Sync the queue entry's status when its saga reaches a terminal state.
+   *
+   * Maps saga terminal states to queue-entry terminal states so failures and
+   * manual-review jobs are clearly visible in the queue (and the processor
+   * stops picking them up as retryable).
+   */
+  private async syncQueueEntryWithTerminalState(saga: any): Promise<void> {
+    const REBALANCE_STATUS = {
+      PENDING: 'PENDING',
+      PROCESSING: 'PROCESSING',
+      PARTIAL: 'PARTIAL',
+      COMPLETED: 'COMPLETED',
+      FAILED: 'FAILED',
+      CANCELLED: 'CANCELLED',
+    } as const;
+
+    let status: string;
+    let lastError: string | null = null;
+
+    switch (saga.state) {
+      case SAGA_STATE.CONFIRMED:
+        status = REBALANCE_STATUS.COMPLETED;
+        break;
+      case SAGA_STATE.CANCELLED:
+        status = REBALANCE_STATUS.CANCELLED;
+        lastError = saga.failureReason ?? saga.reviewReason ?? 'Cancelled';
+        break;
+      case SAGA_STATE.REQUIRES_MANUAL_REVIEW:
+        status = REBALANCE_STATUS.FAILED;
+        lastError = saga.reviewReason ?? saga.failureReason;
+        break;
+      case SAGA_STATE.FAILED:
+        status = REBALANCE_STATUS.FAILED;
+        lastError = saga.failureReason;
+        break;
+      default:
+        return; // Non-terminal saga — no queue sync
+    }
+
+    await prisma.rebalanceQueueEntry.update({
+      where: { id: saga.queueEntryId },
+      data: {
+        status,
+        lastError,
+        completedAt: new Date(),
+      },
+    });
+  }
 
   private generateIdempotencyKey(phase: string, queueEntryId: string): string {
     const data = JSON.stringify({ phase, queueEntryId, nonce: crypto.randomUUID() });

@@ -453,12 +453,23 @@ describe('RebalanceSagaService', () => {
         reviewedBy: 'admin-1',
         reviewRequired: false,
       });
+      mockPrisma.rebalanceQueueEntry.update.mockResolvedValueOnce({
+        id: 'entry-1',
+        status: REBALANCE_STATUS.PENDING,
+      });
 
       const saga = await service.resolveManualReview('saga-1', 'retry', 'admin-1');
 
       expect(saga.state).toBe(SAGA_STATE.PENDING);
       expect(saga.reviewRequired).toBe(false);
       expect(saga.reviewedBy).toBe('admin-1');
+      // Queue entry must return to PENDING so the processor picks it back up.
+      expect(mockPrisma.rebalanceQueueEntry.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { id: 'entry-1' },
+          data: expect.objectContaining({ status: 'PENDING' }),
+        }),
+      );
     });
 
     it('resolves review with cancel decision', async () => {
@@ -474,10 +485,21 @@ describe('RebalanceSagaService', () => {
         reviewRequired: false,
         completedAt: new Date(),
       });
+      mockPrisma.rebalanceQueueEntry.update.mockResolvedValueOnce({
+        id: 'entry-1',
+        status: 'CANCELLED',
+      });
 
       const saga = await service.resolveManualReview('saga-1', 'cancel', 'admin-1');
 
       expect(saga.state).toBe(SAGA_STATE.CANCELLED);
+      // Queue entry must be terminal CANCELLED so it stays out of the retry pool.
+      expect(mockPrisma.rebalanceQueueEntry.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { id: 'entry-1' },
+          data: expect.objectContaining({ status: 'CANCELLED' }),
+        }),
+      );
     });
 
     it('throws if saga is not in requires_manual_review state', async () => {
@@ -486,6 +508,69 @@ describe('RebalanceSagaService', () => {
       await expect(
         service.resolveManualReview('saga-1', 'retry', 'admin-1'),
       ).rejects.toThrow(/not in requires_manual_review/);
+    });
+  });
+
+  describe('terminal queue-entry sync', () => {
+    it('marks queue entry COMPLETED when saga reaches confirmed', async () => {
+      const confirmedSaga = {
+        ...baseSaga(),
+        state: SAGA_STATE.CONFIRMED,
+        currentPhase: SAGA_PHASE.COMPLETE,
+        transactionHash: '0xabc',
+      };
+      mockPrisma.rebalanceSaga.update.mockResolvedValueOnce(confirmedSaga);
+      mockPrisma.rebalanceQueueEntry.update.mockResolvedValueOnce({
+        id: 'entry-1',
+        status: REBALANCE_STATUS.COMPLETED,
+      });
+
+      const saga = await service.transitionState('saga-1', SAGA_STATE.CONFIRMED, {
+        transactionHash: '0xabc',
+      });
+
+      expect(saga.state).toBe(SAGA_STATE.CONFIRMED);
+      // Queue entry synced to COMPLETED so it is visible as done.
+      expect(mockPrisma.rebalanceQueueEntry.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { id: 'entry-1' },
+          data: expect.objectContaining({
+            status: REBALANCE_STATUS.COMPLETED,
+            lastError: null,
+          }),
+        }),
+      );
+    });
+
+    it('marks queue entry FAILED with reason when saga requires manual review', async () => {
+      const reviewSaga = {
+        ...baseSaga(),
+        state: SAGA_STATE.REQUIRES_MANUAL_REVIEW,
+        reviewRequired: true,
+        reviewReason: 'Unrecoverable failure: Slippage breach',
+      };
+      mockPrisma.rebalanceSaga.update.mockResolvedValueOnce(reviewSaga);
+      mockPrisma.rebalanceQueueEntry.update.mockResolvedValueOnce({
+        id: 'entry-1',
+        status: REBALANCE_STATUS.FAILED,
+      });
+
+      const saga = await service.requireManualReview(
+        'saga-1',
+        'Unrecoverable failure: Slippage breach',
+      );
+
+      expect(saga.state).toBe(SAGA_STATE.REQUIRES_MANUAL_REVIEW);
+      // Failure reason is pushed to the queue so it does not disappear.
+      expect(mockPrisma.rebalanceQueueEntry.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { id: 'entry-1' },
+          data: expect.objectContaining({
+            status: REBALANCE_STATUS.FAILED,
+            lastError: 'Unrecoverable failure: Slippage breach',
+          }),
+        }),
+      );
     });
   });
 });
@@ -787,5 +872,199 @@ describe('executeRebalanceSaga', () => {
 
     expect(outcome.completed).toBe(false);
     expect(outcome.error).toContain('duplicate');
+  });
+});
+
+describe('recoverStuckSagas', () => {
+  let mockPrisma: any;
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    const { PrismaClient } = require('@prisma/client');
+    mockPrisma = (PrismaClient as any).__mockInstance;
+
+    // Default: confirmTransaction resolves false (tx not found / still pending)
+    jest.spyOn(rebalanceExecutorService, 'confirmTransaction').mockResolvedValue(false);
+  });
+
+  it('confirms a SUBMITTED saga whose persisted hash landed on-chain', async () => {
+    const submittedSaga = {
+      ...baseSaga(),
+      state: SAGA_STATE.SUBMITTED,
+      currentPhase: SAGA_PHASE.SUBMIT,
+      transactionHash: '0xlanded',
+      lockedBy: 'worker-1',
+      lockedAt: new Date(Date.now() - 600000),
+      lockExpiresAt: new Date(Date.now() - 300000),
+    };
+    (rebalanceExecutorService.confirmTransaction as jest.Mock).mockResolvedValue(true);
+
+    // findStuckSagas
+    mockPrisma.rebalanceSaga.findMany.mockResolvedValueOnce([submittedSaga]);
+
+    // acquireLock: findUnique + update (lockedBy worker-2 -> steal)
+    mockPrisma.rebalanceSaga.findUnique.mockResolvedValueOnce(submittedSaga);
+    mockPrisma.rebalanceSaga.update.mockResolvedValueOnce({
+      ...submittedSaga,
+      lockedBy: 'recovery-worker',
+    });
+
+    // transitionState -> rebalanceSaga.update (confirmed)
+    mockPrisma.rebalanceSaga.update.mockResolvedValueOnce({
+      ...submittedSaga,
+      state: SAGA_STATE.CONFIRMED,
+    });
+
+    // releaseLock -> findUnique + update
+    mockPrisma.rebalanceSaga.findUnique.mockResolvedValueOnce({
+      ...submittedSaga,
+      state: SAGA_STATE.CONFIRMED,
+      lockedBy: 'recovery-worker',
+    });
+    mockPrisma.rebalanceSaga.update.mockResolvedValueOnce({
+      ...submittedSaga,
+      lockedBy: null,
+    });
+
+    const result = await recoverStuckSagas('recovery-worker');
+
+    expect(rebalanceExecutorService.confirmTransaction).toHaveBeenCalledWith('0xlanded');
+    expect(result.recovered).toBe(1);
+    expect(mockPrisma.rebalanceSaga.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: 'saga-1' },
+        data: expect.objectContaining({ state: SAGA_STATE.CONFIRMED }),
+      }),
+    );
+  });
+
+  it('does NOT reset a SUBMITTED saga with a persisted hash that is not yet confirmed', async () => {
+    const submittedSaga = {
+      ...baseSaga(),
+      state: SAGA_STATE.SUBMITTED,
+      currentPhase: SAGA_PHASE.SUBMIT,
+      transactionHash: '0xpending',
+      lockedBy: 'worker-1',
+      lockedAt: new Date(Date.now() - 600000),
+      lockExpiresAt: new Date(Date.now() - 300000),
+    };
+    (rebalanceExecutorService.confirmTransaction as jest.Mock).mockResolvedValue(false);
+
+    // findStuckSagas
+    mockPrisma.rebalanceSaga.findMany.mockResolvedValueOnce([submittedSaga]);
+
+    // acquireLock: findUnique + update
+    mockPrisma.rebalanceSaga.findUnique.mockResolvedValueOnce(submittedSaga);
+    mockPrisma.rebalanceSaga.update.mockResolvedValueOnce({
+      ...submittedSaga,
+      lockedBy: 'recovery-worker',
+    });
+
+    // releaseLock -> findUnique + update
+    mockPrisma.rebalanceSaga.findUnique.mockResolvedValueOnce({
+      ...submittedSaga,
+      lockedBy: 'recovery-worker',
+    });
+    mockPrisma.rebalanceSaga.update.mockResolvedValueOnce({
+      ...submittedSaga,
+      lockedBy: null,
+    });
+
+    const result = await recoverStuckSagas('recovery-worker');
+
+    // Critical: saga must NOT be reset to PENDING — that would trigger a
+    // duplicate submission on retry. It stays SUBMITTED so the executor can
+    // resume from CONFIRM and re-poll the same hash.
+    expect(result.recovered).toBe(0);
+    expect(mockPrisma.rebalanceSaga.update).not.toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: 'saga-1' },
+        data: expect.objectContaining({ state: SAGA_STATE.PENDING }),
+      }),
+    );
+  });
+
+  it('resets a pre-submission saga (PENDING, no hash) to PENDING for retry', async () => {
+    const pendingSaga = {
+      ...baseSaga(),
+      state: SAGA_STATE.PENDING,
+      currentPhase: SAGA_PHASE.INIT,
+      transactionHash: null,
+      lockedBy: 'worker-1',
+      lockedAt: new Date(Date.now() - 600000),
+      lockExpiresAt: new Date(Date.now() - 300000),
+    };
+
+    // findStuckSagas
+    mockPrisma.rebalanceSaga.findMany.mockResolvedValueOnce([pendingSaga]);
+
+    // acquireLock -> findUnique + lock update
+    mockPrisma.rebalanceSaga.findUnique.mockResolvedValueOnce(pendingSaga);
+    mockPrisma.rebalanceSaga.update.mockResolvedValueOnce({
+      ...pendingSaga,
+      lockedBy: 'recovery-worker',
+    });
+
+    // reset to PENDING via transitionState
+    mockPrisma.rebalanceSaga.update.mockResolvedValueOnce({
+      ...pendingSaga,
+      state: SAGA_STATE.PENDING,
+    });
+
+    // releaseLock -> findUnique + update
+    mockPrisma.rebalanceSaga.findUnique.mockResolvedValueOnce({
+      ...pendingSaga,
+      lockedBy: 'recovery-worker',
+    });
+    mockPrisma.rebalanceSaga.update.mockResolvedValueOnce({
+      ...pendingSaga,
+      lockedBy: null,
+    });
+
+    const result = await recoverStuckSagas('recovery-worker');
+
+    expect(result.recovered).toBe(1);
+    expect(mockPrisma.rebalanceSaga.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: 'saga-1' },
+        data: expect.objectContaining({ state: SAGA_STATE.PENDING }),
+      }),
+    );
+  });
+
+  it('does NOT reset a SIMULATED saga that somehow holds a transaction hash (safety)', async () => {
+    const simulatedWithHash = {
+      ...baseSaga(),
+      state: SAGA_STATE.SIMULATED,
+      currentPhase: SAGA_PHASE.APPROVAL,
+      transactionHash: '0xunexpected',
+      lockedBy: 'worker-1',
+      lockedAt: new Date(Date.now() - 600000),
+      lockExpiresAt: new Date(Date.now() - 300000),
+    };
+
+    mockPrisma.rebalanceSaga.findMany.mockResolvedValueOnce([simulatedWithHash]);
+
+    // acquireLock
+    mockPrisma.rebalanceSaga.findUnique.mockResolvedValueOnce(simulatedWithHash);
+    mockPrisma.rebalanceSaga.update.mockResolvedValueOnce({
+      ...simulatedWithHash,
+      lockedBy: 'recovery-worker',
+    });
+
+    // releaseLock
+    mockPrisma.rebalanceSaga.findUnique.mockResolvedValueOnce({
+      ...simulatedWithHash,
+      lockedBy: 'recovery-worker',
+    });
+    mockPrisma.rebalanceSaga.update.mockResolvedValueOnce({
+      ...simulatedWithHash,
+      lockedBy: null,
+    });
+
+    const result = await recoverStuckSagas('recovery-worker');
+
+    // Any saga with a hash is treated conservatively — never re-run/re-submit.
+    expect(result.recovered).toBe(0);
   });
 });

@@ -148,26 +148,63 @@ model RebalanceSagaRetry {
 
 ## Recovery
 
-The queue processor job now includes saga recovery:
+The queue processor job now includes phase-aware saga recovery:
 
-1. `recoverStuckSagas()` is called at the start of each job run.
+1. `recoverStuckSagas()` is called at the start of each job run and on the
+   admin recovery endpoint.
 2. Sagas with expired locks or missing locks in non-terminal states are
-   reset to `pending`.
+   examined phase-by-phase before any reset occurs:
+
+   - **`SUBMITTED` with a persisted `transactionHash`** — the recovery
+     worker polls that exact hash on-chain:
+     - If confirmed → the saga is advanced to `confirmed` (terminal) and the
+       queue entry is marked `COMPLETED`.
+     - If still pending / not found / RPC error → the saga is **left in
+       `SUBMITTED`** so the next execution resumes from the `CONFIRM` phase
+       and re-polls the same hash. It is NEVER reset to `pending`, which
+       would cause a duplicate on-chain rebalance.
+   - **`SUBMITTED` with no persisted hash and phase `INIT`** — safe to reset
+     to `pending`; the relayer was never contacted.
+   - **`PENDING` / `SIMULATED` with no transaction hash** — safe to reset to
+     `pending` (no on-chain action has occurred).
+   - **Any saga holding a `transactionHash`** is treated conservatively and
+     is never reset to a re-submittable state.
 3. The saga `resumeSaga()` method determines which phase to resume from
-   based on the last durable checkpoint.
+   based on the last completed checkpoint.
+
+## Queue-Entry Sync on Terminal States
+
+When a saga reaches a terminal state, the linked `RebalanceQueueEntry` is
+synced so failures never silently disappear from the queue:
+
+| Saga state | Queue entry status | Queue `lastError` |
+|------------|-------------------|-------------------|
+| `confirmed` | `COMPLETED` | `null` |
+| `failed` | `FAILED` | saga `failureReason` |
+| `cancelled` | `CANCELLED` | cancellation reason |
+| `requires_manual_review` | `FAILED` | review reason |
+
+Resolving a manual review also syncs the queue:
+
+- **Retry** → queue entry returns to `PENDING` with `nextRetryAt` set so the
+  processor picks it back up.
+- **Cancel** → queue entry becomes terminal `CANCELLED` and stays out of the
+  retry pool.
 
 ## Tests
 
-- `server/src/__tests__/rebalanceSagaService.test.ts` — 32 tests covering:
+- `server/src/__tests__/rebalanceSagaService.test.ts` — 38 tests covering:
   - Saga creation with idempotency keys
   - Lock acquisition, rejection, and stealing
   - Checkpoint idempotency
   - State transitions and terminal states
+  - Terminal queue-entry sync (confirmed / failed / review)
   - Failure counting and retry limits
   - Phase resumption logic
-  - Manual review resolution
+  - Manual review resolution + queue-entry sync (retry/cancel)
   - Error classification
   - Full saga execution flow
   - Simulated timeouts
   - Concurrent worker prevention
   - Duplicate submission detection
+  - Phase-aware recovery of SUBMITTED sagas (never re-submits)
