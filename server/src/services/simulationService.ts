@@ -409,9 +409,7 @@ export function simulateRebalance(params: RebalanceParams): RebalancePreview {
 export interface RebalanceAllocationRule {
   label: string;
   targetWeight: number;   // 0-100, must sum to ~100 across all allocations
-  apy: number;            // annual % fallback / average, e.g. 10 = 10%
-  /** Optional per-day APY series (length = backtest day count). Overrides `apy` for that day. */
-  dailyApy?: number[];
+  apy: number;            // annual %, e.g. 10 = 10%
   liquidityUsd?: number;  // optional, for context only
 }
 
@@ -537,14 +535,7 @@ export function runRebalanceBacktest(params: RebalanceBacktestParams): Rebalance
   const driftThresholdPct = params.driftThresholdPct ?? 5;
 
   const targetWeights = params.allocations.map(a => a.targetWeight / 100);
-
-  const dailyFactorFor = (alloc: RebalanceAllocationRule, dayIndex: number): number => {
-    const apy =
-      alloc.dailyApy && alloc.dailyApy.length > dayIndex
-        ? alloc.dailyApy[dayIndex]
-        : alloc.apy;
-    return 1 + (apy / 100) / 365;
-  };
+  const dailyFactors = params.allocations.map(a => 1 + (a.apy / 100) / 365);
 
   // Backtest-level structured warnings (evaluated once before the loop).
   const warnings: SimulationWarning[] = [];
@@ -610,8 +601,8 @@ export function runRebalanceBacktest(params: RebalanceBacktestParams): Rebalance
     const dateStr = new Date(ms).toISOString().slice(0, 10);
 
     // Compound growth for each allocation
-    portfolioAlloc = portfolioAlloc.map((v, i) => v * dailyFactorFor(params.allocations[i], dayNumber));
-    passiveAlloc = passiveAlloc.map((v, i) => v * dailyFactorFor(params.allocations[i], dayNumber));
+    portfolioAlloc = portfolioAlloc.map((v, i) => v * dailyFactors[i]);
+    passiveAlloc = passiveAlloc.map((v, i) => v * dailyFactors[i]);
 
     const totalPortfolio = portfolioAlloc.reduce((s, v) => s + v, 0);
     const currentWeights = portfolioAlloc.map(v => (v / totalPortfolio) * 100);
@@ -661,11 +652,10 @@ export function runRebalanceBacktest(params: RebalanceBacktestParams): Rebalance
 
     const portfolioTotal = portfolioAlloc.reduce((s, v) => s + v, 0);
     const passiveTotal = passiveAlloc.reduce((s, v) => s + v, 0);
-    const blendedApy = params.allocations.reduce((sum, a, i) => {
-      const apy =
-        a.dailyApy && a.dailyApy.length > dayNumber ? a.dailyApy[dayNumber] : a.apy;
-      return sum + apy * (portfolioAlloc[i] / portfolioTotal);
-    }, 0);
+    const blendedApy = params.allocations.reduce(
+      (sum, a, i) => sum + a.apy * (portfolioAlloc[i] / portfolioTotal),
+      0,
+    );
 
     snapshots.push({
       date: dateStr,

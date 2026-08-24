@@ -29,19 +29,6 @@ import { parseSmokeRunResult } from "./smokeResults";
 import VaultReliabilityPanel from "./VaultReliabilityPanel";
 import AuditReplayReportPanel from "./AuditReplayReportPanel";
 import RegistryDiffPage from "./RegistryDiff";
-import registryJson from "../../../../contracts/registry.json";
-import prevRegistryJson from "../../../../contracts/registry.previous.json";
-import {
-  assessRegistryFromRecords,
-  getStateLabel,
-  getSubsystemLabel,
-  mapIndexerStatus,
-  mapRelayerStatus,
-  mapSmokeTestStatus,
-  summarizeTransparencyHealth,
-  type SubsystemState,
-  type TransparencyHealthSummary,
-} from "./transparencyServiceHealth";
 
 const getApiBase = () => {
   try {
@@ -134,7 +121,6 @@ export default function TransparencyDashboard() {
     const [smokeStatus, setSmokeStatus] = useState<ReturnType<typeof parseSmokeRunResult>>(null);
     const [smokeHistory, setSmokeHistory] = useState<Array<ReturnType<typeof parseSmokeRunResult>>>([]);
     const [failoverIncidents, setFailoverIncidents] = useState<FailoverIncident[]>([]);
-    const [healthSummary, setHealthSummary] = useState<TransparencyHealthSummary | null>(null);
 
     useEffect(() => {
         async function fetchData() {
@@ -183,74 +169,6 @@ export default function TransparencyDashboard() {
             .then((data: { incidents: FailoverIncident[] }) => setFailoverIncidents(data.incidents))
             .catch(() => setFailoverIncidents([]));
     }, []);
-
-    useEffect(() => {
-        async function loadServiceHealth() {
-            const registryState = assessRegistryFromRecords(
-                registryJson as Record<string, Record<string, string>>,
-                prevRegistryJson as Record<string, Record<string, string>>,
-            );
-
-            let indexerState: SubsystemState = "unknown";
-            let relayerState: SubsystemState = "unknown";
-
-            try {
-                const [indexerRes, relayerRes] = await Promise.all([
-                    fetch(`${getApiBase()}/api/indexer/status`),
-                    fetch(`${getApiBase()}/api/relayer/status`),
-                ]);
-
-                if (indexerRes.ok) {
-                    const indexerJson = (await indexerRes.json()) as { status?: string };
-                    indexerState = mapIndexerStatus(indexerJson.status);
-                }
-
-                if (relayerRes.ok) {
-                    const relayerJson = (await relayerRes.json()) as {
-                        isOnline?: boolean;
-                        failureCount?: number;
-                        successRate?: number;
-                    };
-                    relayerState = mapRelayerStatus({
-                        isOnline: relayerJson.isOnline ?? false,
-                        failureCount: relayerJson.failureCount ?? 0,
-                        successRate: relayerJson.successRate ?? 100,
-                    });
-                }
-            } catch {
-                // Partial availability: keep unknown states for failed fetches.
-            }
-
-            const smokeState = mapSmokeTestStatus(
-                smokeStatus?.status ?? null,
-                smokeStatus?.checks,
-            );
-
-            setHealthSummary(
-                summarizeTransparencyHealth({
-                    indexer: indexerState,
-                    relayer: relayerState,
-                    registry: registryState,
-                    smokeTest: smokeState,
-                }),
-            );
-        }
-
-        void loadServiceHealth();
-    }, [smokeStatus]);
-
-    const healthBadgeClass = (state: SubsystemState) => {
-        switch (state) {
-            case "healthy":
-                return "text-green-300 bg-green-500/10 border-green-500/30";
-            case "degraded":
-                return "text-yellow-300 bg-yellow-500/10 border-yellow-500/30";
-            case "failed":
-                return "text-red-300 bg-red-500/10 border-red-500/30";
-            default:
-                return "text-gray-300 bg-gray-500/10 border-gray-500/30";
-        }
-    };
 
     // ── Truncate X-axis labels to MM/DD ───────────────────────────────────
     const chartData =
@@ -378,48 +296,6 @@ export default function TransparencyDashboard() {
                     </LineChart>
                 </ResponsiveContainer>
             </div>
-
-            {healthSummary && (
-                <div
-                    className="glass-panel rounded-2xl p-6"
-                    role="region"
-                    aria-label="Service health summary"
-                >
-                    <div className="flex items-center gap-2 mb-4">
-                        <AlertTriangle size={18} className="text-amber-400" />
-                        <h3 className="font-semibold text-white">Service Health Summary</h3>
-                    </div>
-                    <p
-                        className={`text-sm mb-4 ${
-                            healthSummary.overall === "healthy"
-                                ? "text-green-300"
-                                : healthSummary.overall === "failed"
-                                  ? "text-red-300"
-                                  : "text-yellow-300"
-                        }`}
-                    >
-                        {healthSummary.summaryMessage}
-                    </p>
-                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
-                        {(Object.keys(healthSummary.subsystems) as Array<
-                            keyof typeof healthSummary.subsystems
-                        >).map((key) => {
-                            const state = healthSummary.subsystems[key];
-                            return (
-                                <div
-                                    key={key}
-                                    className={`rounded-xl border px-3 py-2 ${healthBadgeClass(state)}`}
-                                >
-                                    <p className="text-xs uppercase tracking-wide opacity-80">
-                                        {getSubsystemLabel(key)}
-                                    </p>
-                                    <p className="text-sm font-semibold">{getStateLabel(state)}</p>
-                                </div>
-                            );
-                        })}
-                    </div>
-                </div>
-            )}
 
             <div className="glass-panel rounded-2xl p-6">
                 <div className="flex items-center gap-2 mb-4">

@@ -3,7 +3,6 @@ import rateLimit from "express-rate-limit";
 import { riskPreferenceDriftService, type RiskPreference, type UserRiskProfile, type PortfolioBehavior } from "../services/riskPreferenceDriftService";
 import { stressMatrixService } from "../services/stressMatrixService";
 import { apyDispersionService, type ProviderApyInput } from "../services/apyDispersionService";
-import { buildRegimeBreakdownSnapshots } from "../services/riskScoreBreakdownSnapshotService";
 
 const router = Router();
 
@@ -221,14 +220,6 @@ router.delete("/stress-matrix/scenarios/:scenarioId", (req: Request, res: Respon
   }
 
   res.json({ success: true, message: `Scenario ${scenarioId} removed` });
-});
-
-/**
- * GET /api/risk/breakdown-snapshots
- * Deterministic risk score breakdown snapshots for reference portfolio regimes.
- */
-router.get("/breakdown-snapshots", (_req: Request, res: Response) => {
-  res.json({ snapshots: buildRegimeBreakdownSnapshots() });
 });
 
 export default router;

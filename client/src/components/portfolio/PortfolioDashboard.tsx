@@ -14,7 +14,6 @@ import { ExposureMap } from "../../portfolio/ExposureMap";
 import PresetsPanel from "../../features/presets/PresetsPanel";
 import UnifiedActivityTimeline from "./UnifiedActivityTimeline";
 import PortfolioExport from "./PortfolioExport";
-import RiskScoreBreakdownPanel from "./RiskScoreBreakdownPanel";
 import {
   analyzeConcentration,
   buildExposureBuckets,
@@ -252,8 +251,6 @@ export default function PortfolioDashboard({ walletAddress }: PortfolioDashboard
           totalValue: exposure.totalValueUsd,
         }}
       />
-
-      <RiskScoreBreakdownPanel />
 
       {/* 3D Visualizer Integration */}
       <PortfolioVisualizer />
