@@ -123,6 +123,74 @@ describe("rankStrategies", () => {
   );
 });
 
+describe("rankStrategies — deterministic tie-breaking (#858)", () => {
+  // All strategies below share the default apy/riskScore/ilVolatilityPct, so
+  // they produce an identical RAY. That isolates the secondary (TVL) and
+  // tertiary (id) tie-break keys under test.
+  const tied = (overrides: Partial<StrategyInput>) =>
+    makeStrategy({ apy: 10, riskScore: 8, ilVolatilityPct: 2, tvlUsd: 1_000_000, ...overrides });
+
+  it("equal RAY and equal TVL resolve by strategy id ascending", () => {
+    const ranked = rankStrategies([
+      tied({ id: "gamma" }),
+      tied({ id: "alpha" }),
+      tied({ id: "beta" }),
+    ]);
+    expect(ranked.map((r) => r.id)).toEqual(["alpha", "beta", "gamma"]);
+    expect(ranked.map((r) => r.rank)).toEqual([1, 2, 3]);
+  });
+
+  it("TVL is the secondary key and takes priority over id", () => {
+    // The larger-TVL strategy ranks first even though its id sorts last.
+    const ranked = rankStrategies([
+      tied({ id: "aaa-small", tvlUsd: 100_000 }),
+      tied({ id: "zzz-large", tvlUsd: 9_000_000 }),
+    ]);
+    expect(ranked.map((r) => r.id)).toEqual(["zzz-large", "aaa-small"]);
+  });
+
+  it("id breaks the tie only when RAY and TVL are both equal", () => {
+    const ranked = rankStrategies([tied({ id: "b" }), tied({ id: "a" })]);
+    expect(ranked.map((r) => r.id)).toEqual(["a", "b"]);
+  });
+
+  it("treats a sub-epsilon RAY gap as a tie, resolved by TVL", () => {
+    // apy differs by 1e-12 → RAY differs by far less than the 1e-9 tie epsilon.
+    // The microscopically-higher-RAY strategy has the smaller TVL, so if the
+    // epsilon tie were NOT applied it would (wrongly) win. It must not.
+    const ranked = rankStrategies([
+      tied({ id: "hair-higher-ray", apy: 10 + 1e-12, tvlUsd: 100_000 }),
+      tied({ id: "big-tvl", apy: 10, tvlUsd: 5_000_000 }),
+    ]);
+    expect(ranked[0].id).toBe("big-tvl");
+  });
+
+  it("ranking is stable across input permutations (repeated refreshes)", () => {
+    const strategies = ["e", "a", "d", "b", "c"].map((id) => tied({ id }));
+    const permutations = [
+      strategies,
+      [...strategies].reverse(),
+      [...strategies.slice(2), ...strategies.slice(0, 2)], // rotated
+    ];
+
+    // Order must depend only on the data, never on input position.
+    for (const perm of permutations) {
+      expect(rankStrategies(perm).map((r) => r.id)).toEqual(["a", "b", "c", "d", "e"]);
+    }
+  });
+
+  it("is idempotent — repeated calls on the same input produce identical ranking", () => {
+    const strategies = [
+      tied({ id: "a", tvlUsd: 2_000_000 }),
+      tied({ id: "b", tvlUsd: 2_000_000 }),
+      makeStrategy({ id: "c", apy: 8 }),
+    ];
+    const first = rankStrategies(strategies);
+    const second = rankStrategies(strategies);
+    expect(second).toEqual(first);
+  });
+});
+
 describe("filterByTimeWindow", () => {
   const recentIso = new Date(Date.now() - 1 * 60 * 60 * 1000).toISOString();
   const oldIso = new Date(Date.now() - 40 * 24 * 60 * 60 * 1000).toISOString();

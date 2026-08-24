@@ -11,7 +11,9 @@ import { drawdownService, DrawdownToleranceProfile } from "./drawdownService";
  *   drawdownMultiplier — derived from tolerance profile and estimated drawdown
  *   drawdownProxy = ilVolatilityPct / 10 (normalized; 0 = no risk)
  *
- * Tie resolution: equal RAY → higher TVL wins.
+ * Tie resolution (deterministic total order): equal RAY → higher TVL wins →
+ * equal TVL → lower strategy id wins. The final id key keeps ranking stable
+ * across refreshes regardless of the input order.
  */
 
 export interface StrategyInput {
@@ -73,10 +75,16 @@ export function rankStrategies(
     };
   });
 
+  // Deterministic total ordering. Each key only breaks ties left by the
+  // previous one, and the final `id` key guarantees a stable rank even when
+  // two strategies share the same RAY *and* TVL — so ordering never depends on
+  // the input array position (which varies across refreshes via failover and
+  // time-window filtering).
   withScores.sort((a, b) => {
-    const diff = b.riskAdjustedYield - a.riskAdjustedYield;
-    if (Math.abs(diff) > 1e-9) return diff;
-    return b.tvlUsd - a.tvlUsd;
+    const rayDiff = b.riskAdjustedYield - a.riskAdjustedYield;
+    if (Math.abs(rayDiff) > 1e-9) return rayDiff; // 1. RAY descending (epsilon tie)
+    if (b.tvlUsd !== a.tvlUsd) return b.tvlUsd - a.tvlUsd; // 2. TVL descending
+    return a.id < b.id ? -1 : a.id > b.id ? 1 : 0; // 3. id ascending (final key)
   });
 
   return withScores.map((s, i) => ({ ...s, rank: i + 1 }));

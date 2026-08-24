@@ -139,7 +139,7 @@ router.get("/leaderboard", async (req: Request, res: Response) => {
     filters: { timeWindow, strategyType },
     total: ranked.length,
     scoringMethodology:
-      "RAY = APY × (riskScore / 10) / (1 + ilVolatility / 10). Ties resolved by TVL descending.",
+      "RAY = APY × (riskScore / 10) / (1 + ilVolatility / 10). Ties resolved by TVL descending, then strategy id ascending.",
     failover: {
       excluded: failover.excluded.map((s) => s.id),
       decisions: failover.decisions,
