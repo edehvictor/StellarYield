@@ -4,9 +4,11 @@ import {
   REBALANCE_FIXTURES,
   REBALANCE_EDGE_CASES,
   FAILOVER_FIXTURES,
+  BACKTEST_BENCHMARK_FIXTURES,
   validateSimulationResult,
   validateRebalanceResult,
   validateFailoverResult,
+  validateBacktestBenchmarkResult,
 } from '../../../shared/test-fixtures/simulatorFixtures';
 import { simulateDeposit, simulateRebalance, runRebalanceBacktest } from '../services/simulationService';
 
@@ -62,6 +64,17 @@ describe('Shared Simulator Fixtures – Server', () => {
       it(fixture.description, () => {
         const result = runRebalanceBacktest(fixture.input);
         const { valid, errors } = validateFailoverResult(fixture, result);
+        expect(errors).toEqual([]);
+        expect(valid).toBe(true);
+      });
+    }
+  });
+
+  describe('Backtest benchmark fixtures (#1043)', () => {
+    for (const fixture of BACKTEST_BENCHMARK_FIXTURES) {
+      it(fixture.description, () => {
+        const result = runRebalanceBacktest(fixture.input);
+        const { valid, errors } = validateBacktestBenchmarkResult(fixture, result);
         expect(errors).toEqual([]);
         expect(valid).toBe(true);
       });
