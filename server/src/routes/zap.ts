@@ -55,7 +55,9 @@ router.post("/quote", validateZapQuote, async (req: Request, res: Response) => {
       500,
       "QUOTE_FAILED",
       "Quote failed",
-      e instanceof Error ? e.message : undefined
+      e instanceof Error ? e.message : undefined,
+      undefined,
+      true
     );
   }
 });

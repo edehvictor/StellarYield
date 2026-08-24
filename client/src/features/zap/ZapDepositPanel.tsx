@@ -1,12 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ArrowDown, Zap, Loader2, AlertTriangle, RefreshCw, Clock, Info, Ban } from "lucide-react";
+import { ArrowDown, Zap, Loader2, AlertTriangle, RefreshCw, Clock, Info, Ban, ExternalLink, LifeBuoy } from "lucide-react";
 import TxStatusTimeline from "../../components/transaction/TxStatusTimeline";
 import TransactionFailedModal from "../../components/transaction/TransactionFailedModal";
 import { decodeTransactionError } from "../../utils/errorDecoder";
 import { zapDeposit } from "../../services/soroban";
 import type { TxPhase } from "../../services/transactionPhase";
 import { TX_PHASE_PIPELINE } from "../../services/transactionPhase";
-import { fetchSwapQuote, verifySwapQuote } from "./fetchSwapQuote";
+import { fetchSwapQuote, verifySwapQuote, ZapQuoteError } from "./fetchSwapQuote";
 import { minAmountAfterSlippage } from "./slippage";
 import { parseDecimalToStroops, formatStroopsToDecimal } from "./amount";
 import {
@@ -33,9 +33,17 @@ const MIN_SLIPPAGE = 0.1;
 const MAX_SLIPPAGE = 15;
 const STALE_QUOTE_AGE_MS = 60_000;
 const FALLBACK_SOURCE = "fallback_rate";
+const SUPPORT_URL = "https://github.com/edehvictor/StellarYield/issues";
 
 function quoteAgeSeconds(quotedAt: string): number {
   return Math.floor((Date.now() - new Date(quotedAt).getTime()) / 1000);
+}
+
+function explorerAccountUrl(walletAddress: string | null): string {
+  const passphrase = import.meta.env.VITE_NETWORK_PASSPHRASE ?? "";
+  const isMainnet = passphrase.includes("mainnet") || passphrase.includes("Public Global");
+  const base = `https://stellar.expert/explorer/${isMainnet ? "public" : "testnet"}`;
+  return walletAddress ? `${base}/account/${walletAddress}` : base;
 }
 
 export default function ZapDepositPanel({ walletAddress }: ZapDepositPanelProps) {
@@ -88,6 +96,7 @@ export default function ZapDepositPanel({ walletAddress }: ZapDepositPanelProps)
   const [lastProgressPhase, setLastProgressPhase] = useState<TxPhase>("idle");
   const [txHash, setTxHash] = useState<string | null>(null);
   const [error, setError] = useState("");
+  const [quoteError, setQuoteError] = useState<ZapQuoteError | null>(null);
   const [showFailedModal, setShowFailedModal] = useState(false);
   const [quoteLoading, setQuoteLoading] = useState(false);
   const [expectedOut, setExpectedOut] = useState<bigint | null>(null);
@@ -122,6 +131,7 @@ export default function ZapDepositPanel({ walletAddress }: ZapDepositPanelProps)
 
     setQuoteLoading(true);
     setError("");
+    setQuoteError(null);
     try {
       if (!needsSwap) {
         prevExpectedOutRef.current = expectedOut;
@@ -148,6 +158,7 @@ export default function ZapDepositPanel({ walletAddress }: ZapDepositPanelProps)
       prevExpectedOutRef.current = null;
       setExpectedOut(null);
       setError(e instanceof Error ? e.message : "Could not load quote");
+      setQuoteError(e instanceof ZapQuoteError ? e : null);
       setQuoteData(null);
     } finally {
       setQuoteLoading(false);
@@ -524,9 +535,42 @@ export default function ZapDepositPanel({ walletAddress }: ZapDepositPanelProps)
       )}
 
       {error && txPhase !== "failure" && (
-        <div className="flex items-center gap-2 text-red-400 text-sm mb-4">
-          <AlertTriangle className="w-4 h-4 shrink-0" />
-          {error}
+        <div className="mb-4 space-y-2">
+          <div className="flex items-center gap-2 text-red-400 text-sm">
+            <AlertTriangle className="w-4 h-4 shrink-0" />
+            <span>{error}</span>
+          </div>
+          {quoteError?.recoverable && (
+            <div className="flex flex-wrap items-center gap-x-4 gap-y-2 pl-6 text-xs">
+              <a
+                href={explorerAccountUrl(walletAddress)}
+                target="_blank"
+                rel="noreferrer"
+                className="inline-flex items-center gap-1 text-gray-300 hover:text-white"
+              >
+                <ExternalLink className="w-3.5 h-3.5" />
+                View account on explorer
+              </a>
+              <a
+                href={SUPPORT_URL}
+                target="_blank"
+                rel="noreferrer"
+                className="inline-flex items-center gap-1 text-gray-300 hover:text-white"
+              >
+                <LifeBuoy className="w-3.5 h-3.5" />
+                Contact support
+              </a>
+              <button
+                type="button"
+                onClick={() => void refreshQuote()}
+                disabled={quoteLoading}
+                className="inline-flex items-center gap-1 rounded-lg bg-white/10 px-2.5 py-1 text-gray-200 hover:bg-white/20 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                <RefreshCw className={`w-3.5 h-3.5 ${quoteLoading ? "animate-spin" : ""}`} />
+                Retry quote
+              </button>
+            </div>
+          )}
         </div>
       )}
 
