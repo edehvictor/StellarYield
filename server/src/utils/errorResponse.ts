@@ -11,7 +11,8 @@ export function sendError(
   error: string,
   message: string,
   details?: unknown,
-  requestId?: string
+  requestId?: string,
+  recoverable?: boolean
 ): void {
   const errorResponse: ErrorResponse = { error, message };
   if (requestId !== undefined) {
@@ -19,6 +20,9 @@ export function sendError(
   }
   if (details !== undefined) {
     errorResponse.details = details;
+  }
+  if (recoverable !== undefined) {
+    errorResponse.recoverable = recoverable;
   }
   res.status(statusCode).json(errorResponse);
 }
@@ -29,8 +33,9 @@ export function sendErrorWithRequest(
   statusCode: number,
   error: string,
   message: string,
-  details?: unknown
+  details?: unknown,
+  recoverable?: boolean
 ): void {
   const requestId = getRequestId(req);
-  sendError(res, statusCode, error, message, details, requestId);
+  sendError(res, statusCode, error, message, details, requestId, recoverable);
 }

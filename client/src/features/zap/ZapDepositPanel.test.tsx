@@ -243,4 +243,79 @@ describe("ZapDepositPanel", () => {
       });
     });
   });
+
+  describe("failed preview recovery actions", () => {
+    it("shows recovery links for recoverable preview failures and retries", async () => {
+      mockFetch.mockResolvedValue({
+        ok: false,
+        status: 500,
+        json: async () => ({
+          error: "QUOTE_FAILED",
+          message: "Router simulation unavailable.",
+          requestId: "req-1",
+          recoverable: true,
+        }),
+      });
+
+      render(<ZapDepositPanel walletAddress="GABCDEF123" />);
+
+      const input = screen.getByPlaceholderText("0.00");
+      await userEvent.type(input, "100");
+
+      await waitFor(() => {
+        expect(screen.getByText("Router simulation unavailable.")).toBeInTheDocument();
+      });
+
+      expect(screen.getByRole("link", { name: /view account on explorer/i })).toHaveAttribute(
+        "href",
+        "https://stellar.expert/explorer/testnet/account/GABCDEF123",
+      );
+      expect(screen.getByRole("link", { name: /contact support/i })).toHaveAttribute(
+        "href",
+        "https://github.com/edehvictor/StellarYield/issues",
+      );
+
+      const callsBeforeRetry = mockFetch.mock.calls.length;
+      mockFetch.mockImplementation(() =>
+        Promise.resolve({
+          ok: true,
+          json: async () => createMockQuote(),
+        }),
+      );
+      fireEvent.click(screen.getByRole("button", { name: /retry quote/i }));
+
+      await waitFor(() => {
+        expect(mockFetch.mock.calls.length).toBeGreaterThan(callsBeforeRetry);
+      });
+      await waitFor(() => {
+        expect(screen.getByText("Simulated")).toBeInTheDocument();
+      });
+    });
+
+    it("hides recovery links for non-recoverable preview failures", async () => {
+      mockFetch.mockResolvedValue({
+        ok: false,
+        status: 400,
+        json: async () => ({
+          error: "INVALID_AMOUNT",
+          message: "amountInStroops must be an integer string.",
+        }),
+      });
+
+      render(<ZapDepositPanel walletAddress="GABCDEF123" />);
+
+      const input = screen.getByPlaceholderText("0.00");
+      await userEvent.type(input, "100");
+
+      await waitFor(() => {
+        expect(
+          screen.getByText("amountInStroops must be an integer string."),
+        ).toBeInTheDocument();
+      });
+
+      expect(screen.queryByRole("link", { name: /view account on explorer/i })).not.toBeInTheDocument();
+      expect(screen.queryByRole("link", { name: /contact support/i })).not.toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: /retry quote/i })).not.toBeInTheDocument();
+    });
+  });
 });
