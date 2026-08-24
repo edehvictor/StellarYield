@@ -6,8 +6,11 @@
  * GET  /api/donations/config/:address — fetch user donation config
  * POST /api/donations/set             — update user donation config
  * GET  /api/donations/total           — protocol-wide total donated
+ * GET  /api/donations/summary         — aggregate donation metrics
+ * POST /api/donations/preview         — structured contract execution preview
  */
 import { Router, Request, Response } from "express";
+import { buildDonationPreview } from "../services/donationsService";
 
 const donationsRouter = Router();
 
@@ -106,6 +109,55 @@ donationsRouter.get("/summary", (_req: Request, res: Response): void => {
         participatingVaults,
         projectedMonthlyImpact,
     });
+});
+
+/**
+ * POST /api/donations/preview
+ *
+ * Generates a structured donation preview that details the recipient address,
+ * fee breakdown (gross amount, donation amount, net amount), and memo that will
+ * be submitted to the contract upon signing.  Invalid previews are rejected
+ * with HTTP 422 so callers know not to proceed to submission.
+ *
+ * Body:
+ *   senderAddress      string   — donor wallet (Stellar public key)
+ *   recipientAddress   string   — charity wallet (Stellar public key)
+ *   grossAmountStroops number   — total yield amount in stroops
+ *   bps                number   — donation rate in basis points (0–10 000)
+ *   memo               string?  — optional transaction memo (≤ 28 bytes)
+ */
+donationsRouter.post("/preview", (req: Request, res: Response): void => {
+    const {
+        senderAddress,
+        recipientAddress,
+        grossAmountStroops,
+        bps,
+        memo,
+    } = req.body as {
+        senderAddress?: unknown;
+        recipientAddress?: unknown;
+        grossAmountStroops?: unknown;
+        bps?: unknown;
+        memo?: unknown;
+    };
+
+    const preview = buildDonationPreview({
+        senderAddress: senderAddress as string,
+        recipientAddress: recipientAddress as string,
+        grossAmountStroops: grossAmountStroops as number,
+        bps: bps as number,
+        memo: memo as string | undefined,
+    });
+
+    if (!preview.isValid) {
+        res.status(422).json({
+            error: "Invalid donation preview",
+            validationErrors: preview.validationErrors,
+        });
+        return;
+    }
+
+    res.json(preview);
 });
 
 /** Exposed for testing: reset in-memory state. */

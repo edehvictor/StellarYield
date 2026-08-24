@@ -1,4 +1,5 @@
 import { Router, Request, Response } from "express";
+import rateLimit from "express-rate-limit";
 import {
   simulateTreasury,
   compareTreasuryScenarios,
