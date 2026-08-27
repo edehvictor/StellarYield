@@ -1,4 +1,6 @@
 import { PieChart, Star } from 'lucide-react';
+import EmptyState from '../../components/common/EmptyState';
+import { EMPTY_STATE_PROTOCOL_DISTRIBUTION } from '../../utils/emptyStateCopy';
 import type { ProtocolContribution } from './types';
 
 interface ProtocolDistributionChartProps {
@@ -83,14 +85,12 @@ export default function ProtocolDistributionChart({
       </div>
 
       {sortedProtocols.length === 0 && (
-        <div
-          className="p-12 text-center text-gray-500"
-          data-testid="protocol-distribution-empty"
-        >
-          <p className="font-medium">No protocol data yet</p>
-          <p className="text-xs mt-1">
-            Distribution figures will appear once routing samples are available.
-          </p>
+        <div className="p-12" data-testid="protocol-distribution-empty">
+          <EmptyState
+            title={EMPTY_STATE_PROTOCOL_DISTRIBUTION.title}
+            description={EMPTY_STATE_PROTOCOL_DISTRIBUTION.description}
+            testId="protocol-distribution-empty-state"
+          />
         </div>
       )}
     </div>

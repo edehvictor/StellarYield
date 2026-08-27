@@ -10,6 +10,8 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
+import EmptyState from "../common/EmptyState";
+import { EMPTY_STATE_APY_HISTORY } from "../../utils/emptyStateCopy";
 import { apiUrl } from "../../lib/api";
 import { computeDecayedFreshnessConfidence } from "../dashboard/freshnessDecay";
 
@@ -353,10 +355,11 @@ export default function ApyHistoryChart() {
           </div>
         ) : filteredHistory.length === 0 ? (
           <div className="h-full w-full rounded-lg border border-white/10 bg-white/[0.02] px-6 py-8 flex flex-col items-center justify-center text-center">
-            <p className="text-gray-300 font-semibold">No APY history points available</p>
-            <p className="text-gray-500 text-sm mt-1">
-              The API returned no valid entries for this range.
-            </p>
+            <EmptyState
+              title={EMPTY_STATE_APY_HISTORY.title}
+              description={EMPTY_STATE_APY_HISTORY.description}
+              testId="apy-history-empty-state"
+            />
           </div>
         ) : (
           <ResponsiveContainer width="100%" height="100%">

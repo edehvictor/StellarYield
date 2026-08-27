@@ -5,6 +5,8 @@ import {
   TrendingUp, BarChart3, DollarSign,
 } from "lucide-react";
 import StatusBadge from '../../components/StatusBadge';
+import EmptyState from '../../components/common/EmptyState';
+import { EMPTY_STATE_COMPATIBILITY } from '../../utils/emptyStateCopy';
 import { RISK_CHART_COLORS } from "../../components/charts/darkModeContrast";
 
 // ── Types ───────────────────────────────────────────────────────────────
@@ -204,11 +206,12 @@ export default function CompatibilityPanel() {
   if (!report) {
     return (
       <div className="glass-panel p-8">
-        <div className="text-center py-12">
-          <Shield className="mx-auto mb-4 text-gray-400" size={48} />
-          <h3 className="text-lg font-semibold mb-2">No Compatibility Data</h3>
-          <p className="text-gray-400">Unable to load compatibility information.</p>
-        </div>
+        <EmptyState
+          icon={<Shield className="text-gray-400" size={48} />}
+          title={EMPTY_STATE_COMPATIBILITY.title}
+          description={EMPTY_STATE_COMPATIBILITY.description}
+          testId="compatibility-empty-state"
+        />
       </div>
     );
   }
@@ -230,10 +233,13 @@ export default function CompatibilityPanel() {
             Refresh
           </button>
         </div>
-        <div className="glass-panel p-12 text-center">
-          <Shield className="mx-auto mb-4 text-gray-400" size={48} />
-          <h3 className="text-lg font-semibold mb-2">No Protocols Registered</h3>
-          <p className="text-gray-400">Add protocols to begin monitoring compatibility.</p>
+        <div className="glass-panel p-12">
+          <EmptyState
+            icon={<Shield className="text-gray-400" size={48} />}
+            title={EMPTY_STATE_COMPATIBILITY.title}
+            description={EMPTY_STATE_COMPATIBILITY.description}
+            testId="compatibility-no-protocols-empty-state"
+          />
         </div>
       </div>
     );
