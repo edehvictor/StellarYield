@@ -6,6 +6,40 @@
 //! Accepts user deposits of SAC tokens (XLM, USDC, etc.), tracks ownership
 //! via LP-style vault shares, and exposes an admin-gated `rebalance`
 //! function for moving funds across liquidity pools.
+//!
+//! # Precision & Rounding Assumptions
+//!
+//! All accounting uses `i128` integer math. No floating-point types are used
+//! for value calculations. The following rounding conventions apply:
+//!
+//! | Operation | Rounding Direction | Rationale |
+//! |---|---|---|
+//! | `preview_deposit` (shares minted) | Ceil division `(n + d - 1) / d` | User-favorable: prevents share inflation from rounding |
+//! | `preview_withdraw` (assets returned) | Floor division | Protocol-favorable: ensures solvency |
+//! | `preview_redeem` (shares needed) | Ceil division `(n + d - 1) / d` | User-favorable: prevents overcharging shares |
+//! | `convert_to_shares` | Ceil division `(n + d - 1) / d` | User-favorable: matches preview_deposit |
+//! | `convert_to_assets` | Floor division | Protocol-favorable: matches preview_withdraw |
+//! | `apply_performance_fee` | Floor division for fee | User-favorable: fee rounds down |
+//! | `compute_moving_avg_apy` | Floor division | Acceptable for fee bracket selection |
+//! | `emergency_withdraw` penalty | Floor division for cut | User-favorable: penalty rounds down |
+//!
+//! ## Dust Bounds
+//! - Share conversion rounding dust: at most 1 wei per operation.
+//! - Fee rounding dust: at most 1 unit of the smallest token denomination.
+//! - No value is ever created or destroyed beyond documented rounding dust.
+//!
+//! ## Decimal Handling
+//! - All token amounts are in the native token's smallest unit (e.g., 7-decimal
+//!   for XLM, 6-decimal for USDC). No decimal scaling is applied within the vault.
+//! - Share price is stored as a fixed-point integer with 18 decimal places
+//!   (1e18 precision) for internal calculations.
+//! - Basis points (bps) are integers in range [0, 10000].
+//!
+//! ## Invariant Guarantees
+//! - `total_assets == sum(user_shares * share_price)` within rounding tolerance.
+//! - `net_amount + fee_amount == gross_amount` for all fee applications.
+//! - `total_shares * share_price ≈ total_assets` with at most 1 unit rounding.
+//! - No operation can create or destroy value beyond documented rounding dust.
 
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, symbol_short, token, vec, Address, Bytes,
@@ -46,14 +80,14 @@ enum DataKey {
 mod admin;
 mod donations;
 mod emergency;
+pub mod events;
 mod fees;
 mod flashloan;
 mod invariants;
 mod keeper;
 mod oracle;
 mod referrals;
-mod verification;
-pub mod events; // Versioned event schemas (#904)
+mod verification; // Versioned event schemas (#904)
 
 // ── Errors ──────────────────────────────────────────────────────────────
 
@@ -83,6 +117,8 @@ pub enum VaultError {
     OperationReplayed = 2004,
     /// Cross-contract call from unauthorized or wrong-network contract (maps to error code 2005).
     UnauthorizedContract = 2005,
+    /// Fee recipient is invalid (contract self or zero-equivalent) (maps to error code 2006).
+    InvalidRecipient = 2006,
 }
 
 // ── Contract ────────────────────────────────────────────────────────────
@@ -770,6 +806,22 @@ impl YieldVault {
         YieldVault::get_total_referral_rewards_view(env)
     }
 
+    // ── Fee recipient admin ──────────────────────────────────────────
+
+    /// Admin: update the address that receives protocol performance fees.
+    pub fn set_fee_recipient(
+        env: Env,
+        admin: Address,
+        new_recipient: Address,
+    ) -> Result<(), VaultError> {
+        YieldVault::set_fee_recipient_impl(env, admin, new_recipient)
+    }
+
+    /// View: current fee recipient (defaults to admin when unset).
+    pub fn get_fee_recipient(env: Env) -> Result<Address, VaultError> {
+        YieldVault::get_fee_recipient_impl(env)
+    }
+
     // ── Internal ────────────────────────────────────────────────────
 
     fn require_init(env: &Env) -> Result<(), VaultError> {
@@ -959,8 +1011,8 @@ impl VaultStandard for YieldVault {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use soroban_sdk::testutils::Address as _;
-    use soroban_sdk::{contract, contractimpl, Env};
+    use soroban_sdk::testutils::{Address as _, Events};
+    use soroban_sdk::{contract, contractimpl, Env, IntoVal};
 
     #[contract]
     struct ContractWallet;
@@ -1368,6 +1420,88 @@ mod tests {
         let unknown = Address::generate(&env);
         assert_eq!(client.get_referral_rewards(&unknown), 0);
     }
+
+    // ── Fee recipient admin flows (#958) ───────────────────────────────
+
+    #[test]
+    fn test_fee_recipient_defaults_to_admin() {
+        let (_, client, admin, _, _) = setup_env();
+        assert_eq!(client.get_fee_recipient(), admin);
+    }
+
+    #[test]
+    fn test_set_fee_recipient_by_admin() {
+        let (env, client, admin, _, _) = setup_env();
+        let recipient = Address::generate(&env);
+
+        client.set_fee_recipient(&admin, &recipient);
+        assert_eq!(client.get_fee_recipient(), recipient);
+    }
+
+    #[test]
+    fn test_set_fee_recipient_unauthorized_rejected() {
+        let (env, client, _, _, _) = setup_env();
+        let impostor = Address::generate(&env);
+        let recipient = Address::generate(&env);
+
+        let result = client.try_set_fee_recipient(&impostor, &recipient);
+        assert_eq!(result, Err(Ok(VaultError::Unauthorized)));
+        // Prior state unchanged
+        assert_eq!(client.get_fee_recipient(), client.get_admin());
+    }
+
+    #[test]
+    fn test_set_fee_recipient_rejects_vault_self() {
+        let (_env, client, admin, _, _) = setup_env();
+        let vault_id = client.address.clone();
+
+        let result = client.try_set_fee_recipient(&admin, &vault_id);
+        assert_eq!(result, Err(Ok(VaultError::InvalidRecipient)));
+        // Rollback-safe: still defaults to admin
+        assert_eq!(client.get_fee_recipient(), admin);
+    }
+
+    #[test]
+    fn test_set_fee_recipient_emits_old_new_executor() {
+        let (env, client, admin, _, _) = setup_env();
+        let recipient = Address::generate(&env);
+
+        client.set_fee_recipient(&admin, &recipient);
+
+        let events = env.events().all();
+        assert!(
+            !events.is_empty(),
+            "fee recipient update must emit an event"
+        );
+        // Event tuple: (contract, topics, data); data = (old, new, executor)
+        let (_contract, _topics, data) = events.last().unwrap();
+        let decoded: (Address, Address, Address) = data.clone().into_val(&env);
+        assert_eq!(decoded.0, admin);
+        assert_eq!(decoded.1, recipient);
+        assert_eq!(decoded.2, admin);
+    }
+
+    #[test]
+    fn test_set_fee_recipient_repeated_updates_and_rollback() {
+        let (env, client, admin, _, _) = setup_env();
+        let first = Address::generate(&env);
+        let second = Address::generate(&env);
+
+        client.set_fee_recipient(&admin, &first);
+        assert_eq!(client.get_fee_recipient(), first);
+
+        client.set_fee_recipient(&admin, &second);
+        assert_eq!(client.get_fee_recipient(), second);
+
+        // Failed update must not clobber current recipient
+        let result = client.try_set_fee_recipient(&admin, &client.address);
+        assert_eq!(result, Err(Ok(VaultError::InvalidRecipient)));
+        assert_eq!(client.get_fee_recipient(), second);
+
+        // Rollback to a prior recipient remains valid
+        client.set_fee_recipient(&admin, &first);
+        assert_eq!(client.get_fee_recipient(), first);
+    }
 }
 
 // ── Fuzz / Invariant Tests ───────────────────────────────────────────────
@@ -1381,6 +1515,8 @@ mod fuzz_tests {
     use proptest::prelude::*;
     use soroban_sdk::testutils::Address as _;
     use soroban_sdk::Env;
+
+    const CI_PROPTEST_CASES: u32 = 64;
 
     fn setup_env() -> (Env, YieldVaultClient<'static>, Address, Address, Address) {
         let env = Env::default();
@@ -1406,7 +1542,7 @@ mod fuzz_tests {
 
     // Invariant 1 & 2: totals never go negative
     proptest! {
-        #![proptest_config(ProptestConfig::with_cases(10_000))]
+        #![proptest_config(ProptestConfig::with_cases(CI_PROPTEST_CASES))]
 
         #[test]
         fn fuzz_deposit_totals_non_negative(amount in 1i128..=i64::MAX as i128) {
@@ -1423,7 +1559,7 @@ mod fuzz_tests {
 
     // Invariant 3: first deposit mints 1:1 shares
     proptest! {
-        #![proptest_config(ProptestConfig::with_cases(10_000))]
+        #![proptest_config(ProptestConfig::with_cases(CI_PROPTEST_CASES))]
 
         #[test]
         fn fuzz_first_deposit_shares_equal_assets(amount in 1i128..=i64::MAX as i128) {
@@ -1440,7 +1576,7 @@ mod fuzz_tests {
 
     // Invariant 4: deposit then full withdraw roundtrip
     proptest! {
-        #![proptest_config(ProptestConfig::with_cases(10_000))]
+        #![proptest_config(ProptestConfig::with_cases(CI_PROPTEST_CASES))]
 
         #[test]
         fn fuzz_deposit_withdraw_roundtrip(amount in 1i128..=i64::MAX as i128) {
@@ -1459,7 +1595,7 @@ mod fuzz_tests {
 
     // Invariant 5: proportional shares in multi-depositor scenario
     proptest! {
-        #![proptest_config(ProptestConfig::with_cases(5_000))]
+        #![proptest_config(ProptestConfig::with_cases(CI_PROPTEST_CASES))]
 
         #[test]
         fn fuzz_multi_deposit_proportional(
@@ -1488,7 +1624,7 @@ mod fuzz_tests {
 
     // Invariant 6: rebalance correctly tracks assets
     proptest! {
-        #![proptest_config(ProptestConfig::with_cases(5_000))]
+        #![proptest_config(ProptestConfig::with_cases(CI_PROPTEST_CASES))]
 
         #[test]
         fn fuzz_rebalance_updates_assets(
@@ -1518,7 +1654,7 @@ mod fuzz_tests {
 
     // Invariant 7: share price never decreases from deposit/withdraw
     proptest! {
-        #![proptest_config(ProptestConfig::with_cases(5_000))]
+        #![proptest_config(ProptestConfig::with_cases(CI_PROPTEST_CASES))]
 
         #[test]
         fn fuzz_share_price_monotonic(

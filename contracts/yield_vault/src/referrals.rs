@@ -59,7 +59,7 @@ impl YieldVault {
             .storage()
             .persistent()
             .get(&ReferralKey::Referrer(referrer.clone()));
-        
+
         if let Some(upstream) = referrer_upstream {
             if upstream == *referee {
                 // Circular reference detected
@@ -246,9 +246,10 @@ impl YieldVault {
             .persistent()
             .get(&ReferralKey::TotalReferralRewards)
             .unwrap_or(0);
-        env.storage()
-            .persistent()
-            .set(&ReferralKey::TotalReferralRewards, &(total.saturating_add(reward)));
+        env.storage().persistent().set(
+            &ReferralKey::TotalReferralRewards,
+            &(total.saturating_add(reward)),
+        );
 
         env.events().publish(
             (symbol_short!("ref_rew"),),

@@ -2,6 +2,7 @@ import {
   sanitizeSvg,
   uploadVaultMetadata,
 } from "../services/ipfs/vaultMetadataService";
+import { validateIconAssetOrThrow } from "../utils/iconValidator";
 
 describe("vaultMetadataService", () => {
   it("sanitizes dangerous SVG content", () => {
@@ -17,20 +18,20 @@ describe("vaultMetadataService", () => {
   it("rejects SVG with invalid dimensions during sanitization", () => {
     const tooSmall = '<svg width="10" height="10"><rect width="10" height="10" /></svg>';
 
-    expect(() => sanitizeSvg(tooSmall)).toThrow(/below minimum/);
+    expect(() => validateIconAssetOrThrow(tooSmall, "image/svg+xml")).toThrow(/below minimum/);
   });
 
   it("rejects SVG exceeding size limit during sanitization", () => {
     const tooLarge = `<svg width="100" height="100">${"x".repeat(600000)}</svg>`;
 
-    expect(() => sanitizeSvg(tooLarge)).toThrow(/exceeds maximum allowed size/);
+    expect(() => validateIconAssetOrThrow(tooLarge, "image/svg+xml")).toThrow(/exceeds maximum allowed size/);
   });
 
   it("rejects SVG with script tags during validation", () => {
     const malicious =
       '<svg width="100" height="100"><script>alert("xss")</script><rect width="100" height="100" /></svg>';
 
-    expect(() => sanitizeSvg(malicious)).toThrow(/script tags/);
+    expect(() => validateIconAssetOrThrow(malicious, "image/svg+xml")).toThrow(/script tags/);
   });
 
   it("accepts valid SVG with proper dimensions", () => {

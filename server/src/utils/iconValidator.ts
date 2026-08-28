@@ -74,18 +74,27 @@ function validateSvgSecurity(svgContent: string): string[] {
  * Extracts SVG dimensions from viewBox or width/height attributes
  */
 function extractSvgDimensions(svgContent: string): { width: number; height: number } | null {
-  // Try to extract from viewBox first
-  const viewBoxMatch = svgContent.match(/viewBox\s*=\s*["']([^"']+)["']/i);
+  const svgTagMatch = svgContent.match(/<svg[\s\S]*?>/i);
+  if (!svgTagMatch) return null;
+
+  const svgTag = svgTagMatch[0];
+
+  // Try to extract from viewBox attribute
+  const viewBoxMatch = svgTag.match(/viewBox\s*=\s*["']([^"']+)["']/i);
   if (viewBoxMatch) {
-    const values = viewBoxMatch[1].split(/\s+/).map(Number);
-    if (values.length === 4 && !values.some(isNaN)) {
-      return { width: values[2], height: values[3] };
+    const values = viewBoxMatch[1].trim().split(/[\s,]+/);
+    if (values.length === 4) {
+      const width = parseFloat(values[2]);
+      const height = parseFloat(values[3]);
+      if (!isNaN(width) && !isNaN(height)) {
+        return { width, height };
+      }
     }
   }
 
-  // Try to extract from width and height attributes
-  const widthMatch = svgContent.match(/width\s*=\s*["']?(\d+)/i);
-  const heightMatch = svgContent.match(/height\s*=\s*["']?(\d+)/i);
+  // Try to extract from width and height attributes on <svg> tag
+  const widthMatch = svgTag.match(/width\s*=\s*["']?(\d+)/i);
+  const heightMatch = svgTag.match(/height\s*=\s*["']?(\d+)/i);
 
   if (widthMatch && heightMatch) {
     return {
@@ -211,6 +220,11 @@ function detectImageFormat(content: Buffer | string): string | null {
     }
   }
 
+  // GIF: 47 49 46
+  if (buffer[0] === 0x47 && buffer[1] === 0x49 && buffer[2] === 0x46) {
+    return "gif";
+  }
+
   // SVG (text-based)
   if (typeof content === "string" && /<svg[\s\S]*?>/i.test(content)) {
     return "svg";
@@ -247,7 +261,6 @@ function validateRasterIcon(
     errors.push(`Image format mismatch: expected ${format}, detected ${detectedFormat}`);
   }
 
-  // Note: Dimension extraction for raster images requires image processing libraries
   // For now, we'll add a warning
   warnings.push(
     "Dimension validation for raster images requires additional dependencies. Consider using SVG for better validation.",
@@ -297,6 +310,7 @@ export function validateIconAsset(
       jpeg: "image/jpeg",
       jpg: "image/jpeg",
       webp: "image/webp",
+      gif: "image/gif",
     };
 
     const expectedMime = expectedMimeTypes[detectedFormat as keyof typeof expectedMimeTypes];
@@ -308,13 +322,25 @@ export function validateIconAsset(
   }
 
   // Format-specific validation
+  let result: IconValidationResult;
   if (detectedFormat === "svg") {
     const svgContent = typeof content === "string" ? content : content.toString("utf8");
-    return validateSvgIcon(svgContent, config);
+    result = validateSvgIcon(svgContent, config);
   } else {
     const buffer = typeof content === "string" ? Buffer.from(content) : content;
-    return validateRasterIcon(buffer, detectedFormat, config);
+    result = validateRasterIcon(buffer, detectedFormat, config);
   }
+
+  if (errors.length > 0) {
+    const combinedErrors = [...errors, ...(result.errors || [])];
+    result = {
+      ...result,
+      valid: combinedErrors.length === 0,
+      errors: combinedErrors,
+    };
+  }
+
+  return result;
 }
 
 /**

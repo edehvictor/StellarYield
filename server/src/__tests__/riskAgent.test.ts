@@ -7,7 +7,7 @@ const originalEnv = { ...process.env };
 describe("Risk Agent Parity & Fallback Tests", () => {
   beforeEach(() => {
     jest.resetModules();
-    process.env = { ...originalEnv };
+    process.env = { ...originalEnv, GEMINI_API_KEY: "test-api-key" };
   });
 
   afterEach(() => {
@@ -176,7 +176,9 @@ describe("Risk Agent Parity & Fallback Tests", () => {
     expect(drift).toBeLessThanOrEqual(100); // Bounds check
     // Ensure the structure remains compatible regardless of drift
     expect(llmReport.protocol).toBe(fallbackReport.protocol);
-import { assessProtocolRisk, ProtocolInput } from "../agents/riskAgent";
+  });
+});
+
 import { resilientFetch } from "../agents/resilientFetch";
 
 // Mock resilientFetch to simulate LLM responses
@@ -196,6 +198,7 @@ describe("Risk Agent - LLM Provider Fallback and Regression Tests", () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
+    process.env.GEMINI_API_KEY = "test-api-key";
   });
 
   const createMockResponse = (body: any, ok: boolean = true) => {

@@ -31,6 +31,94 @@ export interface VestingSchedule {
     startTimestamp: number;
 }
 
+/** Raw vesting schedule fields as returned by `scValToNative` for the contract's read call. */
+export interface RawVestingScheduleFields {
+    total_allocation?: unknown;
+    vested_amount?: unknown;
+    claimed_amount?: unknown;
+    cliff_timestamp?: unknown;
+    end_timestamp?: unknown;
+    next_unlock_timestamp?: unknown;
+    start_timestamp?: unknown;
+}
+
+/** Coerces a raw amount field to a non-negative bigint, defaulting to 0n. */
+function toNonNegativeBigInt(value: unknown): bigint {
+    try {
+        if (typeof value === "bigint") {
+            return value < 0n ? 0n : value;
+        }
+        if (typeof value === "number" && Number.isFinite(value)) {
+            const truncated = BigInt(Math.trunc(value));
+            return truncated < 0n ? 0n : truncated;
+        }
+        if (typeof value === "string" && value.trim() !== "") {
+            const parsed = BigInt(value.trim());
+            return parsed < 0n ? 0n : parsed;
+        }
+    } catch {
+        // Fall through to the default below on any parse failure.
+    }
+    return 0n;
+}
+
+/** Coerces a raw timestamp field to a whole-second Unix timestamp, defaulting to 0. */
+function toTimestamp(value: unknown): number {
+    if (typeof value === "bigint") {
+        return Number(value);
+    }
+    if (typeof value === "number" && Number.isFinite(value)) {
+        return Math.trunc(value);
+    }
+    if (typeof value === "string" && value.trim() !== "") {
+        const parsed = Number(value.trim());
+        if (Number.isFinite(parsed)) {
+            return Math.trunc(parsed);
+        }
+    }
+    return 0;
+}
+
+/**
+ * Normalizes raw on-chain vesting schedule fields into a well-formed,
+ * internally-consistent `VestingSchedule`.
+ *
+ * Deterministic and pure: the same input always produces the same output,
+ * independent of wall-clock time or external state. Defensively clamps
+ * amounts so callers never see impossible states even if the contract
+ * returns malformed or out-of-order data:
+ *   - negative amounts clamp to 0
+ *   - `vestedAmount` never exceeds `totalAllocation`
+ *   - `claimedAmount` never exceeds `vestedAmount`
+ *   - `claimableAmount` is derived as `vestedAmount - claimedAmount`, floored at 0
+ */
+export function normalizeVestingSchedule(raw: RawVestingScheduleFields): VestingSchedule {
+    const totalAllocation = toNonNegativeBigInt(raw.total_allocation);
+
+    let vestedAmount = toNonNegativeBigInt(raw.vested_amount);
+    if (vestedAmount > totalAllocation) {
+        vestedAmount = totalAllocation;
+    }
+
+    let claimedAmount = toNonNegativeBigInt(raw.claimed_amount);
+    if (claimedAmount > vestedAmount) {
+        claimedAmount = vestedAmount;
+    }
+
+    const claimableAmount = vestedAmount - claimedAmount > 0n ? vestedAmount - claimedAmount : 0n;
+
+    return {
+        totalAllocation,
+        vestedAmount,
+        claimedAmount,
+        claimableAmount,
+        cliffTimestamp: toTimestamp(raw.cliff_timestamp),
+        endTimestamp: toTimestamp(raw.end_timestamp),
+        nextUnlockTimestamp: toTimestamp(raw.next_unlock_timestamp),
+        startTimestamp: toTimestamp(raw.start_timestamp),
+    };
+}
+
 /**
  * Fetches the vesting schedule for the given wallet address from the
  * on-chain contract via a read-only simulation.
@@ -76,31 +164,9 @@ export async function fetchVestingSchedule(
             return null;
         }
 
-        const val = StellarSdk.scValToNative(result.result.retval) as {
-            total_allocation: bigint;
-            vested_amount: bigint;
-            claimed_amount: bigint;
-            cliff_timestamp: bigint;
-            end_timestamp: bigint;
-            next_unlock_timestamp: bigint;
-            start_timestamp: bigint;
-        };
+        const val = StellarSdk.scValToNative(result.result.retval) as RawVestingScheduleFields;
 
-        const claimable =
-            val.vested_amount - val.claimed_amount > 0n
-                ? val.vested_amount - val.claimed_amount
-                : 0n;
-
-        return {
-            totalAllocation: val.total_allocation,
-            vestedAmount: val.vested_amount,
-            claimedAmount: val.claimed_amount,
-            claimableAmount: claimable,
-            cliffTimestamp: Number(val.cliff_timestamp),
-            endTimestamp: Number(val.end_timestamp),
-            nextUnlockTimestamp: Number(val.next_unlock_timestamp),
-            startTimestamp: Number(val.start_timestamp),
-        };
+        return normalizeVestingSchedule(val);
     } catch {
         // Gracefully return null — do not expose stack traces to users.
         return null;

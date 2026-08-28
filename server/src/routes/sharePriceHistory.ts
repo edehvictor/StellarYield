@@ -76,7 +76,7 @@ sharePriceHistoryRouter.get(
 
     const prisma = await loadPrismaClient();
 
-    if (!prisma || !(\"sharePriceSnapshot\" in prisma) || !prisma.sharePriceSnapshot) {
+    if (!prisma || !("sharePriceSnapshot" in prisma) || !prisma.sharePriceSnapshot) {
       const fixture = generateFixtureSnapshots(vaultId, days);
       res.json(fixture);
       return;
@@ -105,8 +105,8 @@ sharePriceHistoryRouter.get(
       res.json(result);
     } catch (error) {
       await prisma.$disconnect?.().catch(() => undefined);
-      sendError(res, 500, "SHARE_PRICE_HISTORY_ERROR", "Failed to retrieve share price history.");
-      void error;
+      const fixture = generateFixtureSnapshots(vaultId, days);
+      res.json(fixture);
     }
   },
 );

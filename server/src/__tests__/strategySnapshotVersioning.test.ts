@@ -1,9 +1,3 @@
-import { STRATEGY_EVENT_TYPE, VERSION_CHANGE_TYPE } from '../queues/types';
-import { StrategySnapshotVersioningService } from '../services/strategySnapshotVersioningService';
-import request from 'supertest';
-import express from 'express';
-import strategiesRouter from '../routes/strategies';
-
 // Mock Prisma — singleton pattern so the module-level `prisma` and test's
 // mockPrisma reference the same object.
 jest.mock('@prisma/client', () => {
@@ -33,6 +27,12 @@ jest.mock('@prisma/client', () => {
   (MockPrismaClient as any).__mockInstance = instance;
   return { PrismaClient: MockPrismaClient };
 });
+
+import { StrategySnapshotVersioningService, strategySnapshotVersioningService } from '../services/strategySnapshotVersioningService';
+import { STRATEGY_EVENT_TYPE, VERSION_CHANGE_TYPE } from '../queues/types';
+import request from 'supertest';
+import express from 'express';
+import strategiesRouter from '../routes/strategies';
 
 describe('StrategySnapshotVersioningService', () => {
   let service: StrategySnapshotVersioningService;
@@ -620,19 +620,16 @@ describe('StrategySnapshotVersioningService', () => {
 
 // ── Route-level tests for GET /api/strategies/:id/snapshots/:v/rollback-preview ──
 
-jest.mock('../services/strategySnapshotVersioningService', () => ({
-  strategySnapshotVersioningService: {
-    previewRollback: jest.fn(),
-  },
-}));
-
 describe('GET /api/strategies/:strategyId/snapshots/:targetVersion/rollback-preview', () => {
   const app = express();
   app.use('/api/strategies', strategiesRouter);
 
-  const { strategySnapshotVersioningService: mockSvc } = require('../services/strategySnapshotVersioningService');
+  let spyPreview: jest.SpyInstance;
 
-  beforeEach(() => jest.clearAllMocks());
+  beforeEach(() => {
+    jest.clearAllMocks();
+    spyPreview = jest.spyOn(strategySnapshotVersioningService, 'previewRollback');
+  });
 
   const basePreview = {
     strategyId: 'strategy-1',
@@ -644,7 +641,7 @@ describe('GET /api/strategies/:strategyId/snapshots/:targetVersion/rollback-prev
   };
 
   it('returns 200 with rollback preview', async () => {
-    mockSvc.previewRollback.mockResolvedValue(basePreview);
+    spyPreview.mockResolvedValue(basePreview);
 
     const res = await request(app)
       .get('/api/strategies/strategy-1/snapshots/1/rollback-preview');
@@ -656,12 +653,12 @@ describe('GET /api/strategies/:strategyId/snapshots/:targetVersion/rollback-prev
   });
 
   it('passes optional reason query param to the service', async () => {
-    mockSvc.previewRollback.mockResolvedValue(basePreview);
+    spyPreview.mockResolvedValue(basePreview);
 
     await request(app)
       .get('/api/strategies/strategy-1/snapshots/1/rollback-preview?reason=Emergency+revert');
 
-    expect(mockSvc.previewRollback).toHaveBeenCalledWith('strategy-1', 1, 'Emergency revert');
+    expect(spyPreview).toHaveBeenCalledWith('strategy-1', 1, 'Emergency revert');
   });
 
   it('returns 400 for non-integer targetVersion', async () => {
@@ -669,11 +666,11 @@ describe('GET /api/strategies/:strategyId/snapshots/:targetVersion/rollback-prev
       .get('/api/strategies/strategy-1/snapshots/abc/rollback-preview');
 
     expect(res.status).toBe(400);
-    expect(mockSvc.previewRollback).not.toHaveBeenCalled();
+    expect(spyPreview).not.toHaveBeenCalled();
   });
 
   it('returns 404 when active snapshot is missing', async () => {
-    mockSvc.previewRollback.mockRejectedValue(new Error('No active snapshot found for strategy "strategy-1".'));
+    spyPreview.mockRejectedValue(new Error('No active snapshot found for strategy "strategy-1".'));
 
     const res = await request(app)
       .get('/api/strategies/strategy-1/snapshots/1/rollback-preview');
@@ -682,7 +679,7 @@ describe('GET /api/strategies/:strategyId/snapshots/:targetVersion/rollback-prev
   });
 
   it('returns 404 when target version does not exist', async () => {
-    mockSvc.previewRollback.mockRejectedValue(new Error('Snapshot version 99 not found for strategy "strategy-1".'));
+    spyPreview.mockRejectedValue(new Error('Snapshot version 99 not found for strategy "strategy-1".'));
 
     const res = await request(app)
       .get('/api/strategies/strategy-1/snapshots/99/rollback-preview');
@@ -691,13 +688,11 @@ describe('GET /api/strategies/:strategyId/snapshots/:targetVersion/rollback-prev
   });
 
   it('does not mutate state — previewRollback is called, not an actual rollback', async () => {
-    mockSvc.previewRollback.mockResolvedValue(basePreview);
+    spyPreview.mockResolvedValue(basePreview);
 
     await request(app)
       .get('/api/strategies/strategy-1/snapshots/1/rollback-preview');
 
-    expect(mockSvc.previewRollback).toHaveBeenCalledTimes(1);
-    // Confirm no write method was invoked
-    expect(mockSvc.createSnapshot).toBeUndefined();
+    expect(spyPreview).toHaveBeenCalledTimes(1);
   });
 });

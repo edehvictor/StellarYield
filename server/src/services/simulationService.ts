@@ -1,4 +1,8 @@
 import { PROTOCOLS } from "../config/protocols";
+import type { SimulationWarning } from "../../../shared/types/simulationWarning";
+
+// Re-export so consumers can import from a single service location.
+export type { SimulationWarning } from "../../../shared/types/simulationWarning";
 
 export interface SimulationParams {
   strategyId: string;
@@ -29,8 +33,16 @@ export interface SimulationResult {
     path: string[];
     expectedOutput: number;
   };
-  warnings: string[];
+  warnings: SimulationWarning[];
 }
+
+/**
+ * Hard ceiling on a simulated deposit amount (issue #1053). Well above any
+ * realistic deposit, but finite enough that downstream percentage/blended-APY
+ * math (`amount * bps / sum`, chart axis scaling) can't overflow or render a
+ * misleading chart for a client-supplied extreme value.
+ */
+export const MAX_SIMULATION_DEPOSIT = 1_000_000_000;
 
 export function simulateDeposit(params: SimulationParams): SimulationResult {
   const { amount, strategyId, token: _token } = params;
@@ -46,8 +58,25 @@ export function simulateDeposit(params: SimulationParams): SimulationResult {
     warnings: [],
   };
 
-  if (amount <= 0) {
-    result.warnings.push("Amount must be greater than zero.");
+  if (!Number.isFinite(amount) || amount <= 0) {
+    result.warnings.push({
+      code: "ZERO_AMOUNT",
+      severity: "critical",
+      affectedField: "amount",
+      message: "Amount must be a finite number greater than zero.",
+      remediation: "Enter a positive deposit amount before running the simulation.",
+    });
+    return result;
+  }
+
+  if (amount > MAX_SIMULATION_DEPOSIT) {
+    result.warnings.push({
+      code: "AMOUNT_TOO_LARGE",
+      severity: "critical",
+      affectedField: "amount",
+      message: `Amount exceeds the maximum supported simulation deposit of ${MAX_SIMULATION_DEPOSIT.toLocaleString()}.`,
+      remediation: `Reduce the deposit amount to at most ${MAX_SIMULATION_DEPOSIT.toLocaleString()} to run the simulation.`,
+    });
     return result;
   }
 
@@ -55,34 +84,61 @@ export function simulateDeposit(params: SimulationParams): SimulationResult {
   // Base deposit fee (e.g. 0.1%)
   const entryFee = amount * 0.001;
   result.fees.push({ type: "Entry Fee", amount: entryFee });
-  
+
   // Gas estimate
   const networkFee = 0.05; // 0.05 units of token/XLM
   result.fees.push({ type: "Network Fee Estimate", amount: networkFee });
-  
+
   const netAmount = amount - entryFee;
 
   // Illiquidity / Slippage warnings
   if (amount > 100000) {
-    result.warnings.push("High slippage expected for deposits over 100k.");
-  }
-  
-  if (amount > 1000000) {
-    result.warnings.push("Insufficient liquidity to route this deposit fully.");
+    result.warnings.push({
+      code: "HIGH_SLIPPAGE",
+      severity: "warning",
+      affectedField: "amount",
+      message: "High slippage expected for deposits over 100k.",
+      remediation: "Consider splitting the deposit into smaller tranches to reduce price impact.",
+    });
   }
 
+  if (amount > 1000000) {
+    result.warnings.push({
+      code: "INSUFFICIENT_LIQUIDITY",
+      severity: "critical",
+      affectedField: "amount",
+      message: "Insufficient liquidity to route this deposit fully.",
+      remediation: "Reduce the deposit size or contact the protocol to confirm available liquidity before proceeding.",
+    });
+  }
+
+  const normalizedStrategy = (strategyId || "").toLowerCase();
   let targetProtocols = PROTOCOLS.filter((p) => p.protocolType === "blend");
   let baseApySum = targetProtocols.reduce((acc, p) => acc + p.baseApyBps, 0);
+  let isKnownStrategy = false;
 
-  if (strategyId.toLowerCase().includes("aggressive")) {
+  if (normalizedStrategy.includes("aggressive")) {
     targetProtocols = PROTOCOLS.filter((p) => p.protocolType !== "blend");
     baseApySum = targetProtocols.reduce((acc, p) => acc + p.baseApyBps, 0) || 1000;
+    isKnownStrategy = true;
+  } else if (normalizedStrategy.includes("conservative") || normalizedStrategy.includes("blend")) {
+    targetProtocols = PROTOCOLS.filter((p) => p.protocolType === "blend");
+    baseApySum = targetProtocols.reduce((acc, p) => acc + p.baseApyBps, 0);
+    isKnownStrategy = true;
   }
 
-  if (targetProtocols.length === 0) {
-     result.warnings.push("Unsupported strategy or asset combination.");
-     targetProtocols = [PROTOCOLS[0]]; // fallback
-     baseApySum = targetProtocols[0].baseApyBps;
+  if (!isKnownStrategy || targetProtocols.length === 0) {
+    result.warnings.push({
+      code: "UNSUPPORTED_STRATEGY",
+      severity: "warning",
+      affectedField: "strategyId",
+      message: "Unsupported strategy or asset combination.",
+      remediation: "Select a recognised strategy (e.g. blend-stable or aggressive-yield) and retry.",
+    });
+    if (targetProtocols.length === 0) {
+      targetProtocols = [PROTOCOLS[0]]; // fallback
+      baseApySum = targetProtocols[0].baseApyBps;
+    }
   }
 
   // Allocate proportionally based on APY (just a mock logic for simulation)
@@ -162,7 +218,7 @@ export interface RebalancePreview {
   totalTurnoverUsd: number; // capital that actually moves
   estimatedFeeUsd: number;
   maxDriftPct: number; // largest absolute drift across legs
-  warnings: string[];
+  warnings: SimulationWarning[];
 }
 
 export const REBALANCE_THRESHOLDS = {
@@ -189,6 +245,10 @@ export function validateRebalanceParams(params: RebalanceParams): string[] {
 
   if (!Number.isFinite(params.totalValueUsd) || params.totalValueUsd <= 0) {
     errors.push("totalValueUsd must be a positive number.");
+  } else if (params.totalValueUsd > MAX_SIMULATION_DEPOSIT) {
+    errors.push(
+      `totalValueUsd exceeds the maximum supported simulation value of ${MAX_SIMULATION_DEPOSIT.toLocaleString()}.`,
+    );
   }
 
   if (!Array.isArray(params.allocations) || params.allocations.length === 0) {
@@ -218,6 +278,15 @@ export function validateRebalanceParams(params: RebalanceParams): string[] {
           `${field} for ${alloc.label || "allocation"} must be between 0 and 100.`,
         );
       }
+    }
+    if (!Number.isFinite(alloc.apy) || alloc.apy < 0) {
+      errors.push(
+        `apy for ${alloc.label || "allocation"} must be a non-negative number (got ${alloc.apy}).`,
+      );
+    } else if (alloc.apy > 10_000) {
+      errors.push(
+        `apy for ${alloc.label || "allocation"} of ${alloc.apy}% is not a plausible assumption.`,
+      );
     }
     currentSum += alloc.currentWeight;
     targetSum += alloc.targetWeight;
@@ -251,7 +320,7 @@ export function simulateRebalance(params: RebalanceParams): RebalancePreview {
   let blendedApyAfter = 0;
   let maxDriftPct = 0;
   let grossMovement = 0;
-  const warnings: string[] = [];
+  const warnings: SimulationWarning[] = [];
 
   const legs: RebalanceLeg[] = allocations.map((alloc) => {
     const currentValueUsd = (totalValueUsd * alloc.currentWeight) / 100;
@@ -271,9 +340,13 @@ export function simulateRebalance(params: RebalanceParams): RebalancePreview {
       alloc.liquidityUsd >= 0 &&
       deltaUsd > alloc.liquidityUsd * t.liquidityUtilizationLimit
     ) {
-      warnings.push(
-        `Liquidity risk: rebalancing into ${alloc.label} moves $${round2(deltaUsd)} against $${round2(alloc.liquidityUsd)} of liquidity.`,
-      );
+      warnings.push({
+        code: "LIQUIDITY_RISK",
+        severity: "warning",
+        affectedField: `allocations[${alloc.label}].liquidityUsd`,
+        message: `Liquidity risk: rebalancing into ${alloc.label} moves $${round2(deltaUsd)} against $${round2(alloc.liquidityUsd)} of liquidity.`,
+        remediation: `Reduce the target weight for ${alloc.label} or confirm that additional liquidity will be available before executing.`,
+      });
     }
 
     return {
@@ -292,18 +365,26 @@ export function simulateRebalance(params: RebalanceParams): RebalancePreview {
   const estimatedFeeUsd = (totalTurnoverUsd * feeBps) / 10000;
 
   if (estimatedFeeUsd > totalValueUsd * t.highFeeRatio) {
-    warnings.push(
-      `High fees: estimated rebalance cost $${round2(estimatedFeeUsd)} exceeds ${t.highFeeRatio * 100}% of portfolio value.`,
-    );
+    warnings.push({
+      code: "HIGH_FEES",
+      severity: "warning",
+      affectedField: "feeBps",
+      message: `High fees: estimated rebalance cost $${round2(estimatedFeeUsd)} exceeds ${t.highFeeRatio * 100}% of portfolio value.`,
+      remediation: "Lower the fee rate (feeBps) or reduce rebalance frequency to keep turnover costs manageable.",
+    });
   }
 
   if (
     params.dataAgeSeconds !== undefined &&
     params.dataAgeSeconds > t.staleDataSeconds
   ) {
-    warnings.push(
-      `Stale data: preview uses market data ${Math.round(params.dataAgeSeconds / 60)}m old; refresh before committing.`,
-    );
+    warnings.push({
+      code: "STALE_DATA",
+      severity: "warning",
+      affectedField: "dataAgeSeconds",
+      message: `Stale data: preview uses market data ${Math.round(params.dataAgeSeconds / 60)}m old; refresh before committing.`,
+      remediation: "Refresh market data and re-run the simulation before committing any capital.",
+    });
   }
 
   return {
@@ -372,6 +453,7 @@ export interface RebalanceBacktestResult {
   totalFeesUsd: number;
   snapshots: RebalanceBacktestSnapshot[];
   rebalanceEvents: RebalanceEvent[];
+  warnings: SimulationWarning[];
 }
 
 export const BACKTEST_LIMITS = {
@@ -454,6 +536,54 @@ export function runRebalanceBacktest(params: RebalanceBacktestParams): Rebalance
 
   const targetWeights = params.allocations.map(a => a.targetWeight / 100);
   const dailyFactors = params.allocations.map(a => 1 + (a.apy / 100) / 365);
+
+  // Backtest-level structured warnings (evaluated once before the loop).
+  const warnings: SimulationWarning[] = [];
+
+  // Warn when the requested interval means very few rebalances will occur (<2)
+  // for a schedule strategy — results may not be meaningful.
+  if (params.strategy === 'schedule') {
+    const start = new Date(params.startDate).getTime();
+    const end = new Date(params.endDate).getTime();
+    const totalDays = Math.round((end - start) / 86_400_000);
+    const expectedRebalances = Math.floor(totalDays / rebalanceIntervalDays);
+    if (expectedRebalances < 2) {
+      warnings.push({
+        code: "UNSUPPORTED_INTERVAL",
+        severity: "info",
+        affectedField: "rebalanceIntervalDays",
+        message: `The rebalance interval of ${rebalanceIntervalDays} days leaves fewer than 2 rebalances in the selected date range. Results may not be representative.`,
+        remediation: "Shorten the rebalance interval or extend the backtest date range for a more meaningful comparison.",
+      });
+    }
+  }
+
+  // Warn when any allocation has a suspiciously high APY (potential data error).
+  const HIGH_VOLATILITY_APY_THRESHOLD = 200; // >200% annualised APY
+  for (const alloc of params.allocations) {
+    if (alloc.apy > HIGH_VOLATILITY_APY_THRESHOLD) {
+      warnings.push({
+        code: "HIGH_VOLATILITY",
+        severity: "warning",
+        affectedField: `allocations[${alloc.label}].apy`,
+        message: `APY of ${alloc.apy}% for "${alloc.label}" is unusually high and may indicate volatile or unreliable yield data.`,
+        remediation: "Verify the APY input for this allocation. Extremely high yields often reflect short-lived anomalies or data errors.",
+      });
+    }
+  }
+
+  // Warn when the total fee cost across the whole backtest is large relative to
+  // initial portfolio value. We approximate using max possible turnover.
+  const estimatedMaxFeeFraction = (feeBps / 10_000) * (365 / rebalanceIntervalDays);
+  if (estimatedMaxFeeFraction > 0.05) {
+    warnings.push({
+      code: "HIGH_FEES",
+      severity: "warning",
+      affectedField: "feeBps",
+      message: `At ${feeBps} bps per rebalance and an interval of ${rebalanceIntervalDays} days, annual fee drag could exceed 5% of portfolio value.`,
+      remediation: "Increase the rebalance interval or reduce feeBps to keep drag manageable.",
+    });
+  }
 
   // Per-allocation values for the rebalanced portfolio and the passive benchmark
   let portfolioAlloc = targetWeights.map(w => params.initialValueUsd * w);
@@ -557,5 +687,6 @@ export function runRebalanceBacktest(params: RebalanceBacktestParams): Rebalance
     totalFeesUsd: round2(totalFeesUsd),
     snapshots,
     rebalanceEvents,
+    warnings,
   };
 }

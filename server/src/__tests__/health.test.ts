@@ -35,6 +35,7 @@ jest.mock("@prisma/client", () => {
 });
 
 const mockCall = jest.fn();
+const mockRpcGetNetwork = jest.fn();
 jest.mock("@stellar/stellar-sdk", () => {
   const actual = jest.requireActual("@stellar/stellar-sdk");
   return {
@@ -49,7 +50,12 @@ jest.mock("@stellar/stellar-sdk", () => {
           })
         })
       }))
-    }
+    },
+    rpc: {
+      Server: jest.fn().mockImplementation(() => ({
+        getNetwork: mockRpcGetNetwork,
+      })),
+    },
   };
 });
 
@@ -61,6 +67,7 @@ describe("GET /api/health", () => {
     jest.clearAllMocks();
     process.env.STELLAR_HORIZON_TIMEOUT_MS = "100";
     mockGetJobCounts.mockResolvedValue({ waiting: 0, active: 0, completed: 10, failed: 0, delayed: 0 });
+    mockRpcGetNetwork.mockResolvedValue({ passphrase: "Test SDF Network ; September 2015" });
   });
 
   afterEach(() => {

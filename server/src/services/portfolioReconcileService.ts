@@ -1,3 +1,11 @@
+import {
+  analyzeConcentration,
+  buildExposureBuckets,
+  type ConcentrationAnalysis,
+  type ConcentrationThresholdsInput,
+} from '../../../shared/types/exposureConcentration';
+import { readConcentrationThresholdOverrides } from '../config/concentrationThresholds';
+
 export type Position = { asset: string; expected: number };
 export type ProviderBalance = { provider: string; asset: string; balance?: number };
 
@@ -127,6 +135,12 @@ export interface ReconciliationResult {
   staleDurationMs?: number
   orphanedTransactions?: string[]
   duplicatePositions?: string[]
+  /**
+   * Asset and protocol concentration of the reconciled (chain-authoritative)
+   * positions, so callers see exposure risk against the same snapshot they just
+   * reconciled rather than a separately-fetched one.
+   */
+  concentration: ConcentrationAnalysis
 }
 
 export interface PositionChange {
@@ -153,8 +167,31 @@ interface PrismaClient {
   vaultBalance: PrismaVaultBalance
 }
 
+/**
+ * Grades asset and protocol concentration for a set of positions.
+ *
+ * Position `amount` is used as the exposure weight; the reconciler works in
+ * position units and does not carry USD prices, so shares are relative to the
+ * reconciled total rather than to a priced portfolio value.
+ */
+export function analyzePositionConcentration(
+  positions: PortfolioPosition[],
+  thresholds?: ConcentrationThresholdsInput,
+): ConcentrationAnalysis {
+  const buckets = buildExposureBuckets(positions, (p) => ({
+    asset: p.assetId,
+    protocol: p.protocol,
+    valueUsd: p.amount,
+  }))
+
+  return analyzeConcentration(buckets, thresholds ?? readConcentrationThresholdOverrides())
+}
+
 export class PortfolioReconcileService {
-  constructor(private prisma: PrismaClient) {}
+  constructor(
+    private prisma: PrismaClient,
+    private concentrationThresholds?: ConcentrationThresholdsInput,
+  ) {}
 
   async reconcilePortfolio(
     walletAddress: string,
@@ -217,6 +254,7 @@ export class PortfolioReconcileService {
         staleDurationMs: isStale ? projectionAge : undefined,
         orphanedTransactions: orphanedTransactions.length > 0 ? orphanedTransactions : undefined,
         duplicatePositions: duplicatePositions.length > 0 ? duplicatePositions : undefined,
+        concentration: this.analyzeConcentration(chainPositions),
       }
     } catch (error) {
       await this.logReconciliationEvent(walletAddress, [], [], 'failed', error)
@@ -227,8 +265,14 @@ export class PortfolioReconcileService {
         timestamp: new Date(),
         sourceOfTruth: 'chain',
         isStale: true,
+        concentration: this.analyzeConcentration([]),
       }
     }
+  }
+
+  /** Grades concentration using this service's configured thresholds. */
+  analyzeConcentration(positions: PortfolioPosition[]): ConcentrationAnalysis {
+    return analyzePositionConcentration(positions, this.concentrationThresholds)
   }
 
   private comparePositions(
@@ -403,6 +447,7 @@ export class PortfolioReconcileService {
     if (metadata) {
       entry.metadata = metadata
     }
+    console.log(`[Reconciliation] ${status} for ${walletAddress}`)
     persistReconciliationEvent(entry)
   }
 
@@ -414,6 +459,9 @@ export class PortfolioReconcileService {
   }
 }
 
-export function createPortfolioReconcileService(prisma: PrismaClient) {
-  return new PortfolioReconcileService(prisma)
+export function createPortfolioReconcileService(
+  prisma: PrismaClient,
+  concentrationThresholds?: ConcentrationThresholdsInput,
+) {
+  return new PortfolioReconcileService(prisma, concentrationThresholds)
 }

@@ -68,6 +68,24 @@ export function startKeeperHealthServer(
       return;
     }
 
+    if (req.method === 'GET' && url === '/health/redis') {
+      getQueueHealth(queues)
+        .then((summary) => {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({
+            redisStatus: summary.redisStatus,
+            overallStatus: summary.overallStatus,
+            timestamp: summary.timestamp,
+          }));
+        })
+        .catch((err: unknown) => {
+          logger.error({ err }, 'Redis health check failed');
+          res.writeHead(503, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Redis health check failed' }));
+        });
+      return;
+    }
+
     res.writeHead(404);
     res.end();
   });

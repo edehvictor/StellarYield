@@ -34,6 +34,7 @@ The table below reflects **`continue-on-error`**, conditional `if:` steps, and j
 | **Frontend** | `ci.yml` → *Frontend Checks* | **Partially** | **Tests** failing fail the job. **Lint** (`lint:ci-scope`) and **build** use `continue-on-error: true` (advisory in CI). Prefer running full `npm run lint` and `npm run build` locally before pushing. |
 | **Contracts** | `ci.yml` → *Soroban Contract Checks* | **No** | Entire job sets `continue-on-error: true`. Formatting (`cargo fmt`) still runs without that flag on the step—treat contract hygiene as **required by policy** even when the job is lenient. |
 | **Docs / README** | `ci.yml` → *README Command Verification* | **No** | Job-level `continue-on-error: true`. |
+| **Generated Files** | `ci.yml` → *Generated Files Guard* | **Yes** | Blocks if `issue.md` or `pr.md` are present in the branch diff. See [Generated issue scripts](#generated-issue-scripts) below. |
 | **Security (Rust)** | `security.yml` | **Mixed** | Jobs post **PR comments** (`cargo-audit`, security-focused Clippy, Soroban pattern scan). Explicit **fail-on-push** guards exist for some steps; PRs rely on visibility in comments rather than failing the audit job by default—still fix reported issues. |
 | **CodeQL** | `codeql.yml` | **If required** | Fails when analysis fails unless overridden. Typically treated as blocking when enabled for the repo. Hard to replicate fully offline. |
 | **Dependency Review** | `dependency-review.yml` | **Soft** | Runs only for PRs from the **same** repository (not forks). The review step uses `continue-on-error: true` so missing Dependency Graph support does not hard-fail CI. High-severity findings are still surfaced in the PR. |
@@ -297,6 +298,45 @@ node scripts/verify-readme-commands.js
 ```
 
 from the repository root. It checks that documented commands and doc links in `README.md` stay consistent with the repo (including this file).
+
+---
+
+## Generated issue scripts
+
+The files `issue.md` and `pr.md` are **local operational artifacts** — auto-generated summaries that maintainers and contributors use to track issue scope and compose PR descriptions during active development. They must **never** be committed to the repository.
+
+### Guard
+
+CI runs `node scripts/check-generated-files.js` from the repository root as part of `ci.yml` → *Generated Files Guard*. It compares the branch diff against `origin/main` and fails if either filename appears in any changed path. This job is **blocking**: a red guard prevents merging.
+
+### Where local maintainer scripts live
+
+Repository-local scripts that are safe to commit belong under `scripts/`. The following are already committed and CI-safe:
+
+| Script | Purpose |
+|--------|---------|
+| `scripts/issue-triage.js` | Maintainer issue triage summary via GitHub Search API |
+| `scripts/verify-readme-commands.js` | Verifies README commands match package.json scripts |
+| `scripts/validate-workspace.js` | Runs env var consistency checks |
+| `scripts/smoke-test.sh` / `scripts/smoke-test.js` | Backend / frontend endpoint smoke tests |
+| `scripts/setup-doctor.js` | Toolchain and workspace setup checker |
+| `scripts/maintainer_saved_searches.sh` | Maintainer triage shortcut links |
+| `scripts/check-frontend-env.js` | CI guardrail for unsafe VITE_ secrets |
+| `scripts/check-env-vars.js` / `scripts/check-env-drift.ts` | Environment variable consistency checkers |
+| `scripts/check-generated-files.js` | CI guardrail for accidental `issue.md` / `pr.md` commits |
+
+Generated helpers like `issue.md` and `pr.md` that summarize issue scope or compose PR bodies are **not** under `scripts/` because they are ephemeral, author-specific, and should never be reviewed or merged. Keep them in the repository root (where `.gitignore` already excludes them) or in a temporary working directory outside the repo.
+
+### Recovering from an accidental commit
+
+If `issue.md` or `pr.md` end up in a branch despite the `.gitignore` entry (e.g. via `git add --force`), remove them from tracking:
+
+```bash
+git rm --cached issue.md pr.md
+git commit -m "chore: remove accidentally committed generated files"
+```
+
+Then rebase or create a new PR branch from a clean point on `main`.
 
 ---
 

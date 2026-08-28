@@ -79,7 +79,17 @@ export function getApiBaseUrlOrNull(env: ImportMetaEnv = import.meta.env): strin
 
 export function apiUrl(path: string, env?: ImportMetaEnv): string {
   const normalizedPath = path.startsWith("/") ? path : `/${path}`;
-  return `${getApiBaseUrl(env)}${normalizedPath}`;
+  const state = getApiBaseUrlState(env);
+
+  if (state.available) {
+    return `${state.baseUrl}${normalizedPath}`;
+  }
+
+  if (state.reason.startsWith("Invalid API URL configuration")) {
+    throw new ApiUnavailableError(state.reason);
+  }
+
+  return `${SAME_ORIGIN_API_BASE_URL}${normalizedPath}`;
 }
 
 /**

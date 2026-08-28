@@ -1,11 +1,56 @@
 import React, { useState, useEffect } from "react";
+import { AlertTriangle, AlertCircle, Info } from "lucide-react";
 import { fetchDepositSimulation } from "./simulationService";
-import type { SimulationResult } from "./simulationService";
+import type { SimulationResult, SimulationWarning } from "./simulationService";
 
 interface DepositSimulatorProps {
   strategyId: string;
   amount: number;
   token: string;
+}
+
+const SEVERITY_STYLES: Record<
+  SimulationWarning["severity"],
+  { container: string; icon: string; text: string; Icon: React.FC<{ size?: number; className?: string }> }
+> = {
+  info: {
+    container: "bg-blue-500/10 border-l-4 border-blue-400",
+    icon: "text-blue-400",
+    text: "text-blue-300",
+    Icon: Info,
+  },
+  warning: {
+    container: "bg-orange-500/10 border-l-4 border-orange-400",
+    icon: "text-orange-400",
+    text: "text-orange-300",
+    Icon: AlertTriangle,
+  },
+  critical: {
+    container: "bg-red-500/10 border-l-4 border-red-500",
+    icon: "text-red-400",
+    text: "text-red-300",
+    Icon: AlertCircle,
+  },
+};
+
+function WarningItem({ warning }: { warning: SimulationWarning }) {
+  const styles = SEVERITY_STYLES[warning.severity];
+  const { Icon } = styles;
+  return (
+    <li className={`flex gap-3 p-3 rounded ${styles.container}`} role="alert">
+      <Icon size={16} className={`${styles.icon} shrink-0 mt-0.5`} aria-hidden="true" />
+      <div className="space-y-0.5 text-sm">
+        <p className={`font-medium ${styles.text}`}>{warning.message}</p>
+        <p className="text-gray-400 text-xs">
+          <span className="font-semibold text-gray-300">Suggestion: </span>
+          {warning.remediation}
+        </p>
+        {warning.affectedField && (
+          <p className="text-gray-500 text-xs font-mono">Field: {warning.affectedField}</p>
+        )}
+      </div>
+    </li>
+  );
 }
 
 export const DepositSimulator: React.FC<DepositSimulatorProps> = ({
@@ -45,33 +90,45 @@ export const DepositSimulator: React.FC<DepositSimulatorProps> = ({
   if (error) return <div className="p-4 text-red-500 bg-red-50 rounded-md">Error: {error}</div>;
   if (!simulation) return <div className="p-4 text-gray-400 italic">Enter an amount to see the preview.</div>;
 
+  const criticalWarnings = simulation.warnings.filter((w) => w.severity === "critical");
+  const otherWarnings = simulation.warnings.filter((w) => w.severity !== "critical");
+
   return (
     <div className="p-6 border border-gray-200 rounded-lg shadow-sm bg-white mt-4 relative overflow-hidden">
       <div className="absolute top-2 right-2 bg-yellow-100 text-yellow-800 text-xs font-bold px-2 py-1 rounded">
         PREVIEW ONLY
       </div>
-      
+
       <h3 className="text-xl font-bold mb-4 text-gray-800">Deposit Simulation</h3>
-      
-      {simulation.warnings.length > 0 && (
-        <div className="mb-4 bg-orange-50 border-l-4 border-orange-400 p-4 rounded" role="alert">
-          <p className="font-bold text-orange-800 mb-1">Warnings</p>
-          <ul className="list-disc pl-5 text-orange-700 text-sm">
-            {simulation.warnings.map((warning, idx) => (
-              <li key={idx}>{warning}</li>
-            ))}
-          </ul>
-        </div>
+
+      {criticalWarnings.length > 0 && (
+        <ul className="mb-4 space-y-2" aria-label="Critical warnings">
+          {criticalWarnings.map((w, idx) => (
+            <WarningItem key={idx} warning={w} />
+          ))}
+        </ul>
+      )}
+
+      {otherWarnings.length > 0 && (
+        <ul className="mb-4 space-y-2" aria-label="Simulation warnings">
+          {otherWarnings.map((w, idx) => (
+            <WarningItem key={idx} warning={w} />
+          ))}
+        </ul>
       )}
 
       <div className="grid grid-cols-2 gap-4 mb-6">
         <div className="bg-gray-50 p-3 rounded">
           <p className="text-sm text-gray-500 mb-1">Expected Shares</p>
-          <p className="text-lg font-semibold">{simulation.expectedShares.toLocaleString(undefined, { maximumFractionDigits: 2 })}</p>
+          <p className="text-lg font-semibold">
+            {simulation.expectedShares.toLocaleString(undefined, { maximumFractionDigits: 2 })}
+          </p>
         </div>
         <div className="bg-gray-50 p-3 rounded">
-          <p className="text-sm text-gray-500 mb-1">Post-Deposit Expsosure (APY)</p>
-          <p className="text-lg font-semibold">{(simulation.postDepositExposure.expectedApy * 100).toFixed(2)}%</p>
+          <p className="text-sm text-gray-500 mb-1">Post-Deposit Exposure (APY)</p>
+          <p className="text-lg font-semibold">
+            {(simulation.postDepositExposure.expectedApy * 100).toFixed(2)}%
+          </p>
         </div>
       </div>
 
@@ -85,7 +142,8 @@ export const DepositSimulator: React.FC<DepositSimulatorProps> = ({
               <div key={idx} className="flex justify-between items-center text-sm">
                 <span className="font-medium text-gray-700">{alloc.protocol}</span>
                 <span className="text-gray-600">
-                  {alloc.amount.toLocaleString(undefined, { maximumFractionDigits: 2 })} {token} ({alloc.percentage.toFixed(1)}%)
+                  {alloc.amount.toLocaleString(undefined, { maximumFractionDigits: 2 })} {token}{" "}
+                  ({alloc.percentage.toFixed(1)}%)
                 </span>
               </div>
             ))}
@@ -102,13 +160,14 @@ export const DepositSimulator: React.FC<DepositSimulatorProps> = ({
             {simulation.fees.map((fee, idx) => (
               <div key={idx} className="flex justify-between items-center text-sm">
                 <span className="text-gray-600">{fee.type}</span>
-                <span className="font-medium text-gray-800">{fee.amount.toLocaleString(undefined, { maximumFractionDigits: 4 })}</span>
+                <span className="font-medium text-gray-800">
+                  {fee.amount.toLocaleString(undefined, { maximumFractionDigits: 4 })}
+                </span>
               </div>
             ))}
           </div>
         )}
       </div>
-      
     </div>
   );
 };

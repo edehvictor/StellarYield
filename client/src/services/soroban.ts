@@ -415,7 +415,7 @@ export async function deposit(
     onPhase?.("waiting_for_wallet");
     const signer = new CustomSigner(
       userAddress,
-      signTx || ((xdr, passphrase) => signWithFreighter(xdr, passphrase))
+      signTx || ((xdr: string, passphrase: string) => signWithFreighter(xdr, passphrase))
     );
     const signed = await prepared.sign(signer);
 
@@ -439,7 +439,7 @@ export async function deposit(
     return { success: true, hash: confirmed.hash };
   } catch (err) {
     if (err instanceof SubmissionTimeoutError) {
-      const recovery = await attemptRecovery(getVaultClient(), err.txHash, onPhase);
+      const recovery = await attemptRecovery(getVaultClient(), (err as any).txHash, onPhase);
       if (recovery.success) {
         onPhase?.("success");
         return { success: true, hash: recovery.hash };
@@ -455,7 +455,7 @@ export async function deposit(
 }
 
 /**
- * Withdraw shares from the YieldVault contract using the SDK VaultClient & lifecycle.
+ * Withdraw shares from the YieldVault contract using the SDK VaultClient & lifecycle. using the SDK VaultClient & lifecycle.
  */
 export async function withdraw(
   userAddress: string,
@@ -475,7 +475,7 @@ export async function withdraw(
     onPhase?.("waiting_for_wallet");
     const signer = new CustomSigner(
       userAddress,
-      signTx || ((xdr, passphrase) => signWithFreighter(xdr, passphrase))
+      signTx || ((xdr: string, passphrase: string) => signWithFreighter(xdr, passphrase))
     );
     const signed = await prepared.sign(signer);
 
@@ -487,7 +487,7 @@ export async function withdraw(
     return { success: true, hash: confirmed.hash };
   } catch (err) {
     if (err instanceof SubmissionTimeoutError) {
-      const recovery = await attemptRecovery(getVaultClient(), err.txHash, onPhase);
+      const recovery = await attemptRecovery(getVaultClient(), (err as any).txHash, onPhase);
       if (recovery.success) {
         onPhase?.("success");
         return { success: true, hash: recovery.hash };

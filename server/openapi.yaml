@@ -30,7 +30,27 @@ tags:
   - name: Export
     description: Data export endpoints
   - name: Zap
-    description: Zap feature for token swaps
+    description: |
+      Zap feature for token swaps — obtain quotes, verify them, and retrieve
+      supported asset metadata.
+
+      ## Error Codes
+
+      The Zap endpoints return the following machine-readable `error` codes in
+      `ZapErrorResponse`:
+
+      | Error code | HTTP status | Description |
+      |---|---|---|
+      | `MISSING_FIELDS` | 400 | Required request fields are missing. |
+      | `INVALID_AMOUNT` | 400 | `amountInStroops` is not a valid integer string. |
+      | `STALE_QUOTE` | 400 / 422 | The provided quote has expired (older than 60s) and must be refreshed. |
+      | `UNSUPPORTED_ASSET` | 400 / 422 | One or more assets in the quote path are no longer in the supported asset set. |
+      | `SLIPPAGE_EXCEEDED` | 400 / 422 | The applied slippage exceeds the maximum allowed threshold (15%). |
+      | `ROUTE_MISMATCH` | 400 | The route hash in the quote does not match the current computed path. |
+      | `CONFIG_DRIFT` | 400 | The asset configuration version has changed since the quote was issued. |
+      | `QUOTE_FAILED` | 500 | Quote generation failed due to an internal error. |
+      | `VERIFY_FAILED` | 500 | Quote verification failed due to an internal error. |
+      | `CONFIG_UNAVAILABLE` | 503 | The supported assets configuration could not be loaded. |
   - name: Analytics
     description: Analytics and operational metrics
   - name: Treasury
@@ -442,7 +462,11 @@ paths:
   /api/zap/quote:
     post:
       summary: Get token swap quote
-      description: Returns a quote for swapping tokens via the Zap feature
+      description: >
+        Returns a quote for swapping an input token into a vault token via the Zap feature.
+        The quote includes the expected output, slippage-adjusted minimum, expiry window,
+        and route metadata. Use the returned `routeHash` and `assetConfigVersion` when
+        calling `POST /api/zap/verify` to confirm the quote is still valid before executing.
       tags:
         - Zap
       requestBody:
@@ -450,33 +474,198 @@ paths:
         content:
           application/json:
             schema:
-              type: object
-              properties:
-                fromAsset:
-                  type: string
-                  description: Source asset code or address
-                toAsset:
-                  type: string
-                  description: Destination asset code or address
-                amount:
-                  type: string
-                  description: Amount to swap (in stroops for native assets)
+              $ref: '#/components/schemas/ZapQuoteRequest'
+            example:
+              inputTokenContract: "CDXLMXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
+              vaultTokenContract: "CDVAULTXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
+              amountInStroops: "10000000"
+              inputDecimals: 7
+              vaultDecimals: 7
+              slippageTolerance: 0.01
       responses:
         '200':
           description: Quote retrieved successfully
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/SwapQuote'
+                $ref: '#/components/schemas/ZapQuoteResponse'
+              examples:
+                success:
+                  summary: Successful fallback quote
+                  value:
+                    path:
+                      - contractId: "CDXLMXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
+                        label: "in"
+                      - contractId: "CDVAULTXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
+                        label: "out"
+                    expectedAmountOutStroops: "1500000"
+                    source: "fallback_rate"
+                    slippageApplied: 0.005
+                    amountOutAfterSlippage: "1492500"
+                    quotedAt: "2026-07-26T12:00:00.000Z"
+                    minAmountOutStroops: "1492500"
+                    quoteAgeMs: 0
+                    isFallback: true
+                    issuedAt: "2026-07-26T12:00:00.000Z"
+                    expiresAt: "2026-07-26T12:01:00.000Z"
+                    routeHash: "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1"
+                    assetConfigVersion: "abc123def456abc123def456abc123def456abc123def456abc123def456abc123"
         '400':
-          description: Invalid swap parameters
+          description: Invalid request — missing or malformed fields
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ZapErrorResponse'
+              examples:
+                missingFields:
+                  summary: Missing required fields
+                  value:
+                    error: "MISSING_FIELDS"
+                    message: "inputTokenContract, vaultTokenContract, and amountInStroops are required."
+                invalidAmount:
+                  summary: Invalid amount format
+                  value:
+                    error: "INVALID_AMOUNT"
+                    message: "amountInStroops must be an integer string."
+        '422':
+          description: Business logic failure — stale config, unsupported asset, or slippage exceeded
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ZapErrorResponse'
+              examples:
+                staleQuote:
+                  summary: STALE_QUOTE — quote has expired
+                  value:
+                    error: "STALE_QUOTE"
+                    message: "Quote has expired. Request a fresh quote."
+                unsupportedAsset:
+                  summary: UNSUPPORTED_ASSET — asset no longer in supported set
+                  value:
+                    error: "UNSUPPORTED_ASSET"
+                    message: "Asset CDUNKNNOWNXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX is no longer supported."
+                slippageExceeded:
+                  summary: SLIPPAGE_EXCEEDED — slippage exceeds maximum threshold
+                  value:
+                    error: "SLIPPAGE_EXCEEDED"
+                    message: "Slippage 18.50% exceeds maximum allowed threshold of 15%."
         '500':
-          description: Failed to generate quote
+          description: Internal error — quote generation failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ZapErrorResponse'
+              example:
+                error: "QUOTE_FAILED"
+                message: "Quote failed"
+
+  /api/zap/verify:
+    post:
+      summary: Verify a swap quote
+      description: >
+        Validates that a previously obtained quote is still fresh, its route is consistent
+        with the current asset configuration, no assets have been removed from the supported
+        set, and the applied slippage remains within acceptable bounds. Returns `{ success: true }`
+        when the quote passes all checks, or an error code explaining why it should be rejected.
+      tags:
+        - Zap
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ZapQuoteResponse'
+            examples:
+              validQuote:
+                summary: A valid, verifiable quote
+                value:
+                  path:
+                    - contractId: "CDXLMXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
+                      label: "in"
+                    - contractId: "CDVAULTXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
+                      label: "out"
+                  expectedAmountOutStroops: "1500000"
+                  source: "fallback_rate"
+                  slippageApplied: 0.005
+                  amountOutAfterSlippage: "1492500"
+                  quotedAt: "2026-07-26T12:00:00.000Z"
+                  minAmountOutStroops: "1492500"
+                  quoteAgeMs: 0
+                  isFallback: true
+                  issuedAt: "2026-07-26T12:00:00.000Z"
+                  expiresAt: "2026-07-26T12:01:00.000Z"
+                  routeHash: "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1"
+                  assetConfigVersion: "abc123def456abc123def456abc123def456abc123def456abc123def456abc123"
+              staleQuote:
+                summary: An expired quote
+                value:
+                  path:
+                    - contractId: "CDXLMXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
+                  expectedAmountOutStroops: "1500000"
+                  source: "fallback_rate"
+                  slippageApplied: 0.005
+                  amountOutAfterSlippage: "1492500"
+                  quotedAt: "2026-07-26T10:00:00.000Z"
+                  minAmountOutStroops: "1492500"
+                  quoteAgeMs: 7200000
+                  isFallback: true
+                  issuedAt: "2026-07-26T10:00:00.000Z"
+                  expiresAt: "2026-07-26T10:01:00.000Z"
+                  routeHash: "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1"
+                  assetConfigVersion: "abc123def456abc123def456abc123def456abc123def456abc123def456abc123"
+      responses:
+        '200':
+          description: Quote is valid and safe to execute
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    enum: [true]
+                example:
+                  success: true
+        '400':
+          description: Quote failed one or more validation checks
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ZapErrorResponse'
+              examples:
+                staleQuote:
+                  summary: STALE_QUOTE
+                  value:
+                    error: "STALE_QUOTE"
+                    message: "Quote has expired"
+                unsupportedAsset:
+                  summary: UNSUPPORTED_ASSET
+                  value:
+                    error: "UNSUPPORTED_ASSET"
+                    message: "Asset CDUNKNNOWNXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX is no longer supported"
+                slippageExceeded:
+                  summary: SLIPPAGE_EXCEEDED
+                  value:
+                    error: "SLIPPAGE_EXCEEDED"
+                    message: "Slippage 18.50% exceeds maximum allowed threshold of 15%"
+        '500':
+          description: Internal error during verification
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ZapErrorResponse'
+              example:
+                error: "VERIFY_FAILED"
+                message: "Failed to verify quote"
 
   /api/zap/supported-assets:
     get:
       summary: Get supported assets for Zap
-      description: Returns list of assets available for token swaps
+      description: >
+        Returns the list of input assets accepted by the Zap feature, together
+        with the vault token and vault contract ID. The client caches this
+        response and uses it to populate the asset selector and to validate
+        user input before requesting a quote.
       tags:
         - Zap
       responses:
@@ -485,16 +674,37 @@ paths:
           content:
             application/json:
               schema:
-                type: array
-                items:
-                  type: object
-                  properties:
-                    code:
-                      type: string
-                    issuer:
-                      type: string
-                    name:
-                      type: string
+                $ref: '#/components/schemas/ZapSupportedAssetsResponse'
+              example:
+                assets:
+                  - symbol: "XLM"
+                    name: "Stellar Lumens"
+                    contractId: "CDXLMXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
+                    decimals: 7
+                    iconUrl: "https://stellar.expert/img/assets/xlm.svg"
+                  - symbol: "USDC"
+                    name: "USD Coin"
+                    contractId: "CDUSDCXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
+                    decimals: 7
+                  - symbol: "AQUA"
+                    name: "Aquarius"
+                    contractId: "CDAQUAXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
+                    decimals: 7
+                vaultToken:
+                  symbol: "yUSDC"
+                  name: "Vault asset"
+                  contractId: "CDVAULTXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
+                  decimals: 7
+                vaultContractId: "CDYIELDXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
+        '503':
+          description: Asset configuration is unavailable or invalid
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ZapErrorResponse'
+              example:
+                error: "CONFIG_UNAVAILABLE"
+                message: "Supported assets configuration is unavailable."
 
   /api/analytics/attribution/{walletAddress}:
     get:
@@ -2952,27 +3162,251 @@ components:
           items:
             type: string
 
-    SwapQuote:
+    # ── Zap schemas ──────────────────────────────────────────────────────────
+
+    ZapQuoteRequest:
       type: object
+      required:
+        - inputTokenContract
+        - vaultTokenContract
+        - amountInStroops
       properties:
-        fromAsset:
+        inputTokenContract:
           type: string
-        toAsset:
+          description: Soroban contract ID of the token the user wants to swap from (C…)
+          example: "CDXLMXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
+        vaultTokenContract:
           type: string
-        fromAmount:
+          description: Soroban contract ID of the vault token the user wants to receive (C…)
+          example: "CDVAULTXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
+        amountInStroops:
           type: string
-        toAmount:
-          type: string
-        price:
+          description: Amount of input token to swap, in stroops (smallest unit, integer string)
+          example: "10000000"
+        inputDecimals:
+          type: integer
+          minimum: 0
+          maximum: 18
+          default: 7
+          description: Decimal places of the input token
+          example: 7
+        vaultDecimals:
+          type: integer
+          minimum: 0
+          maximum: 18
+          default: 7
+          description: Decimal places of the vault token
+          example: 7
+        slippageTolerance:
           type: number
-          format: double
-        minimumReceived:
+          minimum: 0.001
+          maximum: 0.15
+          default: 0.005
+          description: User-defined slippage tolerance as a decimal fraction (e.g. 0.01 = 1%). Clamped to [0.001, 0.15].
+          example: 0.01
+      example:
+        inputTokenContract: "CDXLMXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
+        vaultTokenContract: "CDVAULTXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
+        amountInStroops: "10000000"
+        inputDecimals: 7
+        vaultDecimals: 7
+        slippageTolerance: 0.01
+
+    ZapQuoteResponse:
+      type: object
+      required:
+        - path
+        - expectedAmountOutStroops
+        - source
+        - slippageApplied
+        - amountOutAfterSlippage
+        - quotedAt
+        - minAmountOutStroops
+        - quoteAgeMs
+        - isFallback
+        - issuedAt
+        - expiresAt
+        - routeHash
+        - assetConfigVersion
+      properties:
+        path:
+          type: array
+          description: Ordered list of hops in the swap path
+          items:
+            $ref: '#/components/schemas/ZapPathHop'
+        expectedAmountOutStroops:
           type: string
-        priceImpact:
+          description: Expected output amount before slippage, in stroops
+          example: "1500000"
+        source:
+          type: string
+          enum: [router_simulation, fallback_rate]
+          description: Source of the quote — on-chain DEX simulation or deterministic fallback rate
+          example: "fallback_rate"
+        slippageApplied:
           type: number
-          format: double
-        estimatedFee:
+          minimum: 0
+          maximum: 1
+          description: Total slippage fraction applied (model-based + user tolerance, clamped to [0, 0.15])
+          example: 0.005
+        amountOutAfterSlippage:
           type: string
+          description: Expected output amount after applying slippage, in stroops. This is also the `minAmountOutStroops` value.
+          example: "1492500"
+        quotedAt:
+          type: string
+          format: date-time
+          description: ISO-8601 timestamp when the quote was generated
+          example: "2026-07-26T12:00:00.000Z"
+        minAmountOutStroops:
+          type: string
+          description: Minimum guaranteed output after slippage, in stroops (same as amountOutAfterSlippage)
+          example: "1492500"
+        quoteAgeMs:
+          type: integer
+          minimum: 0
+          description: Age of the quote in milliseconds at generation time (typically 0 for fresh quotes)
+          example: 0
+        isFallback:
+          type: boolean
+          description: Whether the quote used the deterministic fallback rate instead of an on-chain simulation
+          example: true
+        issuedAt:
+          type: string
+          format: date-time
+          description: ISO-8601 timestamp when the quote was issued (same as quotedAt)
+          example: "2026-07-26T12:00:00.000Z"
+        expiresAt:
+          type: string
+          format: date-time
+          description: ISO-8601 timestamp when the quote expires (quotedAt + 60s)
+          example: "2026-07-26T12:01:00.000Z"
+        routeHash:
+          type: string
+          description: SHA-256 hex digest of the concatenated contract IDs in the path, used for verification
+          example: "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1"
+        assetConfigVersion:
+          type: string
+          description: SHA-256 hex digest of the supported assets payload at quote time, used for config drift detection
+          example: "abc123def456abc123def456abc123def456abc123def456abc123def456abc123"
+      example:
+        path:
+          - contractId: "CDXLMXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
+            label: "in"
+          - contractId: "CDVAULTXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
+            label: "out"
+        expectedAmountOutStroops: "1500000"
+        source: "fallback_rate"
+        slippageApplied: 0.005
+        amountOutAfterSlippage: "1492500"
+        quotedAt: "2026-07-26T12:00:00.000Z"
+        minAmountOutStroops: "1492500"
+        quoteAgeMs: 0
+        isFallback: true
+        issuedAt: "2026-07-26T12:00:00.000Z"
+        expiresAt: "2026-07-26T12:01:00.000Z"
+        routeHash: "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1"
+        assetConfigVersion: "abc123def456abc123def456abc123def456abc123def456abc123def456abc123"
+
+    ZapPathHop:
+      type: object
+      required:
+        - contractId
+      properties:
+        contractId:
+          type: string
+          description: Soroban contract ID (C…)
+          example: "CDXLMXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
+        label:
+          type: string
+          description: Optional human-readable hint (e.g. "in", "out", or a token symbol)
+          example: "in"
+      example:
+        contractId: "CDXLMXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
+        label: "in"
+
+    ZapErrorResponse:
+      type: object
+      required:
+        - error
+        - message
+      properties:
+        error:
+          type: string
+          description: Machine-readable error code
+          example: "STALE_QUOTE"
+        message:
+          type: string
+          description: Human-readable error description
+          example: "Quote has expired"
+        requestId:
+          type: string
+          description: Correlation ID for tracing (present when the server assigns one)
+          example: "req-abc123"
+        details:
+          type: object
+          description: Optional structured error details
+      example:
+        error: "STALE_QUOTE"
+        message: "Quote has expired"
+
+    ZapSupportedAssetsResponse:
+      type: object
+      required:
+        - assets
+        - vaultToken
+        - vaultContractId
+      properties:
+        assets:
+          type: array
+          description: List of input assets accepted by the Zap feature
+          items:
+            $ref: '#/components/schemas/ZapAssetItem'
+        vaultToken:
+          $ref: '#/components/schemas/ZapAssetItem'
+          description: The vault's own token (output side of the swap)
+        vaultContractId:
+          type: string
+          description: The vault contract ID
+          example: "CDYIELDXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
+
+    ZapAssetItem:
+      type: object
+      required:
+        - symbol
+        - name
+        - contractId
+        - decimals
+      properties:
+        symbol:
+          type: string
+          description: Short asset symbol (e.g. "XLM", "USDC")
+          example: "XLM"
+        name:
+          type: string
+          description: Human-readable asset name
+          example: "Stellar Lumens"
+        contractId:
+          type: string
+          description: Soroban SAC contract ID (C…)
+          example: "CDXLMXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
+        decimals:
+          type: integer
+          minimum: 0
+          maximum: 18
+          description: Number of decimal places
+          example: 7
+        iconUrl:
+          type: string
+          format: uri
+          description: Optional URL for asset icon/avatar
+          example: "https://stellar.expert/img/assets/xlm.svg"
+      example:
+        symbol: "XLM"
+        name: "Stellar Lumens"
+        contractId: "CDXLMXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
+        decimals: 7
+        iconUrl: "https://stellar.expert/img/assets/xlm.svg"
 
     AttributionReport:
       type: object

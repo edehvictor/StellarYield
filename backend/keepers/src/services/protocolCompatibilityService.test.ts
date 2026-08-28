@@ -1,4 +1,4 @@
-import { describe, it, expect } from '@jest/globals';
+import { describe, it, expect, jest } from '@jest/globals';
 import {
     compareVersions,
     versionSatisfiesRequirement,
@@ -6,7 +6,11 @@ import {
     evaluateProtocolCompatibility,
     generateCompatibilityReport,
     createProtocolFixture,
+    groupIssuesByAction,
+    sortIssues,
     type CompatibilityRequirement,
+    type CompatibilityIssue,
+    type ActionType,
 } from './protocolCompatibilityService';
 
 describe('protocolCompatibilityService', () => {
@@ -282,10 +286,191 @@ describe('protocolCompatibilityService', () => {
             const report = generateCompatibilityReport(protocols);
 
             expect(report.overallStatus).toBe('degraded');
-        });
+    });
+});
+
+describe('groupIssuesByAction', () => {
+    it('groups issues by affectedActions', () => {
+        const issues: CompatibilityIssue[] = [
+            {
+                severity: 'critical',
+                component: 'core_contract',
+                message: 'Version mismatch',
+                recommendation: 'Upgrade',
+                affectedActions: ['deposit', 'withdraw'],
+            },
+            {
+                severity: 'warning',
+                component: 'api',
+                message: 'Breaking change detected',
+                recommendation: 'Review',
+                affectedActions: ['reporting'],
+            },
+        ];
+
+        const groups = groupIssuesByAction(issues);
+
+        expect(groups.find(g => g.action === 'deposit')!.issues).toHaveLength(1);
+        expect(groups.find(g => g.action === 'withdraw')!.issues).toHaveLength(1);
+        expect(groups.find(g => g.action === 'reporting')!.issues).toHaveLength(1);
+        expect(groups.find(g => g.action === 'rebalance')!.issues).toHaveLength(0);
+        expect(groups.find(g => g.action === 'quote')!.issues).toHaveLength(0);
     });
 
-    describe('createProtocolFixture', () => {
+    it('places issues without affectedActions into every group', () => {
+        const issues: CompatibilityIssue[] = [
+            {
+                severity: 'critical',
+                component: 'unknown',
+                message: 'Global issue',
+                recommendation: 'Investigate',
+            },
+        ];
+
+        const groups = groupIssuesByAction(issues);
+
+        for (const group of groups) {
+            expect(group.issues).toHaveLength(1);
+        }
+    });
+
+    it('computes per-group status correctly', () => {
+        const issues: CompatibilityIssue[] = [
+            {
+                severity: 'critical',
+                component: 'core',
+                message: 'Down',
+                recommendation: 'Fix',
+                affectedActions: ['deposit'],
+            },
+            {
+                severity: 'warning',
+                component: 'api',
+                message: 'Slow',
+                recommendation: 'Monitor',
+                affectedActions: ['withdraw'],
+            },
+            {
+                severity: 'info',
+                component: 'ui',
+                message: 'Notice',
+                recommendation: 'Note',
+                affectedActions: ['reporting'],
+            },
+        ];
+
+        const groups = groupIssuesByAction(issues);
+
+        expect(groups.find(g => g.action === 'deposit')!.status).toBe('blocked');
+        expect(groups.find(g => g.action === 'withdraw')!.status).toBe('degraded');
+        expect(groups.find(g => g.action === 'reporting')!.status).toBe('warning');
+        expect(groups.find(g => g.action === 'rebalance')!.status).toBe('clear');
+        expect(groups.find(g => g.action === 'quote')!.status).toBe('clear');
+    });
+
+    it('handles mixed severity with missing protocolName', () => {
+        const issues: CompatibilityIssue[] = [
+            {
+                severity: 'critical',
+                component: 'core',
+                message: 'Critical failure',
+                recommendation: 'Fix now',
+                affectedActions: ['deposit', 'withdraw'],
+            },
+            {
+                severity: 'warning',
+                component: 'api',
+                message: 'Deprecation notice',
+                recommendation: 'Plan upgrade',
+                affectedActions: ['deposit', 'quote', 'reporting'],
+            },
+            {
+                severity: 'info',
+                component: 'dashboard',
+                message: 'New metric available',
+                recommendation: 'Update dashboards',
+                affectedActions: ['reporting'],
+            },
+        ];
+
+        const groups = groupIssuesByAction(issues);
+
+        expect(groups.find(g => g.action === 'deposit')!.issues).toHaveLength(2);
+        expect(groups.find(g => g.action === 'deposit')!.status).toBe('blocked');
+        expect(groups.find(g => g.action === 'withdraw')!.issues).toHaveLength(1);
+        expect(groups.find(g => g.action === 'withdraw')!.status).toBe('blocked');
+        expect(groups.find(g => g.action === 'quote')!.issues).toHaveLength(1);
+        expect(groups.find(g => g.action === 'quote')!.status).toBe('degraded');
+        expect(groups.find(g => g.action === 'reporting')!.issues).toHaveLength(2);
+        expect(groups.find(g => g.action === 'reporting')!.status).toBe('degraded');
+        expect(groups.find(g => g.action === 'rebalance')!.issues).toHaveLength(0);
+        expect(groups.find(g => g.action === 'rebalance')!.status).toBe('clear');
+    });
+});
+
+describe('sortIssues', () => {
+    it('sorts by severity (critical first)', () => {
+        const issues: CompatibilityIssue[] = [
+            { severity: 'info', component: 'a', message: 'info', recommendation: '' },
+            { severity: 'warning', component: 'b', message: 'warning', recommendation: '' },
+            { severity: 'critical', component: 'c', message: 'critical', recommendation: '' },
+        ];
+
+        const sorted = sortIssues(issues);
+        expect(sorted[0].severity).toBe('critical');
+        expect(sorted[1].severity).toBe('warning');
+        expect(sorted[2].severity).toBe('info');
+    });
+
+    it('sorts by freshness within the same severity tier', () => {
+        const older = new Date('2025-01-01').toISOString();
+        const newer = new Date('2025-06-15').toISOString();
+
+        const issues: CompatibilityIssue[] = [
+            {
+                severity: 'warning', component: 'a', message: 'old', recommendation: '',
+                lastUpdated: older,
+            },
+            {
+                severity: 'warning', component: 'b', message: 'new', recommendation: '',
+                lastUpdated: newer,
+            },
+        ];
+
+        const sorted = sortIssues(issues);
+        expect(sorted[0].message).toBe('new');
+        expect(sorted[1].message).toBe('old');
+    });
+
+    it('places issues without lastUpdated at the end of their tier', () => {
+        const issues: CompatibilityIssue[] = [
+            {
+                severity: 'warning', component: 'a', message: 'dated', recommendation: '',
+                lastUpdated: new Date('2025-06-01').toISOString(),
+            },
+            {
+                severity: 'warning', component: 'b', message: 'undated', recommendation: '',
+            },
+        ];
+
+        const sorted = sortIssues(issues);
+        expect(sorted[0].message).toBe('dated');
+        expect(sorted[1].message).toBe('undated');
+    });
+
+    it('does not mutate the original array', () => {
+        const issues: CompatibilityIssue[] = [
+            { severity: 'info', component: 'a', message: 'x', recommendation: '' },
+            { severity: 'critical', component: 'b', message: 'y', recommendation: '' },
+        ];
+
+        const original = [...issues];
+        sortIssues(issues);
+        expect(issues).toEqual(original);
+    });
+});
+
+describe('createProtocolFixture', () => {
         it('creates compatible upgrade fixture', () => {
             const fixture = createProtocolFixture(
                 'blend-compatible-upgrade',

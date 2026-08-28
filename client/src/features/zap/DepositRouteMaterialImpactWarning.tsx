@@ -75,7 +75,7 @@ export default function DepositRouteMaterialImpactWarning({
     );
   }
 
-  const styles = SEVERITY_STYLES[impact.severity];
+  const styles = SEVERITY_STYLES[impact.severity as Exclude<ImpactSeverity, "none">];
   const Icon = impact.severity === "critical" ? ShieldAlert : AlertTriangle;
 
   return (

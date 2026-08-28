@@ -1,26 +1,38 @@
 import { useEffect, useMemo, useState } from "react";
-import { AlertTriangle, RefreshCw } from "lucide-react";
+import { AlertTriangle, Clock, RefreshCw } from "lucide-react";
 import {
   CartesianGrid,
   Line,
   LineChart,
+  ReferenceLine,
   ResponsiveContainer,
   Tooltip,
   XAxis,
   YAxis,
 } from "recharts";
 import { apiUrl } from "../../lib/api";
+import { computeDecayedFreshnessConfidence } from "../dashboard/freshnessDecay";
 
 type TimeRange = "1W" | "1M" | "All";
+
+/** Threshold (ms) beyond which an APY sample is considered stale. */
+const STALE_THRESHOLD_MS = 5 * 60 * 1000; // 5 minutes
 
 interface HistoricalApyPoint {
   date: string;
   apy: number;
+  /** ISO-8601 timestamp when this data point was fetched from the source. */
+  fetchedAt?: string;
+  /** Computed freshness confidence [0, 1]; populated during normalisation. */
+  freshnessConfidence?: number;
+  /** True when the point is considered unusable due to age. */
+  stale?: boolean;
 }
 
 interface ApiHistoryPoint {
   date?: unknown;
   apy?: unknown;
+  fetchedAt?: unknown;
 }
 
 function formatAxisDate(date: string) {
@@ -45,7 +57,13 @@ function filterHistory(history: HistoricalApyPoint[], range: TimeRange) {
 
 const rangeOptions: TimeRange[] = ["1W", "1M", "All"];
 
-function normalizeHistoryPoint(point: ApiHistoryPoint): HistoricalApyPoint | null {
+function normalizeFetchedAt(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? undefined : value;
+}
+
+function normalizeHistoryPoint(point: ApiHistoryPoint, now = Date.now()): HistoricalApyPoint | null {
   if (typeof point.date !== "string") {
     return null;
   }
@@ -60,7 +78,111 @@ function normalizeHistoryPoint(point: ApiHistoryPoint): HistoricalApyPoint | nul
     return null;
   }
 
-  return { date: point.date, apy };
+  const fetchedAt = normalizeFetchedAt(point.fetchedAt);
+  const fetchedTime = fetchedAt ? new Date(fetchedAt).getTime() : now;
+  const ageMs = now - fetchedTime;
+  const { confidence, unusable } = computeDecayedFreshnessConfidence(ageMs);
+
+  return {
+    date: point.date,
+    apy,
+    fetchedAt,
+    freshnessConfidence: confidence,
+    stale: unusable || ageMs > STALE_THRESHOLD_MS,
+  };
+}
+
+interface SourceHealthSummary {
+  total: number;
+  staleCount: number;
+  avgConfidence: number;
+  allStale: boolean;
+}
+
+function computeSourceHealth(points: HistoricalApyPoint[]): SourceHealthSummary {
+  if (points.length === 0) {
+    return { total: 0, staleCount: 0, avgConfidence: 0, allStale: false };
+  }
+  const staleCount = points.filter((p) => p.stale).length;
+  const avgConfidence =
+    points.reduce((sum, p) => sum + (p.freshnessConfidence ?? 1), 0) / points.length;
+  return {
+    total: points.length,
+    staleCount,
+    avgConfidence,
+    allStale: staleCount === points.length,
+  };
+}
+
+interface CustomTooltipProps {
+  active?: boolean;
+  payload?: Array<{ value: number; payload: HistoricalApyPoint }>;
+  label?: string;
+  sourceHealth: SourceHealthSummary;
+}
+
+function CustomTooltip({ active, payload, label, sourceHealth }: CustomTooltipProps) {
+  if (!active || !payload?.length) return null;
+
+  const point = payload[0].payload;
+  const apy = payload[0].value;
+  const confidence = point.freshnessConfidence ?? 1;
+  const isStale = point.stale ?? false;
+
+  const fetchedAgo = point.fetchedAt
+    ? Math.max(0, Math.round((Date.now() - new Date(point.fetchedAt).getTime()) / 60_000))
+    : null;
+
+  const dateLabel = label
+    ? new Date(label).toLocaleDateString("en-US", {
+        weekday: "short",
+        month: "short",
+        day: "numeric",
+        year: "numeric",
+      })
+    : "";
+
+  return (
+    <div
+      style={{
+        backgroundColor: "rgba(15, 23, 42, 0.94)",
+        border: "1px solid rgba(148, 163, 184, 0.2)",
+        borderRadius: "16px",
+        boxShadow: "0 12px 30px rgba(0, 0, 0, 0.35)",
+        padding: "12px 16px",
+        minWidth: 200,
+      }}
+    >
+      <p style={{ color: "#94a3b8", fontSize: 12, marginBottom: 6 }}>{dateLabel}</p>
+      <p style={{ color: "#6C5DD3", fontWeight: 700, fontSize: 16, marginBottom: 4 }}>
+        {apy.toFixed(2)}% APY
+      </p>
+      {isStale ? (
+        <p style={{ color: "#f87171", fontSize: 11 }}>
+          ⚠ Stale sample{fetchedAgo !== null && ` · fetched ${fetchedAgo}m ago`}
+        </p>
+      ) : (
+        <p style={{ color: "#86efac", fontSize: 11 }}>
+          ✓ Fresh · {Math.round(confidence * 100)}% confidence
+          {fetchedAgo !== null && ` · ${fetchedAgo}m ago`}
+        </p>
+      )}
+      <div style={{ borderTop: "1px solid rgba(148,163,184,0.15)", marginTop: 8, paddingTop: 8 }}>
+        <p style={{ color: "#94a3b8", fontSize: 10, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 2 }}>
+          Series health
+        </p>
+        <p style={{ color: "#94a3b8", fontSize: 11 }}>
+          {sourceHealth.staleCount}/{sourceHealth.total} stale points
+        </p>
+        <p style={{ color: "#94a3b8", fontSize: 11 }}>
+          Avg confidence: {Math.round(sourceHealth.avgConfidence * 100)}%
+        </p>
+        {sourceHealth.allStale && (
+          <p style={{ color: "#f87171", fontSize: 11, marginTop: 2 }}>All series data is stale</p>
+        )}
+      </div>
+    </div>
+  );
 }
 
 export default function ApyHistoryChart() {
@@ -85,8 +207,9 @@ export default function ApyHistoryChart() {
 
       const raw = await response.json();
       const rows = Array.isArray(raw) ? raw : [];
+      const now = Date.now();
       const normalized = rows
-        .map((row) => normalizeHistoryPoint(row as ApiHistoryPoint))
+        .map((row) => normalizeHistoryPoint(row as ApiHistoryPoint, now))
         .filter((point): point is HistoricalApyPoint => point !== null)
         .sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
       setHistory(normalized);
@@ -108,6 +231,16 @@ export default function ApyHistoryChart() {
   const filteredHistory = useMemo(
     () => filterHistory(history, range),
     [history, range],
+  );
+
+  const sourceHealth = useMemo(
+    () => computeSourceHealth(filteredHistory),
+    [filteredHistory],
+  );
+
+  const stalePointDates = useMemo(
+    () => filteredHistory.filter((p) => p.stale).map((p) => p.date),
+    [filteredHistory],
   );
 
   return (
@@ -138,6 +271,33 @@ export default function ApyHistoryChart() {
         </div>
       </div>
 
+      {!loading && !error && sourceHealth.allStale && filteredHistory.length > 0 && (
+        <div
+          className="mb-4 flex items-center gap-2 rounded-xl border border-amber-500/30 bg-amber-500/10 p-3 text-sm text-amber-300"
+          role="status"
+          aria-label="All APY history data is stale"
+          data-testid="apy-history-all-stale-banner"
+        >
+          <AlertTriangle size={16} aria-hidden="true" />
+          <span>All visible data is stale. Chart may not reflect current market conditions.</span>
+        </div>
+      )}
+
+      {!loading && !error && !sourceHealth.allStale && sourceHealth.staleCount > 0 && filteredHistory.length > 0 && (
+        <div
+          className="mb-4 flex items-center gap-2 rounded-xl border border-yellow-500/20 bg-yellow-500/5 p-2.5 text-xs text-yellow-300"
+          role="status"
+          aria-label={`${sourceHealth.staleCount} of ${sourceHealth.total} APY history points are stale`}
+          data-testid="apy-history-partial-stale-banner"
+        >
+          <Clock size={14} aria-hidden="true" />
+          <span>
+            {sourceHealth.staleCount} of {sourceHealth.total} data points are stale ·{" "}
+            avg. confidence {Math.round(sourceHealth.avgConfidence * 100)}%
+          </span>
+        </div>
+      )}
+
       <div className="h-[320px] w-full sm:h-[360px]">
         {loading ? (
           <div className="h-full w-full rounded-lg border border-white/10 bg-white/[0.02] p-5">
@@ -162,6 +322,17 @@ export default function ApyHistoryChart() {
               <RefreshCw size={14} className={retrying ? "animate-spin" : ""} />
               Retry
             </button>
+          </div>
+        ) : sourceHealth.allStale && filteredHistory.length > 0 ? (
+          <div
+            className="h-full w-full rounded-lg border border-amber-500/30 bg-amber-500/10 px-6 py-8 flex flex-col items-center justify-center text-center"
+            data-testid="apy-history-all-stale-empty"
+          >
+            <AlertTriangle size={24} className="text-amber-300 mb-3" />
+            <p className="text-amber-200 font-semibold">All APY history is stale</p>
+            <p className="text-amber-300/80 text-sm mt-1 max-w-sm">
+              Source data has not been refreshed within the expected window. Chart may not reflect current market conditions.
+            </p>
           </div>
         ) : filteredHistory.length === 0 ? (
           <div className="h-full w-full rounded-lg border border-white/10 bg-white/[0.02] px-6 py-8 flex flex-col items-center justify-center text-center">
@@ -198,22 +369,18 @@ export default function ApyHistoryChart() {
                 tickLine={false}
                 width={54}
               />
+              {stalePointDates.map((date) => (
+                <ReferenceLine
+                  key={date}
+                  x={date}
+                  stroke="rgba(251, 191, 36, 0.35)"
+                  strokeWidth={1}
+                  strokeDasharray="3 3"
+                  aria-label={`Stale data point at ${date}`}
+                />
+              ))}
               <Tooltip
-                formatter={(value: number) => [`${value.toFixed(2)}%`, "APY"]}
-                labelFormatter={(label) =>
-                  new Date(label).toLocaleDateString("en-US", {
-                    weekday: "short",
-                    month: "short",
-                    day: "numeric",
-                    year: "numeric",
-                  })
-                }
-                contentStyle={{
-                  backgroundColor: "rgba(15, 23, 42, 0.94)",
-                  border: "1px solid rgba(148, 163, 184, 0.2)",
-                  borderRadius: "16px",
-                  boxShadow: "0 12px 30px rgba(0, 0, 0, 0.35)",
-                }}
+                content={<CustomTooltip sourceHealth={sourceHealth} />}
                 cursor={{ stroke: "rgba(108, 93, 211, 0.6)", strokeWidth: 1 }}
               />
               <Line
@@ -221,7 +388,28 @@ export default function ApyHistoryChart() {
                 dataKey="apy"
                 stroke="#6C5DD3"
                 strokeWidth={3}
-                dot={{ r: 0 }}
+                dot={(props) => {
+                  const { cx, cy, payload } = props as {
+                    cx: number;
+                    cy: number;
+                    payload: HistoricalApyPoint;
+                  };
+                  if (payload.stale) {
+                    return (
+                      <circle
+                        key={`stale-dot-${payload.date}`}
+                        cx={cx}
+                        cy={cy}
+                        r={4}
+                        fill="rgba(251, 191, 36, 0.7)"
+                        stroke="rgba(251, 191, 36, 0.9)"
+                        strokeWidth={1.5}
+                        aria-label={`Stale APY sample on ${payload.date}`}
+                      />
+                    );
+                  }
+                  return <circle key={`dot-${payload.date}`} cx={cx} cy={cy} r={0} fill="none" />;
+                }}
                 activeDot={{
                   r: 5,
                   stroke: "#ffffff",

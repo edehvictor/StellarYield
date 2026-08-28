@@ -151,15 +151,11 @@ function isNodeViable(
     };
   }
 
-  // Health score check
-  if (health.score < context.minHealthScore) {
-    return {
-      viable: false,
-      reason: `Health score ${health.score} below threshold ${context.minHealthScore}`,
-    };
+  // Status-based check
+  if (health.status === 'unknown') {
+    return { viable: false, reason: 'Status is unknown' };
   }
 
-  // Status-based check
   if (health.status === 'blocked') {
     return { viable: false, reason: 'Status is blocked' };
   }
@@ -172,8 +168,12 @@ function isNodeViable(
     return { viable: false, reason: 'Degraded status not allowed' };
   }
 
-  if (health.status === 'unknown') {
-    return { viable: false, reason: 'Status is unknown' };
+  // Health score check
+  if (health.score < context.minHealthScore) {
+    return {
+      viable: false,
+      reason: `Health score ${health.score} below threshold ${context.minHealthScore}`,
+    };
   }
 
   return { viable: true, reason: 'All checks passed' };
@@ -182,21 +182,19 @@ function isNodeViable(
 /**
  * Detect cycles in the fallback tree to prevent infinite loops
  */
-function detectCycles(node: FallbackNode, visited: Set<string>, path: string[]): boolean {
-  if (visited.has(node.id)) {
+function detectCycles(node: FallbackNode, visited: Set<FallbackNode> = new Set()): boolean {
+  if (visited.has(node)) {
     return true;
   }
 
-  visited.add(node.id);
-  path.push(node.id);
+  visited.add(node);
 
   for (const child of node.fallbacks) {
-    if (detectCycles(child, visited, [...path])) {
+    if (detectCycles(child, new Set(visited))) {
       return true;
     }
   }
 
-  visited.delete(node.id);
   return false;
 }
 
@@ -213,7 +211,10 @@ export function validateFallbackTree(root: FallbackNode): { valid: boolean; erro
   }
 
   // Check for duplicate IDs at same level
-  function checkDuplicates(node: FallbackNode, ids: Set<string>): void {
+  function checkDuplicates(node: FallbackNode, ids: Set<string>, visitedInPath: Set<FallbackNode> = new Set()): void {
+    if (visitedInPath.has(node)) return;
+    visitedInPath.add(node);
+
     if (ids.has(node.id)) {
       errors.push(`Duplicate node ID at same level: ${node.id}`);
     }
@@ -221,7 +222,7 @@ export function validateFallbackTree(root: FallbackNode): { valid: boolean; erro
 
     const childIds = new Set<string>();
     for (const child of node.fallbacks) {
-      checkDuplicates(child, childIds);
+      checkDuplicates(child, childIds, new Set(visitedInPath));
     }
   }
 
@@ -265,7 +266,7 @@ export async function traverseFallbackTree(
     depth: number,
     visited: Set<string>,
   ): Promise<FallbackNode | null> {
-    if (depth > maxDepthReached) {
+    if (depth <= context.maxDepth && depth > maxDepthReached) {
       maxDepthReached = depth;
     }
 
@@ -447,6 +448,7 @@ export class FallbackTreeRegistry {
     };
 
     const result = await traverseFallbackTree(root, context);
+    (result as any).treeKey = key;
     this.recordTraversal(result);
     return result;
   }
@@ -465,7 +467,7 @@ export class FallbackTreeRegistry {
    */
   getTraversalHistoryForTree(key: string, limit = 50): TraversalResult[] {
     const all = this.getTraversalHistory(limit);
-    return all.filter(r => r.path.length > 0 && r.path[0].nodeId === key);
+    return all.filter(r => (r as any).treeKey === key || (r.path.length > 0 && r.path[0].nodeId === key));
   }
 
   /**

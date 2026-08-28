@@ -1,9 +1,10 @@
-import { useState, useEffect, Suspense } from "react";
+import { useState, useEffect, useMemo, Suspense } from "react";
 import {
   Wallet,
   TrendingUp,
   ArrowDownToLine,
   ArrowUpFromLine,
+  AlertTriangle,
   Clock,
   RefreshCw,
 } from "lucide-react";
@@ -13,6 +14,11 @@ import { ExposureMap } from "../../portfolio/ExposureMap";
 import PresetsPanel from "../../features/presets/PresetsPanel";
 import UnifiedActivityTimeline from "./UnifiedActivityTimeline";
 import PortfolioExport from "./PortfolioExport";
+import {
+  analyzeConcentration,
+  buildExposureBuckets,
+  formatSharePct,
+} from "../../../../shared/types/exposureConcentration";
 
 // ── Types ───────────────────────────────────────────────────────────────
 
@@ -98,6 +104,17 @@ export default function PortfolioDashboard({ walletAddress }: PortfolioDashboard
     ? positions.reduce((s, p) => s + p.apy, 0) / positions.length
     : 0;
 
+  const exposure = useMemo(
+    () =>
+      buildExposureBuckets(positions, (p) => ({
+        asset: p.asset,
+        protocol: p.protocol,
+        valueUsd: p.currentValue,
+      })),
+    [positions],
+  );
+  const concentration = useMemo(() => analyzeConcentration(exposure), [exposure]);
+
   if (isLoading) {
     return (
       <div className="flex items-center justify-center py-20">
@@ -139,7 +156,7 @@ export default function PortfolioDashboard({ walletAddress }: PortfolioDashboard
       </div>
 
       {/* Stats Cards */}
-      <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-4">
         <div className="glass-card p-5">
           <div className="flex items-center gap-2 text-gray-400 text-xs font-semibold uppercase tracking-wider mb-2">
             <Wallet size={14} /> Total Deposited
@@ -169,7 +186,54 @@ export default function PortfolioDashboard({ walletAddress }: PortfolioDashboard
           </div>
           <p className="text-2xl font-bold">{avgApy.toFixed(1)}%</p>
         </div>
+
+        <div className="glass-card p-5">
+          <div className="flex items-center gap-2 text-gray-400 text-xs font-semibold uppercase tracking-wider mb-2">
+            <AlertTriangle size={14} /> Top Exposure
+          </div>
+          <p
+            className={`text-2xl font-bold ${
+              concentration.severity === "critical"
+                ? "text-[#FF5E5E]"
+                : concentration.severity === "warning"
+                  ? "text-yellow-500"
+                  : ""
+            }`}
+          >
+            {formatSharePct(Math.max(concentration.topAssetShare, concentration.topProtocolShare))}
+          </p>
+          <p className="text-xs text-gray-500 mt-1">
+            {concentration.warnings.length > 0
+              ? `${concentration.warnings.length} concentration warning${concentration.warnings.length > 1 ? "s" : ""}`
+              : "Well diversified"}
+          </p>
+        </div>
       </div>
+
+      {/* Concentration summary */}
+      {concentration.warnings.length > 0 && (
+        <div
+          className={`glass-panel p-5 border-l-4 ${
+            concentration.severity === "critical" ? "border-[#FF5E5E]" : "border-yellow-500"
+          }`}
+          role="alert"
+        >
+          <div className="flex items-center gap-2 mb-2">
+            <AlertTriangle
+              size={16}
+              className={
+                concentration.severity === "critical" ? "text-[#FF5E5E]" : "text-yellow-500"
+              }
+            />
+            <h3 className="font-bold">Your portfolio is less diversified than it looks</h3>
+          </div>
+          <ul className="list-disc list-inside space-y-1 text-sm text-gray-300">
+            {concentration.warnings.map((warning) => (
+              <li key={`${warning.dimension}-${warning.name}`}>{warning.message}</li>
+            ))}
+          </ul>
+        </div>
+      )}
 
       <Suspense
         fallback={
@@ -180,20 +244,11 @@ export default function PortfolioDashboard({ walletAddress }: PortfolioDashboard
       </Suspense>
 
       {/* Exposure Map */}
-      <ExposureMap 
+      <ExposureMap
         data={{
-          byAsset: positions.reduce((acc, p) => {
-            acc[p.asset] = (acc[p.asset] || 0) + p.currentValue;
-            return acc;
-          }, {} as Record<string, number>),
-          byProtocol: positions.reduce((acc, p) => {
-            acc[p.protocol] = (acc[p.protocol] || 0) + p.currentValue;
-            return acc;
-          }, {} as Record<string, number>),
-          totalValue: totalValue,
-          warnings: totalValue > 0 && positions.some(p => p.currentValue / totalValue > 0.5) 
-            ? ["High concentration (>50%) detected in a single position."] 
-            : []
+          byAsset: exposure.byAsset,
+          byProtocol: exposure.byProtocol,
+          totalValue: exposure.totalValueUsd,
         }}
       />
 

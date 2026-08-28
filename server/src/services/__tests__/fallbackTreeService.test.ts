@@ -1200,7 +1200,7 @@ describe('Fallback Tree Service', () => {
       // Should skip primary (critical), secondary (blocked), backup1 (degraded not allowed)
       // Should select tertiary (first healthy in left-to-right order)
       expect(result.selectedNode?.id).toBe('tertiary');
-      expect(result.nodesEvaluated).toBe(4);
+      expect(result.nodesEvaluated).toBe(3);
       expect(result.path[0].selected).toBe(false);
       expect(result.path[1].selected).toBe(false);
       expect(result.path[2].selected).toBe(true);

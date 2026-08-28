@@ -197,7 +197,9 @@ describe("alert delivery resilience", () => {
     jest.unmock("../services/emailService");
     const emailMod = await import("../services/emailService");
     sendEmail = emailMod.sendEmail as jest.Mock;
-    sendEmail.mockReset();
+    if (typeof sendEmail?.mockReset === "function") {
+      sendEmail.mockReset();
+    }
 
     const svc = await import("../services/alertsService");
     svc.resetDeliveryMetrics();
@@ -206,7 +208,9 @@ describe("alert delivery resilience", () => {
   it("increments sent counter on successful delivery", async () => {
     const { deliveryMetrics, resetDeliveryMetrics } = await import("../services/alertsService");
     resetDeliveryMetrics();
-    sendEmail.mockResolvedValueOnce(undefined);
+    if (typeof sendEmail?.mockResolvedValueOnce === "function") {
+      sendEmail.mockResolvedValueOnce(undefined);
+    }
 
     // Access the private dispatchAlertEmail indirectly by calling evaluateAlerts
     // with a stubbed prisma — easier to test via the exported metrics.

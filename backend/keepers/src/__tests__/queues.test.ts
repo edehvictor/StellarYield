@@ -94,6 +94,147 @@ describe('queues/index', () => {
   });
 });
 
+describe('queues — exactly-once fencing (#906)', () => {
+  beforeEach(() => {
+    jest.isolateModules(() => {
+      jest.mock('ioredis', () => ({
+        Redis: jest.fn().mockImplementation(() => ({
+          on: jest.fn(),
+          quit: jest.fn().mockResolvedValue('OK'),
+          status: 'ready',
+          ping: jest.fn().mockResolvedValue('PONG'),
+        })),
+      }));
+      jest.mock('bullmq', () => ({
+        Queue: jest.fn().mockImplementation((name: string) => ({
+          name,
+          add: jest.fn().mockResolvedValue({ id: 'job-fence-1' }),
+          close: jest.fn().mockResolvedValue(undefined),
+        })),
+        QueueEvents: jest.fn().mockImplementation((name: string) => ({
+          name,
+          on: jest.fn(),
+        })),
+      }));
+      const mod = require('../queues');
+      (global as any).__queues = mod;
+    });
+  });
+
+  test('nextFencingToken() increments monotonically', () => {
+    const { nextFencingToken } = (global as any).__queues;
+    expect(nextFencingToken('compound', 'vault-1')).toBe(1);
+    expect(nextFencingToken('compound', 'vault-1')).toBe(2);
+    expect(nextFencingToken('compound', 'vault-2')).toBe(1); // separate target
+  });
+
+  test('validateFencingToken() rejects stale tokens after new job enqueue', () => {
+    const { nextFencingToken, validateFencingToken } = (global as any).__queues;
+    nextFencingToken('compound', 'vault-1'); // 1
+    nextFencingToken('compound', 'vault-1'); // 2
+
+    expect(validateFencingToken('compound', 'vault-1', 1)).toBe(false);
+    expect(validateFencingToken('compound', 'vault-1', 2)).toBe(true);
+  });
+
+  test('enqueueCompoundJob() attaches fencingToken and requiredSequence to payload', async () => {
+    const { enqueueCompoundJob } = (global as any).__queues;
+    const jobId = await enqueueCompoundJob('CVAULT_123', '1000000', 12345);
+    expect(jobId).toBeDefined();
+    const { Queue } = require('bullmq');
+    const instance = Queue.mock.results[0].value;
+    expect(instance.add).toHaveBeenCalledWith(
+      'compound:CVAULT_123',
+      expect.objectContaining({
+        vaultContractId: 'CVAULT_123',
+        fencingToken: 1,
+        requiredSequence: 12345,
+      }),
+      expect.any(Object),
+    );
+  });
+});
+
+describe('queues — retry budgets and poison isolation (#907)', () => {
+  beforeEach(() => {
+    jest.isolateModules(() => {
+      jest.mock('ioredis', () => ({
+        Redis: jest.fn().mockImplementation(() => ({
+          on: jest.fn(),
+          quit: jest.fn().mockResolvedValue('OK'),
+          status: 'ready',
+          ping: jest.fn().mockResolvedValue('PONG'),
+        })),
+      }));
+      jest.mock('bullmq', () => ({
+        Queue: jest.fn().mockImplementation((name: string) => {
+          const instances = new Map<string, any>();
+          const self = {
+            name,
+            add: jest.fn().mockImplementation(async (jobName: string, data: any) => {
+              const id = `${name}:${jobName}:${Date.now()}`;
+              return { id, ...data };
+            }),
+            getJobCounts: jest
+              .fn()
+              .mockImplementation((...keys: string[]) => {
+                if (name === 'poison') {
+                  return { waiting: 2, active: 0, completed: 0, failed: 1, delayed: 0 };
+                }
+                const counts: any = { waiting: 0, active: 0, completed: 0, failed: 0, delayed: 0 };
+                keys.forEach((k: string) => {
+                  if (k === 'failed') counts[k] = 12;
+                });
+                return counts;
+              }),
+            close: jest.fn().mockResolvedValue(undefined),
+            opts: { connection: {} },
+          };
+          instances.set(name, self);
+          return self;
+        }),
+        QueueEvents: jest.fn().mockImplementation(() => ({
+          on: jest.fn(),
+        })),
+      }));
+      const mod = require('../queues');
+      (global as any).__queues = mod;
+    });
+  });
+
+  test('classifyFailure() marks reverted simulation as non-retryable', () => {
+    const { classifyFailure } = (global as any).__queues;
+    const result = classifyFailure(new Error('Simulation failed: xyz'));
+    expect(result.retryable).toBe(false);
+    expect(result.reason).toBe('NON_RETRYABLE_ERROR');
+  });
+
+  test('isRetryableError() distinguishes transient network blips from permanent failures', () => {
+    const { isRetryableError } = (global as any).__queues;
+    expect(isRetryableError('Network timeout')).toBe(true);
+    expect(isRetryableError('Contract reverted: harvest error')).toBe(false);
+    expect(isRetryableError('insufficient balance')).toBe(false);
+  });
+
+  test('getQueueHealth() reports warnings when failed jobs exceed threshold', async () => {
+    const { getQueueHealth, QUEUE_NAMES } = (global as any).__queues;
+    const mockQueue = {
+      name: QUEUE_NAMES.COMPOUND,
+      getJobCounts: jest.fn().mockResolvedValue({
+        waiting: 0,
+        active: 1,
+        completed: 10,
+        failed: 12,
+        delayed: 0,
+      }),
+      opts: { connection: {} },
+    } as any;
+
+    const summary = await getQueueHealth([mockQueue]);
+    expect(summary.queues[0].warnings.some((w: string) => w.includes('failed'))).toBe(true);
+  });
+});
+
 describe('queues/types', () => {
   test('QUEUE_NAMES has LIQUIDATION and COMPOUND entries', () => {
     const { QUEUE_NAMES } = require('../queues/types');

@@ -114,9 +114,15 @@ impl OptimisticGovernance {
             .instance()
             .set(&DataKey::ProposalCount, &proposal_id);
 
+        // Indexer-friendly history: status Pending + window bounds
         env.events().publish(
             (symbol_short!("propose"), proposer),
-            (proposal_id, execution_time),
+            (
+                proposal_id,
+                execution_time,
+                Self::status_code(&ProposalStatus::Pending),
+                env.ledger().timestamp(),
+            ),
         );
 
         Ok(proposal_id)
@@ -156,13 +162,22 @@ impl OptimisticGovernance {
             return Err(Error::InsufficientVotingPower);
         }
 
+        let old_status = proposal.status.clone();
         proposal.status = ProposalStatus::Disputed;
         env.storage()
             .persistent()
             .set(&DataKey::Proposal(proposal_id), &proposal);
 
-        env.events()
-            .publish((symbol_short!("dispute"), disputer), (proposal_id,));
+        // Indexer-friendly: old→new status + timestamp for proposal history
+        env.events().publish(
+            (symbol_short!("dispute"), disputer),
+            (
+                proposal_id,
+                Self::status_code(&old_status),
+                Self::status_code(&ProposalStatus::Disputed),
+                env.ledger().timestamp(),
+            ),
+        );
 
         Ok(())
     }
@@ -197,14 +212,22 @@ impl OptimisticGovernance {
             proposal.args.clone(),
         );
 
+        let old_status = proposal.status.clone();
         proposal.status = ProposalStatus::Executed;
         env.storage()
             .persistent()
             .set(&DataKey::Proposal(proposal_id), &proposal);
 
+        // Indexer-friendly: old→new status + timestamp for proposal history
         env.events().publish(
             (symbol_short!("execute"), proposal_id),
-            (proposal.contract_id, proposal.function),
+            (
+                proposal.contract_id,
+                proposal.function,
+                Self::status_code(&old_status),
+                Self::status_code(&ProposalStatus::Executed),
+                env.ledger().timestamp(),
+            ),
         );
 
         Ok(result)
@@ -226,6 +249,14 @@ impl OptimisticGovernance {
     }
 
     // ── Internal Helpers ──────────────────────────────────────────
+
+    fn status_code(status: &ProposalStatus) -> u32 {
+        match status {
+            ProposalStatus::Pending => 0,
+            ProposalStatus::Disputed => 1,
+            ProposalStatus::Executed => 2,
+        }
+    }
 
     fn require_init(env: &Env) -> Result<(), Error> {
         if !env.storage().instance().has(&DataKey::IsInitialized) {

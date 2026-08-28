@@ -6,7 +6,7 @@
   "scripts": {
     "start": "node dist/index.js",
     "dev": "ts-node-dev src/index.js",
-    "build": "tsc",
+    "build": "tsc -p tsconfig.build.json",
     "lint": "npx eslint \"src/**/*.ts\"",
     "test": "jest",
     "check:metrics-token": "node scripts/check-metrics-token.js",

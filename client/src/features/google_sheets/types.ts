@@ -27,4 +27,8 @@ export interface DailyYieldMetric {
     currentValue: bigint;
     dailyYield: bigint;
     apy: number;
+    /** Wallet this metric belongs to. Used for dry-run conflict detection (#962). */
+    walletAddress?: string;
+    /** Asset/token symbol for this vault position. Used for dry-run conflict detection (#962). */
+    asset?: string;
 }

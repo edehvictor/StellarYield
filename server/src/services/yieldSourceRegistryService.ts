@@ -9,8 +9,17 @@
  * The registry uses an operator-facing status vocabulary
  * (`healthy | degraded | stale | unavailable`) that is intentionally simpler
  * than the engine's internal reliability tiers.
+ *
+ * Cache invalidation (#981):
+ * The registry maintains an in-memory cache with a version counter. The cache
+ * is invalidated (regenerated) when:
+ *   1. The set of registered source IDs changes (provider added/removed).
+ *   2. Any source's health status or failure reason changes.
+ *   3. Any source's metadata (name or data source type) changes.
+ * The cache age and version are exposed in diagnostics.
  */
 
+import NodeCache from "node-cache";
 import {
   yieldReliabilityEngine,
   type DataSourceReliability,
@@ -39,11 +48,22 @@ export interface SourceHealthSummary {
   trend: DataSourceReliability["trend"];
 }
 
+/**
+ * Extended registry response with bounded cache invalidation diagnostics.
+ * Exposes cacheAge (seconds since last generation) and cacheVersion (monotonic
+ * counter that increments on each invalidation) per issue #981.
+ */
 export interface SourceHealthRegistry {
   generatedAt: string;
   totalSources: number;
   counts: Record<SourceHealthStatus, number>;
   sources: SourceHealthSummary[];
+  /** Age of the cached result in seconds (0 if freshly generated). */
+  cacheAge: number;
+  /** Monotonic version counter. Increments each time the cache is invalidated. */
+  cacheVersion: number;
+  /** ISO timestamp of the last cache invalidation (or generation if never invalidated). */
+  lastInvalidatedAt: string;
 }
 
 // ── Classification thresholds ─────────────────────────────────────────────
@@ -205,10 +225,120 @@ const REGISTERED_SOURCES: Array<{ id: string; name: string; source: string }> =
     { id: "coingecko", name: "CoinGecko", source: "oracle" },
   ];
 
+// ── Bounded cache invalidation (#981) ──────────────────────────────────────
+
+export const REGISTRY_CACHE_TTL_SECONDS = 5 * 60; // 5 minutes
+
+interface RegistryCacheEntry {
+  registry: SourceHealthRegistry;
+  /** Monotonic version number, incremented on each invalidation. */
+  version: number;
+  /** Timestamp (epoch ms) when this entry was generated. */
+  generatedAt: number;
+  /** Snapshot of provider IDs at generation time, used to detect changes. */
+  knownProviderIds: string[];
+  /** Snapshot of provider statuses (status + failureReason), used to detect health changes. */
+  knownStatuses: Map<string, { status: SourceHealthStatus; failureReason: string | null }>;
+  /** Snapshot of provider metadata (name + source), used to detect metadata changes. */
+  knownMetadata: Map<string, { name: string; source: string }>;
+}
+
+const registryCache = new NodeCache({
+  stdTTL: REGISTRY_CACHE_TTL_SECONDS,
+  checkperiod: 60,
+  useClones: false,
+});
+
+let cacheVersionCounter = 0;
+let lastInvalidatedAt = new Date().toISOString();
+const CACHE_KEY = "yieldSourceHealthRegistry";
+
+/**
+ * Check whether the cached registry is still valid by comparing the current
+ * registered sources and their health status against the snapshot stored in
+ * the cache entry. Returns `true` if the cache is still fresh.
+ */
+function isRegistryCacheValid(entry: RegistryCacheEntry): boolean {
+  const nowIds = new Set(REGISTERED_SOURCES.map((s) => s.id));
+  const cachedIds = new Set(entry.knownProviderIds);
+
+  // 1. Source set changed (provider added or removed)
+  if (
+    nowIds.size !== cachedIds.size ||
+    [...nowIds].some((id) => !cachedIds.has(id))
+  ) {
+    return false;
+  }
+
+  // 2. Check each provider for metadata or health status changes
+  for (const source of REGISTERED_SOURCES) {
+    const cachedStatus = entry.knownStatuses.get(source.id);
+    if (!cachedStatus) return false;
+
+    const cachedMeta = entry.knownMetadata.get(source.id);
+    if (!cachedMeta) return false;
+
+    // Metadata changed
+    if (cachedMeta.name !== source.name || cachedMeta.source !== source.source) {
+      return false;
+    }
+
+    // Health status or failure reason changed (checked via the live snapshot)
+    // We need the current reliability scores to compare; this is checked
+    // by looking at the latest data from the engine.
+  }
+
+  return true;
+}
+
 /**
  * Read-only health registry for every registered yield data source.
+ *
+ * Results are cached with bounded invalidation: the cache is regenerated when
+ * registered sources change, when source metadata changes, or when any source's
+ * health status or failure reason differs from the cached snapshot.
+ *
+ * The returned registry includes `cacheAge`, `cacheVersion`, and
+ * `lastInvalidatedAt` diagnostic fields.
  */
 export async function getSourceHealthRegistry(): Promise<SourceHealthRegistry> {
+  const cached = registryCache.get<RegistryCacheEntry>(CACHE_KEY);
+
+  if (cached && isRegistryCacheValid(cached)) {
+    // Check health changes: we still need to compare statuses from the engine
+    const reliabilityScores =
+      await yieldReliabilityEngine.getReliabilityScores(REGISTERED_SOURCES);
+
+    let healthChanged = false;
+    for (const r of reliabilityScores) {
+      const { status, failureReason } = toSourceHealth(r, cached.generatedAt);
+      const known = cached.knownStatuses.get(r.providerId);
+      if (
+        !known ||
+        known.status !== status ||
+        known.failureReason !== failureReason
+      ) {
+        healthChanged = true;
+        break;
+      }
+    }
+
+    if (healthChanged) {
+      // Invalidate and rebuild
+      registryCache.del(CACHE_KEY);
+    } else {
+      // Cache is still valid — return the cached registry with updated age
+      const ageSeconds = Math.round((Date.now() - cached.generatedAt) / 1000);
+      return {
+        ...cached.registry,
+        cacheAge: ageSeconds,
+        cacheVersion: cached.version,
+        lastInvalidatedAt,
+      };
+    }
+  }
+
+  // Build fresh registry
   const reliabilityScores =
     await yieldReliabilityEngine.getReliabilityScores(REGISTERED_SOURCES);
 
@@ -217,10 +347,46 @@ export async function getSourceHealthRegistry(): Promise<SourceHealthRegistry> {
     .map((reliability) => toSourceHealth(reliability, now))
     .sort((a, b) => a.reliabilityScore - b.reliabilityScore);
 
-  return {
+  cacheVersionCounter += 1;
+  lastInvalidatedAt = new Date().toISOString();
+
+  const knownStatuses = new Map<
+    string,
+    { status: SourceHealthStatus; failureReason: string | null }
+  >();
+  const knownMetadata = new Map<string, { name: string; source: string }>();
+
+  for (const source of sources) {
+    knownStatuses.set(source.providerId, {
+      status: source.status,
+      failureReason: source.failureReason,
+    });
+    knownMetadata.set(source.providerId, {
+      name: source.providerName,
+      source: source.dataSource,
+    });
+  }
+
+  const registry: SourceHealthRegistry = {
     generatedAt: new Date(now).toISOString(),
     totalSources: sources.length,
     counts: summarizeSourceHealth(sources),
     sources,
+    cacheAge: 0,
+    cacheVersion: cacheVersionCounter,
+    lastInvalidatedAt,
   };
+
+  const entry: RegistryCacheEntry = {
+    registry,
+    version: cacheVersionCounter,
+    generatedAt: now,
+    knownProviderIds: REGISTERED_SOURCES.map((s) => s.id),
+    knownStatuses,
+    knownMetadata,
+  };
+
+  registryCache.set(CACHE_KEY, entry);
+
+  return registry;
 }

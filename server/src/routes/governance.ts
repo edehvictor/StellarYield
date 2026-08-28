@@ -1,4 +1,5 @@
 import { Router, Request, Response } from "express";
+import rateLimit from "express-rate-limit";
 import {
   forecastGovernanceProposal,
   type GovernanceForecastInput,
@@ -6,6 +7,15 @@ import {
 } from "../services/governanceForecastService";
 
 const router = Router();
+
+// #935 — forecast is compute-heavy; rate-limit to prevent burst abuse.
+const forecastLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 30,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: "Too many governance forecast requests. Please try again later." },
+});
 
 const VALID_PROPOSAL_TYPES: ProposalType[] = [
   "fee_change",
@@ -19,7 +29,11 @@ const VALID_PROPOSAL_TYPES: ProposalType[] = [
  * Returns an estimated impact forecast for a governance proposal.
  * Read-only — does not execute any on-chain operation.
  */
-router.post("/forecast", (req: Request, res: Response) => {
+router.get("/forecast", (_req: Request, res: Response) => {
+  res.json({ message: "Use POST /api/governance/forecast to submit forecast inputs." });
+});
+
+router.post("/forecast", forecastLimiter, (req: Request, res: Response) => {
   const { proposalType, parameters, baseline } = req.body as Partial<GovernanceForecastInput>;
 
   if (!proposalType || !VALID_PROPOSAL_TYPES.includes(proposalType)) {

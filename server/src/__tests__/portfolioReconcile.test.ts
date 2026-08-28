@@ -1,4 +1,4 @@
-import { PortfolioReconcileService } from '../services/portfolioReconcileService'
+import { PortfolioReconcileService, resetReconciliationStore } from '../services/portfolioReconcileService'
 
 describe('PortfolioReconcileService', () => {
   let service: PortfolioReconcileService
@@ -11,6 +11,7 @@ describe('PortfolioReconcileService', () => {
 
   beforeEach(() => {
     jest.clearAllMocks()
+    resetReconciliationStore()
     service = new PortfolioReconcileService(mockPrisma)
   })
 

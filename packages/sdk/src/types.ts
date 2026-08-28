@@ -5,8 +5,32 @@ export interface VaultConfig {
   specHash?: string;
 }
 
-export interface ApiConfig {
+/**
+ * Retry policy for ApiClient HTTP calls.
+ * Timeouts and network failures are normalized into SDK error types.
+ */
+export interface ApiRetryConfig {
+  /** Per-request timeout in milliseconds (default: 15_000). */
+  timeoutMs?: number;
+  /** Maximum number of retries after the first attempt (default: 2). */
+  maxRetries?: number;
+  /** Base delay between retries in milliseconds (default: 250). Exponential backoff. */
+  retryDelayMs?: number;
+  /** HTTP status codes that are safe to retry (default: 408, 429, 500, 502, 503, 504). */
+  retryableStatuses?: number[];
+}
+
+export interface ApiConfig extends ApiRetryConfig {
   baseUrl: string;
+}
+
+/** Options for a single ApiClient request. */
+export interface ApiRequestOptions {
+  /**
+   * Mark a non-idempotent method (POST/PUT/PATCH/DELETE) as safe to retry.
+   * GET/HEAD are always treated as idempotent.
+   */
+  retrySafe?: boolean;
 }
 
 export interface DepositParams {

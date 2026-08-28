@@ -28,6 +28,7 @@ export interface OffRampTransaction {
     status: OffRampStatus;
     amount: string;
     currency: string;
+    /** Masked once persisted — see maskBankAccount. Never the full account number (#963). */
     bankAccount: string;
     memo: string;
     createdAt: number;
@@ -36,7 +37,8 @@ export interface OffRampTransaction {
     quoteExpiresAt?: number;
     errorMessage?: string;
     isRetryable?: boolean;
-    request?: WithdrawalRequest;
+    /** Non-sensitive fields safe to persist and use to validate a resume attempt (#963). */
+    resumeMetadata?: SafeResumeMetadata;
 }
 
 export interface WithdrawalRequest {
@@ -46,7 +48,29 @@ export interface WithdrawalRequest {
     bankAccount: string;
     bankName: string;
     accountHolder: string;
+    /** Wallet initiating this withdrawal — used to detect a changed-wallet resume (#963). */
+    walletAddress?: string;
 }
+
+/**
+ * Non-sensitive fields safe to persist to localStorage for resuming a
+ * withdrawal across a page reload. Deliberately excludes the raw bank
+ * account number and any provider credentials — only a masked account
+ * number is retained (#963).
+ */
+export interface SafeResumeMetadata {
+    vaultContractId: string;
+    bankName: string;
+    accountHolder: string;
+    maskedBankAccount: string;
+    walletAddress?: string;
+}
+
+export type ResumeBlockedReason = "quote_expired" | "incomplete_metadata" | "wallet_changed";
+
+export type ResumeValidationResult =
+    | { canResume: true }
+    | { canResume: false; reason: ResumeBlockedReason; message: string };
 
 /**
  * OffRampError class for handling off-ramp specific errors

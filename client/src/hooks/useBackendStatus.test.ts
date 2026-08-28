@@ -64,8 +64,11 @@ describe("useBackendStatus", () => {
   });
 
   it("returns 'unavailable' on timeout", async () => {
-    global.fetch = vi.fn(() => {
-      return new Promise((resolve) => {
+    global.fetch = vi.fn((_input: RequestInfo | URL, init?: RequestInit) => {
+      return new Promise<Response>((resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => {
+          reject(new Error("Request aborted"));
+        });
         setTimeout(() => resolve(new Response("", { status: 200 })), 10000);
       });
     });
@@ -78,7 +81,7 @@ describe("useBackendStatus", () => {
       },
       { timeout: 7000 }
     );
-  });
+  }, 8000);
 
   it("polls for status when checkInterval is provided", async () => {
     const fetchSpy = vi.fn(() =>

@@ -14,7 +14,9 @@ import {
 } from "./confidenceService";
 
 export interface SnapshotBundle {
+  version: string;
   generatedAt: string;
+  timestamp: string;  // alias for generatedAt (backward-compat)
   appVersion: string;
   opportunities: OpportunitySnapshot[];
   metadata: {
@@ -134,7 +136,9 @@ export class ExportService {
       : 0;
 
     return {
+      version: "1.0.0",
       generatedAt: isoNow,
+      timestamp: isoNow,
       appVersion: "1.0.0",
       opportunities: snapshots,
       metadata: {

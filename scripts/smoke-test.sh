@@ -6,6 +6,7 @@ BACKEND_URL=${BACKEND_URL:-"http://localhost:3001"}
 OUTPUT_MODE=${OUTPUT_MODE:-"text"}
 
 BACKEND_HEALTH_PATH=${BACKEND_HEALTH_PATH:-"/api/health"}
+BACKEND_READINESS_PATH=${BACKEND_READINESS_PATH:-"/api/health/readiness"}
 BACKEND_YIELDS_PATH=${BACKEND_YIELDS_PATH:-"/api/yields"}
 FRONTEND_ASSET_PATH=${FRONTEND_ASSET_PATH:-"/favicon.svg"}
 
@@ -57,6 +58,7 @@ if [[ "${1:-}" == "--json" || "$OUTPUT_MODE" == "json" ]]; then
   timestamp="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
   checks=(
     "Backend ${BACKEND_HEALTH_PATH}|${BACKEND_URL}${BACKEND_HEALTH_PATH}"
+    "Backend readiness endpoint|${BACKEND_URL}${BACKEND_READINESS_PATH}"
     "Backend ${BACKEND_YIELDS_PATH}|${BACKEND_URL}${BACKEND_YIELDS_PATH}"
     "Frontend /|${FRONTEND_URL}/"
     "Frontend ${FRONTEND_ASSET_PATH}|${FRONTEND_URL}${FRONTEND_ASSET_PATH}"
@@ -85,19 +87,23 @@ echo "Target Backend:  $BACKEND_URL"
 echo "----------------------------------------"
 
 echo ""
-echo "[1/4] Checking backend health..."
+echo "[1/5] Checking backend health..."
 expect_200 "Backend ${BACKEND_HEALTH_PATH}" "${BACKEND_URL}${BACKEND_HEALTH_PATH}"
 
 echo ""
-echo "[2/4] Checking backend yield endpoint..."
+echo "[2/5] Checking backend readiness..."
+expect_200 "Backend readiness endpoint" "${BACKEND_URL}${BACKEND_READINESS_PATH}"
+
+echo ""
+echo "[3/5] Checking backend yield endpoint..."
 expect_200 "Backend ${BACKEND_YIELDS_PATH}" "${BACKEND_URL}${BACKEND_YIELDS_PATH}"
 
 echo ""
-echo "[3/4] Checking frontend root..."
+echo "[4/5] Checking frontend root..."
 expect_200 "Frontend /" "${FRONTEND_URL}/"
 
 echo ""
-echo "[4/4] Checking frontend static asset..."
+echo "[5/5] Checking frontend static asset..."
 expect_200 "Frontend ${FRONTEND_ASSET_PATH}" "${FRONTEND_URL}${FRONTEND_ASSET_PATH}"
 
 echo ""

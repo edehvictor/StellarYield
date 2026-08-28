@@ -9,6 +9,7 @@ const { URL } = require('url');
 const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:5173';
 const BACKEND_URL = process.env.BACKEND_URL || 'http://localhost:3001';
 const BACKEND_HEALTH_PATH = process.env.BACKEND_HEALTH_PATH || '/api/health';
+const BACKEND_READINESS_PATH = process.env.BACKEND_READINESS_PATH || '/api/health/readiness';
 const BACKEND_YIELDS_PATH = process.env.BACKEND_YIELDS_PATH || '/api/yields';
 const FRONTEND_ASSET_PATH = process.env.FRONTEND_ASSET_PATH || '/favicon.svg';
 
@@ -89,6 +90,10 @@ async function collectSmokeResults() {
     {
       label: `Backend ${BACKEND_HEALTH_PATH}`,
       url: `${BACKEND_URL}${BACKEND_HEALTH_PATH}`,
+    },
+    {
+      label: `Backend readiness endpoint`,
+      url: `${BACKEND_URL}${BACKEND_READINESS_PATH}`,
     },
     {
       label: `Backend ${BACKEND_YIELDS_PATH}`,
@@ -209,22 +214,27 @@ async function runSmokeTest() {
 
   const tests = [
     {
-      step: '[1/4] Checking backend health...',
+      step: '[1/5] Checking backend health...',
       label: `Backend ${BACKEND_HEALTH_PATH}`,
       url: `${BACKEND_URL}${BACKEND_HEALTH_PATH}`,
     },
     {
-      step: '[2/4] Checking backend yield endpoint...',
+      step: '[2/5] Checking backend readiness...',
+      label: `Backend readiness endpoint`,
+      url: `${BACKEND_URL}${BACKEND_READINESS_PATH}`,
+    },
+    {
+      step: '[3/5] Checking backend yield endpoint...',
       label: `Backend ${BACKEND_YIELDS_PATH}`,
       url: `${BACKEND_URL}${BACKEND_YIELDS_PATH}`,
     },
     {
-      step: '[3/4] Checking frontend root...',
+      step: '[4/5] Checking frontend root...',
       label: 'Frontend /',
       url: `${FRONTEND_URL}/`,
     },
     {
-      step: '[4/4] Checking frontend static asset...',
+      step: '[5/5] Checking frontend static asset...',
       label: `Frontend ${FRONTEND_ASSET_PATH}`,
       url: `${FRONTEND_URL}${FRONTEND_ASSET_PATH}`,
     },

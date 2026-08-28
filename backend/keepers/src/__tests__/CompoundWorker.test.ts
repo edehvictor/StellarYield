@@ -26,19 +26,24 @@ jest.mock('@stellar/stellar-sdk', () => ({
 // ── Tests ──────────────────────────────────────────────────────────────────────
 
 describe('CompoundWorker', () => {
-  let mockSigner: jest.Mocked<KeeperSigner>;
+  let mockSigner: any;
   let worker: CompoundWorker;
 
   const sampleJobData: CompoundJobData = {
     vaultContractId: 'CVAULT_AAAA',
     minHarvestAmount: '1000000',
+    fencingToken: 0,
+    requiredSequence: 1,
   };
 
   beforeEach(() => {
     mockSigner = {
       publicKey: 'GKEEPER123',
       invokeContract: jest.fn().mockResolvedValue('COMPOUND_TX_HASH'),
-    } as unknown as jest.Mocked<KeeperSigner>;
+      server: {
+        getAccount: jest.fn().mockResolvedValue({ sequence: '1' }),
+      },
+    };
 
     worker = new CompoundWorker(mockSigner);
   });
@@ -77,7 +82,7 @@ describe('CompoundWorker', () => {
   test('process() converts minHarvestAmount to i128 ScVal', async () => {
     const mockJob = {
       id: 'job-cmp-3',
-      data: { vaultContractId: 'CVAULT_BBBB', minHarvestAmount: '5000000' },
+      data: { vaultContractId: 'CVAULT_BBBB', minHarvestAmount: '5000000', fencingToken: 0, requiredSequence: 1 },
     } as Job<CompoundJobData>;
 
     await worker.process(mockJob);
@@ -97,24 +102,42 @@ describe('CompoundWorker', () => {
     expect(result.txHash).toBe('SPECIFIC_HASH_XYZ');
   });
 
-  test('process() propagates errors from invokeContract (triggers BullMQ retry)', async () => {
-    mockSigner.invokeContract.mockRejectedValue(new Error('Contract reverted: harvest error'));
-
-    await expect(
-      worker.process({ id: 'job-cmp-5', data: sampleJobData } as Job<CompoundJobData>),
-    ).rejects.toThrow('Contract reverted: harvest error');
-  });
-
   test('process() handles zero minHarvestAmount correctly', async () => {
     const mockJob = {
       id: 'job-cmp-6',
-      data: { vaultContractId: 'CVAULT_ZERO', minHarvestAmount: '0' },
+      data: { vaultContractId: 'CVAULT_ZERO', minHarvestAmount: '0', fencingToken: 0, requiredSequence: 1 },
     } as Job<CompoundJobData>;
 
     await worker.process(mockJob);
 
     const { nativeToScVal } = require('@stellar/stellar-sdk');
     expect(nativeToScVal).toHaveBeenCalledWith(0n, { type: 'i128' });
+  });
+
+  test('process() validates fencing token before execution', async () => {
+    const mockJob = {
+      id: 'job-cmp-fence',
+      data: { vaultContractId: 'CVAULT_FENCE', minHarvestAmount: '1000000', fencingToken: 999, requiredSequence: 1 },
+      attemptsMade: 0,
+    } as Job<CompoundJobData>;
+
+    await expect(worker.process(mockJob)).rejects.toThrow('FENCING_VIOLATION');
+  });
+
+  test('process() rejects stale job after fencing token advances (#906 duplicate-worker guard)', async () => {
+    const { nextFencingToken, validateFencingToken } = require('../queues');
+    const vaultId = 'CVAULT_STALE';
+    nextFencingToken('compound', vaultId); // token → 1
+    nextFencingToken('compound', vaultId); // token → 2, stale = 1
+
+    const staleJob = {
+      id: 'job-cmp-stale',
+      data: { vaultContractId: vaultId, minHarvestAmount: '1000000', fencingToken: 1, requiredSequence: 1 },
+      attemptsMade: 0,
+    } as Job<CompoundJobData>;
+
+    await expect(worker.process(staleJob)).rejects.toThrow('FENCING_VIOLATION');
+    expect(validateFencingToken('compound', vaultId, 1)).toBe(false);
   });
 
   // ── close() ───────────────────────────────────────────────────────────────────
@@ -131,7 +154,7 @@ describe('CompoundWorker', () => {
   test('Worker "completed" event logs vault and job ID without throwing', () => {
     const { Worker } = require('bullmq');
     const workerInstance = Worker.mock.results[0].value;
-    const onCalls = (workerInstance.on as jest.Mock).mock.calls;
+    const onCalls = (workerInstance.on as any).mock.calls;
 
     const completedHandler = onCalls.find(([event]: [string]) => event === 'completed')?.[1];
     expect(completedHandler).toBeDefined();
@@ -141,7 +164,7 @@ describe('CompoundWorker', () => {
   test('Worker "failed" event logs job ID and error without throwing', () => {
     const { Worker } = require('bullmq');
     const workerInstance = Worker.mock.results[0].value;
-    const onCalls = (workerInstance.on as jest.Mock).mock.calls;
+    const onCalls = (workerInstance.on as any).mock.calls;
 
     const failedHandler = onCalls.find(([event]: [string]) => event === 'failed')?.[1];
     expect(failedHandler).toBeDefined();

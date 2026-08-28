@@ -30,7 +30,17 @@ const makeEntry = (overrides: Partial<AuditLogEntry> = {}): AuditLogEntry => ({
   previousHash: "GENESIS",
   hash: "hash",
   signature: "sig",
+  ...overrides,
 });
+
+/** Helper: insert a pre-built entry via createAuditEntry using context id/timestamp */
+async function insertEntry(entry: AuditLogEntry): Promise<void> {
+  await createAuditEntry(
+    { method: "GET", path: "/", headers: {}, ip: "127.0.0.1" } as any,
+    { statusCode: 200 } as any,
+    { id: entry.id, timestamp: entry.timestamp },
+  );
+}
 
 beforeEach(() => {
   resetAuditLog();
@@ -46,11 +56,7 @@ describe("getAuditLogs ordering contract", () => {
     ];
 
     for (const entry of entries) {
-      await createAuditEntry(
-        { method: "GET", path: "/", headers: {}, ip: "127.0.0.1", userAgent: "a" } as any,
-        { statusCode: 200, send: () => {} } as any,
-        {},
-      );
+      await insertEntry(entry);
     }
 
     const logs = await getAuditLogs({ limit: 100 });
@@ -67,11 +73,7 @@ describe("getAuditLogs ordering contract", () => {
     ];
 
     for (const entry of entries) {
-      await createAuditEntry(
-        { method: "GET", path: "/", headers: {}, ip: "127.0.0.1", userAgent: "a" } as any,
-        { statusCode: 200, send: () => {} } as any,
-        {},
-      );
+      await insertEntry(entry);
     }
 
     const logs = await getAuditLogs({ limit: 100 });
@@ -94,11 +96,7 @@ describe("getAuditLogs cursor pagination contract", () => {
     );
 
     for (const entry of entries) {
-      await createAuditEntry(
-        { method: "GET", path: "/", headers: {}, ip: "127.0.0.1", userAgent: "a" } as any,
-        { statusCode: 200, send: () => {} } as any,
-        {},
-      );
+      await insertEntry(entry);
     }
   });
 
@@ -140,7 +138,10 @@ describe("getAuditLogs cursor pagination contract", () => {
   });
 
   it("returns empty when cursor points past the last item", async () => {
-    const page = await getAuditLogs({ limit: 10, cursor: "page-999" });
+    // Get all 25 items, take the last item's id as cursor
+    const all = await getAuditLogs({ limit: 25 });
+    const lastCursor = all[all.length - 1].id; // "page-24"
+    const page = await getAuditLogs({ limit: 10, cursor: lastCursor });
     expect(page).toHaveLength(0);
   });
 });

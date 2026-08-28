@@ -37,3 +37,5 @@ export type * from './yieldReliabilityService';
 export type * from './opportunityMomentumEngine';
 export * from "./conversionRiskService";
 export * from "./portfolioRegimeShiftService";
+export { yieldQuorumService } from "./yieldQuorumService";
+export type * from "./yieldQuorumService";

@@ -12,11 +12,38 @@ export interface CompatibilityRequirement {
     breakingChanges: string[];
 }
 
+export type ActionType = 'deposit' | 'withdraw' | 'rebalance' | 'quote' | 'reporting';
+
+export const ACTION_LABELS: Record<ActionType, string> = {
+    deposit: 'Deposit',
+    withdraw: 'Withdraw',
+    rebalance: 'Rebalance',
+    quote: 'Quote',
+    reporting: 'Reporting',
+};
+
+export const ACTION_DESCRIPTIONS: Record<ActionType, string> = {
+    deposit: 'Adding funds to vaults or strategies',
+    withdraw: 'Removing funds from vaults or strategies',
+    rebalance: 'Reallocating capital across positions',
+    quote: 'Fetching swap rates and price estimates',
+    reporting: 'Aggregating yield and performance data',
+};
+
+const SEVERITY_RANK: Record<string, number> = {
+    critical: 0,
+    warning: 1,
+    info: 2,
+};
+
 export interface CompatibilityIssue {
     severity: 'critical' | 'warning' | 'info';
     component: string;
     message: string;
     recommendation: string;
+    affectedActions?: ActionType[];
+    lastUpdated?: string;
+    protocolName?: string;
 }
 
 export interface CompatibilityStatus {
@@ -206,6 +233,76 @@ export function generateCompatibilityReport(
         generatedAt: new Date().toISOString(),
         nextCheckDue: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
     };
+}
+
+export interface ActionGroup {
+    action: ActionType;
+    label: string;
+    description: string;
+    issues: CompatibilityIssue[];
+    status: 'clear' | 'warning' | 'degraded' | 'blocked';
+}
+
+const ALL_ACTIONS: ActionType[] = ['deposit', 'withdraw', 'rebalance', 'quote', 'reporting'];
+
+/**
+ * Derive aggregate status for an action group from its issues
+ */
+function actionGroupStatus(issues: CompatibilityIssue[]): ActionGroup['status'] {
+    if (issues.length === 0) return 'clear';
+    if (issues.some(i => i.severity === 'critical')) return 'blocked';
+    if (issues.some(i => i.severity === 'warning')) return 'degraded';
+    return 'warning';
+}
+
+/**
+ * Group issues by the actions they affect.
+ * Issues with no affectedActions are placed into every group so they
+ * are surfaced regardless of the selected action tab.
+ */
+export function groupIssuesByAction(issues: CompatibilityIssue[]): ActionGroup[] {
+    const grouped: Record<ActionType, CompatibilityIssue[]> = {
+        deposit: [],
+        withdraw: [],
+        rebalance: [],
+        quote: [],
+        reporting: [],
+    };
+
+    for (const issue of issues) {
+        const actions = (issue.affectedActions?.length ?? 0) > 0
+            ? issue.affectedActions!
+            : ALL_ACTIONS;
+
+        for (const action of actions) {
+            if (!grouped[action]) continue;
+            grouped[action].push(issue);
+        }
+    }
+
+    return ALL_ACTIONS.map(action => ({
+        action,
+        label: ACTION_LABELS[action],
+        description: ACTION_DESCRIPTIONS[action],
+        issues: sortIssues(grouped[action]),
+        status: actionGroupStatus(grouped[action]),
+    }));
+}
+
+/**
+ * Sort compatibility issues by severity (critical first) then by
+ * lastUpdated (most recent first).  Issues without a date sort last.
+ */
+export function sortIssues(issues: CompatibilityIssue[]): CompatibilityIssue[] {
+    return [...issues].sort((a, b) => {
+        const rankA = SEVERITY_RANK[a.severity] ?? 99;
+        const rankB = SEVERITY_RANK[b.severity] ?? 99;
+        if (rankA !== rankB) return rankA - rankB;
+
+        const dateA = a.lastUpdated ? new Date(a.lastUpdated).getTime() : 0;
+        const dateB = b.lastUpdated ? new Date(b.lastUpdated).getTime() : 0;
+        return dateB - dateA;
+    });
 }
 
 /**

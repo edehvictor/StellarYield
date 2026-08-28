@@ -1,6 +1,13 @@
 import { useState, useEffect } from "react";
 import { PieChart, Pie, Cell, ResponsiveContainer, Tooltip, Legend, BarChart, Bar, XAxis, YAxis, CartesianGrid } from "recharts";
 import { TrendingUp, TrendingDown, Minus, Info, Calendar, DollarSign, Target } from "lucide-react";
+import {
+  PERFORMANCE_CHART_COLORS,
+  REWARD_SOURCE_CHART_COLORS,
+  CHART_PANEL_BG,
+  CHART_PANEL_AXIS,
+  CHART_PANEL_LABEL,
+} from "../../components/charts/darkModeContrast";
 
 // ── Types ───────────────────────────────────────────────────────────────
 
@@ -51,10 +58,10 @@ interface PortfolioAttributionPanelProps {
 // ── Configuration ───────────────────────────────────────────────────────
 
 const DECISION_TYPE_COLORS = {
-  initial_routing: "#6C5DD3",
-  rotation: "#3EAC75", 
-  incentive_capture: "#F5A623",
-  hold: "#FF5E5E",
+  initial_routing: PERFORMANCE_CHART_COLORS.initial_routing,
+  rotation: PERFORMANCE_CHART_COLORS.rotation,
+  incentive_capture: PERFORMANCE_CHART_COLORS.incentive_capture,
+  hold: PERFORMANCE_CHART_COLORS.hold,
 };
 
 const DECISION_TYPE_LABELS = {
@@ -64,12 +71,7 @@ const DECISION_TYPE_LABELS = {
   hold: "Hold Strategy",
 };
 
-const REWARD_SOURCE_COLORS: Record<string, string> = {
-  base_protocol_yield: "#6C5DD3",
-  incentive_emissions: "#F5A623",
-  tactical_routing: "#3EAC75",
-  fees: "#FF5E5E",
-};
+const REWARD_SOURCE_COLORS: Record<string, string> = REWARD_SOURCE_CHART_COLORS;
 
 const REWARD_SOURCE_LABELS: Record<string, string> = {
   base_protocol_yield: "Base Protocol Yield",
@@ -200,7 +202,7 @@ export default function PortfolioAttributionPanel({ walletAddress }: PortfolioAt
         value: entry.contribution,
         percentage: entry.percentage,
         color:
-          REWARD_SOURCE_COLORS[entry.rewardSource] || "#6C5DD3",
+          REWARD_SOURCE_COLORS[entry.rewardSource] || PERFORMANCE_CHART_COLORS.initial_routing,
       };
     }
 
@@ -214,7 +216,7 @@ export default function PortfolioAttributionPanel({ walletAddress }: PortfolioAt
       color:
         DECISION_TYPE_COLORS[
           entry.decisionType as keyof typeof DECISION_TYPE_COLORS
-        ] || "#6C5DD3",
+        ] || PERFORMANCE_CHART_COLORS.initial_routing,
     };
   });
 
@@ -342,15 +344,15 @@ export default function PortfolioAttributionPanel({ walletAddress }: PortfolioAt
           <ResponsiveContainer width="100%" height={300}>
             <BarChart data={barChartData}>
               <CartesianGrid strokeDasharray="3 3" stroke="#ffffff10" />
-              <XAxis dataKey="name" tick={{ fill: "#9CA3AF", fontSize: 12 }} />
-              <YAxis tick={{ fill: "#9CA3AF", fontSize: 12 }} />
-              <Tooltip 
-                contentStyle={{ backgroundColor: "#1F2937", border: "1px solid #374151" }}
-                labelStyle={{ color: "#F3F4F6" }}
+              <XAxis dataKey="name" tick={{ fill: CHART_PANEL_AXIS, fontSize: 12 }} />
+              <YAxis tick={{ fill: CHART_PANEL_AXIS, fontSize: 12 }} />
+              <Tooltip
+                contentStyle={{ backgroundColor: CHART_PANEL_BG, border: "1px solid #374151" }}
+                labelStyle={{ color: CHART_PANEL_LABEL }}
               />
-              <Bar dataKey="contribution" fill="#6C5DD3" name="Contribution ($)" />
-              <Bar dataKey="apyImpact" fill="#3EAC75" name="APY Impact (%)" />
-              <Bar dataKey="confidence" fill="#F5A623" name="Confidence (%)" />
+              <Bar dataKey="contribution" fill={PERFORMANCE_CHART_COLORS.initial_routing} name="Contribution ($)" />
+              <Bar dataKey="apyImpact" fill={PERFORMANCE_CHART_COLORS.rotation} name="APY Impact (%)" />
+              <Bar dataKey="confidence" fill={PERFORMANCE_CHART_COLORS.incentive_capture} name="Confidence (%)" />
             </BarChart>
           </ResponsiveContainer>
         </div>

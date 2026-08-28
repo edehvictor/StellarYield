@@ -31,9 +31,9 @@ jest.mock("@prisma/client", () => {
 
 const { PrismaClient } = require("@prisma/client");
 const prismaMock = (PrismaClient as any).__mockInstance;
-const mockDriftEventFindFirst = prismaMock.driftEvent.findFirst;
-const mockDriftEventCreate = prismaMock.driftEvent.create;
-const mockDriftEventUpdate = prismaMock.driftEvent.update;
+mockDriftEventFindFirst = prismaMock.driftEvent.findFirst;
+mockDriftEventCreate = prismaMock.driftEvent.create;
+mockDriftEventUpdate = prismaMock.driftEvent.update;
 describe("DriftService", () => {
   beforeEach(() => {
     jest.clearAllMocks();

@@ -1,8 +1,8 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "framework": "vite",
-  "installCommand": "npm ci --no-audit",
-  "buildCommand": "npm run build",
+  "installCommand": "if [ -d client ]; then cd client && npm ci --no-audit; else npm ci --no-audit; fi",
+  "buildCommand": "if [ -d client ]; then cd client && npm run build && rm -rf ../dist && cp -R dist ../dist; else npm run build; fi",
   "outputDirectory": "dist",
   "rewrites": [
     {

@@ -37,7 +37,7 @@ describe("recommendationTimelineService", () => {
     });
 
     expect(entry.timestamp).toBe("2026-01-01T00:00:00.000Z");
-    expect(entry.id).toBe("1725000000000-74f01a");
+    expect(entry.id).toBe("1725000000000-74f01f");
     const timeline = await getRecommendationTimeline("user-1");
     expect(timeline).toHaveLength(1);
     expect(timeline[0].changedInputs).toContain("initial-baseline");

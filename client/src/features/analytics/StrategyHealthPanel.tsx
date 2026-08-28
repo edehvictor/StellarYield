@@ -3,6 +3,7 @@ import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContai
 import { Activity, AlertTriangle, CheckCircle, XCircle, TrendingUp, TrendingDown, Minus, RefreshCw, Settings } from "lucide-react";
 import StatusBadge from '../../components/StatusBadge';
 import { FreshnessBanner } from "../../components/dashboard/FreshnessBanner";
+import { RISK_CHART_COLORS, CHART_PANEL_BG, CHART_PANEL_AXIS } from "../../components/charts/darkModeContrast";
 
 // ── Types ───────────────────────────────────────────────────────────────
 
@@ -49,10 +50,10 @@ interface StrategyHealthPanelProps {
 // ── Configuration ───────────────────────────────────────────────────────
 
 const STATUS_COLORS = {
-  healthy: "#3EAC75",
-  degraded: "#F5A623",
-  critical: "#FF5E5E",
-  disabled: "#6B7280",
+  healthy:  RISK_CHART_COLORS.healthy,
+  degraded: RISK_CHART_COLORS.degraded,
+  critical: RISK_CHART_COLORS.critical,
+  disabled: RISK_CHART_COLORS.disabled,
 };
 
 const STATUS_ICONS = {
@@ -283,11 +284,11 @@ export default function StrategyHealthPanel({ strategyIds = ['strategy_1', 'stra
               <ResponsiveContainer width="100%" height={300}>
                 <RadarChart data={getRadarData(selectedStrategy.metrics)}>
                   <PolarGrid stroke="#ffffff20" />
-                  <PolarAngleAxis dataKey="metric" tick={{ fill: "#9CA3AF", fontSize: 12 }} />
-                  <PolarRadiusAxis 
-                    angle={90} 
-                    domain={[0, 100]} 
-                    tick={{ fill: "#9CA3AF", fontSize: 10 }}
+                  <PolarAngleAxis dataKey="metric" tick={{ fill: CHART_PANEL_AXIS, fontSize: 12 }} />
+                  <PolarRadiusAxis
+                    angle={90}
+                    domain={[0, 100]}
+                    tick={{ fill: CHART_PANEL_AXIS, fontSize: 10 }}
                   />
                   <Radar
                     name="Health Score"
@@ -296,8 +297,8 @@ export default function StrategyHealthPanel({ strategyIds = ['strategy_1', 'stra
                     fill={getStatusColor(selectedStrategy.overallScore)}
                     fillOpacity={0.3}
                   />
-                  <Tooltip 
-                    contentStyle={{ backgroundColor: "#1F2937", border: "1px solid #374151" }}
+                  <Tooltip
+                    contentStyle={{ backgroundColor: CHART_PANEL_BG, border: "1px solid #374151" }}
                   />
                 </RadarChart>
               </ResponsiveContainer>
@@ -315,23 +316,23 @@ export default function StrategyHealthPanel({ strategyIds = ['strategy_1', 'stra
                   const isVolatility = metric === 'volatilityIndex';
                   
                   let displayValue: string;
-                  let color: string = "#3EAC75";
-                  
+                  let color: string = STATUS_COLORS.healthy;
+
                   if (isPercentage) {
                     displayValue = `${(value * 100).toFixed(1)}%`;
-                    color = value >= 0.8 ? "#3EAC75" : value >= 0.6 ? "#F5A623" : "#FF5E5E";
+                    color = value >= 0.8 ? STATUS_COLORS.healthy : value >= 0.6 ? STATUS_COLORS.degraded : STATUS_COLORS.critical;
                   } else if (isErrorRate) {
                     displayValue = `${(value * 100).toFixed(2)}%`;
-                    color = value <= 0.01 ? "#3EAC75" : value <= 0.05 ? "#F5A623" : "#FF5E5E";
+                    color = value <= 0.01 ? STATUS_COLORS.healthy : value <= 0.05 ? STATUS_COLORS.degraded : STATUS_COLORS.critical;
                   } else if (isLatency) {
                     displayValue = formatLatency(value);
-                    color = value <= 200 ? "#3EAC75" : value <= 500 ? "#F5A623" : "#FF5E5E";
+                    color = value <= 200 ? STATUS_COLORS.healthy : value <= 500 ? STATUS_COLORS.degraded : STATUS_COLORS.critical;
                   } else if (isVolatility) {
                     displayValue = `${(value * 100).toFixed(1)}%`;
-                    color = value <= 0.3 ? "#3EAC75" : value <= 0.5 ? "#F5A623" : "#FF5E5E";
+                    color = value <= 0.3 ? STATUS_COLORS.healthy : value <= 0.5 ? STATUS_COLORS.degraded : STATUS_COLORS.critical;
                   } else {
                     displayValue = value.toString();
-                    color = "#9CA3AF";
+                    color = CHART_PANEL_AXIS;
                   }
 
                   return (

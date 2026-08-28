@@ -12,6 +12,7 @@ import {
 } from "lucide-react";
 import { apiUrl } from "../../lib/api";
 import type { AccountActivityEvent, AccountActivityEventType } from "./activityTimelineTypes";
+import { SOURCE_LABELS, sortAndDeduplicateTimeline } from "./activityTimelineTypes";
 
 const ACTIVITY_FILTERS: Array<{ type: AccountActivityEventType; label: string }> = [
   { type: "deposit", label: "Deposits" },
@@ -117,7 +118,7 @@ export default function UnifiedActivityTimeline({
         };
 
         if (!cancelled) {
-          setEvents(payload.timeline ?? []);
+          setEvents(sortAndDeduplicateTimeline(payload.timeline ?? []));
         }
       } catch (loadError) {
         if (!cancelled) {
@@ -255,7 +256,12 @@ export default function UnifiedActivityTimeline({
                             <p className="mt-1 text-sm text-gray-300">{event.description}</p>
                             <div className="mt-2 flex flex-wrap gap-3 text-xs text-gray-400">
                               <span>{formatTimeLabel(event.timestamp)}</span>
-                              <span>{event.source}</span>
+                              <span
+                                className="rounded-full bg-black/20 px-2 py-0.5 text-[11px] uppercase tracking-wide text-gray-400"
+                                title={`Source: ${event.source}`}
+                              >
+                                {SOURCE_LABELS[event.source] ?? event.source}
+                              </span>
                               {event.relatedVaultId && <span>{event.relatedVaultId}</span>}
                               {event.assetSymbol && <span>{event.assetSymbol}</span>}
                             </div>

@@ -3,7 +3,7 @@
 //! Events are emitted with version information to support backward compatibility
 //! as the contract evolves. Decoders should handle multiple schema versions.
 
-use soroban_sdk::{symbol_short, Address, Env, Symbol};
+use soroban_sdk::{Env, IntoVal, Symbol, Val};
 
 /// Current event schema version for all vault events
 pub const VAULT_EVENT_SCHEMA_VERSION: u32 = 1;
@@ -47,18 +47,13 @@ pub const HARVEST_EVENT_V1: EventVersion = EventVersion {
 /// * `topic` - The event topic (e.g., "deposit")
 /// * `version` - The schema version for this event
 /// * `data` - The event data payload
-pub fn emit_versioned_event<T: soroban_sdk::IntoVal<Env>>(
-    env: &Env,
-    topic: Symbol,
-    version: u32,
-    data: T,
-) {
+pub fn emit_versioned_event<T>(env: &Env, topic: Symbol, version: u32, data: T)
+where
+    T: IntoVal<Env, Val>,
+{
     // Emit event with version information
     // Topic format: "event_v<version>" to allow version-aware filtering
-    env.events().publish(
-        (topic, version),
-        data,
-    );
+    env.events().publish((topic, version), data);
 }
 
 /// Marker type for unknown/future event versions
@@ -77,10 +72,7 @@ pub enum EventDecodeStatus {
 }
 
 /// Verify if an event version is compatible with this decoder
-pub fn check_event_version(
-    event_type: &str,
-    version: u32,
-) -> EventDecodeStatus {
+pub fn check_event_version(event_type: &str, version: u32) -> EventDecodeStatus {
     match (event_type, version) {
         ("deposit", 1) => EventDecodeStatus::Recognized,
         ("withdrawal", 1) => EventDecodeStatus::Recognized,

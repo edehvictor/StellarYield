@@ -62,6 +62,32 @@ describe('Analytics Routes Contract Tests', () => {
     jest.clearAllMocks();
   });
 
+  // ── Envelope shape helper ──────────────────────────────────────────────
+
+  function expectSuccessEnvelope(body: Record<string, unknown>, route: string) {
+    expect(body.ok).toBe(true);
+    expect(body).toHaveProperty('data');
+    expect(body.meta).toMatchObject({
+      generatedAt: expect.any(String),
+      route,
+    });
+    // generatedAt must be a valid ISO timestamp
+    const meta = body.meta as Record<string, unknown>;
+    expect(new Date(meta.generatedAt as string).toString()).not.toBe('Invalid Date');
+  }
+
+  function expectErrorEnvelope(body: Record<string, unknown>, expectedCode: string) {
+    expect(body.ok).toBe(false);
+    expect(body.error).toMatchObject({
+      code: expectedCode,
+      message: expect.any(String),
+    });
+    expect(body.meta).toMatchObject({
+      generatedAt: expect.any(String),
+      route: expect.any(String),
+    });
+  }
+
   describe('Portfolio Attribution Routes', () => {
     describe('GET /api/analytics/attribution/:walletAddress', () => {
       const mockAttributionReport = AnalyticsMockDataGenerator.createAttributionReport('GTEST123');
@@ -70,16 +96,13 @@ describe('Analytics Routes Contract Tests', () => {
         (portfolioAttributionEngine.generateAttributionReport as jest.Mock).mockResolvedValue(mockAttributionReport);
       });
 
-      it('should return 400 for missing query parameters', async () => {
+      it('should return 400 with VALIDATION_ERROR envelope for missing query parameters', async () => {
         const response = await request(server)
           .get('/api/analytics/attribution/GTEST123')
           .expect(400);
 
-        expect(response.body).toMatchObject({
-          success: false,
-          error: 'Missing required parameters: startTime and endTime',
-          example: expect.stringContaining('/api/analytics/attribution/:walletAddress?startTime='),
-        });
+        expectErrorEnvelope(response.body, 'VALIDATION_ERROR');
+        expect(response.body.error.message).toContain('Missing required parameters');
       });
 
       it('should return valid attribution report structure', async () => {
@@ -91,31 +114,29 @@ describe('Analytics Routes Contract Tests', () => {
           })
           .expect(200);
 
-        expect(response.body).toMatchObject({
-          success: true,
-          data: {
-            walletAddress: expect.any(String),
-            totalReturn: expect.any(Number),
-            totalDeposited: expect.any(Number),
-            attributionBreakdown: expect.arrayContaining([
-              expect.objectContaining({
-                decisionType: expect.any(String),
-                contribution: expect.any(Number),
-                percentage: expect.any(Number),
-                apyImpact: expect.any(Number),
-                decisions: expect.any(Array),
-                confidence: expect.any(Number),
-              }),
-            ]),
-            timeWindow: expect.objectContaining({
-              start: expect.any(String),
-              end: expect.any(String),
+        expectSuccessEnvelope(response.body, 'analytics/attribution');
+        expect(response.body.data).toMatchObject({
+          walletAddress: expect.any(String),
+          totalReturn: expect.any(Number),
+          totalDeposited: expect.any(Number),
+          attributionBreakdown: expect.arrayContaining([
+            expect.objectContaining({
+              decisionType: expect.any(String),
+              contribution: expect.any(Number),
+              percentage: expect.any(Number),
+              apyImpact: expect.any(Number),
+              decisions: expect.any(Array),
+              confidence: expect.any(Number),
             }),
-            generatedAt: expect.any(String),
-            dataCompleteness: expect.any(Number),
-            formattedDate: expect.any(String),
-            totalAttribution: expect.any(Number),
-          },
+          ]),
+          timeWindow: expect.objectContaining({
+            start: expect.any(String),
+            end: expect.any(String),
+          }),
+          generatedAt: expect.any(String),
+          dataCompleteness: expect.any(Number),
+          formattedDate: expect.any(String),
+          totalAttribution: expect.any(Number),
         });
       });
 
@@ -129,14 +150,14 @@ describe('Analytics Routes Contract Tests', () => {
           .expect(200);
 
         const { data } = response.body;
-        
+
         // Validate core fields
         expect(FIELD_VALIDATORS.nonEmptyString(data.walletAddress)).toBe(true);
         expect(FIELD_VALIDATORS.positiveNumber(data.totalReturn)).toBe(true);
         expect(FIELD_VALIDATORS.positiveNumber(data.totalDeposited)).toBe(true);
         expect(FIELD_VALIDATORS.percentage(data.dataCompleteness * 100)).toBe(true);
         expect(FIELD_VALIDATORS.timestamp(data.generatedAt)).toBe(true);
-        
+
         // Validate attribution breakdown structure
         expect(Array.isArray(data.attributionBreakdown)).toBe(true);
         if (data.attributionBreakdown.length > 0) {
@@ -148,7 +169,7 @@ describe('Analytics Routes Contract Tests', () => {
         }
       });
 
-      it('should handle service unavailable errors', async () => {
+      it('should return INTERNAL_ERROR envelope for service failures', async () => {
         (portfolioAttributionEngine.generateAttributionReport as jest.Mock).mockRejectedValue(
           new Error('Service unavailable')
         );
@@ -161,10 +182,8 @@ describe('Analytics Routes Contract Tests', () => {
           })
           .expect(500);
 
-        expect(response.body).toMatchObject({
-          error: 'Failed to generate attribution report',
-          message: 'Service unavailable',
-        });
+        expectErrorEnvelope(response.body, 'INTERNAL_ERROR');
+        expect(response.body.error.details).toMatchObject({ message: 'Service unavailable' });
       });
     });
 
@@ -179,8 +198,8 @@ describe('Analytics Routes Contract Tests', () => {
           .send(mockConfig)
           .expect(200);
 
-        expect(response.body).toMatchObject({
-          success: true,
+        expectSuccessEnvelope(response.body, 'analytics/attribution/config');
+        expect(response.body.data).toMatchObject({
           message: 'Attribution configuration updated',
           config: mockConfig,
         });
@@ -195,8 +214,8 @@ describe('Analytics Routes Contract Tests', () => {
           .delete('/api/analytics/attribution/cache/GTEST123')
           .expect(200);
 
-        expect(response.body).toMatchObject({
-          success: true,
+        expectSuccessEnvelope(response.body, 'analytics/attribution/cache');
+        expect(response.body.data).toMatchObject({
           message: 'Attribution cache cleared for GTEST123',
         });
       });
@@ -216,20 +235,18 @@ describe('Analytics Routes Contract Tests', () => {
           .get('/api/analytics/compatibility')
           .expect(200);
 
-        expect(response.body).toMatchObject({
-          success: true,
-          data: {
-            protocols: expect.arrayContaining([
-              expect.objectContaining({
-                protocolName: expect.any(String),
-                status: expect.any(String),
-                criticalIssues: expect.any(Number),
-              }),
-            ]),
-            issues: expect.any(Array),
-            formattedDate: expect.any(String),
-            criticalIssues: expect.any(Array),
-          },
+        expectSuccessEnvelope(response.body, 'analytics/compatibility');
+        expect(response.body.data).toMatchObject({
+          protocols: expect.arrayContaining([
+            expect.objectContaining({
+              protocolName: expect.any(String),
+              status: expect.any(String),
+              criticalIssues: expect.any(Number),
+            }),
+          ]),
+          issues: expect.any(Array),
+          formattedDate: expect.any(String),
+          criticalIssues: expect.any(Array),
         });
       });
     });
@@ -248,12 +265,10 @@ describe('Analytics Routes Contract Tests', () => {
           .get('/api/analytics/compatibility/Blend')
           .expect(200);
 
-        expect(response.body).toMatchObject({
-          success: true,
-          data: expect.objectContaining({
-            protocolName: expect.any(String),
-            status: expect.any(String),
-          }),
+        expectSuccessEnvelope(response.body, 'analytics/compatibility/protocol');
+        expect(response.body.data).toMatchObject({
+          protocolName: expect.any(String),
+          status: expect.any(String),
         });
       });
     });
@@ -268,13 +283,11 @@ describe('Analytics Routes Contract Tests', () => {
           .get('/api/analytics/compatibility/safe/Blend')
           .expect(200);
 
-        expect(response.body).toMatchObject({
-          success: true,
-          data: {
-            protocolName: 'Blend',
-            isSafe: expect.any(Boolean),
-            status: expect.any(String),
-          },
+        expectSuccessEnvelope(response.body, 'analytics/compatibility/safe');
+        expect(response.body.data).toMatchObject({
+          protocolName: 'Blend',
+          isSafe: expect.any(Boolean),
+          status: expect.any(String),
         });
       });
     });
@@ -293,29 +306,27 @@ describe('Analytics Routes Contract Tests', () => {
           .get('/api/analytics/health/strategy_1')
           .expect(200);
 
-        expect(response.body).toMatchObject({
-          success: true,
-          data: {
-            strategyId: expect.any(String),
-            strategyName: expect.any(String),
-            overallScore: expect.any(Number),
-            metrics: expect.objectContaining({
-              contractSafety: expect.any(Number),
-              dataFreshness: expect.any(Number),
-              providerUptime: expect.any(Number),
-              liquidityConditions: expect.any(Number),
-              executionOutcomes: expect.any(Number),
-              volatilityIndex: expect.any(Number),
-              errorRate: expect.any(Number),
-              latency: expect.any(Number),
-            }),
-            status: expect.stringMatching(/^(healthy|degraded|critical|disabled)$/),
-            signals: expect.any(Array),
-            lastUpdated: expect.any(String),
-            trend: expect.stringMatching(/^(improving|stable|declining)$/),
-            recommendations: expect.any(Array),
-            formattedDate: expect.any(String),
-          },
+        expectSuccessEnvelope(response.body, 'analytics/health');
+        expect(response.body.data).toMatchObject({
+          strategyId: expect.any(String),
+          strategyName: expect.any(String),
+          overallScore: expect.any(Number),
+          metrics: expect.objectContaining({
+            contractSafety: expect.any(Number),
+            dataFreshness: expect.any(Number),
+            providerUptime: expect.any(Number),
+            liquidityConditions: expect.any(Number),
+            executionOutcomes: expect.any(Number),
+            volatilityIndex: expect.any(Number),
+            errorRate: expect.any(Number),
+            latency: expect.any(Number),
+          }),
+          status: expect.stringMatching(/^(healthy|degraded|critical|disabled)$/),
+          signals: expect.any(Array),
+          lastUpdated: expect.any(String),
+          trend: expect.stringMatching(/^(improving|stable|declining)$/),
+          recommendations: expect.any(Array),
+          formattedDate: expect.any(String),
         });
       });
     });
@@ -331,27 +342,26 @@ describe('Analytics Routes Contract Tests', () => {
           .send({ strategyIds: ['strategy_1', 'strategy_2'] })
           .expect(200);
 
-        expect(response.body).toMatchObject({
-          success: true,
-          data: expect.arrayContaining([
+        expectSuccessEnvelope(response.body, 'analytics/health/batch');
+        expect(response.body.data).toEqual(
+          expect.arrayContaining([
             expect.objectContaining({
               strategyId: expect.any(String),
               overallScore: expect.any(Number),
               status: expect.any(String),
             }),
           ]),
-        });
+        );
       });
 
-      it('should return 400 for invalid request body', async () => {
+      it('should return VALIDATION_ERROR envelope for invalid request body', async () => {
         const response = await request(server)
           .post('/api/analytics/health/batch')
           .send({ strategyIds: 'invalid' })
           .expect(400);
 
-        expect(response.body).toMatchObject({
-          error: 'strategyIds must be a non-empty array',
-        });
+        expectErrorEnvelope(response.body, 'VALIDATION_ERROR');
+        expect(response.body.error.message).toContain('strategyIds must be a non-empty array');
       });
     });
 
@@ -368,13 +378,11 @@ describe('Analytics Routes Contract Tests', () => {
           .get('/api/analytics/health/alerts')
           .expect(200);
 
-        expect(response.body).toMatchObject({
-          success: true,
-          data: {
-            alerts: expect.any(Array),
-            criticalCount: expect.any(Number),
-            totalStrategies: expect.any(Number),
-          },
+        expectSuccessEnvelope(response.body, 'analytics/health/alerts');
+        expect(response.body.data).toMatchObject({
+          alerts: expect.any(Array),
+          criticalCount: expect.any(Number),
+          totalStrategies: expect.any(Number),
         });
       });
     });
@@ -393,15 +401,13 @@ describe('Analytics Routes Contract Tests', () => {
           .get('/api/analytics/reliability/provider_1')
           .expect(200);
 
-        expect(response.body).toMatchObject({
-          success: true,
-          data: {
-            providerId: expect.any(String),
-            providerName: expect.any(String),
-            overallScore: expect.any(Number),
-            status: expect.stringMatching(/^(reliable|moderate|unreliable)$/),
-            formattedDate: expect.any(String),
-          },
+        expectSuccessEnvelope(response.body, 'analytics/reliability');
+        expect(response.body.data).toMatchObject({
+          providerId: expect.any(String),
+          providerName: expect.any(String),
+          overallScore: expect.any(Number),
+          status: expect.stringMatching(/^(reliable|moderate|unreliable)$/),
+          formattedDate: expect.any(String),
         });
       });
     });
@@ -422,27 +428,26 @@ describe('Analytics Routes Contract Tests', () => {
           .send({ providers })
           .expect(200);
 
-        expect(response.body).toMatchObject({
-          success: true,
-          data: expect.arrayContaining([
+        expectSuccessEnvelope(response.body, 'analytics/reliability/batch');
+        expect(response.body.data).toEqual(
+          expect.arrayContaining([
             expect.objectContaining({
               providerId: expect.any(String),
               overallScore: expect.any(Number),
               status: expect.any(String),
             }),
           ]),
-        });
+        );
       });
 
-      it('should return 400 for invalid request body', async () => {
+      it('should return VALIDATION_ERROR envelope for invalid request body', async () => {
         const response = await request(server)
           .post('/api/analytics/reliability/batch')
           .send({ providers: 'invalid' })
           .expect(400);
 
-        expect(response.body).toMatchObject({
-          error: 'providers must be a non-empty array',
-        });
+        expectErrorEnvelope(response.body, 'VALIDATION_ERROR');
+        expect(response.body.error.message).toContain('providers must be a non-empty array');
       });
     });
 
@@ -460,12 +465,10 @@ describe('Analytics Routes Contract Tests', () => {
           .get('/api/analytics/reliability/compare')
           .expect(200);
 
-        expect(response.body).toMatchObject({
-          success: true,
-          data: expect.objectContaining({
-            providers: expect.any(Array),
-            ranking: expect.any(Array),
-          }),
+        expectSuccessEnvelope(response.body, 'analytics/reliability/compare');
+        expect(response.body.data).toMatchObject({
+          providers: expect.any(Array),
+          ranking: expect.any(Array),
         });
       });
     });
@@ -483,14 +486,12 @@ describe('Analytics Routes Contract Tests', () => {
           .query({ minReliability: 80 })
           .expect(200);
 
-        expect(response.body).toMatchObject({
-          success: true,
-          data: {
-            providers: expect.any(Array),
-            minReliability: 80,
-            totalProviders: expect.any(Number),
-            selectedProviders: expect.any(Number),
-          },
+        expectSuccessEnvelope(response.body, 'analytics/reliability/recommendations');
+        expect(response.body.data).toMatchObject({
+          providers: expect.any(Array),
+          minReliability: 80,
+          totalProviders: expect.any(Number),
+          selectedProviders: expect.any(Number),
         });
       });
     });
@@ -522,21 +523,19 @@ describe('Analytics Routes Contract Tests', () => {
           })
           .expect(200);
 
-        expect(response.body).toMatchObject({
-          success: true,
-          data: {
-            attribution: expect.any(Object),
-            compatibility: expect.any(Object),
-            healthScores: expect.any(Array),
-            reliabilityScores: expect.any(Array),
-            alerts: expect.any(Array),
-            summary: expect.objectContaining({
-              overallHealth: expect.any(String),
-              criticalIssues: expect.any(Number),
-              recommendations: expect.any(Array),
-              lastUpdated: expect.any(String),
-            }),
-          },
+        expectSuccessEnvelope(response.body, 'analytics/dashboard');
+        expect(response.body.data).toMatchObject({
+          attribution: expect.any(Object),
+          compatibility: expect.any(Object),
+          healthScores: expect.any(Array),
+          reliabilityScores: expect.any(Array),
+          alerts: expect.any(Array),
+          summary: expect.objectContaining({
+            overallHealth: expect.any(String),
+            criticalIssues: expect.any(Number),
+            recommendations: expect.any(Array),
+            lastUpdated: expect.any(String),
+          }),
         });
       });
 
@@ -545,19 +544,17 @@ describe('Analytics Routes Contract Tests', () => {
           .get('/api/analytics/dashboard')
           .expect(200);
 
-        expect(response.body).toMatchObject({
-          success: true,
-          data: {
-            attribution: null,
-            compatibility: expect.any(Object),
-            healthScores: expect.any(Array),
-            reliabilityScores: expect.any(Array),
-            alerts: expect.any(Array),
-            summary: expect.objectContaining({
-              overallHealth: 'unknown',
-              criticalIssues: expect.any(Number),
-            }),
-          },
+        expectSuccessEnvelope(response.body, 'analytics/dashboard');
+        expect(response.body.data).toMatchObject({
+          attribution: null,
+          compatibility: expect.any(Object),
+          healthScores: expect.any(Array),
+          reliabilityScores: expect.any(Array),
+          alerts: expect.any(Array),
+          summary: expect.objectContaining({
+            overallHealth: 'unknown',
+            criticalIssues: expect.any(Number),
+          }),
         });
       });
     });
@@ -576,14 +573,12 @@ describe('Analytics Routes Contract Tests', () => {
           .get('/api/analytics/strategy-state-transitions/strategy_1')
           .expect(200);
 
-        expect(response.body).toMatchObject({
-          success: true,
-          data: {
-            strategyId: expect.any(String),
-            transitions: expect.any(Array),
-            totalTransitions: expect.any(Number),
-            generatedAt: expect.any(String),
-          },
+        expectSuccessEnvelope(response.body, 'analytics/strategy-state-transitions');
+        expect(response.body.data).toMatchObject({
+          strategyId: expect.any(String),
+          transitions: expect.any(Array),
+          totalTransitions: expect.any(Number),
+          generatedAt: expect.any(String),
         });
       });
 
@@ -617,39 +612,35 @@ describe('Analytics Routes Contract Tests', () => {
           .send(requestBody)
           .expect(200);
 
-        expect(response.body).toMatchObject({
-          success: true,
-          data: {
-            stability: expect.objectContaining({
-              overallScore: expect.any(Number),
-              changedRecommendations: expect.any(Number),
-              totalRecommendations: expect.any(Number),
-            }),
-            differences: expect.any(Array),
-            summary: expect.objectContaining({
-              stable: expect.any(Boolean),
-              riskLevel: expect.any(String),
-            }),
-          },
+        expectSuccessEnvelope(response.body, 'analytics/recommendation-stability/compare');
+        expect(response.body.data).toMatchObject({
+          stability: expect.objectContaining({
+            overallScore: expect.any(Number),
+            changedRecommendations: expect.any(Number),
+            totalRecommendations: expect.any(Number),
+          }),
+          differences: expect.any(Array),
+          summary: expect.objectContaining({
+            stable: expect.any(Boolean),
+            riskLevel: expect.any(String),
+          }),
         });
       });
 
-      it('should return 400 for invalid request body', async () => {
+      it('should return VALIDATION_ERROR envelope for invalid request body', async () => {
         const response = await request(server)
           .post('/api/analytics/recommendation-stability/compare')
           .send({ before: 'invalid' })
           .expect(400);
 
-        expect(response.body).toMatchObject({
-          success: false,
-          error: expect.stringContaining('Missing or invalid request body'),
-        });
+        expectErrorEnvelope(response.body, 'VALIDATION_ERROR');
+        expect(response.body.error.message).toContain('Missing or invalid request body');
       });
     });
   });
 
   describe('Error Handling', () => {
-    it('should handle service unavailable errors consistently', async () => {
+    it('should return INTERNAL_ERROR envelope for service unavailable errors', async () => {
       (portfolioAttributionEngine.generateAttributionReport as jest.Mock).mockRejectedValue(
         new Error('Service temporarily unavailable')
       );
@@ -662,10 +653,7 @@ describe('Analytics Routes Contract Tests', () => {
         })
         .expect(500);
 
-      expect(response.body).toMatchObject({
-        error: expect.any(String),
-        message: expect.any(String),
-      });
+      expectErrorEnvelope(response.body, 'INTERNAL_ERROR');
     });
 
     it('should handle unknown errors gracefully', async () => {
@@ -677,10 +665,42 @@ describe('Analytics Routes Contract Tests', () => {
         .get('/api/analytics/compatibility')
         .expect(500);
 
-      expect(response.body).toMatchObject({
-        error: expect.any(String),
-        message: 'Unknown error',
-      });
+      expectErrorEnvelope(response.body, 'INTERNAL_ERROR');
     });
   });
-});
+
+  describe('Response Envelope Shape', () => {
+    it('success response always has ok=true, data, and meta with generatedAt and route', async () => {
+      (protocolCompatibilityEngine.runCompatibilityCheck as jest.Mock).mockResolvedValue(
+        AnalyticsMockDataGenerator.createCompatibilityReport(),
+      );
+      const response = await request(server)
+        .get('/api/analytics/compatibility')
+        .expect(200);
+
+      const { ok, data, meta } = response.body;
+      expect(ok).toBe(true);
+      expect(data).toBeDefined();
+      expect(meta).toBeDefined();
+      expect(typeof meta.generatedAt).toBe('string');
+      expect(typeof meta.route).toBe('string');
+      // Must not have old-style success/error keys at top level
+      expect(response.body).not.toHaveProperty('success');
+      expect(response.body).not.toHaveProperty('message');
+    });
+
+    it('error response always has ok=false, error.code, error.message, and meta', async () => {
+      const response = await request(server)
+        .get('/api/analytics/attribution/GTEST123')
+        .expect(400);
+
+      const { ok, error, meta } = response.body;
+      expect(ok).toBe(false);
+      expect(typeof error.code).toBe('string');
+      expect(typeof error.message).toBe('string');
+      expect(typeof meta.generatedAt).toBe('string');
+      // Must not have old-style success key
+      expect(response.body).not.toHaveProperty('success');
+    });
+  });
+});

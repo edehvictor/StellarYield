@@ -103,7 +103,7 @@ export class AdaptiveCooldownOptimizer {
   private computeExpansionFactors(
     metrics: StrategyMetrics,
     isUnderMarketStress: boolean,
-  ): CooldownExpansionFactors {
+  ): CooldownExpansionFactors & { contractionFactor: number } {
     // Volatility factor: higher volatility = longer cooldown
     const volatilityFactor = Math.max(
       1.0,
@@ -134,25 +134,41 @@ export class AdaptiveCooldownOptimizer {
           0.75, // Up to 75% expansion
     );
 
-    // Execution success rate: lower success = expansion
+    // Execution success rate: lower success (< 95%) = expansion
     const successFactor = Math.max(
       1.0,
-      1 + (1 - metrics.executionSuccessRate) * 0.4, // Up to 40% expansion
+      1 + Math.max(0, 0.95 - metrics.executionSuccessRate) * 0.4,
     );
 
-    // Slippage factor: higher slippage = expansion
-    const slippageFactor = Math.max(1.0, 1 + metrics.averageSlippage / 100 * 0.3); // Up to 30% expansion
+    // Slippage factor: higher slippage (> 2%) = expansion
+    const slippageFactor = Math.max(
+      1.0,
+      1 + (Math.max(0, metrics.averageSlippage - 2.0) / 100) * 0.3,
+    );
 
     // Market stress: global override for stress conditions
     const marketStressFactor = isUnderMarketStress
       ? this.config.marketStressMultiplier
       : 1.0;
 
+    // Contraction factor: when all conditions are excellent, cooldown can shrink.
+    // Applies only when no expansion factors are triggered.
+    const allFavorable =
+      !isUnderMarketStress &&
+      volatilityFactor === 1.0 &&
+      liquidityFactor === 1.0 &&
+      failuresFactor === 1.0 &&
+      successFactor === 1.0 &&
+      slippageFactor === 1.0;
+    // Contract up to 20% below baseline when conditions are excellent
+    const contractionFactor = allFavorable ? 0.8 : 1.0;
+
     return {
       volatilityFactor,
       liquidityFactor,
       failuresFactor,
       marketStressFactor,
+      contractionFactor,
     };
   }
 
@@ -169,12 +185,13 @@ export class AdaptiveCooldownOptimizer {
   ): CooldownRecommendation {
     const factors = this.computeExpansionFactors(metrics, isUnderMarketStress);
 
-    // Aggregate all multipliers
+    // Aggregate all multipliers (contraction applies when conditions are excellent)
     const totalMultiplier =
       factors.volatilityFactor *
       factors.liquidityFactor *
       factors.failuresFactor *
-      factors.marketStressFactor;
+      factors.marketStressFactor *
+      factors.contractionFactor;
 
     // Apply multiplier to baseline
     let recommendedMs = this.config.baselineCooldownMs * totalMultiplier;

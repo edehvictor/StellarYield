@@ -88,10 +88,10 @@ function logAudit(metadata: {
       clean = clean.split(apiKey).join("[REDACTED]");
     }
     // Also scan for common credentials pattern
-    clean = clean.replace(/Bearer\s+[a-zA-Z0-9_\-\.]+/gi, "Bearer [REDACTED]");
-    clean = clean.replace(/key=[a-zA-Z0-9_\-\.]+/gi, "key=[REDACTED]");
-    clean = clean.replace(/api_key=[a-zA-Z0-9_\-\.]+/gi, "api_key=[REDACTED]");
-    clean = clean.replace(/apikey=[a-zA-Z0-9_\-\.]+/gi, "apikey=[REDACTED]");
+    clean = clean.replace(/Bearer\s+[a-zA-Z0-9_.-]+/gi, "Bearer [REDACTED]");
+    clean = clean.replace(/key=[a-zA-Z0-9_.-]+/gi, "key=[REDACTED]");
+    clean = clean.replace(/api_key=[a-zA-Z0-9_.-]+/gi, "api_key=[REDACTED]");
+    clean = clean.replace(/apikey=[a-zA-Z0-9_.-]+/gi, "apikey=[REDACTED]");
 
     // Truncate overly large raw payloads
     if (clean.length > 4000) {
@@ -118,12 +118,6 @@ function logAudit(metadata: {
     console.error(line);
   } else {
     console.log(line);
-const LLM_TIMEOUT_MS = 15_000;
-const LLM_MAX_RETRIES = 2;
-
-async function callLLM(systemPrompt: string, userPrompt: string): Promise<string> {
-  if (!LLM_API_KEY) {
-    throw new Error("No LLM API key configured (set GEMINI_API_KEY or OPENAI_API_KEY)");
   }
 }
 
@@ -148,17 +142,6 @@ async function callLLM(systemPrompt: string, userPrompt: string): Promise<string
           Authorization: `Bearer ${apiKey}`,
         },
         body: JSON.stringify({
-          model,
-  if (LLM_PROVIDER === "openai") {
-    const res = await resilientFetch(
-      "https://api.openai.com/v1/chat/completions",
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${LLM_API_KEY}`,
-        },
-        body: JSON.stringify({
           model: "gpt-4o-mini",
           messages: [
             { role: "system", content: systemPrompt },
@@ -175,7 +158,7 @@ async function callLLM(systemPrompt: string, userPrompt: string): Promise<string
       result = data.choices[0].message.content;
     } else {
       // Default: Google Gemini
-      const res = await fetch(
+      const res = await resilientFetch(
         `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`,
         {
           method: "POST",
@@ -185,6 +168,8 @@ async function callLLM(systemPrompt: string, userPrompt: string): Promise<string
             generationConfig: { temperature: 0.3, maxOutputTokens: 500 },
           }),
         },
+        "gemini-risk-agent",
+        { timeoutMs: 10_000, maxRetries: 1 },
       );
       if (!res.ok) {
         throw new Error("Gemini API failed with status " + res.status);
@@ -216,32 +201,6 @@ async function callLLM(systemPrompt: string, userPrompt: string): Promise<string
     });
     throw err;
   }
-      },
-      "openai-risk-agent",
-      { timeoutMs: LLM_TIMEOUT_MS, maxRetries: LLM_MAX_RETRIES },
-    );
-    const data = (await res.json()) as { choices: { message: { content: string } }[] };
-    return data.choices[0].message.content;
-  }
-
-  // Default: Google Gemini
-  const res = await resilientFetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${LLM_API_KEY}`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        contents: [{ parts: [{ text: `${systemPrompt}\n\n${userPrompt}` }] }],
-        generationConfig: { temperature: 0.3, maxOutputTokens: 500 },
-      }),
-    },
-    "gemini-risk-agent",
-    { timeoutMs: LLM_TIMEOUT_MS, maxRetries: LLM_MAX_RETRIES },
-  );
-  const data = (await res.json()) as {
-    candidates: { content: { parts: { text: string }[] } }[];
-  };
-  return data.candidates[0].content.parts[0].text;
 }
 
 

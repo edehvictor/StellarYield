@@ -32,7 +32,7 @@ describe('RiskPreferenceDriftService', () => {
   });
 
   describe('conservative drift cases', () => {
-    it('should not detect drift when conservative portfolio is within bounds', () => {
+    it('should not detect drift when conservative portfolio is within bounds', async () => {
       const behavior: PortfolioBehavior = {
         currentConcentrationPct: 20,
         currentVolatilityPct: 5,
@@ -46,14 +46,14 @@ describe('RiskPreferenceDriftService', () => {
         ],
       };
 
-      const result = service.detectDrift(conservativeProfile, behavior);
+      const result = await service.detectDrift(conservativeProfile, behavior);
 
       expect(result.isDrifting).toBe(false);
       expect(result.overallDriftPct).toBe(0);
       expect(result.message).toContain('aligns');
     });
 
-    it('should detect concentration drift for conservative', () => {
+    it('should detect concentration drift for conservative', async () => {
       const behavior: PortfolioBehavior = {
         currentConcentrationPct: 50,
         currentVolatilityPct: 5,
@@ -64,13 +64,13 @@ describe('RiskPreferenceDriftService', () => {
         ],
       };
 
-      const result = service.detectDrift(conservativeProfile, behavior);
+      const result = await service.detectDrift(conservativeProfile, behavior);
 
       expect(result.isDrifting).toBe(true);
       expect(result.dimensions.some(d => d.dimension === 'concentration' && d.isDrifting)).toBe(true);
     });
 
-    it('should detect volatility drift for conservative', () => {
+    it('should detect volatility drift for conservative', async () => {
       const behavior: PortfolioBehavior = {
         currentConcentrationPct: 20,
         currentVolatilityPct: 15,
@@ -81,13 +81,13 @@ describe('RiskPreferenceDriftService', () => {
         ],
       };
 
-      const result = service.detectDrift(conservativeProfile, behavior);
+      const result = await service.detectDrift(conservativeProfile, behavior);
 
       expect(result.isDrifting).toBe(true);
       expect(result.dimensions.some(d => d.dimension === 'volatility' && d.isDrifting)).toBe(true);
     });
 
-    it('should detect liquidity drift for conservative', () => {
+    it('should detect liquidity drift for conservative', async () => {
       const behavior: PortfolioBehavior = {
         currentConcentrationPct: 20,
         currentVolatilityPct: 5,
@@ -97,7 +97,7 @@ describe('RiskPreferenceDriftService', () => {
         ],
       };
 
-      const result = service.detectDrift(conservativeProfile, behavior);
+      const result = await service.detectDrift(conservativeProfile, behavior);
 
       expect(result.isDrifting).toBe(true);
       expect(result.dimensions.some(d => d.dimension === 'liquidity' && d.isDrifting)).toBe(true);
@@ -105,7 +105,7 @@ describe('RiskPreferenceDriftService', () => {
   });
 
   describe('balanced drift cases', () => {
-    it('should not detect drift when balanced portfolio is within bounds', () => {
+    it('should not detect drift when balanced portfolio is within bounds', async () => {
       const behavior: PortfolioBehavior = {
         currentConcentrationPct: 35,
         currentVolatilityPct: 12,
@@ -117,13 +117,13 @@ describe('RiskPreferenceDriftService', () => {
         ],
       };
 
-      const result = service.detectDrift(balancedProfile, behavior);
+      const result = await service.detectDrift(balancedProfile, behavior);
 
       expect(result.isDrifting).toBe(false);
       expect(result.overallDriftPct).toBe(0);
     });
 
-    it('should detect concentration drift for balanced', () => {
+    it('should detect concentration drift for balanced', async () => {
       const behavior: PortfolioBehavior = {
         currentConcentrationPct: 70,
         currentVolatilityPct: 12,
@@ -134,7 +134,7 @@ describe('RiskPreferenceDriftService', () => {
         ],
       };
 
-      const result = service.detectDrift(balancedProfile, behavior);
+      const result = await service.detectDrift(balancedProfile, behavior);
 
       expect(result.isDrifting).toBe(true);
       expect(result.dimensions.some(d => d.dimension === 'concentration' && d.isDrifting)).toBe(true);
@@ -142,7 +142,7 @@ describe('RiskPreferenceDriftService', () => {
   });
 
   describe('aggressive drift cases', () => {
-    it('should not detect drift when aggressive portfolio is within bounds', () => {
+    it('should not detect drift when aggressive portfolio is within bounds', async () => {
       const behavior: PortfolioBehavior = {
         currentConcentrationPct: 55,
         currentVolatilityPct: 30,
@@ -153,13 +153,13 @@ describe('RiskPreferenceDriftService', () => {
         ],
       };
 
-      const result = service.detectDrift(aggressiveProfile, behavior);
+      const result = await service.detectDrift(aggressiveProfile, behavior);
 
       expect(result.isDrifting).toBe(false);
       expect(result.overallDriftPct).toBe(0);
     });
 
-    it('should detect volatility drift for aggressive', () => {
+    it('should detect volatility drift for aggressive', async () => {
       const behavior: PortfolioBehavior = {
         currentConcentrationPct: 50,
         currentVolatilityPct: 45,
@@ -170,13 +170,13 @@ describe('RiskPreferenceDriftService', () => {
         ],
       };
 
-      const result = service.detectDrift(aggressiveProfile, behavior);
+      const result = await service.detectDrift(aggressiveProfile, behavior);
 
       expect(result.isDrifting).toBe(true);
       expect(result.dimensions.some(d => d.dimension === 'volatility' && d.isDrifting)).toBe(true);
     });
 
-    it('should provide correct message for drifting portfolios', () => {
+    it('should provide correct message for drifting portfolios', async () => {
       const behavior: PortfolioBehavior = {
         currentConcentrationPct: 80,
         currentVolatilityPct: 40,
@@ -186,7 +186,7 @@ describe('RiskPreferenceDriftService', () => {
         ],
       };
 
-      const result = service.detectDrift(aggressiveProfile, behavior);
+      const result = await service.detectDrift(aggressiveProfile, behavior);
 
       expect(result.isDrifting).toBe(true);
       expect(result.message).toContain('Detected drift');
@@ -196,7 +196,7 @@ describe('RiskPreferenceDriftService', () => {
   });
 
   describe('edge cases', () => {
-    it('should handle empty positions', () => {
+    it('should handle empty positions', async () => {
       const behavior: PortfolioBehavior = {
         currentConcentrationPct: 0,
         currentVolatilityPct: 0,
@@ -204,7 +204,7 @@ describe('RiskPreferenceDriftService', () => {
         positions: [],
       };
 
-      const result = service.detectDrift(conservativeProfile, behavior);
+      const result = await service.detectDrift(conservativeProfile, behavior);
 
       expect(result.isDrifting).toBe(false);
       expect(result.overallDriftPct).toBe(0);
@@ -223,7 +223,7 @@ describe('RiskPreferenceDriftService', () => {
       expect(aggressiveThresholds.maxConcentrationPct).toBe(60);
     });
 
-    it('should compute overallDriftPct correctly', () => {
+    it('should compute overallDriftPct correctly', async () => {
       const behavior: PortfolioBehavior = {
         currentConcentrationPct: 50,
         currentVolatilityPct: 25,
@@ -234,7 +234,7 @@ describe('RiskPreferenceDriftService', () => {
         ],
       };
 
-      const result = service.detectDrift(conservativeProfile, behavior);
+      const result = await service.detectDrift(conservativeProfile, behavior);
 
       expect(result.overallDriftPct).toBeGreaterThan(0);
       expect(result.overallDriftPct).toBeLessThanOrEqual(100);

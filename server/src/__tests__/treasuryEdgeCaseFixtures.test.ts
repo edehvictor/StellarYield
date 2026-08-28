@@ -74,8 +74,10 @@ export const FIXTURES: TreasuryFixture[] = [
       ],
       createdAt: new Date().toISOString(),
     },
-    expectedYieldUsd: 122_000,
-    expectedRotationCostUsd: 3_400,
+    // Allocation A: 60% × $2M × 5% APY = $60,000 + Allocation B: 40% × $2M × 5% APY = $40,000 = $100,000
+    expectedYieldUsd: 100_000,
+    // Rotation cost: $1.2M × 0.05% + $0.8M × 0.4% = $600 + $3,200 = $3,800
+    expectedRotationCostUsd: 3_800,
     expectedWarnings: [],
     expectZeroYield: false,
   },

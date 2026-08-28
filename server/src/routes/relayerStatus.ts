@@ -9,7 +9,7 @@ const relayerStatusRouter = Router();
  * Read-only endpoint exposing bridge relayer health metrics.
  * Shows queue depth, replay protection state, relay failures, and recent activity.
  */
-relayerStatusRouter.get("/", (_req, res) => {
+const handleStatus = (_req: any, res: any) => {
   try {
     const status = getRelayerStatus();
     res.json(status);
@@ -22,6 +22,9 @@ relayerStatusRouter.get("/", (_req, res) => {
       "Unable to fetch relayer status right now.",
     );
   }
-});
+};
+
+relayerStatusRouter.get("/", handleStatus);
+relayerStatusRouter.get("/status", handleStatus);
 
 export default relayerStatusRouter;

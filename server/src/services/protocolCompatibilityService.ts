@@ -21,6 +21,33 @@ export interface CompatibilityRequirement {
   breakingChanges: string[];
 }
 
+export type ActionType = 'deposit' | 'withdraw' | 'rebalance' | 'quote' | 'reporting';
+
+export const ACTION_LABELS: Record<ActionType, string> = {
+  deposit: 'Deposit',
+  withdraw: 'Withdraw',
+  rebalance: 'Rebalance',
+  quote: 'Quote',
+  reporting: 'Reporting',
+};
+
+export interface ActionGroup {
+  action: ActionType;
+  label: string;
+  issues: CompatibilityIssue[];
+  issueCount: number;
+  status: 'clear' | 'warning' | 'degraded' | 'blocked';
+}
+
+const SEVERITY_RANK: Record<string, number> = {
+  critical: 0,
+  high: 1,
+  medium: 2,
+  low: 3,
+};
+
+const ALL_ACTIONS: ActionType[] = ['deposit', 'withdraw', 'rebalance', 'quote', 'reporting'];
+
 export interface CompatibilityIssue {
   severity: 'critical' | 'high' | 'medium' | 'low';
   component: string;
@@ -28,6 +55,9 @@ export interface CompatibilityIssue {
   impact: string;
   recommendation: string;
   affectedStrategies: string[];
+  affectedActions?: ActionType[];
+  lastUpdated?: string;
+  protocolName?: string;
 }
 
 export interface CompatibilityStatus {
@@ -45,6 +75,7 @@ export interface CompatibilityReport {
   overallStatus: 'compatible' | 'degraded' | 'incompatible';
   protocols: CompatibilityStatus[];
   criticalIssues: CompatibilityIssue[];
+  actionGroups: ActionGroup[];
   generatedAt: string;
   nextCheckDue: string;
 }
@@ -72,6 +103,68 @@ const cache = new NodeCache({
   checkperiod: 60,
   useClones: false,
 });
+
+function actionGroupStatus(issues: CompatibilityIssue[]): ActionGroup['status'] {
+  if (issues.length === 0) return 'clear';
+  if (issues.some(i => i.severity === 'critical')) return 'blocked';
+  if (issues.some(i => i.severity === 'high')) return 'degraded';
+  if (issues.some(i => i.severity === 'medium')) return 'degraded';
+  return 'warning';
+}
+
+/**
+ * Group issues by the actions they affect.
+ * Issues with no affectedActions are placed into *every* group so they
+ * remain visible regardless of which action tab the operator selects.
+ */
+export function groupIssuesByAction(issues: CompatibilityIssue[]): ActionGroup[] {
+  const grouped: Record<ActionType, CompatibilityIssue[]> = {
+    deposit: [],
+    withdraw: [],
+    rebalance: [],
+    quote: [],
+    reporting: [],
+  };
+
+  for (const issue of issues) {
+    const actions = (issue.affectedActions?.length ?? 0) > 0
+      ? issue.affectedActions!
+      : ALL_ACTIONS;
+
+    for (const action of actions) {
+      if (!grouped[action]) continue;
+      grouped[action].push(issue);
+    }
+  }
+
+  return ALL_ACTIONS.map(action => {
+    const issues = sortIssues(grouped[action]);
+    return {
+      action,
+      label: (ACTION_LABELS as Record<ActionType, string>)[action],
+      issues,
+      issueCount: issues.length,
+      status: actionGroupStatus(issues),
+    };
+  });
+}
+
+/**
+ * Sort compatibility issues by severity (critical first, then high,
+ * medium, low) and by lastUpdated (most recent first).  Issues
+ * without a lastUpdated date sort last within their severity tier.
+ */
+export function sortIssues(issues: CompatibilityIssue[]): CompatibilityIssue[] {
+  return [...issues].sort((a, b) => {
+    const rankA = SEVERITY_RANK[a.severity] ?? 99;
+    const rankB = SEVERITY_RANK[b.severity] ?? 99;
+    if (rankA !== rankB) return rankA - rankB;
+
+    const dateA = a.lastUpdated ? new Date(a.lastUpdated).getTime() : 0;
+    const dateB = b.lastUpdated ? new Date(b.lastUpdated).getTime() : 0;
+    return dateB - dateA;
+  });
+}
 
 // ── Compatibility Engine ────────────────────────────────────────────────
 
@@ -161,10 +254,13 @@ export class ProtocolCompatibilityEngine {
 
       const overallStatus = this.determineOverallStatus(protocols, criticalIssues);
 
+      const actionGroups = groupIssuesByAction(criticalIssues.length > 0 ? criticalIssues : protocols.flatMap(p => p.issues));
+
       const report: CompatibilityReport = {
         overallStatus,
         protocols,
         criticalIssues,
+        actionGroups,
         generatedAt: new Date().toISOString(),
         nextCheckDue: new Date(Date.now() + this.config.checkIntervalMinutes * 60 * 1000).toISOString(),
       };
@@ -214,9 +310,19 @@ export class ProtocolCompatibilityEngine {
         issues.push(...componentIssues);
       }
 
+      const now = new Date().toISOString();
+
+      // Annotate every issue with affectedActions and lastUpdated
+      const annotated = issues.map(issue => ({
+        ...issue,
+        protocolName,
+        lastUpdated: now,
+        affectedActions: this.mapComponentToActions(issue.component),
+      }));
+
       // Determine status
-      const status = this.determineProtocolStatus(issues);
-      const recommendations = this.generateRecommendations(issues, status);
+      const status = this.determineProtocolStatus(annotated);
+      const recommendations = this.generateRecommendations(annotated, status);
       const autoUpdateAvailable = await this.checkAutoUpdateAvailable(protocolName, currentVersion, latestVersion);
 
       return {
@@ -224,8 +330,8 @@ export class ProtocolCompatibilityEngine {
         currentVersion: currentVersion.version,
         latestVersion: latestVersion.version,
         status,
-        issues,
-        lastChecked: new Date().toISOString(),
+        issues: annotated,
+        lastChecked: now,
         recommendations,
         autoUpdateAvailable,
       };
@@ -243,6 +349,8 @@ export class ProtocolCompatibilityEngine {
           impact: 'Cannot determine compatibility',
           recommendation: 'Check protocol connectivity',
           affectedStrategies: [],
+          protocolName,
+          lastUpdated: new Date().toISOString(),
         }],
         lastChecked: new Date().toISOString(),
         recommendations: ['Check protocol connectivity'],
@@ -502,6 +610,21 @@ export class ProtocolCompatibilityEngine {
   }
 
   /**
+   * Map a component name to the actions it affects.
+   */
+  private mapComponentToActions(component: string): ActionType[] {
+    const componentLower = component.toLowerCase();
+    const actions: ActionType[] = [];
+    if (/deposit|mint|add_liquidity/i.test(componentLower)) actions.push('deposit');
+    if (/withdraw|redeem|remove_liquidity/i.test(componentLower)) actions.push('withdraw');
+    if (/rebalance|swap|router|pool/i.test(componentLower)) actions.push('rebalance');
+    if (/quote|get_amount_out|swap_exact/i.test(componentLower)) actions.push('quote');
+    if (/api|yield|vault_info|report|index/i.test(componentLower)) actions.push('reporting');
+    if (/core_contract|core/i.test(componentLower)) actions.push('deposit', 'withdraw', 'rebalance');
+    return actions;
+  }
+
+  /**
    * Handle incompatible protocols
    */
   private async handleIncompatibleProtocols(protocols: CompatibilityStatus[]): Promise<void> {
@@ -564,6 +687,13 @@ export function formatCompatibilityReport(report: CompatibilityReport): Compatib
     criticalIssues: report.criticalIssues.map(issue => ({
       ...issue,
       affectedStrategies: [...issue.affectedStrategies],
+    })),
+    actionGroups: report.actionGroups.map(group => ({
+      ...group,
+      issues: group.issues.map(issue => ({
+        ...issue,
+        affectedStrategies: [...issue.affectedStrategies],
+      })),
     })),
   };
 }

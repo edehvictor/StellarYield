@@ -1,4 +1,8 @@
 import { apiUrl } from "../../lib/api";
+import type { SimulationWarning } from "../../../../shared/types/simulationWarning";
+
+// Re-export for convenience.
+export type { SimulationWarning } from "../../../../shared/types/simulationWarning";
 
 export interface RebalanceAllocationRule {
   label: string;
@@ -47,6 +51,7 @@ export interface RebalanceBacktestResult {
   totalFeesUsd: number;
   snapshots: RebalanceBacktestSnapshot[];
   rebalanceEvents: RebalanceEvent[];
+  warnings: SimulationWarning[];
 }
 
 export async function fetchRebalanceBacktest(

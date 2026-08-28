@@ -8,6 +8,10 @@
  */
 
 import * as StellarSdk from "@stellar/stellar-sdk";
+import type {
+  HealthSnapshot,
+  IndexerHealthSnapshot,
+} from "../monitoring/healthSnapshots";
 
 const RPC_URL = process.env.RPC_URL || "https://soroban-testnet.stellar.org";
 
@@ -39,6 +43,10 @@ export interface IndexerStatus {
   lastIndexedAt: string | null;
   heartbeatAgeSeconds: number | null;
   recentErrors: IndexerReplayError[];
+  /** Number of unresolved dead-letter events. */
+  deadLetterCount: number;
+  /** Oldest unresolved dead-letter event timestamp (ISO string), if any. */
+  oldestDeadLetterAt: string | null;
   generatedAt: string;
 }
 
@@ -99,6 +107,8 @@ export function classifyIndexerStatus(input: IndexerStatusInput): IndexerStatus 
     lastIndexedAt: input.lastIndexedAt,
     heartbeatAgeSeconds,
     recentErrors: input.recentErrors,
+    deadLetterCount: 0,
+    oldestDeadLetterAt: null,
     generatedAt: new Date(now).toISOString(),
   };
 }
@@ -120,6 +130,35 @@ export function recordReplayError(message: string, ledger: number | null = null)
 /** Return a copy of the most recent replay errors (newest first). */
 export function getRecentReplayErrors(): IndexerReplayError[] {
   return [...recentErrors];
+}
+
+/**
+ * Convert an IndexerStatus to a typed health snapshot for the readiness endpoint.
+ */
+export function toIndexerHealthSnapshot(
+  status: IndexerStatus,
+): IndexerHealthSnapshot {
+  const snapshot: IndexerHealthSnapshot = {
+    status:
+      status.status === "unavailable"
+        ? "unavailable"
+        : status.status === "degraded"
+          ? "degraded"
+          : "healthy",
+    latencyMs: 0,
+    checkedAt: status.generatedAt,
+    errorCode: status.reason
+      ? status.reason.includes("unavailable")
+        ? "INDEXER_STATE_UNREADABLE"
+        : status.reason.includes("lag")
+          ? "INDEXER_LAG_ELEVATED"
+          : "INDEXER_DEGRADED"
+      : null,
+    retryable: status.status !== "healthy",
+    syncedLedger: status.indexedLedger ?? undefined,
+    lagLedgers: status.lagLedgers ?? undefined,
+  };
+  return snapshot;
 }
 
 // ── Snapshot assembly ─────────────────────────────────────────────────────

@@ -111,6 +111,37 @@ model Referral {
   @@index([referrerAddress])
 }
 
+// ── Dead-Letter Queue for Event Decoder Failures (Issue #889) ──────────────
+
+model DeadLetterEvent {
+  id              String   @id @default(uuid())
+  // Raw event reference for replay
+  ledger          Int
+  txHash          String
+  contractId      String
+  topic           String   // Raw topic XDR
+  data            String   // Raw event value XDR
+  // Decoder metadata
+  decoderVersion  String   // Semver of decoder at time of failure
+  errorClass      String   // e.g. "DecodeError", "ValidationError", "ProjectorError"
+  errorMessage    String   // Human-readable error description
+  // Retry state
+  retryCount      Int      @default(0)
+  maxRetries      Int      @default(3)
+  nextRetryAt     DateTime // When the next retry is attempted
+  lastErrorAt     DateTime?
+  // Resolution
+  resolved        Boolean  @default(false)
+  resolvedAt      DateTime?
+  // Audit
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([ledger, resolved])
+  @@index([nextRetryAt, resolved])
+  @@index([resolved, createdAt])
+}
+
 // ── APY Alert Models ─────────────────────────────────────────────────────────
 
 model UserAlert {

@@ -3,7 +3,9 @@
  */
 
 import request from "supertest";
-import { app } from "../app";
+import { createApp } from "../app";
+
+const app = createApp();
 
 describe("GET /api/rewards/dry-run", () => {
   it("returns 400 when ?now is not a valid ISO date", async () => {

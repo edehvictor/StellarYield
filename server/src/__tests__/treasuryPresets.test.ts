@@ -5,13 +5,13 @@
  * preset loading into simulation, and simulation payloads.
  */
 
-import { TREASURY_PRESETS, type TreasuryPreset } from "../../config/treasuryPresets";
+import { TREASURY_PRESETS, type TreasuryPreset } from "../config/treasuryPresets";
 import {
   simulateTreasury,
   isValidAllocationPayload,
   type AllocationPosition,
   type TreasuryScenario,
-} from "../../services/treasurySimulationService";
+} from "../services/treasurySimulationService";
 
 // ── Preset definitions ────────────────────────────────────────────────────────
 

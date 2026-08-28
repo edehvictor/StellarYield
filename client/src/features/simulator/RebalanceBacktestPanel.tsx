@@ -1,10 +1,12 @@
 import { useState, useCallback } from "react";
-import { BarChart2, Plus, Trash2, Loader2, AlertCircle, TrendingUp, TrendingDown } from "lucide-react";
+import React from "react";
+import { BarChart2, Plus, Trash2, Loader2, AlertCircle, AlertTriangle, Info, TrendingUp, TrendingDown } from "lucide-react";
 import {
   fetchRebalanceBacktest,
   type RebalanceAllocationRule,
   type RebalanceBacktestParams,
   type RebalanceBacktestResult,
+  type SimulationWarning,
 } from "./rebalanceBacktestService";
 
 interface AllocationRow extends RebalanceAllocationRule {
@@ -32,6 +34,40 @@ function returnColor(pct: number) {
 
 function fmt2(n: number) {
   return n.toFixed(2);
+}
+
+const SEVERITY_ICON: Record<SimulationWarning["severity"], React.ReactElement> = {
+  info: <Info size={14} className="text-blue-400 shrink-0" />,
+  warning: <AlertTriangle size={14} className="text-yellow-400 shrink-0" />,
+  critical: <AlertCircle size={14} className="text-red-400 shrink-0" />,
+};
+
+const SEVERITY_CLASSES: Record<
+  SimulationWarning["severity"],
+  { container: string; message: string }
+> = {
+  info: { container: "bg-blue-500/10 border border-blue-500/20", message: "text-blue-300" },
+  warning: { container: "bg-yellow-500/10 border border-yellow-500/20", message: "text-yellow-300" },
+  critical: { container: "bg-red-500/10 border border-red-500/20", message: "text-red-300" },
+};
+
+function BacktestWarningCard({ warning }: { warning: SimulationWarning }) {
+  const cls = SEVERITY_CLASSES[warning.severity];
+  return (
+    <div className={`flex gap-2 p-3 rounded-lg ${cls.container}`} role="alert">
+      <div className="mt-0.5">{SEVERITY_ICON[warning.severity]}</div>
+      <div className="text-sm space-y-0.5">
+        <p className={`font-medium ${cls.message}`}>{warning.message}</p>
+        <p className="text-gray-400 text-xs">
+          <span className="font-semibold text-gray-300">Suggestion: </span>
+          {warning.remediation}
+        </p>
+        {warning.affectedField && (
+          <p className="text-gray-500 text-xs font-mono">Field: {warning.affectedField}</p>
+        )}
+      </div>
+    </div>
+  );
 }
 
 export default function RebalanceBacktestPanel() {
@@ -348,6 +384,18 @@ export default function RebalanceBacktestPanel() {
           <div className="text-xs text-gray-500 text-right">
             Simulation only · {result.startDate} → {result.endDate}
           </div>
+
+          {/* Structured warnings */}
+          {result.warnings && result.warnings.length > 0 && (
+            <div className="space-y-2">
+              <h3 className="text-sm font-semibold text-gray-400 uppercase tracking-widest">
+                Backtest Warnings ({result.warnings.length})
+              </h3>
+              {result.warnings.map((w, i) => (
+                <BacktestWarningCard key={i} warning={w} />
+              ))}
+            </div>
+          )}
 
           {/* Equity snapshots (last 20) */}
           <div className="glass-panel p-6">

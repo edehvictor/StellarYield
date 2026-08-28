@@ -1,29 +1,25 @@
-/**
- * Tests for RebalanceEventService
- * Covers database operations, event creation, statistics, and allocation calculations.
- */
+const mockPrisma = {
+  rebalanceEvent: {
+    findMany: jest.fn(),
+    count: jest.fn(),
+    create: jest.fn(),
+    update: jest.fn(),
+  },
+};
+(global as any).__mockPrisma = mockPrisma;
 
-import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { RebalanceEventService } from "../rebalanceEventService";
+// Mock PrismaClient
+jest.mock("@prisma/client", () => ({
+  PrismaClient: jest.fn(() => (global as any).__mockPrisma),
+}));
+
+import { RebalanceEventService } from "../services/rebalanceEventService";
 import type {
   RebalanceEvent,
   RebalanceAllocation,
-} from "../../shared/types/rebalanceEvent";
+} from "../../../shared/types/rebalanceEvent";
 
-// Mock PrismaClient
-vi.mock("@prisma/client", () => ({
-  PrismaClient: vi.fn(() => ({
-    rebalanceEvent: {
-      findMany: vi.fn(),
-      count: vi.fn(),
-      create: vi.fn(),
-      update: vi.fn(),
-    },
-  })),
-}));
-
-const { PrismaClient } = require("@prisma/client");
-const prisma = new PrismaClient();
+const prisma = mockPrisma;
 
 const mockRebalanceEvent = (overrides?: Partial<RebalanceEvent>): RebalanceEvent => ({
   id: "rebalance-1",
@@ -62,7 +58,7 @@ const mockRebalanceEvent = (overrides?: Partial<RebalanceEvent>): RebalanceEvent
 
 describe("RebalanceEventService", () => {
   beforeEach(() => {
-    vi.clearAllMocks();
+    jest.clearAllMocks();
   });
 
   describe("getRebalanceEvents", () => {

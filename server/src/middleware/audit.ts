@@ -28,6 +28,8 @@ export interface AuditLogEntry {
 }
 
 export interface AuditContext {
+  id?: string;
+  timestamp?: string;
   userId?: string;
   userEmail?: string;
   action?: string;
@@ -140,7 +142,7 @@ function getClientIp(req: Request): string {
   if (typeof forwarded === "string") {
     return forwarded.split(",")[0].trim();
   }
-  return req.socket.remoteAddress || "UNKNOWN";
+  return req.socket?.remoteAddress || "UNKNOWN";
 }
 
 /**
@@ -152,8 +154,8 @@ export async function createAuditEntry(
   context: AuditContext,
 ): Promise<AuditLogEntry> {
   const { userId, userEmail } = extractUserInfo(req);
-  const id = crypto.randomUUID();
-  const timestamp = new Date().toISOString();
+  const id = context.id ?? crypto.randomUUID();
+  const timestamp = context.timestamp ?? new Date().toISOString();
 
   const entryData: Omit<AuditLogEntry, "hash" | "signature"> = {
     id,
@@ -341,6 +343,10 @@ export function auditMiddleware(
 
   // Override send to capture response
   res.send = function (data: unknown) {
+    if (res.headersSent) {
+      return this;
+    }
+
     // Attach audit context to request for later use
     const auditContext = (req as unknown as Record<string, unknown>)
       .auditContext as AuditContext | undefined;

@@ -66,6 +66,15 @@ async function retryWithBackoff<T>(
 }
 
 export async function fetchNetworkSnapshot(): Promise<NetworkSnapshot> {
+  // STELLAR_SKIP_RETRIES can be set in smoke/integration tests to avoid long
+  // retry delays when there is no real Horizon endpoint available.
+  const skipRetries = process.env.STELLAR_SKIP_RETRIES === "true";
+  const maxRetries = skipRetries ? 0 : 3;
+  const baseDelay = skipRetries ? 50 : 1000;
+  const timeoutMs = skipRetries
+    ? 300
+    : parseInt(process.env.STELLAR_HORIZON_TIMEOUT_MS ?? "10000", 10);
+
   return retryWithBackoff(
     async () => {
       const response = await horizonServer.ledgers().order("desc").limit(1).call();
@@ -81,8 +90,8 @@ export async function fetchNetworkSnapshot(): Promise<NetworkSnapshot> {
         network: networkLabel,
       };
     },
-    3, // maxRetries
-    1000, // baseDelay in ms
-    parseInt(process.env.STELLAR_HORIZON_TIMEOUT_MS ?? "10000", 10) // timeout in ms
+    maxRetries,
+    baseDelay,
+    timeoutMs
   );
 }

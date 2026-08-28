@@ -207,7 +207,7 @@ export class YieldReliabilityEngine {
    */
   private async collectReliabilitySignals(providerId: string, _dataSource: string): Promise<ReliabilitySignals> {
     const baseSignals = {
-      lastSuccessfulFetch: new Date(Date.now() - 5 * 60 * 1000).toISOString(), // 5 minutes ago
+      lastSuccessfulFetch: new Date(Date.now() - 1 * 60 * 1000).toISOString(), // 1 minute ago
       consecutiveFailures: 0,
       totalRequests: 1000,
       successfulRequests: 985,

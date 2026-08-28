@@ -21,7 +21,13 @@ function hasValue(value: string | undefined): boolean {
 function isPlaceholder(value: string | undefined, placeholders: string[]): boolean {
   if (!value) return false;
   const lower = value.trim().toLowerCase();
-  return placeholders.some((p) => lower === p.toLowerCase() || lower.includes(p.toLowerCase()));
+  return placeholders.some((p) => {
+    const pLower = p.toLowerCase();
+    if (pLower === "placeholder") {
+      return lower === "placeholder" || lower === "a-placeholder" || lower === "your-placeholder";
+    }
+    return lower === pLower || lower.includes(pLower);
+  });
 }
 
 function isProduction(env: Env): boolean {

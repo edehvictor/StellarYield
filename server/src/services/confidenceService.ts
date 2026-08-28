@@ -1,4 +1,4 @@
-type ProviderReading = { provider: string; apy?: number; weight?: number };
+type ProviderReading = { provider: string; apy?: number | null; weight?: number };
 
 export function computeConfidence(readings: ProviderReading[], consensusApy: number | null) {
   const reasons: string[] = [];

@@ -11,3 +11,5 @@ export type {
   RebalanceEvent,
   RebalanceBacktestResult,
 } from "./rebalanceBacktestService";
+
+export type { SimulationWarning } from "./simulationService";

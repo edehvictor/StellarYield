@@ -1,14 +1,15 @@
 import { useState, useEffect, useCallback } from "react";
-import { AlertCircle, CheckCircle2, Clock, Zap, RefreshCw } from "lucide-react";
+import { AlertCircle, AlertOctagon, CheckCircle2, Clock, Zap, RefreshCw } from "lucide-react";
 import { useWallet } from "../../context/useWallet";
 import { getApiBaseUrl } from "../../lib/api";
-import type { BatchClaimPreview, ClaimProofData } from "./types";
+import type { BatchClaimPreview, ClaimProofData, CurrentCampaignInfo } from "./types";
 import {
   buildBatchClaimPreview,
   formatYieldAmount,
   getClaimableVaults,
   getStaleProofVaults,
   getUnavailableVaults,
+  getInvalidProofVaults,
 } from "./batchClaimUtils";
 
 const getApiBase = () => {
@@ -22,6 +23,8 @@ const getApiBase = () => {
 interface BatchClaimPreviewProps {
   vaultIds: string[];
   vaultMetadata: Record<string, { name: string }>;
+  /** Active campaign id/root, when known, to detect stale or wrong-campaign cached proofs (#964). */
+  currentCampaign?: CurrentCampaignInfo;
 }
 
 /**
@@ -31,6 +34,7 @@ interface BatchClaimPreviewProps {
 export default function BatchClaimPreview({
   vaultIds,
   vaultMetadata,
+  currentCampaign,
 }: BatchClaimPreviewProps) {
   const { isConnected, walletAddress } = useWallet();
   const [preview, setPreview] = useState<BatchClaimPreview | null>(null);
@@ -77,7 +81,7 @@ export default function BatchClaimPreview({
       const results = await Promise.all(proofPromises);
       const vaultProofs = Object.fromEntries(results);
 
-      const batchPreview = buildBatchClaimPreview(vaultProofs, vaultMetadata);
+      const batchPreview = buildBatchClaimPreview(vaultProofs, vaultMetadata, currentCampaign);
       setPreview(batchPreview);
     } catch (err) {
       setError(
@@ -86,7 +90,7 @@ export default function BatchClaimPreview({
     } finally {
       setLoading(false);
     }
-  }, [walletAddress, vaultIds, vaultMetadata]);
+  }, [walletAddress, vaultIds, vaultMetadata, currentCampaign]);
 
   useEffect(() => {
     if (isConnected && walletAddress) {
@@ -130,6 +134,7 @@ export default function BatchClaimPreview({
   const claimableVaults = getClaimableVaults(preview.vaults);
   const staleVaults = getStaleProofVaults(preview.vaults);
   const unavailableVaults = getUnavailableVaults(preview.vaults);
+  const invalidVaults = getInvalidProofVaults(preview.vaults);
 
   return (
     <div className="space-y-6">
@@ -192,6 +197,16 @@ export default function BatchClaimPreview({
               </span>
             </div>
           )}
+
+          {invalidVaults.length > 0 && (
+            <div className="flex items-center gap-2 px-3 py-2 bg-red-500/10 border border-red-500/20 rounded-lg">
+              <AlertOctagon size={16} className="text-red-400" />
+              <span className="text-sm text-red-400">
+                {invalidVaults.length} invalid proof
+                {invalidVaults.length !== 1 ? "s" : ""}
+              </span>
+            </div>
+          )}
         </div>
       </div>
 
@@ -247,6 +262,16 @@ export default function BatchClaimPreview({
                   <span className="text-xs text-red-400">Missing</span>
                 </div>
               )}
+
+              {vault.status === "invalid_proof" && (
+                <div
+                  className="flex items-center gap-1 px-2 py-1 bg-red-500/20 rounded"
+                  title={vault.previewMessage}
+                >
+                  <AlertOctagon size={16} className="text-red-400" />
+                  <span className="text-xs text-red-400">Invalid</span>
+                </div>
+              )}
             </div>
           </div>
         ))}
@@ -278,6 +303,22 @@ export default function BatchClaimPreview({
             <p className="text-sm text-red-300">
               {unavailableVaults.map((v) => v.vaultName).join(", ")} have no
               available rewards or proof data.
+            </p>
+          </div>
+        </div>
+      )}
+
+      {invalidVaults.length > 0 && (
+        <div className="flex items-start gap-3 bg-red-500/10 border border-red-500/20 rounded-xl p-4">
+          <AlertOctagon className="text-red-400 shrink-0 mt-0.5" size={20} />
+          <div>
+            <p className="font-semibold text-red-400 mb-1">
+              Invalid Claim Data
+            </p>
+            <p className="text-sm text-red-300">
+              {invalidVaults.map((v) => v.vaultName).join(", ")} have a cached
+              proof that does not match the active reward campaign and must
+              not be submitted. Refresh to fetch a corrected proof.
             </p>
           </div>
         </div>

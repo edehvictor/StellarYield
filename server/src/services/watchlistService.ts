@@ -4,18 +4,18 @@
  */
 
 import { PrismaClient } from "@prisma/client";
-import { v4 as uuidv4 } from "uuid";
+import { randomUUID as uuidv4 } from "crypto";
 import type {
   YieldOpportunityWatchItem,
   WatchlistItem,
   WatchlistResponse,
   ThresholdRule,
   ThresholdCheckResult,
-} from "../../shared/types/watchlist";
+} from "../../../shared/types/watchlist";
 import {
   checkThresholdTrigger,
   generateAlertMessage,
-} from "../../shared/types/watchlist";
+} from "../../../shared/types/watchlist";
 
 const prisma = new PrismaClient();
 

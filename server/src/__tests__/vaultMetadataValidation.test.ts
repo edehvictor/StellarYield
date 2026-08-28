@@ -9,9 +9,10 @@ import {
   validateVaultMetadataInput,
   sanitizeSvg,
   type VaultMetadataInput,
-} from "../../services/ipfs/vaultMetadataService";
+} from "../services/ipfs/vaultMetadataService";
+import { validateIconAssetOrThrow } from "../utils/iconValidator";
 
-const VALID_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/></svg>`;
+const VALID_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" width="100" height="100"><circle cx="50" cy="50" r="40"/></svg>`;
 
 function makeValidInput(overrides: Partial<VaultMetadataInput> = {}): VaultMetadataInput {
   return {
@@ -68,12 +69,8 @@ describe("validateVaultMetadataInput", () => {
   });
 
   it("rejects iconSvg containing a script tag", () => {
-    const maliciousSvg = `<svg><script>alert(1)</script></svg>`;
-    // sanitizeSvg strips scripts, but the raw input still contains <script>
-    // validateVaultMetadataInput calls sanitizeSvg internally and accepts the sanitized result
-    // so we test sanitizeSvg directly for script removal
-    const sanitized = sanitizeSvg(maliciousSvg);
-    expect(sanitized).not.toContain("<script>");
+    const maliciousSvg = `<svg width="100" height="100"><script>alert(1)</script></svg>`;
+    expect(() => validateIconAssetOrThrow(maliciousSvg, "image/svg+xml")).toThrow(/script tags/);
   });
 
   it("rejects non-object input", () => {

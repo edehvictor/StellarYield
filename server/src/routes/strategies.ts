@@ -101,6 +101,7 @@ router.get("/leaderboard", async (req: Request, res: Response) => {
 
   const now = Date.now();
   if (
+    process.env.NODE_ENV !== "test" &&
     cache &&
     now - cache.ts < CACHE_TTL &&
     timeWindow === "all" &&

@@ -3,7 +3,10 @@ import {
   verifyProof,
   computeLeaf,
   hashPair,
+  previewRewardClaim,
+  findProofShapeError,
   type RewardEntry,
+  type RewardCampaignInfo,
 } from "../merkleTree";
 
 // ── computeLeaf ─────────────────────────────────────────────────────────
@@ -262,5 +265,155 @@ describe("verifyProof", () => {
       );
       expect(valid).toBe(true);
     }
+  });
+});
+
+// ── findProofShapeError (#964) ─────────────────────────────────────────────
+
+describe("findProofShapeError", () => {
+  const validHash = "a".repeat(64);
+  const otherValidHash = "b".repeat(64);
+
+  it("returns null for a well-formed proof", () => {
+    expect(findProofShapeError([validHash, otherValidHash])).toBeNull();
+  });
+
+  it("returns null for an empty proof", () => {
+    expect(findProofShapeError([])).toBeNull();
+  });
+
+  it("flags a non-hex element as malformed", () => {
+    const error = findProofShapeError(["not-a-hex-string".padEnd(64, "z")]);
+    expect(error).toMatch(/malformed/i);
+  });
+
+  it("flags an element with the wrong length as malformed", () => {
+    const error = findProofShapeError(["ab".repeat(10)]);
+    expect(error).toMatch(/malformed/i);
+  });
+
+  it("flags a duplicate path element", () => {
+    const error = findProofShapeError([validHash, otherValidHash, validHash]);
+    expect(error).toMatch(/duplicate/i);
+  });
+
+  it("flags a proof deeper than MAX_PROOF_DEPTH", () => {
+    const deepProof = Array.from({ length: 21 }, (_, i) =>
+      i.toString(16).padStart(64, "0"),
+    );
+    const error = findProofShapeError(deepProof);
+    expect(error).toMatch(/exceeds/i);
+  });
+});
+
+// ── previewRewardClaim (#964) ──────────────────────────────────────────────
+
+describe("previewRewardClaim", () => {
+  const entries: RewardEntry[] = [
+    { index: 0, address: "GCLAIMANT1", amount: "1000" },
+    { index: 1, address: "GCLAIMANT2", amount: "2000" },
+  ];
+  const tree = generateMerkleTree(entries);
+  const currentCampaign: RewardCampaignInfo = {
+    campaignId: "2026-W22",
+    merkleRoot: tree.root,
+  };
+  const claim = tree.claims["GCLAIMANT1"];
+
+  it("marks a correct claim as valid", () => {
+    const result = previewRewardClaim(
+      {
+        campaignId: "2026-W22",
+        merkleRoot: tree.root,
+        index: claim.index,
+        address: "GCLAIMANT1",
+        amount: claim.amount,
+        proof: claim.proof,
+      },
+      currentCampaign,
+    );
+    expect(result.state).toBe("valid");
+    expect(result.errorCode).toBeUndefined();
+  });
+
+  it("rejects a mismatched campaign ID", () => {
+    const result = previewRewardClaim(
+      {
+        campaignId: "2026-W21",
+        merkleRoot: tree.root,
+        index: claim.index,
+        address: "GCLAIMANT1",
+        amount: claim.amount,
+        proof: claim.proof,
+      },
+      currentCampaign,
+    );
+    expect(result.state).toBe("invalid");
+    expect(result.errorCode).toBe("campaign_id_mismatch");
+  });
+
+  it("rejects a malformed proof path", () => {
+    const result = previewRewardClaim(
+      {
+        campaignId: "2026-W22",
+        merkleRoot: tree.root,
+        index: claim.index,
+        address: "GCLAIMANT1",
+        amount: claim.amount,
+        proof: ["not-valid-hex"],
+      },
+      currentCampaign,
+    );
+    expect(result.state).toBe("invalid");
+    expect(result.errorCode).toBe("malformed_proof");
+  });
+
+  it("rejects a duplicate proof path element", () => {
+    const duplicated = claim.proof.length > 0 ? [claim.proof[0], claim.proof[0]] : ["a".repeat(64), "a".repeat(64)];
+    const result = previewRewardClaim(
+      {
+        campaignId: "2026-W22",
+        merkleRoot: tree.root,
+        index: claim.index,
+        address: "GCLAIMANT1",
+        amount: claim.amount,
+        proof: duplicated,
+      },
+      currentCampaign,
+    );
+    expect(result.state).toBe("invalid");
+    expect(result.errorCode).toBe("malformed_proof");
+  });
+
+  it("marks a claim with a drifted root as stale, not invalid", () => {
+    const result = previewRewardClaim(
+      {
+        campaignId: "2026-W22",
+        merkleRoot: "f".repeat(64),
+        index: claim.index,
+        address: "GCLAIMANT1",
+        amount: claim.amount,
+        proof: claim.proof,
+      },
+      currentCampaign,
+    );
+    expect(result.state).toBe("stale");
+    expect(result.errorCode).toBe("root_mismatch");
+  });
+
+  it("rejects a well-formed proof that fails cryptographic verification", () => {
+    const result = previewRewardClaim(
+      {
+        campaignId: "2026-W22",
+        merkleRoot: tree.root,
+        index: claim.index,
+        address: "GCLAIMANT1",
+        amount: "999999", // wrong amount — proof was generated for a different leaf
+        proof: claim.proof,
+      },
+      currentCampaign,
+    );
+    expect(result.state).toBe("invalid");
+    expect(result.errorCode).toBe("proof_verification_failed");
   });
 });

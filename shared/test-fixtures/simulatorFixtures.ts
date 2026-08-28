@@ -539,14 +539,23 @@ export function validateRebalanceResult(
     errors.push(`Expected maxDriftPct >= ${exp.maxDriftPctMin}, got ${result.maxDriftPct}`);
   }
 
-  const warnings: string[] = result.warnings || [];
-  if (exp.expectedWarnings.staleData && !warnings.some((w: string) => w.includes('Stale data'))) {
+  const warnings: unknown[] = result.warnings || [];
+  const hasCode = (code: string) =>
+    warnings.some((w: unknown) =>
+      typeof w === "object" && w !== null && (w as Record<string, unknown>).code === code
+    );
+  const hasText = (text: string) =>
+    warnings.some((w: unknown) =>
+      typeof w === "string" && w.toLowerCase().includes(text.toLowerCase())
+    );
+
+  if (exp.expectedWarnings.staleData && !hasCode("STALE_DATA") && !hasText("Stale data")) {
     errors.push('Expected stale data warning');
   }
-  if (exp.expectedWarnings.liquidityRisk && !warnings.some((w: string) => w.includes('Liquidity risk'))) {
+  if (exp.expectedWarnings.liquidityRisk && !hasCode("LIQUIDITY_RISK") && !hasText("Liquidity risk")) {
     errors.push('Expected liquidity risk warning');
   }
-  if (exp.expectedWarnings.highFees && !warnings.some((w: string) => w.includes('High fees'))) {
+  if (exp.expectedWarnings.highFees && !hasCode("HIGH_FEES") && !hasText("High fees")) {
     errors.push('Expected high fees warning');
   }
 
@@ -631,22 +640,37 @@ export function validateSimulationResult(
     );
   }
 
-  // Check warnings
-  const warnings = result.warnings || [];
+  // Check warnings — works with both structured SimulationWarning objects and plain strings
+  const warnings: unknown[] = result.warnings || [];
+  const hasCode = (code: string) =>
+    warnings.some((w: unknown) =>
+      typeof w === "object" && w !== null && (w as Record<string, unknown>).code === code
+    );
+  const hasText = (text: string) =>
+    warnings.some((w: unknown) =>
+      typeof w === "string" && w.toLowerCase().includes(text.toLowerCase())
+    );
+
   if (fixture.expectedOutput.expectedWarnings.highSlippage) {
-    if (!warnings.some((w: string) => w.includes("slippage"))) {
+    if (!hasCode("HIGH_SLIPPAGE") && !hasText("slippage")) {
       errors.push("Expected high slippage warning");
     }
   }
 
   if (fixture.expectedOutput.expectedWarnings.insufficientLiquidity) {
-    if (!warnings.some((w: string) => w.includes("liquidity"))) {
+    if (!hasCode("INSUFFICIENT_LIQUIDITY") && !hasText("liquidity")) {
       errors.push("Expected insufficient liquidity warning");
     }
   }
 
   if (fixture.expectedOutput.expectedWarnings.unsupported) {
-    if (!warnings.some((w: string) => w.includes("Amount") || w.includes("Unsupported"))) {
+    if (
+      !hasCode("ZERO_AMOUNT") &&
+      !hasCode("UNSUPPORTED_STRATEGY") &&
+      !hasCode("AMOUNT_TOO_LARGE") &&
+      !hasText("Amount") &&
+      !hasText("Unsupported")
+    ) {
       errors.push("Expected unsupported/amount warning");
     }
   }

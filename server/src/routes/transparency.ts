@@ -91,19 +91,19 @@ async function aggregateTransparencyData(): Promise<TransparencyData> {
  * Returns protocol revenue and token burn metrics.
  * Cached for 60 seconds.
  */
-transparencyRouter.get(
-    "/summary",
-    async (_req: Request, res: Response): Promise<void> => {
-        try {
-            const data = await aggregateTransparencyData();
-            const { cachedAt: _omit, ...payload } = data;
-            res.json(payload);
-        } catch (err) {
-            console.error("Failed to aggregate transparency data", err);
-            res.status(500).json({ error: "Unable to fetch transparency data." });
-        }
-    },
-);
+const handleSummary = async (_req: Request, res: Response): Promise<void> => {
+    try {
+        const data = await aggregateTransparencyData();
+        const { cachedAt: _omit, ...payload } = data;
+        res.json(payload);
+    } catch (err) {
+        console.error("Failed to aggregate transparency data", err);
+        res.status(500).json({ error: "Unable to fetch transparency data." });
+    }
+};
+
+transparencyRouter.get("/", handleSummary);
+transparencyRouter.get("/summary", handleSummary);
 
 /**
  * GET /api/transparency/failover-history

@@ -1,27 +1,32 @@
-export type RotationCandidate = {
+import {
+  computeConfidenceScore,
+  computeDecayedFreshnessConfidence,
+  type ConfidenceFactors,
+  type ConfidenceScore,
+} from "./confidenceService";
+
+export type LegacyRotationCandidate = {
   id: string;
-  score: number; // raw score from strategy evaluation
+  score: number;
   reason?: string;
-  confidence?: number; // 0-100
+  confidence?: number;
 };
 
 export type RotationRecord = {
   timestamp: string;
-  winner: RotationCandidate | null;
-  skipped: { candidate: RotationCandidate; reason: string }[];
+  winner: LegacyRotationCandidate | null;
+  skipped: { candidate: LegacyRotationCandidate; reason: string }[];
   metadata?: any;
 };
 
 const history: RotationRecord[] = [];
 
-export function decideRotation(candidates: RotationCandidate[], metadata?: any) {
+export function decideRotation(candidates: LegacyRotationCandidate[], metadata?: any) {
   if (!candidates || candidates.length === 0) {
     const rec: RotationRecord = { timestamp: new Date().toISOString(), winner: null, skipped: [], metadata };
     history.push(rec);
     return rec;
   }
-
-  // prefer higher (score * confidenceFactor)
   const scored = candidates.map((c) => ({
     candidate: c,
     weight: c.score * ((c.confidence ?? 50) / 100),
@@ -41,14 +46,6 @@ export function getRotationHistory() {
 export function clearRotationHistory() {
   history.length = 0;
 }
-
-export default { decideRotation, getRotationHistory, clearRotationHistory };
-import {
-  computeConfidenceScore,
-  computeDecayedFreshnessConfidence,
-  type ConfidenceFactors,
-  type ConfidenceScore,
-} from "./confidenceService";
 
 /**
  * Autonomous Strategy Rotation Service

@@ -11,6 +11,10 @@ import {
 const router = Router();
 const prisma = new PrismaClient();
 
+router.get("/", (_req: Request, res: Response) => {
+  res.json([]);
+});
+
 router.get("/digest/preferences/:walletAddress", validateWalletAddress, (req: Request, res: Response) => {
   const { walletAddress } = req.params;
   res.json(getWatchlistDigestPreference(walletAddress));

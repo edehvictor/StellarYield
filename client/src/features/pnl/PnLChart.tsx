@@ -9,7 +9,13 @@ import {
   ResponsiveContainer,
 } from "recharts";
 import { useWallet } from "../../context/useWallet";
-import { TrendingUp, TrendingDown, Loader2, DollarSign, BarChart3 } from "lucide-react";
+import {
+  TrendingUp,
+  TrendingDown,
+  Loader2,
+  DollarSign,
+  BarChart3,
+} from "lucide-react";
 import { getApiBaseUrl } from "../../lib/api";
 import ApiErrorBanner from "../../components/ApiErrorBanner/ApiErrorBanner";
 import {
@@ -33,6 +39,7 @@ const getApiBase = () => {
  *
  * Shows total deposited, withdrawn, current value, absolute PnL, and
  * Time-Weighted Return, alongside a daily cumulative PnL chart.
+ * Supports sparse data warnings from the chart utils.
  */
 export default function PnLChart() {
   const { isConnected, walletAddress } = useWallet();
@@ -100,7 +107,7 @@ export default function PnLChart() {
     );
   }
 
-  // Complete no-data state: no deposits and no snapshots
+  // Complete no-data state
   if (hasNoData(pnlData)) {
     return (
       <div className="glass-panel p-8 text-center">
@@ -113,7 +120,6 @@ export default function PnLChart() {
     );
   }
 
-  // Partial data state: has deposits but no chart data
   const showPartialDataWarning = hasPartialData(pnlData);
   const data = pnlData;
   if (!data) return null;
@@ -141,8 +147,14 @@ export default function PnLChart() {
 
       {/* Summary Cards */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-        <StatCard label="Total Deposited" value={`$${fmt(data.totalDeposited)}`} />
-        <StatCard label="Total Withdrawn" value={`$${fmt(data.totalWithdrawn)}`} />
+        <StatCard
+          label="Total Deposited"
+          value={`$${fmt(data.totalDeposited)}`}
+        />
+        <StatCard
+          label="Total Withdrawn"
+          value={`$${fmt(data.totalWithdrawn)}`}
+        />
         <StatCard
           label="Current Value"
           value={`$${fmt(data.currentValue)}`}

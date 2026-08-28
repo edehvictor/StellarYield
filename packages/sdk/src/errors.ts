@@ -151,6 +151,45 @@ export class MissingAuthError extends SorobanSdkError {
   }
 }
 
+/** HTTP / fetch request timed out before a response arrived. */
+export class ApiTimeoutError extends SorobanSdkError {
+  public readonly timeoutMs: number;
+  public readonly path: string;
+
+  constructor(path: string, timeoutMs: number) {
+    super(`API request to '${path}' timed out after ${timeoutMs}ms`, undefined, true);
+    this.path = path;
+    this.timeoutMs = timeoutMs;
+  }
+}
+
+/** Underlying network failure (DNS, connection reset, offline, etc.). */
+export class ApiNetworkError extends SorobanSdkError {
+  public readonly path: string;
+  public readonly cause?: unknown;
+
+  constructor(path: string, cause?: unknown) {
+    const detail = cause instanceof Error ? cause.message : cause != null ? String(cause) : "unknown";
+    super(`API network error at '${path}': ${detail}`, undefined, true);
+    this.path = path;
+    this.cause = cause;
+  }
+}
+
+/** Non-OK HTTP response from the backend API. */
+export class ApiHttpError extends SorobanSdkError {
+  public readonly path: string;
+  public readonly status: number;
+  public readonly statusText: string;
+
+  constructor(path: string, status: number, statusText: string, retryable: boolean) {
+    super(`API error (${status} ${statusText}) at ${path}`, undefined, retryable);
+    this.path = path;
+    this.status = status;
+    this.statusText = statusText;
+  }
+}
+
 /**
  * Restore preamble data returned by a `SimulateTransactionRestoreResponse`.
  * `transactionData` is a `SorobanDataBuilder` instance from `@stellar/stellar-sdk`

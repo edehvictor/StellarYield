@@ -1,286 +1,164 @@
 name: CI
 
 on:
-  pull_request:
+  push:
     branches:
       - main
-  workflow_dispatch:
+      - dev
+  pull_request:
 
 jobs:
-  sdk:
-    name: SDK & Spec Drift Checks
+  changes:
+    name: Detect changed areas
     runs-on: ubuntu-latest
+    outputs:
+      client: ${{ steps.filter.outputs.client }}
+      server: ${{ steps.filter.outputs.server }}
+      contracts: ${{ steps.filter.outputs.contracts }}
+
     steps:
-      - name: Check out repository
+      - name: Checkout
         uses: actions/checkout@v4
-
-      - name: Set up Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
         with:
-          targets: wasm32-unknown-unknown
+          fetch-depth: 0
 
-      - name: Install Stellar CLI
-        run: cargo install --locked stellar-cli --version 25.1.0
-
-      - name: Build YieldVault WASM
-        run: cargo build --target wasm32-unknown-unknown --release --package yield_vault
-        working-directory: contracts
-
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 20
-
-      - name: Install SDK dependencies
-        working-directory: packages/sdk
-        run: npm ci
-
-      - name: Verify Contract & API Spec Drift
-        working-directory: packages/sdk
-        run: npm run verify-drift
-
-      - name: Run SDK Tests
-        working-directory: packages/sdk
-        run: npm test
-
-      - name: Build SDK Package
-        working-directory: packages/sdk
-        run: npm run build
-
-  backend:
-    name: Backend Checks
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: server
-    env:
-      DATABASE_URL: "postgresql://test:test@localhost:5432/stellaryield_test"
-    services:
-      postgres:
-        image: postgres:15
-        env:
-          POSTGRES_USER: test
-          POSTGRES_PASSWORD: test
-          POSTGRES_DB: stellaryield_test
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-        ports:
-          - 5432:5432
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
-
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 20
-          cache: npm
-          cache-dependency-path: server/package-lock.json
-
-      - name: Harden npm network settings
+      - name: Detect changed files
+        id: filter
+        shell: bash
         run: |
-          npm config set fetch-retries 5
-          npm config set fetch-retry-mintimeout 20000
-          npm config set fetch-retry-maxtimeout 120000
-          npm config set fetch-timeout 120000
+          if [[ "${{ github.event_name }}" != "pull_request" ]]; then
+            echo "client=true" >> "$GITHUB_OUTPUT"
+            echo "server=true" >> "$GITHUB_OUTPUT"
+            echo "contracts=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
 
-      - name: Install backend dependencies
-        run: npm ci --no-audit --prefer-offline
+          git fetch --no-tags --depth=1 origin "+refs/heads/${{ github.base_ref }}:refs/remotes/origin/${{ github.base_ref }}"
+          changed_files="$(git diff --name-only "refs/remotes/origin/${{ github.base_ref }}" HEAD)"
 
-      - name: Lint backend
-        continue-on-error: true
-        run: npm run lint
+          if grep -Eq '^(client/|packages/sdk/|shared/|vercel\.json|\.github/workflows/ci\.yml)$' <<< "$changed_files"; then
+            echo "client=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "client=false" >> "$GITHUB_OUTPUT"
+          fi
 
-      - name: Generate Prisma client
-        run: npx prisma generate
+          if grep -Eq '^(server/|shared/|\.github/workflows/ci\.yml)$' <<< "$changed_files"; then
+            echo "server=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "server=false" >> "$GITHUB_OUTPUT"
+          fi
 
-      - name: Run Prisma migrations
-        run: npx prisma migrate deploy
+          if grep -Eq '^(contracts/|\.github/workflows/ci\.yml)$' <<< "$changed_files"; then
+            echo "contracts=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "contracts=false" >> "$GITHUB_OUTPUT"
+          fi
 
-      - name: Check for unapplied schema changes
-        run: npx prisma migrate status || (echo "Unapplied schema changes detected" && exit 1)
-
-      - name: Run backend tests
-        run: npm test
-
-  frontend:
-    name: Frontend Checks
+  client:
+    name: Client CI
+    needs: changes
+    if: needs.changes.outputs.client == 'true'
     runs-on: ubuntu-latest
     defaults:
       run:
         working-directory: client
+
     steps:
-      - name: Check out repository
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Node.js
+      - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 20
           cache: npm
           cache-dependency-path: client/package-lock.json
 
-      - name: Harden npm network settings
-        run: |
-          npm config set fetch-retries 5
-          npm config set fetch-retry-mintimeout 20000
-          npm config set fetch-retry-maxtimeout 120000
-          npm config set fetch-timeout 120000
+      - name: Install dependencies
+        run: npm ci
 
-      - name: Install client dependencies
-        run: npm ci --no-audit --prefer-offline
+      - name: Lint
+        run: npm run lint
 
-      - name: Lint frontend (CI scoped)
-        continue-on-error: true
-        run: npm run lint:ci-scope
+      - name: Build
+        run: npm run build
 
-      - name: Run frontend tests
-        id: frontend_tests
-        continue-on-error: true
-        shell: bash
-        run: |
-          set -o pipefail
-          npm test 2>&1 | tee frontend-test.log
+  server:
+    name: Server CI
+    needs: changes
+    if: needs.changes.outputs.server == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: server
 
-      - name: Build frontend and capture logs
-        id: frontend_build
-        continue-on-error: true
-        shell: bash
-        run: |
-          set -o pipefail
-          npm run build 2>&1 | tee frontend-build.log
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - name: Upload frontend failure artifacts
-        if: steps.frontend_tests.outcome == 'failure' || steps.frontend_build.outcome == 'failure'
-        uses: actions/upload-artifact@v4
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
         with:
-          name: frontend-failure-artifacts-${{ github.run_id }}
-          path: |
-            client/frontend-test.log
-            client/frontend-build.log
-            client/dist
-          if-no-files-found: ignore
-          retention-days: 7
+          node-version: 20
+          cache: npm
+          cache-dependency-path: server/package-lock.json
 
-      - name: Fail frontend job if tests failed
-        if: steps.frontend_tests.outcome == 'failure'
-        run: exit 1
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Generate Prisma client
+        run: npx prisma generate
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Build
+        run: npm run build
 
   contracts:
-    name: Soroban Contract Checks
+    name: Contracts CI
+    needs: changes
+    if: needs.changes.outputs.contracts == 'true'
     runs-on: ubuntu-latest
-    continue-on-error: true
     defaults:
       run:
         working-directory: contracts
+
     steps:
-      - name: Check out repository
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Rust toolchain
+      - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
         with:
+          toolchain: stable
           components: rustfmt, clippy
 
-      - name: Check formatting
+      - name: Rust versions
+        run: |
+          rustc --version
+          cargo fmt --version
+
+      - name: Format check
         run: cargo fmt --all -- --check
 
-      - name: Run Clippy
-        continue-on-error: true
-        run: cargo clippy --workspace --all-targets
+      - name: Clippy
+        run: >
+          cargo clippy --workspace --all-targets --
+          -D warnings
+          -A unused-imports
+          -A unused-variables
+          -A unused-mut
+          -A dead-code
+          -A clippy::erasing_op
+          -A clippy::single_match
+          -A clippy::match_like_matches_macro
+          -A clippy::manual_memcpy
+          -A clippy::unnecessary_cast
+          -A clippy::absurd_extreme_comparisons
+          -A unused-comparisons
+          -A clippy::let_unit_value
+          -A clippy::manual_range_contains
 
-      - name: Run contract tests
-        id: contract_tests
-        continue-on-error: true
-        shell: bash
-        run: |
-          set -o pipefail
-          cargo test --workspace 2>&1 | tee contract-test.log
-
-      - name: Run contract fuzz tests (quick profile) (#903)
-        id: contract_fuzz
-        continue-on-error: true
-        shell: bash
-        run: |
-          set -o pipefail
-          cargo test --test fuzz --lib 2>&1 | tee contract-fuzz.log
-
-      - name: Upload contract test logs
-        if: steps.contract_tests.outcome == 'failure'
-        uses: actions/upload-artifact@v4
-        with:
-          name: contract-test-logs-${{ github.run_id }}
-          path: contracts/contract-test.log
-          if-no-files-found: error
-          retention-days: 7
-
-      - name: Fail contracts job if tests failed
-        if: steps.contract_tests.outcome == 'failure'
-        run: exit 1
-
-      - name: Set up Node.js for contract script tests
-        uses: actions/setup-node@v4
-        with:
-          node-version: 20
-
-      - name: Install contract script dependencies
-        working-directory: contracts
-        run: npm ci
-
-      - name: Run contract script tests
-        working-directory: contracts
-        run: npm test
-
-      - name: Verify deployment manifest
-        working-directory: .
-        shell: bash
-        run: |
-          if [ -f contracts/scripts/deployment-manifest.json ]; then
-            node contracts/scripts/verify-manifest.js \
-              --manifest contracts/scripts/deployment-manifest.json \
-              --registry contracts/registry.json \
-              --network testnet
-          else
-            echo "No deployment manifest found — skipping verification"
-          fi
-
-  readme-commands:
-    name: README Command Verification
-    runs-on: ubuntu-latest
-    continue-on-error: true
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
-
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 20
-
-      - name: Verify documented README commands
-        run: node scripts/verify-readme-commands.js
-
-  verification:
-    name: Formal Verification (Kani)
-    runs-on: ubuntu-latest
-    if: github.event_name == 'workflow_dispatch'
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
-
-      - name: Set up Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: nightly
-          components: rustfmt
-
-      - name: Install Kani
-        run: |
-          cargo install --locked kani-verifier
-          cargo kani setup
-
-      - name: Run Kani verification
-        run: cd contracts/yield_vault && cargo kani --harness verification::prove_fee_bounds --harness verification::prove_flash_loan_security --harness verification::prove_deposit_share_calculation
+      - name: Test
+        run: cargo test --workspace

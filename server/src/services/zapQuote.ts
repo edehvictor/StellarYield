@@ -1,9 +1,11 @@
 import * as StellarSdk from "@stellar/stellar-sdk";
 import NodeCache from "node-cache";
+import crypto from "crypto";
 import { createHash, randomUUID } from "crypto";
 import { slippageRegistry } from "./slippageRegistry";
 import { getYieldData } from "./yieldService";
 import { freezeService } from "./freezeService";
+import { getZapSupportedAssetsPayload } from "../config/zapAssetsConfig";
 
 export interface ZapQuoteBody {
   inputTokenContract: string;
@@ -25,7 +27,7 @@ export interface ZapQuoteResult {
   minAmountOutStroops: string;
   quoteAgeMs: number;
   isFallback: boolean;
-  // Safety envelope fields
+  // Safety envelope — extended (merged upstream + branch)
   quoteId: string;
   expiresAt: string;
   ttlMs: number;
@@ -35,8 +37,11 @@ export interface ZapQuoteResult {
   protocol: string;
   freezeCheckedAt: string;
   quoteSource: "router_simulation" | "fallback_rate";
-  // Optional signature over assumptions (persist-or-sign requirement)
   quoteSignature?: string;
+  // Upstream fields
+  issuedAt: string;
+  routeHash: string;
+  assetConfigVersion: string;
 }
 
 export interface VerifyQuoteRequest {
@@ -109,6 +114,17 @@ function mulDivStroops(amountIn: string, numerator: string, denominator: string)
   return ((a * n) / d).toString();
 }
 
+export function getAssetConfigVersion(): string {
+  const payload = getZapSupportedAssetsPayload();
+  const data = JSON.stringify(payload);
+  return crypto.createHash("sha256").update(data).digest("hex");
+}
+
+export function computeRouteHash(path: { contractId: string }[]): string {
+  const ids = path.map(p => p.contractId).join("->");
+  return crypto.createHash("sha256").update(ids).digest("hex");
+}
+
 export async function quoteViaRouterSimulation(
   body: ZapQuoteBody,
 ): Promise<ZapQuoteResult | null> {
@@ -166,8 +182,8 @@ export async function quoteViaRouterSimulation(
 
     const now = Date.now();
 
-    // These interim fields will be overwritten by getZapQuote with envelope values,
-    // but return a shape compatible with legacy callers.
+    // Interim fields will be overwritten by getZapQuote with envelope values,
+    // but return a shape compatible with legacy callers (now includes full envelope with placeholder upstream fields).
     return {
       path: [
         { contractId: body.inputTokenContract, label: "in" },
@@ -181,7 +197,7 @@ export async function quoteViaRouterSimulation(
       minAmountOutStroops: expected.toString(),
       quoteAgeMs: 0,
       isFallback: false,
-      quoteId: "",
+      quoteId: generateQuoteId(),
       expiresAt: new Date(now + getQuoteTtlMs()).toISOString(),
       ttlMs: getQuoteTtlMs(),
       inputTokenContract: body.inputTokenContract,
@@ -190,6 +206,9 @@ export async function quoteViaRouterSimulation(
       protocol: body.protocol || "default",
       freezeCheckedAt: new Date(now).toISOString(),
       quoteSource: "router_simulation",
+      issuedAt: new Date(now).toISOString(),
+      routeHash: computeRouteHash([{ contractId: body.inputTokenContract }, { contractId: body.vaultTokenContract }]),
+      assetConfigVersion: getAssetConfigVersion(),
     };
   } catch {
     return null;
@@ -221,6 +240,9 @@ export function quoteFallback(body: ZapQuoteBody): ZapQuoteResult {
       protocol: body.protocol || "default",
       freezeCheckedAt: new Date(now).toISOString(),
       quoteSource: "fallback_rate",
+      issuedAt: new Date(now).toISOString(),
+      routeHash: computeRouteHash([{ contractId: body.inputTokenContract }]),
+      assetConfigVersion: getAssetConfigVersion(),
     };
     const sig = signQuoteAssumptions(base);
     return { ...base, quoteSignature: sig };
@@ -252,6 +274,9 @@ export function quoteFallback(body: ZapQuoteBody): ZapQuoteResult {
     protocol: body.protocol || "default",
     freezeCheckedAt: new Date(now).toISOString(),
     quoteSource: "fallback_rate",
+    issuedAt: new Date(now).toISOString(),
+    routeHash: computeRouteHash([{ contractId: body.inputTokenContract }, { contractId: body.vaultTokenContract }]),
+    assetConfigVersion: getAssetConfigVersion(),
   };
   const sig = signQuoteAssumptions(base);
   return { ...base, quoteSignature: sig };
@@ -423,6 +448,9 @@ export async function getZapQuote(body: ZapQuoteBody): Promise<ZapQuoteResult> {
 
   const quoteId = generateQuoteId();
   const freezeCheckedAt = new Date(now).toISOString();
+  const routeHash = computeRouteHash(sim.path);
+  const assetConfigVersion = getAssetConfigVersion();
+  const issuedAt = quotedAt;
 
   const enriched: ZapQuoteResult = {
     ...sim,
@@ -441,6 +469,9 @@ export async function getZapQuote(body: ZapQuoteBody): Promise<ZapQuoteResult> {
     protocol,
     freezeCheckedAt,
     quoteSource: sim.source,
+    issuedAt,
+    routeHash,
+    assetConfigVersion,
   };
 
   // Sign assumptions for tamper detection
@@ -450,4 +481,41 @@ export async function getZapQuote(body: ZapQuoteBody): Promise<ZapQuoteResult> {
   storeQuote(enriched);
 
   return enriched;
+}
+
+export function verifyZapQuote(quote: any): { valid: boolean; reason?: string; errorCode?: string } {
+  const now = Date.now();
+  if (!quote || typeof quote !== "object") {
+    return { valid: false, reason: "Invalid quote format", errorCode: "INVALID_QUOTE" };
+  }
+  if (!quote.expiresAt || new Date(quote.expiresAt).getTime() < now) {
+    return { valid: false, reason: "Quote has expired", errorCode: "STALE_QUOTE" };
+  }
+  const currentVersion = getAssetConfigVersion();
+  if (quote.assetConfigVersion !== currentVersion) {
+    return { valid: false, reason: "Asset configuration has drifted", errorCode: "CONFIG_DRIFT" };
+  }
+  if (!quote.path || !Array.isArray(quote.path)) {
+    return { valid: false, reason: "Invalid path in quote", errorCode: "ROUTE_MISMATCH" };
+  }
+  const currentRouteHash = computeRouteHash(quote.path);
+  if (quote.routeHash !== currentRouteHash) {
+    return { valid: false, reason: "Route path mismatch", errorCode: "ROUTE_MISMATCH" };
+  }
+  // Check unsupported asset transitions
+  const payload = getZapSupportedAssetsPayload();
+  const supportedIds = new Set([
+    ...payload.assets.map(a => a.contractId),
+    payload.vaultToken.contractId
+  ]);
+  for (const hop of quote.path) {
+    if (!supportedIds.has(hop.contractId)) {
+      return { valid: false, reason: `Asset ${hop.contractId} is no longer supported`, errorCode: "UNSUPPORTED_ASSET" };
+    }
+  }
+  // Check slippage exceeded — reject quotes where applied slippage exceeds maximum threshold
+  if (typeof quote.slippageApplied === "number" && quote.slippageApplied > 0.15) {
+    return { valid: false, reason: `Slippage ${(quote.slippageApplied * 100).toFixed(2)}% exceeds maximum allowed threshold of 15%`, errorCode: "SLIPPAGE_EXCEEDED" };
+  }
+  return { valid: true };
 }

@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from "react";
+import { AlertTriangle, RefreshCw } from "lucide-react";
 import { apiUrl } from "../../lib/api";
 
 interface CorrelationMatrix {
@@ -36,40 +37,81 @@ export default function CorrelationHeatmap() {
   const [data, setData] = useState<CorrelationMatrix | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [retrying, setRetrying] = useState(false);
 
-  useEffect(() => {
-    async function loadData() {
-      try {
-        setLoading(true);
-        const response = await fetch(apiUrl("/api/correlation?window=30"));
-        if (!response.ok) {
-          throw new Error("Unable to fetch correlation data");
-        }
-        const json = await response.json() as CorrelationMatrix;
-        setData(json);
-      } catch (err) {
-        setError(err instanceof Error ? err.message : "Error fetching correlation data");
-      } finally {
-        setLoading(false);
-      }
+  const loadData = async (showLoader = true) => {
+    if (showLoader) {
+      setLoading(true);
     }
 
-    loadData();
+    try {
+      setError(null);
+      const response = await fetch(apiUrl("/api/correlation?window=30"));
+      if (!response.ok) {
+        throw new Error("Unable to fetch correlation data");
+      }
+      const json = (await response.json()) as CorrelationMatrix;
+      setData(json);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Error fetching correlation data");
+    } finally {
+      setLoading(false);
+      setRetrying(false);
+    }
+  };
+
+  useEffect(() => {
+    void loadData();
   }, []);
+
+  const isEmpty = !!data && (data.items.length === 0 || data.matrix.length === 0);
 
   if (loading) {
     return (
-      <div className="glass-card mt-8 p-6 animate-pulse">
-        <div className="h-6 w-1/3 bg-gray-700/50 rounded mb-6"></div>
-        <div className="h-[300px] bg-slate-800/30 rounded-xl"></div>
+      <div className="glass-card mt-8 p-6">
+        <div className="mb-6 h-6 w-1/3 animate-pulse rounded bg-gray-700/50"></div>
+        <div className="h-[260px] w-full rounded-lg border border-white/10 bg-white/[0.02] p-5 sm:h-[300px]">
+          <p className="mb-3 text-sm text-gray-400" role="status">
+            Loading correlation data...
+          </p>
+          <div className="h-full w-full animate-pulse rounded-lg bg-gradient-to-r from-gray-700/30 via-gray-600/30 to-gray-700/30" />
+        </div>
       </div>
     );
   }
 
-  if (error || !data) {
+  if (error) {
     return (
-      <div className="glass-card mt-8 p-6 text-center text-red-400">
-        <p>{error || "Failed to load"}</p>
+      <div className="glass-card mt-8 p-6">
+        <div className="flex h-[260px] w-full flex-col items-center justify-center rounded-lg border border-red-500/30 bg-red-500/10 px-6 py-8 text-center sm:h-[300px]">
+          <AlertTriangle size={24} className="mb-3 text-red-300" />
+          <p className="font-semibold text-red-100">Unable to load correlation data</p>
+          <p className="mt-1 max-w-sm text-sm text-red-200/90">{error}</p>
+          <button
+            type="button"
+            onClick={() => {
+              setRetrying(true);
+              void loadData(false);
+            }}
+            className="btn-secondary mt-4 inline-flex items-center gap-2"
+          >
+            <RefreshCw size={14} className={retrying ? "animate-spin" : ""} />
+            Retry
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  if (!data || isEmpty) {
+    return (
+      <div className="glass-card mt-8 p-6">
+        <div className="flex h-[260px] w-full flex-col items-center justify-center rounded-lg border border-white/10 bg-white/[0.02] px-6 py-8 text-center sm:h-[300px]">
+          <p className="font-semibold text-gray-300">No correlation data available</p>
+          <p className="mt-1 text-sm text-gray-500">
+            There isn&apos;t enough position history yet to compute asset correlations.
+          </p>
+        </div>
       </div>
     );
   }

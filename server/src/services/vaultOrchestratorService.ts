@@ -256,8 +256,11 @@ export class VaultOrchestrator {
       (sum, s) => sum + Math.pow(s.weight, 2),
       0,
     );
-    // Normalize to 0-100 scale
-    return (hhi / (1 / this.config.strategies.length)) * 100;
+    // Normalize to 0-100 scale; clamp to [0,100] for edge cases where HHI > 1/n
+    const n = this.config.strategies.length;
+    const minHhi = n > 0 ? 1 / n : 0;
+    const risk = (hhi / minHhi) * 100;
+    return Math.min(100, Math.max(0, risk));
   }
 
   /**

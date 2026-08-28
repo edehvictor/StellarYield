@@ -134,7 +134,7 @@ export function verifyAuthChallenge(input: {
   }
   const challengeWallet = parts[3];
   const challengeSessionKey = parts[4];
-  const challengeExpiresAt = parts[5];
+  const challengeExpiresAt = parts.slice(5).join(":");
 
   if (challengeWallet !== input.walletAddress) {
     throw new Error("Challenge wallet address mismatch.");

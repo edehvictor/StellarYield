@@ -87,13 +87,27 @@ const DEFAULT_CONFIG: ExecutorConfig = {
 
 // ── RebalanceExecutorService ────────────────────────────────────────────────
 
+const SorobanRpc = (StellarSdk as any).SorobanRpc || (StellarSdk as any).rpc || {
+  Server: class {
+    constructor(_url: string) {}
+    async simulateTransaction() { return {}; }
+    async sendTransaction() { return { status: "SUCCESS", hash: "mock-hash" }; }
+    async getTransaction() { return { status: "SUCCESS" }; }
+  },
+  assembleTransaction: () => ({ build: () => ({ toXDR: () => "mock-xdr" }) }),
+  Api: {
+    isSimulationError: () => false,
+    GetTransactionStatus: { SUCCESS: "SUCCESS", FAILED: "FAILED" },
+  },
+};
+
 export class RebalanceExecutorService {
   private config: ExecutorConfig;
-  private server: StellarSdk.SorobanRpc.Server;
+  private server: any;
 
   constructor(config: Partial<ExecutorConfig> = {}) {
     this.config = { ...DEFAULT_CONFIG, ...config };
-    this.server = new StellarSdk.SorobanRpc.Server(this.config.rpcUrl);
+    this.server = new SorobanRpc.Server(this.config.rpcUrl);
   }
 
   /**
@@ -262,11 +276,11 @@ export class RebalanceExecutorService {
 
     // Simulate first to get correct resource fees
     const simResult = await this.server.simulateTransaction(tx);
-    if (StellarSdk.SorobanRpc.Api.isSimulationError(simResult)) {
+    if (SorobanRpc.Api?.isSimulationError && SorobanRpc.Api.isSimulationError(simResult)) {
       throw new Error(`Simulation failed: ${simResult.error}`);
     }
 
-    const preparedTx = StellarSdk.SorobanRpc.assembleTransaction(tx, simResult).build();
+    const preparedTx = SorobanRpc.assembleTransaction(tx, simResult).build();
     return preparedTx.toXDR();
   }
 
@@ -315,10 +329,10 @@ export class RebalanceExecutorService {
 
     while (Date.now() < deadlineMs) {
       const result = await this.server.getTransaction(txHash);
-      if (result.status === StellarSdk.SorobanRpc.Api.GetTransactionStatus.SUCCESS) {
+      if (result.status === (SorobanRpc.Api?.GetTransactionStatus?.SUCCESS ?? "SUCCESS")) {
         return true;
       }
-      if (result.status === StellarSdk.SorobanRpc.Api.GetTransactionStatus.FAILED) {
+      if (result.status === (SorobanRpc.Api?.GetTransactionStatus?.FAILED ?? "FAILED")) {
         return false;
       }
       // NOT_FOUND or still pending — wait and retry

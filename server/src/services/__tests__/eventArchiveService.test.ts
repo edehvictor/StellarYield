@@ -206,7 +206,12 @@ describe("EventArchiveService", () => {
         compressed,
       );
 
-      expect(decompressed).toEqual(originalEvents);
+      expect(decompressed).toEqual([
+        {
+          ...originalEvents[0],
+          createdAt: originalEvents[0].createdAt.toISOString(),
+        },
+      ]);
     });
 
     it("should handle already uncompressed data", async () => {

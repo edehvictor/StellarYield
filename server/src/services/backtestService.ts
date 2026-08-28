@@ -49,8 +49,8 @@ export function validateBacktestRequest(
 
     errors.push(
       ...requiredErrors.map((e) => ({
-        code: e.code,
-        message: e.message,
+        code: e.details?.field === "vaultContractId" ? "INVALID_VAULT_ID" : e.code,
+        message: e.details?.field === "vaultContractId" ? "Vault contract ID must be a non-empty string" : e.message,
         field: e.details?.field as string,
       })),
     );

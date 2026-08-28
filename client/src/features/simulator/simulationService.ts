@@ -1,3 +1,8 @@
+import type { SimulationWarning } from "../../../../shared/types/simulationWarning";
+
+// Re-export so consumers only need to import from this service.
+export type { SimulationWarning } from "../../../../shared/types/simulationWarning";
+
 export interface SimulationAllocation {
   protocol: string;
   amount: number;
@@ -21,7 +26,7 @@ export interface SimulationResult {
     path: string[];
     expectedOutput: number;
   };
-  warnings: string[];
+  warnings: SimulationWarning[];
 }
 
 export interface SimulationRequestParams {

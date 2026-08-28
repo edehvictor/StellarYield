@@ -27,9 +27,13 @@ export interface ZapQuoteResponse {
   minAmountOutStroops: string;
   quoteAgeMs: number;
   isFallback: boolean;
-  // Safety envelope — added in safety model, optional for backward compat
-  quoteId?: string;
+  // Upstream safety fields (issuedAt/expiresAt/routeHash/version) — merged
+  issuedAt?: string;
   expiresAt?: string;
+  routeHash?: string;
+  assetConfigVersion?: number;
+  // Safety envelope — extended in this branch, optional for backward compat
+  quoteId?: string;
   ttlMs?: number;
   inputTokenContract?: string;
   vaultTokenContract?: string;

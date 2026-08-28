@@ -7,6 +7,7 @@ import { useState, useCallback, useEffect } from "react";
 import {
   ArrowRight,
   AlertCircle,
+  AlertTriangle,
   CheckCircle2,
   Clock,
   XCircle,
@@ -15,7 +16,7 @@ import TxStatusTimeline from "../../components/transaction/TxStatusTimeline";
 import type { TxPhase } from "../../services/transactionPhase";
 import { ExitImpactEstimator } from "../ExitImpactEstimator";
 import { OffRampService } from "./offRampService";
-import type { OffRampTransaction, WithdrawalRequest } from "./types";
+import type { OffRampTransaction, WithdrawalRequest, ResumeValidationResult } from "./types";
 
 export interface OffRampPanelProps {
   walletAddress: string | null;
@@ -37,25 +38,33 @@ export default function OffRampPanel({
   const [currentTxId, setCurrentTxId] = useState<string | null>(null);
   const [transactions, setTransactions] = useState<OffRampTransaction[]>([]);
   const [error, setError] = useState("");
+  const [blockedResume, setBlockedResume] = useState<
+    { transaction: OffRampTransaction; validation: Extract<ResumeValidationResult, { canResume: false }> } | null
+  >(null);
 
   // API key and base URL are managed server-side in /api/offramp proxy.
   const service = new OffRampService("moonpay");
 
-  // Load transaction history and auto-resume pending
+  // Load transaction history and resume a pending transaction — but only
+  // after revalidating expiry, resume metadata, and the connected wallet
+  // (#963). A stale or wallet-mismatched quote surfaces a restart prompt
+  // instead of silently continuing.
   useEffect(() => {
     const history = service.getAllTransactions();
     setTransactions(history);
 
-    // Auto-resume most recent pending transaction if any
-    const pending = history
-      .filter((t) => t.status === "pending")
-      .sort((a, b) => b.createdAt - a.createdAt)[0];
+    if (txPhase !== "idle") return;
 
-    if (pending && txPhase === "idle") {
-      setCurrentTxId(pending.id);
+    const resumable = service.findResumableTransaction(walletAddress);
+    if (!resumable) return;
+
+    if (resumable.validation.canResume) {
+      setCurrentTxId(resumable.transaction.id);
       setTxPhase("polling");
+    } else {
+      setBlockedResume({ transaction: resumable.transaction, validation: resumable.validation });
     }
-  }, [txPhase]);
+  }, [txPhase, walletAddress]);
 
   // Poll current transaction status
   useEffect(() => {
@@ -99,12 +108,14 @@ export default function OffRampPanel({
         bankAccount,
         bankName,
         accountHolder,
+        walletAddress: walletAddress ?? undefined,
       };
 
       setTxPhase("submitting");
       const tx = await service.initiateWithdrawal(request);
       setCurrentTxId(tx.id);
       setTxPhase("polling");
+      setBlockedResume(null);
       setTransactions(service.getAllTransactions());
     } catch (err) {
       setTxPhase("failure");
@@ -149,6 +160,32 @@ export default function OffRampPanel({
 
   return (
     <div className="space-y-6">
+      {/* Blocked resume — restart flow (#963) */}
+      {blockedResume && (
+        <div
+          className="glass-panel p-6 border border-amber-500/30 space-y-3"
+          data-testid="offramp-restart-flow"
+        >
+          <div className="flex items-start gap-3">
+            <AlertTriangle className="w-5 h-5 text-amber-400 shrink-0 mt-0.5" />
+            <div className="flex-1">
+              <p className="font-semibold text-amber-400">
+                Previous withdrawal can't be resumed
+              </p>
+              <p className="text-sm text-gray-400 mt-1">
+                {blockedResume.validation.message}
+              </p>
+            </div>
+          </div>
+          <button
+            onClick={() => setBlockedResume(null)}
+            className="text-sm font-medium text-amber-400 hover:text-amber-300 underline"
+          >
+            Start a new withdrawal
+          </button>
+        </div>
+      )}
+
       {/* Withdrawal Form */}
       <div className="glass-panel p-6 space-y-4">
         <h2 className="text-xl font-semibold">Withdraw to Bank Account</h2>

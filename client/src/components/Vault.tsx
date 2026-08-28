@@ -1,12 +1,16 @@
 import { useEffect, useState } from "react";
 import { useParams, Link } from "react-router-dom";
-import { Landmark, Loader2, AlertCircle, ArrowLeft } from "lucide-react";
+import { Landmark, Loader2, AlertCircle, ArrowLeft, Info } from "lucide-react";
 import { ZapDepositPanel } from "../features/zap";
 import { WithdrawPanel } from "../features/withdraw";
 import { useWallet } from "../context/useWallet";
 import { useVaultOgMeta } from "../hooks/useVaultOgMeta";
+import { useBackendStatus } from "../hooks/useBackendStatus";
+import { useVaultActionAvailability } from "../hooks/useVaultActionAvailability";
+import type { VaultActionAvailabilityMap } from "../hooks/useVaultActionAvailability";
 import { RecoveryAdvisor } from "./AIAdvisor/RecoveryAdvisor";
 import { fetchVaultStats, type VaultStats, formatTvl, validateVaultSlug } from "../lib/vaultData";
+import VaultCapacityWarning, { type VaultCapacityStatus } from "./VaultCapacityWarning";
 
 /**
  * Injects or updates a <meta> tag in document.head.
@@ -24,6 +28,37 @@ function setMetaTag(property: string, content: string): void {
   el.setAttribute("content", content);
 }
 
+// ── Inline tooltip for disabled-action buttons ───────────────────────────
+
+function VaultTooltip({ text, children }: { text: string; children: React.ReactNode }) {
+  if (!text) return <>{children}</>;
+  return (
+    <div className="relative group inline-flex">
+      {children}
+      <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 px-3 py-1.5 rounded-lg bg-gray-900/95 text-white text-xs leading-relaxed shadow-xl opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none whitespace-nowrap z-20 border border-white/10 backdrop-blur-sm max-w-[260px] whitespace-normal text-center">
+        {text}
+      </div>
+    </div>
+  );
+}
+
+// ── Default capacity status (no dedicated capacity API yet) ─────────────
+
+function defaultCapacityStatus(vaultId: string): VaultCapacityStatus {
+  return {
+    vaultId,
+    currentUtilization: 0,
+    isNearCapacity: false,
+    isAtCapacity: false,
+    availableCapacity: BigInt(0),
+    recommendedMaxDeposit: BigInt(0),
+    status: "normal",
+    warnings: [],
+  };
+}
+
+// ── Component ────────────────────────────────────────────────────────────
+
 export default function Vault() {
   const { walletAddress } = useWallet();
   const { slug } = useParams<{ slug?: string }>();
@@ -34,8 +69,20 @@ export default function Vault() {
   const [loading, setLoading] = useState(true);
   const [notFound, setNotFound] = useState(!isSlugValid);
   const [vaultAction, setVaultAction] = useState<"deposit" | "withdraw">("deposit");
+  const [capacity, setCapacity] = useState<VaultCapacityStatus>(() =>
+    defaultCapacityStatus(activeSlug),
+  );
 
+  const backendStatus = useBackendStatus(30_000); // poll every 30s
   const meta = useVaultOgMeta(activeSlug);
+
+  // Compute action availability from wallet, backend, stats, and capacity
+  const availability: VaultActionAvailabilityMap = useVaultActionAvailability({
+    walletAddress,
+    stats,
+    backendStatus,
+    isAtCapacity: capacity.isAtCapacity,
+  });
 
   // Fetch vault stats
   useEffect(() => {
@@ -121,6 +168,58 @@ export default function Vault() {
 
   const isUnavailable = stats && !stats.live;
 
+  // ── Helpers ──────────────────────────────────────────────────────────────
+
+  type VaultTabAction = "deposit" | "withdraw";
+
+  function ActionTab({
+    action,
+    label,
+  }: {
+    action: VaultTabAction;
+    label: string;
+  }) {
+    const avail = availability[action];
+    const active = vaultAction === action;
+    const disabled = !avail.available;
+
+    return (
+      <VaultTooltip text={disabled ? avail.reason ?? "" : ""}>
+        <button
+          type="button"
+          onClick={() => setVaultAction(action)}
+          disabled={disabled}
+          aria-disabled={disabled}
+          aria-label={`${label}${disabled ? ` — ${avail.reason}` : ""}`}
+          className={`px-4 py-2 rounded-lg text-sm font-semibold transition-colors ${
+            active
+              ? "bg-green-500/20 text-green-400"
+              : disabled
+                ? "text-gray-600 cursor-not-allowed"
+                : "text-gray-400 hover:text-white"
+          }`}
+        >
+          {label}
+        </button>
+      </VaultTooltip>
+    );
+  }
+
+  function ActionDisabledBanner({ action }: { action: VaultTabAction }) {
+    const avail = availability[action];
+    if (avail.available) return null;
+
+    return (
+      <div
+        className="mb-4 p-3 rounded-lg bg-amber-500/10 border border-amber-500/30 flex items-start gap-2"
+        role="alert"
+      >
+        <Info className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+        <p className="text-sm text-amber-200 text-left">{avail.reason}</p>
+      </div>
+    );
+  }
+
   return (
     <div className="flex flex-col items-center min-h-[60vh] text-center space-y-6">
       <div className="bg-green-500/20 p-6 rounded-full inline-block mb-4">
@@ -167,34 +266,21 @@ export default function Vault() {
 
       <div className="glass-panel p-8 mt-8 max-w-3xl w-full text-left">
         <div className="flex items-center justify-center gap-2 mb-6">
-          <button
-            type="button"
-            onClick={() => setVaultAction("deposit")}
-            className={`px-4 py-2 rounded-lg text-sm font-semibold transition-colors ${
-              vaultAction === "deposit"
-                ? "bg-green-500/20 text-green-400"
-                : "text-gray-400 hover:text-white"
-            }`}
-          >
-            Deposit
-          </button>
-          <button
-            type="button"
-            onClick={() => setVaultAction("withdraw")}
-            className={`px-4 py-2 rounded-lg text-sm font-semibold transition-colors ${
-              vaultAction === "withdraw"
-                ? "bg-green-500/20 text-green-400"
-                : "text-gray-400 hover:text-white"
-            }`}
-          >
-            Withdraw
-          </button>
+          <ActionTab action="deposit" label="Deposit" />
+          <ActionTab action="withdraw" label="Withdraw" />
         </div>
 
         {vaultAction === "deposit" ? (
-          <ZapDepositPanel walletAddress={walletAddress} />
+          <>
+            <ActionDisabledBanner action="deposit" />
+            <VaultCapacityWarning capacity={capacity} />
+            <ZapDepositPanel walletAddress={walletAddress} />
+          </>
         ) : (
-          <WithdrawPanel walletAddress={walletAddress} />
+          <>
+            <ActionDisabledBanner action="withdraw" />
+            <WithdrawPanel walletAddress={walletAddress} />
+          </>
         )}
       </div>
     </div>

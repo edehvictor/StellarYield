@@ -9,18 +9,78 @@ import {
   Unlink2,
   CheckCircle2,
   AlertCircle,
+  AlertTriangle,
   Loader2,
+  Eye,
+  Wifi,
+  RefreshCw,
+  XCircle,
 } from "lucide-react";
 import { GoogleSheetsService } from "./googleSheetsService";
-import type { GoogleSheetsConfig } from "./types";
-import { GoogleAuthError, GOOGLE_AUTH_MESSAGES } from "./errors";
+import type { GoogleSheetsConfig, DailyYieldMetric } from "./types";
+import type { DryRunSyncSummary } from "./dryRunSync";
+import type { GoogleAuthErrorCode } from "./errors";
+import { GoogleAuthError, GOOGLE_AUTH_MESSAGES, GOOGLE_AUTH_REMEDIATION, GOOGLE_AUTH_REQUIRES_RECONNECT } from "./errors";
 
 export interface GoogleSheetsPanelProps {
   walletAddress: string | null;
+  /** Metrics that would be written on the next sync, used to power the dry-run preview (#962). */
+  pendingMetrics?: DailyYieldMetric[];
+}
+
+// ---------------------------------------------------------------------------
+// Per-code error banner
+// ---------------------------------------------------------------------------
+
+const CODE_ICON: Record<GoogleAuthErrorCode, React.ReactElement> = {
+  OAUTH_DENIED:      <XCircle className="w-5 h-5 text-amber-500 shrink-0" />,
+  TOKEN_EXPIRED:     <RefreshCw className="w-5 h-5 text-amber-500 shrink-0" />,
+  REAUTH_REQUIRED:   <AlertCircle className="w-5 h-5 text-amber-500 shrink-0" />,
+  INSUFFICIENT_SCOPE:<AlertCircle className="w-5 h-5 text-amber-500 shrink-0" />,
+  ACCESS_DENIED:     <AlertTriangle className="w-5 h-5 text-red-500 shrink-0" />,
+  NETWORK_ERROR:     <Wifi className="w-5 h-5 text-yellow-500 shrink-0" />,
+};
+
+const CODE_TITLE: Record<GoogleAuthErrorCode, string> = {
+  OAUTH_DENIED:       "Sign-In Cancelled",
+  TOKEN_EXPIRED:      "Session Expired",
+  REAUTH_REQUIRED:    "Reconnection Required",
+  INSUFFICIENT_SCOPE: "Missing Sheets Permission",
+  ACCESS_DENIED:      "Access Denied",
+  NETWORK_ERROR:      "Network Error",
+};
+
+function AuthErrorBanner({
+  code,
+  onReconnect,
+}: {
+  code: GoogleAuthErrorCode;
+  onReconnect: () => void;
+}) {
+  const canReconnect = GOOGLE_AUTH_REQUIRES_RECONNECT[code];
+  return (
+    <div className="flex items-start gap-3 p-4 mb-4 bg-amber-500/10 border border-amber-500/30 rounded-lg">
+      {CODE_ICON[code]}
+      <div className="flex-1 min-w-0">
+        <p className="font-semibold text-amber-400">{CODE_TITLE[code]}</p>
+        <p className="text-sm text-gray-300 mt-0.5">{GOOGLE_AUTH_MESSAGES[code]}</p>
+        <p className="text-xs text-gray-400 mt-1">{GOOGLE_AUTH_REMEDIATION[code]}</p>
+      </div>
+      {canReconnect && (
+        <button
+          onClick={onReconnect}
+          className="shrink-0 px-3 py-1.5 text-sm bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 rounded-lg whitespace-nowrap"
+        >
+          Reconnect
+        </button>
+      )}
+    </div>
+  );
 }
 
 export default function GoogleSheetsPanel({
   walletAddress,
+  pendingMetrics,
 }: GoogleSheetsPanelProps) {
   const [config, setConfig] = useState<GoogleSheetsConfig | null>(null);
   const [spreadsheetId, setSpreadsheetId] = useState("");
@@ -31,6 +91,11 @@ export default function GoogleSheetsPanel({
   const [authStatus, setAuthStatus] = useState<
     "connected" | "expired" | "missing_scope" | "not_connected"
   >("not_connected");
+  const [activeErrorCode, setActiveErrorCode] = useState<GoogleAuthErrorCode | null>(null);
+  const [dryRunSummary, setDryRunSummary] = useState<DryRunSyncSummary | null>(null);
+  const [dryRunLoading, setDryRunLoading] = useState(false);
+  const [dryRunError, setDryRunError] = useState("");
+  const [dryRunErrorCode, setDryRunErrorCode] = useState<GoogleAuthErrorCode | null>(null);
 
   // Only the public client_id is needed here; the client secret lives
   // server-side inside /api/google-sheets/token (process.env.GOOGLE_CLIENT_SECRET).
@@ -58,6 +123,7 @@ export default function GoogleSheetsPanel({
 
     setError("");
     setSuccess("");
+    setActiveErrorCode(null);
     setLoading(true);
 
     try {
@@ -69,6 +135,7 @@ export default function GoogleSheetsPanel({
     } catch (err) {
       if (err instanceof GoogleAuthError) {
         setAuthStatus(service.getAuthStatus());
+        setActiveErrorCode(err.code);
         setError(GOOGLE_AUTH_MESSAGES[err.code] ?? err.message);
       } else {
         setError(
@@ -89,6 +156,32 @@ export default function GoogleSheetsPanel({
     }
   }, []);
 
+  const handlePreviewSync = useCallback(async () => {
+    if (!pendingMetrics || pendingMetrics.length === 0) return;
+
+    setDryRunError("");
+    setDryRunErrorCode(null);
+    setDryRunSummary(null);
+    setDryRunLoading(true);
+
+    try {
+      const summary = await service.previewSync(pendingMetrics);
+      setDryRunSummary(summary);
+    } catch (err) {
+      if (err instanceof GoogleAuthError) {
+        setAuthStatus(service.getAuthStatus());
+        setDryRunErrorCode(err.code);
+        setDryRunError(GOOGLE_AUTH_MESSAGES[err.code] ?? err.message);
+      } else {
+        setDryRunError(
+          err instanceof Error ? err.message : "Failed to preview sync",
+        );
+      }
+    } finally {
+      setDryRunLoading(false);
+    }
+  }, [pendingMetrics]);
+
   return (
     <div className="space-y-6">
       {/* Status Card */}
@@ -97,40 +190,18 @@ export default function GoogleSheetsPanel({
           Google Sheets Integration
         </h2>
 
-        {authStatus === "expired" && (
-          <div className="flex items-center gap-3 p-4 mb-4 bg-amber-500/10 border border-amber-500/30 rounded-lg">
-            <AlertCircle className="w-5 h-5 text-amber-500 shrink-0" />
-            <div className="flex-1">
-              <p className="font-semibold text-amber-400">Session Expired</p>
-              <p className="text-sm text-gray-400">
-                {GOOGLE_AUTH_MESSAGES.REAUTH_REQUIRED}
-              </p>
-            </div>
-            <button
-              onClick={handleConnectGoogle}
-              className="px-3 py-1.5 text-sm bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 rounded-lg"
-            >
-              Reconnect
-            </button>
-          </div>
-        )}
-
-        {authStatus === "missing_scope" && (
-          <div className="flex items-center gap-3 p-4 mb-4 bg-amber-500/10 border border-amber-500/30 rounded-lg">
-            <AlertCircle className="w-5 h-5 text-amber-500 shrink-0" />
-            <div className="flex-1">
-              <p className="font-semibold text-amber-400">Missing Sheets Permission</p>
-              <p className="text-sm text-gray-400">
-                {GOOGLE_AUTH_MESSAGES.INSUFFICIENT_SCOPE}
-              </p>
-            </div>
-            <button
-              onClick={handleConnectGoogle}
-              className="px-3 py-1.5 text-sm bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 rounded-lg"
-            >
-              Reconnect
-            </button>
-          </div>
+        {/* Unified auth error banner — renders for any GoogleAuthErrorCode */}
+        {activeErrorCode ? (
+          <AuthErrorBanner code={activeErrorCode} onReconnect={handleConnectGoogle} />
+        ) : (
+          <>
+            {authStatus === "expired" && (
+              <AuthErrorBanner code="REAUTH_REQUIRED" onReconnect={handleConnectGoogle} />
+            )}
+            {authStatus === "missing_scope" && (
+              <AuthErrorBanner code="INSUFFICIENT_SCOPE" onReconnect={handleConnectGoogle} />
+            )}
+          </>
         )}
 
         {config?.isLinked ? (
@@ -184,6 +255,84 @@ export default function GoogleSheetsPanel({
               every night at 12:00 AM UTC.
             </p>
           </div>
+
+          {pendingMetrics && pendingMetrics.length > 0 && (
+            <div className="space-y-3" data-testid="dry-run-section">
+              <button
+                onClick={() => void handlePreviewSync()}
+                disabled={dryRunLoading}
+                className="w-full flex items-center justify-center gap-2 px-4 py-2.5 bg-white/5 hover:bg-white/10 border border-white/10 disabled:opacity-50 text-white rounded-lg font-medium"
+              >
+                {dryRunLoading ? (
+                  <>
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                    Previewing sync...
+                  </>
+                ) : (
+                  <>
+                    <Eye className="w-4 h-4" />
+                    Preview Sync ({pendingMetrics.length} row
+                    {pendingMetrics.length !== 1 ? "s" : ""})
+                  </>
+                )}
+              </button>
+
+              {dryRunError && (
+                <div className="space-y-1">
+                  {dryRunErrorCode ? (
+                    <AuthErrorBanner code={dryRunErrorCode} onReconnect={handleConnectGoogle} />
+                  ) : (
+                    <div className="flex items-center gap-2 p-3 bg-red-500/10 border border-red-500/30 rounded-lg">
+                      <AlertCircle className="w-5 h-5 text-red-500" />
+                      <span className="text-sm text-red-400">{dryRunError}</span>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {dryRunSummary && (
+                <div
+                  className="p-4 bg-black/30 border border-white/10 rounded-lg space-y-3"
+                  data-testid="dry-run-summary"
+                >
+                  <p className="text-sm font-semibold text-gray-200">
+                    Dry-run preview — nothing has been written yet
+                  </p>
+                  <div className="grid grid-cols-2 gap-2 text-sm">
+                    <div className="flex items-center justify-between px-3 py-2 bg-green-500/10 border border-green-500/20 rounded-lg">
+                      <span className="text-green-400">Added</span>
+                      <span className="font-mono text-green-300">{dryRunSummary.added.length}</span>
+                    </div>
+                    <div className="flex items-center justify-between px-3 py-2 bg-blue-500/10 border border-blue-500/20 rounded-lg">
+                      <span className="text-blue-400">Updated</span>
+                      <span className="font-mono text-blue-300">{dryRunSummary.updated.length}</span>
+                    </div>
+                    <div className="flex items-center justify-between px-3 py-2 bg-gray-500/10 border border-gray-500/20 rounded-lg">
+                      <span className="text-gray-400">Skipped</span>
+                      <span className="font-mono text-gray-300">{dryRunSummary.skipped.length}</span>
+                    </div>
+                    <div className="flex items-center justify-between px-3 py-2 bg-amber-500/10 border border-amber-500/20 rounded-lg">
+                      <span className="text-amber-400">Conflicted</span>
+                      <span className="font-mono text-amber-300">{dryRunSummary.conflicted.length}</span>
+                    </div>
+                  </div>
+
+                  {dryRunSummary.conflicted.length > 0 && (
+                    <div className="flex items-start gap-2 p-3 bg-amber-500/10 border border-amber-500/30 rounded-lg">
+                      <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+                      <p className="text-xs text-amber-300">
+                        {dryRunSummary.conflicted.length} row
+                        {dryRunSummary.conflicted.length !== 1 ? "s" : ""} disagree
+                        with data already in the sheet and will be skipped by a
+                        real sync. Resolve them in the spreadsheet before
+                        committing.
+                      </p>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
         </div>
       ) : (
         <div className="glass-panel p-6 space-y-4">
@@ -220,9 +369,15 @@ export default function GoogleSheetsPanel({
           </div>
 
           {error && (
-            <div className="flex items-center gap-2 p-3 bg-red-500/10 border border-red-500/30 rounded-lg">
-              <AlertCircle className="w-5 h-5 text-red-500" />
-              <span className="text-sm text-red-400">{error}</span>
+            <div>
+              {activeErrorCode ? (
+                <AuthErrorBanner code={activeErrorCode} onReconnect={handleConnectGoogle} />
+              ) : (
+                <div className="flex items-center gap-2 p-3 bg-red-500/10 border border-red-500/30 rounded-lg">
+                  <AlertCircle className="w-5 h-5 text-red-500" />
+                  <span className="text-sm text-red-400">{error}</span>
+                </div>
+              )}
             </div>
           )}
 

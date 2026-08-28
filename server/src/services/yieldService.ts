@@ -1,20 +1,35 @@
 import computeConfidence from './confidenceService';
+import {
+  yieldQuorumService,
+  type QuorumStatus,
+  type ProviderReadingInput,
+} from './yieldQuorumService';
 
-type ProviderReading = { provider: string; apy?: number; weight?: number };
+export type ProviderReading = ProviderReadingInput;
 
-export function aggregateApy(readings: ProviderReading[]) {
+export function aggregateApy(readings: ProviderReading[], protocol: string = 'default') {
   const reasons: string[] = [];
+  const quorumStatus = yieldQuorumService.evaluateQuorum(protocol, readings);
+
   if (!readings || readings.length === 0) {
     reasons.push('no_readings');
-    return { consensusApy: null, confidence: { score: 0, reasons } };
+    return {
+      consensusApy: null,
+      confidence: { score: 0, reasons: Array.from(new Set([...reasons, ...quorumStatus.reasons])) },
+      quorumStatus,
+    };
   }
 
   // Step 1: normalize weights and filter missing
   const available = readings.map((r) => ({ ...r }));
-  const present = available.filter((r) => typeof r.apy === 'number');
+  const present = available.filter((r) => typeof r.apy === 'number' && !Number.isNaN(r.apy));
   if (present.length === 0) {
     reasons.push('missing_all_apy');
-    return { consensusApy: null, confidence: { score: 0, reasons } };
+    return {
+      consensusApy: null,
+      confidence: { score: 0, reasons: Array.from(new Set([...reasons, ...quorumStatus.reasons])) },
+      quorumStatus,
+    };
   }
 
   const totalRaw = present.reduce((s, p) => s + (p.weight ?? 1), 0);
@@ -49,9 +64,17 @@ export function aggregateApy(readings: ProviderReading[]) {
   if (present.length < 2) reasons.push('single_provider');
 
   const confidence = computeConfidence(readings, consensusApy);
+
+  // Step 4: Enforce Quorum Policy - degrade confidence if quorum is not met
+  if (!quorumStatus.isMet) {
+    reasons.push(...quorumStatus.reasons);
+    // Degrade score by multiplying by 0.5 and subtracting a 15-point penalty
+    confidence.score = Math.max(0, Math.round(confidence.score * 0.5 - 15));
+  }
+
   confidence.reasons = Array.from(new Set([...reasons, ...confidence.reasons]));
 
-  return { consensusApy, confidence };
+  return { consensusApy, confidence, quorumStatus };
 }
 
 export default aggregateApy;
@@ -168,22 +191,28 @@ export async function getYieldData(): Promise<NormalizedYield[]> {
     }
 
     const fallback = normalizeYields(
-      PROTOCOLS.map((protocol) => ({
-        protocolName: protocol.protocolName,
-        protocolType: protocol.protocolType,
-        apyBps: protocol.baseApyBps,
-        tvlUsd: protocol.baseTvlUsd,
-        volatilityPct: protocol.volatilityPct,
-        protocolAgeDays: protocol.protocolAgeDays,
-        network: "mainnet",
-        source: protocol.source,
+      PROTOCOLS.map((p) => ({
+        protocolName: p.protocolName,
+        protocolType: p.protocolType,
+        apyBps: p.baseApyBps,
+        tvlUsd: p.baseTvlUsd,
+        volatilityPct: p.volatilityPct,
+        protocolAgeDays: p.protocolAgeDays,
+        network: "testnet",
+        source: p.source,
         fetchedAt: new Date().toISOString(),
-        liquidityUsd: protocol.liquidityUsd,
-        rebalancingBehavior: protocol.rebalancingBehavior,
-        managementFeeBps: protocol.managementFeeBps,
-        performanceFeeBps: protocol.performanceFeeBps,
-        capitalEfficiencyPct: protocol.capitalEfficiencyPct,
-        rewards: protocol.rewardStreams,
+        liquidityUsd: p.liquidityUsd,
+        rebalancingBehavior: p.rebalancingBehavior,
+        managementFeeBps: p.managementFeeBps,
+        performanceFeeBps: p.performanceFeeBps,
+        capitalEfficiencyPct: p.capitalEfficiencyPct,
+        rewards: p.rewardStreams || [],
+        attribution: {
+          baseYield: (p.baseApyBps / 100) * 0.8,
+          incentives: (p.baseApyBps / 100) * 0.1,
+          compounding: (p.baseApyBps / 100) * 0.05,
+          tacticalRotation: (p.baseApyBps / 100) * 0.05,
+        },
       })),
     );
 

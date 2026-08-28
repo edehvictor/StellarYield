@@ -122,6 +122,8 @@ const GovernanceForecast: React.FC = () => {
           <h3 className="text-2xl font-bold">Proposal Impact Forecast</h3>
           <p className="text-gray-400 text-sm">
             Model expected changes to yield, exposure, fees, and proposal risk before voting.
+            On-chain optimistic proposals can only execute at or after the challenge-window end
+            (`execution_time`); disputes must land strictly before that boundary.
           </p>
         </div>
       </div>

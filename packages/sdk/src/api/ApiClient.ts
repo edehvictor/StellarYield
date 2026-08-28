@@ -1,4 +1,5 @@
-import type { ApiConfig, ApiVaultData, HistoricalDataPoint } from "../types";
+import type { ApiConfig, ApiRequestOptions, ApiVaultData, HistoricalDataPoint } from "../types";
+import { ApiHttpError, ApiNetworkError, ApiTimeoutError } from "../errors";
 
 export interface ApiRegisteredEndpoint {
   method: "GET" | "POST" | "PUT" | "DELETE" | "PATCH";
@@ -17,15 +18,41 @@ export interface YieldItem {
   risk?: string;
 }
 
+const DEFAULT_TIMEOUT_MS = 15_000;
+const DEFAULT_MAX_RETRIES = 2;
+const DEFAULT_RETRY_DELAY_MS = 250;
+const DEFAULT_RETRYABLE_STATUSES = [408, 429, 500, 502, 503, 504];
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isIdempotentMethod(method: string | undefined): boolean {
+  const m = (method ?? "GET").toUpperCase();
+  return m === "GET" || m === "HEAD" || m === "OPTIONS";
+}
+
 /**
  * ApiClient provides methods to interact with the StellarYield backend API.
  * Every endpoint maps directly to an entry in server/openapi.yaml.
+ *
+ * Transient failures (timeouts, network errors, retryable HTTP statuses) are
+ * retried according to {@link ApiConfig}. Non-idempotent methods are only
+ * retried when explicitly marked `retrySafe`.
  */
 export class ApiClient {
   private config: ApiConfig;
+  private readonly timeoutMs: number;
+  private readonly maxRetries: number;
+  private readonly retryDelayMs: number;
+  private readonly retryableStatuses: Set<number>;
 
   constructor(config: ApiConfig) {
     this.config = config;
+    this.timeoutMs = config.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+    this.maxRetries = config.maxRetries ?? DEFAULT_MAX_RETRIES;
+    this.retryDelayMs = config.retryDelayMs ?? DEFAULT_RETRY_DELAY_MS;
+    this.retryableStatuses = new Set(config.retryableStatuses ?? DEFAULT_RETRYABLE_STATUSES);
   }
 
   public getRegisteredEndpoints(): ApiRegisteredEndpoint[] {
@@ -42,13 +69,77 @@ export class ApiClient {
     ];
   }
 
-  private async request<T>(path: string, options?: RequestInit): Promise<T> {
-    const url = `${this.config.baseUrl}${path}`;
-    const response = await fetch(url, options);
-    if (!response.ok) {
-      throw new Error(`API error (${response.status} ${response.statusText}) at ${path}`);
+  private async request<T>(
+    path: string,
+    options?: RequestInit,
+    requestOptions?: ApiRequestOptions
+  ): Promise<T> {
+    const method = options?.method ?? "GET";
+    const mayRetry =
+      isIdempotentMethod(method) || requestOptions?.retrySafe === true;
+
+    let lastError: Error | undefined;
+
+    for (let attempt = 0; attempt <= this.maxRetries; attempt++) {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), this.timeoutMs);
+
+      try {
+        const response = await fetch(`${this.config.baseUrl}${path}`, {
+          ...options,
+          signal: controller.signal,
+        });
+
+        if (!response.ok) {
+          const retryable = this.retryableStatuses.has(response.status);
+          const err = new ApiHttpError(path, response.status, response.statusText, retryable);
+          if (mayRetry && retryable && attempt < this.maxRetries) {
+            lastError = err;
+            await sleep(this.retryDelayMs * Math.pow(2, attempt));
+            continue;
+          }
+          throw err;
+        }
+
+        return (await response.json()) as T;
+      } catch (err) {
+        if (err instanceof ApiHttpError) {
+          throw err;
+        }
+
+        const normalized = this.normalizeFetchError(path, err);
+        if (mayRetry && normalized.retryable && attempt < this.maxRetries) {
+          lastError = normalized;
+          await sleep(this.retryDelayMs * Math.pow(2, attempt));
+          continue;
+        }
+        throw normalized;
+      } finally {
+        clearTimeout(timer);
+      }
     }
-    return response.json() as Promise<T>;
+
+    throw lastError ?? new ApiNetworkError(path);
+  }
+
+  private normalizeFetchError(path: string, err: unknown): ApiTimeoutError | ApiNetworkError {
+    if (err instanceof ApiTimeoutError || err instanceof ApiNetworkError) {
+      return err;
+    }
+
+    const name = err instanceof Error ? err.name : "";
+    const message = err instanceof Error ? err.message.toLowerCase() : String(err).toLowerCase();
+
+    if (
+      name === "AbortError" ||
+      message.includes("aborted") ||
+      message.includes("timeout") ||
+      message.includes("timed out")
+    ) {
+      return new ApiTimeoutError(path, this.timeoutMs);
+    }
+
+    return new ApiNetworkError(path, err);
   }
 
   async getHealth(): Promise<{ database?: string; redis?: string; indexer?: string; horizon?: string }> {
@@ -79,7 +170,7 @@ export class ApiClient {
     return match ? (match.tvl ?? match.tvlUsd ?? 0) : 0;
   }
 
-  async getHistoricalData(vaultId: string, days: number = 30): Promise<HistoricalDataPoint[]> {
+  async getHistoricalData(_vaultId: string, _days: number = 30): Promise<HistoricalDataPoint[]> {
     return this.getYieldHistory();
   }
 
@@ -117,6 +208,7 @@ export class ApiClient {
   }
 
   async claimReferral(address: string): Promise<{ amount: string; txHash: string }> {
+    // POST is non-idempotent — never retried unless callers opt in later.
     return this.request<{ amount: string; txHash: string }>("/api/referrals/claim", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -125,11 +217,16 @@ export class ApiClient {
   }
 
   async getZapQuote(fromAsset: string, toAsset: string, amount: string): Promise<any> {
-    return this.request<any>("/api/zap/quote", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ fromAsset, toAsset, amount }),
-    });
+    // Quote POST is safe to retry (read-only side effects).
+    return this.request<any>(
+      "/api/zap/quote",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ fromAsset, toAsset, amount }),
+      },
+      { retrySafe: true }
+    );
   }
 
   async getZapSupportedAssets(): Promise<{ code: string; issuer?: string; name?: string }[]> {

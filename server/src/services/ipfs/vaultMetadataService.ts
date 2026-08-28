@@ -40,14 +40,52 @@ export function sanitizeSvg(svg: string): string {
     throw new Error("iconSvg must be a valid SVG string");
   }
 
-  // Validate icon asset before sanitization
-  validateIconAssetOrThrow(normalized, "image/svg+xml", DEFAULT_ICON_CONFIG);
-
   return normalized
     .replace(/<script[\s\S]*?>[\s\S]*?<\/script>/gi, "")
     .replace(/\son\w+="[^"]*"/gi, "")
     .replace(/\son\w+='[^']*'/gi, "")
     .replace(/javascript:/gi, "");
+}
+
+export interface ValidationResult {
+  ok: boolean;
+  errors: string[];
+}
+
+/**
+ * Validate a VaultMetadataInput object, returning a structured result.
+ * Returns { ok: true } on success, or { ok: false, errors: [...] } on failure.
+ */
+export function validateVaultMetadataInput(input: unknown): ValidationResult {
+  const errors: string[] = [];
+
+  if (input === null || input === undefined || typeof input !== "object") {
+    return { ok: false, errors: ["Input must be a non-null object"] };
+  }
+
+  const p = input as Record<string, unknown>;
+
+  if (!p.vaultName || typeof p.vaultName !== "string" || (p.vaultName as string).trim() === "") {
+    errors.push("vaultName is required");
+  }
+
+  if (!p.description || typeof p.description !== "string" || (p.description as string).trim() === "") {
+    errors.push("description is required");
+  }
+
+  if (!p.iconSvg || typeof p.iconSvg !== "string" || (p.iconSvg as string).trim() === "") {
+    errors.push("iconSvg is required");
+  } else {
+    const svg = p.iconSvg as string;
+    if (!svg.includes("<svg")) {
+      errors.push("iconSvg must be a valid SVG string");
+    }
+  }
+
+  return {
+    ok: errors.length === 0,
+    errors,
+  };
 }
 
 function makeDeterministicCid(seed: string): string {
@@ -87,35 +125,38 @@ async function uploadSvgToPinata(svg: string, pinataJwt: string): Promise<string
 
   const data = (await response.json()) as { IpfsHash?: string };
   if (!data.IpfsHash) {
-    throw new Error("Pinata SVG upload did not return IpfsHash");
+    throw new Error("Pinata SVG upload failed: missing IpfsHash in response");
   }
 
   return data.IpfsHash;
 }
 
 async function uploadJsonToPinata(
-  metadata: VaultMetadataPayload,
+  payload: VaultMetadataPayload,
   pinataJwt: string,
 ): Promise<string> {
   const response = await fetch(PINATA_JSON_API, {
     method: "POST",
     headers: {
-      Authorization: `Bearer ${pinataJwt}`,
       "Content-Type": "application/json",
+      Authorization: `Bearer ${pinataJwt}`,
     },
     body: JSON.stringify({
-      pinataContent: metadata,
+      pinataContent: payload,
+      pinataMetadata: {
+        name: `vault-metadata-${payload.name}.json`,
+      },
     }),
   });
 
   if (!response.ok) {
     const text = await response.text();
-    throw new Error(`Pinata metadata upload failed: ${response.status} ${text}`);
+    throw new Error(`Pinata JSON upload failed: ${response.status} ${text}`);
   }
 
   const data = (await response.json()) as { IpfsHash?: string };
   if (!data.IpfsHash) {
-    throw new Error("Pinata metadata upload did not return IpfsHash");
+    throw new Error("Pinata JSON upload failed: missing IpfsHash in response");
   }
 
   return data.IpfsHash;
@@ -124,6 +165,7 @@ async function uploadJsonToPinata(
 export async function uploadVaultMetadata(
   input: VaultMetadataInput,
 ): Promise<UploadVaultMetadataResult> {
+  validateIconAssetOrThrow(input.iconSvg, "image/svg+xml", DEFAULT_ICON_CONFIG);
   const sanitizedSvg = sanitizeSvg(input.iconSvg);
   const pinataJwt = process.env.PINATA_JWT?.trim();
 

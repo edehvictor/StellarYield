@@ -186,4 +186,35 @@ describe("getSourceHealthRegistry", () => {
       );
     }
   });
+
+  it("includes cacheAge, cacheVersion, and lastInvalidatedAt diagnostics", async () => {
+    const registry = await getSourceHealthRegistry();
+
+    // cacheAge is 0 on first call (freshly generated)
+    expect(registry.cacheAge).toBe(0);
+
+    // cacheVersion is a positive integer
+    expect(typeof registry.cacheVersion).toBe("number");
+    expect(registry.cacheVersion).toBeGreaterThan(0);
+
+    // lastInvalidatedAt is a valid ISO timestamp
+    expect(typeof registry.lastInvalidatedAt).toBe("string");
+    expect(new Date(registry.lastInvalidatedAt).toString()).not.toBe("Invalid Date");
+  });
+
+  it("increments cacheVersion and includes cacheAge on subsequent calls", async () => {
+    // Clear cache between tests to get a fresh start
+    const registry1 = await getSourceHealthRegistry();
+    expect(registry1.cacheAge).toBe(0);
+    const v1 = registry1.cacheVersion;
+
+    // Second call within TTL should return cached version with non-zero age
+    const registry2 = await getSourceHealthRegistry();
+    expect(registry2.cacheVersion).toBe(v1);
+    expect(registry2.cacheAge).toBeGreaterThanOrEqual(0);
+    expect(registry2.totalSources).toBe(registry1.totalSources);
+
+    // Verify sources are consistent between calls
+    expect(registry2.sources.length).toBe(registry1.sources.length);
+  });
 });

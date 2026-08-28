@@ -6,7 +6,7 @@
  * and chart label rendering.
  */
 
-import { predictApy, ema, linearRegression } from "../../analytics/apyPredictor";
+import { predictApy, ema, linearRegression } from "../analytics/apyPredictor";
 
 function makeHistory(baseApy: number, days = 14) {
   const now = new Date();

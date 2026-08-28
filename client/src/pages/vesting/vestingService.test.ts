@@ -15,7 +15,9 @@ import {
     claimedPercent,
     fetchVestingSchedule,
     claimVested,
+    normalizeVestingSchedule,
     type VestingSchedule,
+    type RawVestingScheduleFields,
 } from "./vestingService";
 
 // ── formatTokens ─────────────────────────────────────────────────────────
@@ -140,5 +142,144 @@ describe("claimVested (no contract configured)", () => {
     it("error message mentions the contract is not configured", async () => {
         const result = await claimVested("GADDRTEST0000000000000000000000000000000");
         expect(result.error).toMatch(/not configured/i);
+    });
+});
+
+// ── normalizeVestingSchedule ───────────────────────────────────────────────
+//
+// Deterministic normalization: the same raw input must always produce the
+// same output, regardless of field encoding (bigint/number/string) or
+// malformed/out-of-order data returned by the contract.
+
+describe("normalizeVestingSchedule", () => {
+    const wellFormed: RawVestingScheduleFields = {
+        total_allocation: 1_000n,
+        vested_amount: 400n,
+        claimed_amount: 150n,
+        cliff_timestamp: 1_000_000n,
+        end_timestamp: 2_000_000n,
+        next_unlock_timestamp: 1_500_000n,
+        start_timestamp: 500_000n,
+    };
+
+    it("normalizes well-formed bigint fields", () => {
+        expect(normalizeVestingSchedule(wellFormed)).toEqual<VestingSchedule>({
+            totalAllocation: 1_000n,
+            vestedAmount: 400n,
+            claimedAmount: 150n,
+            claimableAmount: 250n,
+            cliffTimestamp: 1_000_000,
+            endTimestamp: 2_000_000,
+            nextUnlockTimestamp: 1_500_000,
+            startTimestamp: 500_000,
+        });
+    });
+
+    it("is deterministic across repeated calls with the same input", () => {
+        const first = normalizeVestingSchedule(wellFormed);
+        const second = normalizeVestingSchedule(wellFormed);
+        expect(second).toEqual(first);
+    });
+
+    it("accepts string-encoded amounts and timestamps", () => {
+        const raw: RawVestingScheduleFields = {
+            total_allocation: "1000",
+            vested_amount: "400",
+            claimed_amount: "150",
+            cliff_timestamp: "1000000",
+            end_timestamp: "2000000",
+            next_unlock_timestamp: "1500000",
+            start_timestamp: "500000",
+        };
+        expect(normalizeVestingSchedule(raw)).toEqual(normalizeVestingSchedule(wellFormed));
+    });
+
+    it("accepts number-encoded amounts and timestamps", () => {
+        const raw: RawVestingScheduleFields = {
+            total_allocation: 1000,
+            vested_amount: 400,
+            claimed_amount: 150,
+            cliff_timestamp: 1_000_000,
+            end_timestamp: 2_000_000,
+            next_unlock_timestamp: 1_500_000,
+            start_timestamp: 500_000,
+        };
+        expect(normalizeVestingSchedule(raw)).toEqual(normalizeVestingSchedule(wellFormed));
+    });
+
+    it("defaults missing fields to zero", () => {
+        expect(normalizeVestingSchedule({})).toEqual<VestingSchedule>({
+            totalAllocation: 0n,
+            vestedAmount: 0n,
+            claimedAmount: 0n,
+            claimableAmount: 0n,
+            cliffTimestamp: 0,
+            endTimestamp: 0,
+            nextUnlockTimestamp: 0,
+            startTimestamp: 0,
+        });
+    });
+
+    it("clamps negative amounts to zero", () => {
+        const raw: RawVestingScheduleFields = {
+            total_allocation: -1_000n,
+            vested_amount: -400n,
+            claimed_amount: -150n,
+        };
+        const result = normalizeVestingSchedule(raw);
+        expect(result.totalAllocation).toBe(0n);
+        expect(result.vestedAmount).toBe(0n);
+        expect(result.claimedAmount).toBe(0n);
+        expect(result.claimableAmount).toBe(0n);
+    });
+
+    it("clamps vestedAmount so it never exceeds totalAllocation", () => {
+        const raw: RawVestingScheduleFields = {
+            total_allocation: 100n,
+            vested_amount: 500n,
+            claimed_amount: 0n,
+        };
+        const result = normalizeVestingSchedule(raw);
+        expect(result.vestedAmount).toBe(100n);
+        expect(result.claimableAmount).toBe(100n);
+    });
+
+    it("clamps claimedAmount so it never exceeds vestedAmount", () => {
+        const raw: RawVestingScheduleFields = {
+            total_allocation: 1_000n,
+            vested_amount: 200n,
+            claimed_amount: 900n,
+        };
+        const result = normalizeVestingSchedule(raw);
+        expect(result.claimedAmount).toBe(200n);
+        expect(result.claimableAmount).toBe(0n);
+    });
+
+    it("floors claimableAmount at zero when claimed exceeds vested pre-clamp", () => {
+        const raw: RawVestingScheduleFields = {
+            total_allocation: 1_000n,
+            vested_amount: 300n,
+            claimed_amount: 300n,
+        };
+        expect(normalizeVestingSchedule(raw).claimableAmount).toBe(0n);
+    });
+
+    it("falls back to zero for non-numeric garbage strings", () => {
+        const raw: RawVestingScheduleFields = {
+            total_allocation: "not-a-number",
+            vested_amount: "NaN",
+            cliff_timestamp: "not-a-timestamp",
+        };
+        const result = normalizeVestingSchedule(raw);
+        expect(result.totalAllocation).toBe(0n);
+        expect(result.vestedAmount).toBe(0n);
+        expect(result.cliffTimestamp).toBe(0);
+    });
+
+    it("truncates fractional timestamp values", () => {
+        const raw: RawVestingScheduleFields = {
+            cliff_timestamp: 1_000_000.9,
+        };
+        expect(normalizeVestingSchedule(raw).cliffTimestamp).toBe(1_000_000);
     });
 });

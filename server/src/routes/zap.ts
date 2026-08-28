@@ -1,6 +1,6 @@
 import { Router, Request, Response } from "express";
 import { getZapSupportedAssetsPayload } from "../config/zapAssetsConfig";
-import { getZapQuote, verifyQuoteForExecution, isQuoteExpired, type ZapQuoteBody } from "../services/zapQuote";
+import { getZapQuote, verifyQuoteForExecution, verifyZapQuote, isQuoteExpired, type ZapQuoteBody } from "../services/zapQuote";
 import { freezeService } from "../services/freezeService";
 import { sendError } from "../utils/errorResponse";
 import { validateZapQuote } from "../middleware/validation";
@@ -46,9 +46,13 @@ router.post("/quote", validateZapQuote, async (req: Request, res: Response) => {
       minAmountOutStroops: quote.minAmountOutStroops,
       quoteAgeMs: quote.quoteAgeMs,
       isFallback: quote.isFallback,
-      // Safety envelope — new fields (backward compatible: old clients ignore)
-      quoteId: quote.quoteId,
+      // Upstream fields
+      issuedAt: quote.issuedAt,
       expiresAt: quote.expiresAt,
+      routeHash: quote.routeHash,
+      assetConfigVersion: quote.assetConfigVersion,
+      // Safety envelope — extended (backward compatible: old clients ignore)
+      quoteId: quote.quoteId,
       ttlMs: quote.ttlMs,
       inputTokenContract: quote.inputTokenContract,
       vaultTokenContract: quote.vaultTokenContract,
@@ -80,6 +84,7 @@ router.post("/quote", validateZapQuote, async (req: Request, res: Response) => {
 
 router.post("/verify", async (req: Request, res: Response) => {
   try {
+    // Branch 1: our quoteId-based verification (fine-grained, with freeze/route binding)
     const {
       quoteId,
       inputTokenContract,
@@ -96,42 +101,59 @@ router.post("/verify", async (req: Request, res: Response) => {
       path?: { contractId: string }[];
     };
 
-    if (!quoteId || typeof quoteId !== "string") {
-      sendError(res, 400, "MISSING_QUOTE_ID", "quoteId is required for verification.");
+    if (quoteId && typeof quoteId === "string") {
+      const result = verifyQuoteForExecution({
+        quoteId,
+        inputTokenContract: inputTokenContract ? String(inputTokenContract) : undefined,
+        vaultTokenContract: vaultTokenContract ? String(vaultTokenContract) : undefined,
+        amountInStroops: amountInStroops ? String(amountInStroops) : undefined,
+        protocol: protocol ? String(protocol) : undefined,
+        path,
+      });
+
+      if (!result.valid) {
+        const statusMap: Record<string, number> = {
+          QUOTE_NOT_FOUND: 404,
+          QUOTE_EXPIRED: 410,
+          FROZEN: 423,
+          ASSET_MISMATCH: 409,
+          ROUTE_MISMATCH: 409,
+          AMOUNT_MISMATCH: 409,
+        };
+        const status = statusMap[result.code ?? ""] ?? 400;
+        sendError(res, status, result.code ?? "QUOTE_INVALID", result.reason ?? "Quote verification failed.", result.reason);
+        return;
+      }
+
+      res.json({
+        valid: true,
+        success: true,
+        quote: result.storedQuote,
+        isFallback: result.isFallback,
+        isExpired: result.storedQuote ? isQuoteExpired(result.storedQuote) : false,
+      });
       return;
     }
 
-    const result = verifyQuoteForExecution({
-      quoteId,
-      inputTokenContract: inputTokenContract ? String(inputTokenContract) : undefined,
-      vaultTokenContract: vaultTokenContract ? String(vaultTokenContract) : undefined,
-      amountInStroops: amountInStroops ? String(amountInStroops) : undefined,
-      protocol: protocol ? String(protocol) : undefined,
-      path,
-    });
-
+    // Branch 2: upstream full-quote verification (routeHash, assetConfigVersion, slippage)
+    const result = verifyZapQuote(req.body);
     if (!result.valid) {
-      const statusMap: Record<string, number> = {
-        QUOTE_NOT_FOUND: 404,
-        QUOTE_EXPIRED: 410,
-        FROZEN: 423,
-        ASSET_MISMATCH: 409,
-        ROUTE_MISMATCH: 409,
-        AMOUNT_MISMATCH: 409,
-      };
-      const status = statusMap[result.code ?? ""] ?? 400;
-      sendError(res, status, result.code ?? "QUOTE_INVALID", result.reason ?? "Quote verification failed.", result.reason);
-      return;
+      return sendError(
+        res,
+        400,
+        result.errorCode || "INVALID_QUOTE",
+        result.reason || "Invalid quote",
+      );
     }
-
-    res.json({
-      valid: true,
-      quote: result.storedQuote,
-      isFallback: result.isFallback,
-      isExpired: result.storedQuote ? isQuoteExpired(result.storedQuote) : false,
-    });
+    res.json({ success: true, valid: true });
   } catch (e) {
-    sendError(res, 500, "VERIFY_FAILED", "Quote verification failed", e instanceof Error ? e.message : undefined);
+    sendError(
+      res,
+      500,
+      "VERIFY_FAILED",
+      "Failed to verify quote",
+      e instanceof Error ? e.message : undefined
+    );
   }
 });
 

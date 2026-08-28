@@ -192,3 +192,151 @@ export function verifyProof(
 
   return computed.toString("hex") === root;
 }
+
+// ─── Claim preview validation (#964) ───────────────────────────────────────
+
+/** A single 32-byte proof element must be exactly 64 lowercase/uppercase hex chars. */
+const PROOF_ELEMENT_PATTERN = /^[0-9a-fA-F]{64}$/;
+const ROOT_PATTERN = /^[0-9a-fA-F]{64}$/;
+
+/**
+ * Identifies the reward campaign a claim preview is checked against.
+ */
+export interface RewardCampaignInfo {
+  /** Stable identifier for the distribution campaign (e.g. "2026-W22"). */
+  campaignId: string;
+  /** The Merkle root currently published on-chain for this campaign. */
+  merkleRoot: string;
+}
+
+/**
+ * A claim a client wants previewed before submitting a claim transaction.
+ * `campaignId` and `merkleRoot` are whatever the client last cached — they
+ * may be stale relative to the current campaign.
+ */
+export interface ClaimPreviewInput {
+  campaignId: string;
+  merkleRoot: string;
+  index: number;
+  address: string;
+  amount: string;
+  proof: string[];
+}
+
+export type ClaimPreviewState = "valid" | "invalid" | "stale";
+
+export type ClaimPreviewErrorCode =
+  | "campaign_id_mismatch"
+  | "malformed_proof"
+  | "root_mismatch"
+  | "proof_verification_failed";
+
+export interface ClaimPreviewResult {
+  state: ClaimPreviewState;
+  errorCode?: ClaimPreviewErrorCode;
+  message: string;
+}
+
+/**
+ * Structural validation of a proof array: every element must be a 32-byte
+ * hex string, the depth must respect MAX_PROOF_DEPTH, and no sibling hash
+ * may repeat (a well-formed Merkle proof never revisits the same node twice
+ * — a repeated element is a sign of a truncated, replayed, or tampered proof).
+ */
+export function findProofShapeError(proof: string[]): string | null {
+  if (!Array.isArray(proof)) {
+    return "Proof must be an array of hex-encoded sibling hashes";
+  }
+
+  const sizeCheck = validateProofSize(proof);
+  if (!sizeCheck.valid) {
+    return sizeCheck.reason ?? "Proof exceeds maximum depth";
+  }
+
+  const seen = new Set<string>();
+  for (const element of proof) {
+    if (typeof element !== "string" || !PROOF_ELEMENT_PATTERN.test(element)) {
+      return `Proof contains a malformed path element: "${String(element)}"`;
+    }
+    const normalized = element.toLowerCase();
+    if (seen.has(normalized)) {
+      return `Proof contains a duplicate path element: "${element}"`;
+    }
+    seen.add(normalized);
+  }
+
+  return null;
+}
+
+/**
+ * Preview a reward claim before the caller submits an on-chain transaction.
+ *
+ * Validates, in order: the campaign ID matches the active campaign, the
+ * proof array is well-formed (correct hex shape, bounded depth, no
+ * duplicate path elements), the client's cached Merkle root matches the
+ * campaign's current root (catching "root drift" — a proof generated
+ * against a previous distribution), and finally that the proof
+ * cryptographically verifies against the current root.
+ *
+ * @param input   - The claim the caller wants to preview.
+ * @param current - The active campaign's canonical id and Merkle root.
+ */
+export function previewRewardClaim(
+  input: ClaimPreviewInput,
+  current: RewardCampaignInfo,
+): ClaimPreviewResult {
+  if (input.campaignId !== current.campaignId) {
+    return {
+      state: "invalid",
+      errorCode: "campaign_id_mismatch",
+      message: `Claim targets campaign "${input.campaignId}" but the active campaign is "${current.campaignId}".`,
+    };
+  }
+
+  const shapeError = findProofShapeError(input.proof);
+  if (shapeError) {
+    return {
+      state: "invalid",
+      errorCode: "malformed_proof",
+      message: shapeError,
+    };
+  }
+
+  if (!ROOT_PATTERN.test(input.merkleRoot)) {
+    return {
+      state: "invalid",
+      errorCode: "malformed_proof",
+      message: `Merkle root "${input.merkleRoot}" is not a valid 32-byte hex value.`,
+    };
+  }
+
+  if (input.merkleRoot.toLowerCase() !== current.merkleRoot.toLowerCase()) {
+    return {
+      state: "stale",
+      errorCode: "root_mismatch",
+      message:
+        "This claim was generated against an earlier version of the reward tree. Refresh to fetch an updated proof.",
+    };
+  }
+
+  const isValid = verifyProof(
+    current.merkleRoot,
+    input.index,
+    input.address,
+    input.amount,
+    input.proof,
+  );
+
+  if (!isValid) {
+    return {
+      state: "invalid",
+      errorCode: "proof_verification_failed",
+      message: "This proof does not verify against the current reward tree.",
+    };
+  }
+
+  return {
+    state: "valid",
+    message: "Claim proof is valid and can be submitted.",
+  };
+}

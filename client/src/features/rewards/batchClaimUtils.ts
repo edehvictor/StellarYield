@@ -1,4 +1,5 @@
-import type { BatchClaimPreview, VaultRewardStatus, ClaimProofData } from './types';
+import type { BatchClaimPreview, VaultRewardStatus, ClaimProofData, CurrentCampaignInfo } from './types';
+import { getClaimPreviewState } from './claimPreviewValidation';
 
 const PROOF_STALE_THRESHOLD_MS = 24 * 60 * 60 * 1000; // 24 hours
 const ESTIMATED_FEE_STROOPS = '1000000'; // 0.1 YIELD
@@ -52,17 +53,25 @@ export function isProofStale(timestamp: number): boolean {
 }
 
 /**
- * Build a batch claim preview from multiple vault proofs
+ * Build a batch claim preview from multiple vault proofs.
+ *
+ * When `currentCampaign` is provided, each proof is additionally checked
+ * against the active campaign's id and Merkle root (#964): a campaign-ID
+ * mismatch or malformed proof marks the vault 'invalid_proof' (must not be
+ * submitted), while root drift is folded into the existing 'stale_proof'
+ * signal alongside time-based staleness.
  */
 export function buildBatchClaimPreview(
     vaultProofs: Record<string, ClaimProofData | null>,
     vaultMetadata: Record<string, { name: string }>,
+    currentCampaign?: CurrentCampaignInfo,
 ): BatchClaimPreview {
     const vaults: VaultRewardStatus[] = [];
     let totalClaimable = 0n;
     let totalEstimatedFees = 0n;
     let allProofsAvailable = true;
     let anyProofsStale = false;
+    let anyProofsInvalid = false;
 
     for (const [vaultId, proof] of Object.entries(vaultProofs)) {
         const metadata = vaultMetadata[vaultId];
@@ -83,14 +92,27 @@ export function buildBatchClaimPreview(
             continue;
         }
 
-        const stale = isProofStale(proof.timestamp);
+        const preview = currentCampaign
+            ? getClaimPreviewState(
+                { campaignId: proof.campaignId, merkleRoot: proof.merkleRoot, proof: proof.proof },
+                currentCampaign,
+            )
+            : null;
+
+        const timeStale = isProofStale(proof.timestamp);
+        const rootStale = preview?.state === 'stale';
+        const invalid = preview?.state === 'invalid';
+        const stale = timeStale || rootStale;
+
         const amount = BigInt(proof.amount);
         const fee = BigInt(ESTIMATED_FEE_STROOPS);
 
         totalClaimable += amount;
         totalEstimatedFees += fee;
 
-        if (stale) {
+        if (invalid) {
+            anyProofsInvalid = true;
+        } else if (stale) {
             anyProofsStale = true;
         }
 
@@ -99,10 +121,11 @@ export function buildBatchClaimPreview(
             vaultName: metadata.name,
             claimableAmount: proof.amount,
             proofAvailable: true,
-            proofStale: stale,
+            proofStale: stale && !invalid,
             lastProofUpdate: new Date(proof.timestamp).toISOString(),
             estimatedFee: fee.toString(),
-            status: stale ? 'stale_proof' : 'claimable',
+            status: invalid ? 'invalid_proof' : stale ? 'stale_proof' : 'claimable',
+            previewMessage: invalid ? preview?.message : undefined,
         });
     }
 
@@ -112,7 +135,7 @@ export function buildBatchClaimPreview(
         vaults,
         allProofsAvailable,
         anyProofsStale,
-        canClaimAll: allProofsAvailable && !anyProofsStale,
+        canClaimAll: allProofsAvailable && !anyProofsStale && !anyProofsInvalid,
     };
 }
 
@@ -153,4 +176,12 @@ export function getStaleProofVaults(vaults: VaultRewardStatus[]): VaultRewardSta
  */
 export function getUnavailableVaults(vaults: VaultRewardStatus[]): VaultRewardStatus[] {
     return vaults.filter(v => !v.proofAvailable);
+}
+
+/**
+ * Get vaults whose cached proof failed campaign-ID or shape validation and
+ * must not be submitted as-is (#964).
+ */
+export function getInvalidProofVaults(vaults: VaultRewardStatus[]): VaultRewardStatus[] {
+    return vaults.filter(v => v.status === 'invalid_proof');
 }

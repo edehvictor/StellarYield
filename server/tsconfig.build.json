@@ -1,0 +1,16 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "rootDir": "..",
+    "types": ["node"],
+    "noCheck": true
+  },
+  "include": ["src/**/*.ts", "../shared/types/**/*.ts"],
+  "exclude": [
+    "src/**/*.test.ts",
+    "src/**/*.spec.ts",
+    "src/**/__tests__/**",
+    "dist",
+    "node_modules"
+  ]
+}

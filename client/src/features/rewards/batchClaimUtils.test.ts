@@ -7,8 +7,9 @@ import {
     getClaimableVaults,
     getStaleProofVaults,
     getUnavailableVaults,
+    getInvalidProofVaults,
 } from './batchClaimUtils';
-import type { ClaimProofData } from './types';
+import type { ClaimProofData, CurrentCampaignInfo } from './types';
 
 describe('batchClaimUtils', () => {
     beforeEach(() => {
@@ -309,6 +310,114 @@ describe('batchClaimUtils', () => {
             const unavailable = getUnavailableVaults(vaults);
             expect(unavailable).toHaveLength(1);
             expect(unavailable[0].vaultId).toBe('v2');
+        });
+    });
+
+    // ── #964: campaign-aware buildBatchClaimPreview ────────────────────────
+
+    describe('buildBatchClaimPreview with currentCampaign', () => {
+        const currentCampaign: CurrentCampaignInfo = {
+            campaignId: '2026-W22',
+            merkleRoot: 'a'.repeat(64),
+        };
+
+        it('keeps a matching campaign/root proof claimable', () => {
+            const vaultProofs = {
+                vault1: {
+                    index: 0,
+                    amount: '5000000000',
+                    proof: ['b'.repeat(64)],
+                    timestamp: Date.now() - 1000,
+                    campaignId: '2026-W22',
+                    merkleRoot: 'a'.repeat(64),
+                } as ClaimProofData,
+            };
+            const vaultMetadata = { vault1: { name: 'USDC Vault' } };
+
+            const preview = buildBatchClaimPreview(vaultProofs, vaultMetadata, currentCampaign);
+
+            expect(preview.vaults[0].status).toBe('claimable');
+            expect(preview.canClaimAll).toBe(true);
+        });
+
+        it('marks a campaign-ID mismatch as invalid_proof, not stale', () => {
+            const vaultProofs = {
+                vault1: {
+                    index: 0,
+                    amount: '5000000000',
+                    proof: ['b'.repeat(64)],
+                    timestamp: Date.now() - 1000,
+                    campaignId: '2026-W21',
+                    merkleRoot: 'a'.repeat(64),
+                } as ClaimProofData,
+            };
+            const vaultMetadata = { vault1: { name: 'USDC Vault' } };
+
+            const preview = buildBatchClaimPreview(vaultProofs, vaultMetadata, currentCampaign);
+
+            expect(preview.vaults[0].status).toBe('invalid_proof');
+            expect(preview.vaults[0].proofStale).toBe(false);
+            expect(preview.vaults[0].previewMessage).toMatch(/campaign/i);
+            expect(preview.canClaimAll).toBe(false);
+            expect(getInvalidProofVaults(preview.vaults)).toHaveLength(1);
+        });
+
+        it('marks root drift as stale_proof', () => {
+            const vaultProofs = {
+                vault1: {
+                    index: 0,
+                    amount: '5000000000',
+                    proof: ['b'.repeat(64)],
+                    timestamp: Date.now() - 1000,
+                    campaignId: '2026-W22',
+                    merkleRoot: 'c'.repeat(64),
+                } as ClaimProofData,
+            };
+            const vaultMetadata = { vault1: { name: 'USDC Vault' } };
+
+            const preview = buildBatchClaimPreview(vaultProofs, vaultMetadata, currentCampaign);
+
+            expect(preview.vaults[0].status).toBe('stale_proof');
+            expect(preview.vaults[0].proofStale).toBe(true);
+            expect(preview.anyProofsStale).toBe(true);
+            expect(preview.canClaimAll).toBe(false);
+        });
+
+        it('marks a malformed proof array as invalid_proof', () => {
+            const vaultProofs = {
+                vault1: {
+                    index: 0,
+                    amount: '5000000000',
+                    proof: ['not-a-hex-hash'],
+                    timestamp: Date.now() - 1000,
+                    campaignId: '2026-W22',
+                    merkleRoot: 'a'.repeat(64),
+                } as ClaimProofData,
+            };
+            const vaultMetadata = { vault1: { name: 'USDC Vault' } };
+
+            const preview = buildBatchClaimPreview(vaultProofs, vaultMetadata, currentCampaign);
+
+            expect(preview.vaults[0].status).toBe('invalid_proof');
+            expect(preview.canClaimAll).toBe(false);
+        });
+
+        it('does not run campaign checks when currentCampaign is omitted (backward compatible)', () => {
+            const vaultProofs = {
+                vault1: {
+                    index: 0,
+                    amount: '5000000000',
+                    proof: ['not-a-hex-hash'],
+                    timestamp: Date.now() - 1000,
+                    campaignId: 'some-other-campaign',
+                    merkleRoot: 'z'.repeat(64),
+                } as ClaimProofData,
+            };
+            const vaultMetadata = { vault1: { name: 'USDC Vault' } };
+
+            const preview = buildBatchClaimPreview(vaultProofs, vaultMetadata);
+
+            expect(preview.vaults[0].status).toBe('claimable');
         });
     });
 });
