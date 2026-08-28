@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { groupDriftAlerts } from '../services/digest/DriftAlertGrouper';
 import type { DriftAlertEvent } from '../services/digest/types';
+import { describe, it, expect } from 'vitest';
 
 function makeAlert(overrides: Partial<DriftAlertEvent> = {}): DriftAlertEvent {
   return {
