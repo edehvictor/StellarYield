@@ -13,15 +13,19 @@ export interface FreezeState {
 export class FreezeService {
     private GLOBAL_KEY = "freeze:global";
     private PROTOCOL_PREFIX = "freeze:protocol:";
+    private GLOBAL_LAST_FROZEN_KEY = "freeze:last:global";
+    private PROTOCOL_LAST_PREFIX = "freeze:last:protocol:";
 
     async freezeGlobal(reason: string, actor: string): Promise<FreezeState> {
+        const now = new Date();
         const state: FreezeState = {
             isFrozen: true,
             reason,
-            frozenAt: new Date(),
+            frozenAt: now,
             updatedBy: actor,
         };
         cache.set(this.GLOBAL_KEY, state);
+        cache.set(this.GLOBAL_LAST_FROZEN_KEY, now);
         return state;
     }
 
@@ -35,13 +39,15 @@ export class FreezeService {
     }
 
     async freezeProtocol(protocol: string, reason: string, actor: string): Promise<FreezeState> {
+        const now = new Date();
         const state: FreezeState = {
             isFrozen: true,
             reason,
-            frozenAt: new Date(),
+            frozenAt: now,
             updatedBy: actor,
         };
         cache.set(`${this.PROTOCOL_PREFIX}${protocol.toLowerCase()}`, state);
+        cache.set(`${this.PROTOCOL_LAST_PREFIX}${protocol.toLowerCase()}`, now);
         return state;
     }
 
@@ -76,6 +82,50 @@ export class FreezeService {
         }
 
         return { isFrozen: false };
+    }
+
+    getLastFrozenAt(protocol?: string): Date | undefined {
+        if (protocol) {
+            const protocolLast = cache.get<Date>(`${this.PROTOCOL_LAST_PREFIX}${protocol.toLowerCase()}`);
+            if (protocolLast) return protocolLast;
+        }
+        const globalLast = cache.get<Date>(this.GLOBAL_LAST_FROZEN_KEY);
+        return globalLast;
+    }
+
+    /**
+     * Returns true if a quote created at `quotedAtIso` is invalidated because
+     * a global or protocol-specific freeze happened after the quote was created.
+     * Also returns true if the protocol is currently frozen — the caller should
+     * treat any pending quote as stale until unfreeze + requote.
+     */
+    isQuoteInvalidatedByFreeze(quotedAtIso: string, protocol?: string): boolean {
+        const quotedAtMs = new Date(quotedAtIso).getTime();
+        if (Number.isNaN(quotedAtMs)) return true;
+
+        // If currently frozen, any pending quote is considered invalid.
+        if (this.isFrozen(protocol)) {
+            return true;
+        }
+
+        const globalLast = cache.get<Date>(this.GLOBAL_LAST_FROZEN_KEY);
+        if (globalLast && globalLast.getTime() > quotedAtMs) {
+            return true;
+        }
+
+        if (protocol) {
+            const protocolLast = cache.get<Date>(`${this.PROTOCOL_LAST_PREFIX}${protocol.toLowerCase()}`);
+            if (protocolLast && protocolLast.getTime() > quotedAtMs) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /** Test helper: clear all freeze state */
+    clearAll(): void {
+        cache.flushAll();
     }
 }
 

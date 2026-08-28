@@ -1,12 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ArrowDown, Zap, Loader2, AlertTriangle, RefreshCw, Clock, Info, Ban } from "lucide-react";
+import { ArrowDown, Zap, Loader2, AlertTriangle, RefreshCw, Clock, Info, Ban, ShieldAlert } from "lucide-react";
 import TxStatusTimeline from "../../components/transaction/TxStatusTimeline";
 import TransactionFailedModal from "../../components/transaction/TransactionFailedModal";
 import { decodeTransactionError } from "../../utils/errorDecoder";
 import { zapDeposit } from "../../services/soroban";
 import type { TxPhase } from "../../services/transactionPhase";
 import { TX_PHASE_PIPELINE } from "../../services/transactionPhase";
-import { fetchSwapQuote } from "./fetchSwapQuote";
+import { fetchSwapQuote, fetchVerifyQuote, isQuoteExpiredLocal } from "./fetchSwapQuote";
 import { minAmountAfterSlippage } from "./slippage";
 import { parseDecimalToStroops, formatStroopsToDecimal } from "./amount";
 import {
@@ -97,6 +97,10 @@ export default function ZapDepositPanel({ walletAddress }: ZapDepositPanelProps)
   const [slippageTolerance, setSlippageTolerance] = useState(settingsSlippage);
   const [showSlippageEdit, setShowSlippageEdit] = useState(false);
   const prevExpectedOutRef = useRef<bigint | null>(null);
+  // Safety envelope: fallback acknowledgment + expiry/freeze tracking
+  const [fallbackAcknowledged, setFallbackAcknowledged] = useState(false);
+  const [verifyError, setVerifyError] = useState("");
+  const [confirmFallbackForTest] = useState(false);
 
   const needsSwap = inputAsset?.contractId !== vaultToken.contractId;
 
@@ -106,6 +110,7 @@ export default function ZapDepositPanel({ walletAddress }: ZapDepositPanelProps)
       setExpectedOut(null);
       setQuotePath("");
       setQuoteData(null);
+      setVerifyError("");
       return;
     }
     let stroops: bigint;
@@ -122,6 +127,7 @@ export default function ZapDepositPanel({ walletAddress }: ZapDepositPanelProps)
 
     setQuoteLoading(true);
     setError("");
+    setVerifyError("");
     try {
       if (!needsSwap) {
         prevExpectedOutRef.current = expectedOut;
@@ -129,6 +135,7 @@ export default function ZapDepositPanel({ walletAddress }: ZapDepositPanelProps)
         setQuotePath(`${inputAsset.symbol} (no swap)`);
         setQuoteSource("direct");
         setQuoteData(null);
+        setFallbackAcknowledged(false);
       } else {
         const q = await fetchSwapQuote({
           inputTokenContract: inputAsset.contractId,
@@ -143,6 +150,11 @@ export default function ZapDepositPanel({ walletAddress }: ZapDepositPanelProps)
         setQuotePath(q.path.map((h) => h.label ?? h.contractId.slice(0, 6)).join(" → "));
         setQuoteSource(q.source);
         setQuoteData(q);
+        // Reset fallback ack on new quote — prevents silently carrying over acknowledgment
+        setFallbackAcknowledged(false);
+        if (confirmFallbackForTest) {
+          // keep test helper
+        }
       }
     } catch (e) {
       prevExpectedOutRef.current = null;
@@ -152,7 +164,7 @@ export default function ZapDepositPanel({ walletAddress }: ZapDepositPanelProps)
     } finally {
       setQuoteLoading(false);
     }
-  }, [amount, inputAsset, needsSwap, slippageTolerance, vaultToken, expectedOut]);
+  }, [amount, inputAsset, needsSwap, slippageTolerance, vaultToken, expectedOut, confirmFallbackForTest]);
 
   useEffect(() => {
     const t = setTimeout(() => {
@@ -163,22 +175,46 @@ export default function ZapDepositPanel({ walletAddress }: ZapDepositPanelProps)
 
   const minOut = useMemo(() => {
     if (expectedOut === null || expectedOut <= 0n) return null;
+    // Prefer server-bound minAmountOutStroops if present (safety envelope), otherwise compute locally
+    if (quoteData?.minAmountOutStroops) {
+      try {
+        const serverMin = BigInt(quoteData.minAmountOutStroops);
+        if (serverMin > 0n) return serverMin;
+      } catch {
+        // fall through to computed
+      }
+    }
     return minAmountAfterSlippage(expectedOut, slippageTolerance);
-  }, [expectedOut, slippageTolerance]);
+  }, [expectedOut, slippageTolerance, quoteData]);
 
-  const isStale = useMemo(() => {
+  const isExpired = useMemo(() => {
     if (!quoteData) return false;
+    // Prefer explicit expiresAt, fallback to age-based staleness
+    if (quoteData.expiresAt || quoteData.ttlMs !== undefined) {
+      return isQuoteExpiredLocal(quoteData);
+    }
     return quoteAgeSeconds(quoteData.quotedAt) > STALE_QUOTE_AGE_MS / 1000;
   }, [quoteData]);
 
+  const isStale = useMemo(() => {
+    if (!quoteData) return false;
+    if (isExpired) return true;
+    return quoteAgeSeconds(quoteData.quotedAt) > STALE_QUOTE_AGE_MS / 1000;
+  }, [quoteData, isExpired]);
+
   const isFallback = useMemo(() => {
     if (!quoteData) return false;
-    return quoteData.isFallback || quoteData.source === FALLBACK_SOURCE;
+    return quoteData.isFallback || quoteData.source === FALLBACK_SOURCE || quoteData.quoteSource === FALLBACK_SOURCE;
+  }, [quoteData]);
+
+  const isFrozenQuote = useMemo(() => {
+    if (!quoteData) return false;
+    return Boolean(quoteData.isFrozen);
   }, [quoteData]);
 
   const quoteSnapshot = useMemo<QuoteSnapshot | undefined>(() => {
     if (!quoteData || !expectedOut || expectedOut <= 0n) return undefined;
-    const minOutVal = minAmountAfterSlippage(expectedOut, slippageTolerance);
+    const minOutVal = minOut ?? minAmountAfterSlippage(expectedOut, slippageTolerance);
     return {
       quotedAt: quoteData.quotedAt,
       route: quoteData.path.map((h) => h.contractId),
@@ -189,7 +225,7 @@ export default function ZapDepositPanel({ walletAddress }: ZapDepositPanelProps)
       isStale,
       source: quoteData.source,
     };
-  }, [quoteData, expectedOut, slippageTolerance, isFallback, isStale]);
+  }, [quoteData, expectedOut, slippageTolerance, isFallback, isStale, minOut]);
 
   const depositImpact = useDepositImpact({
     amountUsd: 0,
@@ -228,12 +264,67 @@ export default function ZapDepositPanel({ walletAddress }: ZapDepositPanelProps)
       return;
     }
 
+    // Safety envelope: pre-flight checks before contract submission
+    if (needsSwap && quoteData) {
+      // Stale / expired quotes must requote — never execute with stale assumptions
+      if (isExpired || isStale) {
+        setError("Quote expired — please refresh for current rates before submitting.");
+        setVerifyError("Quote expired — requote required.");
+        return;
+      }
+      if (isFrozenQuote) {
+        setError("Protocol is frozen — quoting disabled. Please requote after freeze is lifted.");
+        setVerifyError("Protocol frozen — quote invalidated.");
+        return;
+      }
+      if (isFallback && !fallbackAcknowledged) {
+        setError("Fallback quote requires acknowledgment — estimated rate, not simulated. Check the acknowledgment to proceed.");
+        setVerifyError("Fallback quote — explicit acknowledgment required.");
+        return;
+      }
+      // Verify with backend that quote is still fresh, bound to same pair/route, and not after-freeze
+      if (quoteData.quoteId) {
+        try {
+          setVerifyError("");
+          // Local expiry fast-path before network
+          if (isQuoteExpiredLocal(quoteData)) {
+            throw new Error(`Quote expired at ${quoteData.expiresAt}. Please requote.`);
+          }
+          await fetchVerifyQuote({
+            quoteId: quoteData.quoteId,
+            inputTokenContract: inputAsset.contractId,
+            vaultTokenContract: vaultToken.contractId,
+            amountInStroops: amountIn.toString(),
+            protocol: quoteData.protocol,
+            path: quoteData.path,
+          });
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : "Quote verification failed";
+          const code = (e as { code?: string }).code;
+          // Distinguish freeze vs expiry for messaging
+          if (code === "FROZEN" || msg.toLowerCase().includes("freeze")) {
+            setError("Quote invalidated by protocol freeze after it was created. Please requote.");
+          } else if (code === "QUOTE_EXPIRED" || msg.toLowerCase().includes("expired")) {
+            setError("Quote expired — please refresh for current rates before submitting.");
+          } else if (code === "ASSET_MISMATCH" || code === "ROUTE_MISMATCH") {
+            setError("Quote route or asset mismatch — please requote with the current pair.");
+          } else {
+            setError(msg);
+          }
+          setVerifyError(msg);
+          setStatus("error");
+          return;
+        }
+      }
+    }
+
     lastProgressPhaseRef.current = "idle";
     setLastProgressPhase("idle");
     setTxPhase("idle");
     setTxHash(null);
     setStatus("loading");
     setError("");
+    setVerifyError("");
     setShowFailedModal(false);
     try {
       const result = await zapDeposit(
@@ -270,6 +361,13 @@ export default function ZapDepositPanel({ walletAddress }: ZapDepositPanelProps)
     minOut,
     emitPhase,
     settings,
+    needsSwap,
+    quoteData,
+    isExpired,
+    isStale,
+    isFrozenQuote,
+    isFallback,
+    fallbackAcknowledged,
   ]);
 
   const retryZap = useCallback(() => {
@@ -320,28 +418,84 @@ export default function ZapDepositPanel({ walletAddress }: ZapDepositPanelProps)
         </div>
       )}
 
-      {/* Fallback quote warning */}
-      {isFallback && needsSwap && (
-        <div className="mb-4 flex items-start gap-2 text-amber-200/90 text-sm bg-amber-500/10 border border-amber-500/30 rounded-lg p-3">
-          <Info className="w-4 h-4 shrink-0 mt-0.5 text-amber-400" />
+      {/* Frozen state — protocol freeze invalidates pending quotes */}
+      {isFrozenQuote && needsSwap && (
+        <div className="mb-4 flex items-start gap-2 text-red-200/90 text-sm bg-red-500/10 border border-red-500/30 rounded-lg p-3" role="alert" aria-live="assertive">
+          <ShieldAlert className="w-4 h-4 shrink-0 mt-0.5 text-red-400" />
           <div>
-            <p className="font-medium text-amber-300">Fallback quote active</p>
-            <p className="text-xs text-amber-200/70">
-              Router simulation unavailable. Using estimated rate. Actual output may differ.
+            <p className="font-medium text-red-300">Protocol frozen — quote invalidated</p>
+            <p className="text-xs text-red-200/70">
+              This quote was created before a safety freeze and can no longer be executed. Please requote after the freeze is lifted.
             </p>
+            <button type="button" onClick={() => void refreshQuote()} className="mt-2 text-xs px-2 py-1 rounded bg-red-500/20 hover:bg-red-500/30 text-red-200">
+              Requote
+            </button>
           </div>
         </div>
       )}
 
-      {/* Stale quote warning */}
-      {isStale && !quoteLoading && (
+      {/* Fallback quote warning — must be explicitly acknowledged */}
+      {isFallback && needsSwap && (
+        <div className="mb-4 flex items-start gap-2 text-amber-200/90 text-sm bg-amber-500/10 border border-amber-500/30 rounded-lg p-3">
+          <Info className="w-4 h-4 shrink-0 mt-0.5 text-amber-400" />
+          <div className="flex-1">
+            <p className="font-medium text-amber-300">Fallback quote active</p>
+            <p className="text-xs text-amber-200/70">
+              Router simulation unavailable. Using estimated rate. Actual output may differ significantly. This quote cannot be silently treated as a simulated quote.
+            </p>
+            <label className="mt-2 flex items-center gap-2 text-xs text-amber-200 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={fallbackAcknowledged}
+                onChange={(e) => setFallbackAcknowledged(e.target.checked)}
+                className="rounded border-amber-500/50 bg-white/10"
+              />
+              <span>I understand the risk and want to proceed with this estimated quote</span>
+            </label>
+            {!fallbackAcknowledged && (
+              <p className="mt-1 text-[10px] text-amber-300/80">Required to enable Zap with fallback quote.</p>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Expired / stale quote warning — requires requote */}
+      {(isExpired || isStale) && !quoteLoading && needsSwap && quoteData && (
         <div className="mb-4 flex items-start gap-2 text-orange-200/90 text-sm bg-orange-500/10 border border-orange-500/30 rounded-lg p-3">
           <Clock className="w-4 h-4 shrink-0 mt-0.5 text-orange-400" />
-          <div>
-            <p className="font-medium text-orange-300">Stale quote</p>
+          <div className="flex-1">
+            <p className="font-medium text-orange-300">{isExpired ? "Quote expired" : "Stale quote"}</p>
             <p className="text-xs text-orange-200/70">
-              Quote is over 60 seconds old. Refresh for current rates.
+              {isExpired
+                ? `Quote expired at ${quoteData.expiresAt ? new Date(quoteData.expiresAt).toLocaleTimeString() : ""}. Execution blocked until you requote.`
+                : "Quote is over 60 seconds old. Refresh for current rates."}
             </p>
+            <div className="mt-2 flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => void refreshQuote()}
+                className="text-xs px-2 py-1 rounded bg-orange-500/20 hover:bg-orange-500/30 text-orange-200"
+              >
+                Requote now
+              </button>
+              {quoteData.quoteId && (
+                <span className="text-[10px] text-orange-300/60">ID {quoteData.quoteId.slice(0, 8)}…</span>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Verify error — e.g. asset mismatch after user changed pair without requote */}
+      {verifyError && (
+        <div className="mb-4 flex items-start gap-2 text-red-200/90 text-sm bg-red-500/10 border border-red-500/30 rounded-lg p-3" role="alert" aria-live="assertive">
+          <Ban className="w-4 h-4 shrink-0 mt-0.5 text-red-400" />
+          <div>
+            <p className="font-medium text-red-300">Quote verification failed</p>
+            <p className="text-xs text-red-200/70">{verifyError}</p>
+            <button type="button" onClick={() => void refreshQuote()} className="mt-2 text-xs px-2 py-1 rounded bg-red-500/20 hover:bg-red-500/30 text-red-200">
+              Requote
+            </button>
           </div>
         </div>
       )}
@@ -426,6 +580,18 @@ export default function ZapDepositPanel({ walletAddress }: ZapDepositPanelProps)
                 {quoteAgeSeconds(quoteData.quotedAt)}s ago
               </span>
             )}
+            {/* TTL / expiry */}
+            {quoteData?.expiresAt && (
+              <span className="text-[10px] text-gray-500">
+                expires {new Date(quoteData.expiresAt).toLocaleTimeString()}
+              </span>
+            )}
+            {/* Quote ID for audit / support */}
+            {quoteData?.quoteId && (
+              <span className="text-[10px] text-gray-600 font-mono" title={quoteData.quoteId}>
+                {quoteData.quoteId.slice(0, 8)}
+              </span>
+            )}
           </div>
         )}
 
@@ -433,6 +599,9 @@ export default function ZapDepositPanel({ walletAddress }: ZapDepositPanelProps)
           <p className="text-xs text-gray-500">
             Path: {quotePath}
           </p>
+        )}
+        {quoteData && isFallback && (
+          <p className="text-[10px] text-amber-300/70">Fallback quotes are estimated — not router-simulated. Requires explicit acknowledgment.</p>
         )}
       </div>
 
@@ -493,8 +662,14 @@ export default function ZapDepositPanel({ walletAddress }: ZapDepositPanelProps)
                   High slippage may result in significant price impact
                 </p>
               )}
+              {slippageTolerance < 0.5 && (
+                <p className="text-xs text-amber-400 flex items-center gap-1">
+                  <Info size={10} />
+                  Very low slippage may cause transaction to fail if price moves slightly.
+                </p>
+              )}
               <p className="text-[10px] text-gray-500">
-                Safe range: {MIN_SLIPPAGE}% – {MAX_SLIPPAGE}%. Higher tolerance means more risk of unfavorable rate.
+                Safe range: {MIN_SLIPPAGE}% – {MAX_SLIPPAGE}%. Higher tolerance means more risk of unfavorable rate. Low tolerance may fail.
               </p>
             </div>
           )}
@@ -577,9 +752,19 @@ export default function ZapDepositPanel({ walletAddress }: ZapDepositPanelProps)
           status === "loading" ||
           minOut === null ||
           minOut <= 0n ||
-          depositImpact.shouldBlock
+          depositImpact.shouldBlock ||
+          (needsSwap && isExpired) ||
+          (needsSwap && isFallback && !fallbackAcknowledged) ||
+          Boolean(verifyError && needsSwap)
         }
         className="w-full py-3 rounded-xl font-semibold text-white bg-gradient-to-r from-blue-500 to-purple-500 hover:from-blue-600 hover:to-purple-600 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+        title={
+          needsSwap && isExpired
+            ? "Quote expired — requote required"
+            : needsSwap && isFallback && !fallbackAcknowledged
+              ? "Acknowledge fallback quote risk to proceed"
+              : undefined
+        }
       >
         {status === "loading" ? (
           <>
@@ -601,7 +786,7 @@ export default function ZapDepositPanel({ walletAddress }: ZapDepositPanelProps)
       <p className="text-xs text-gray-500 text-center mt-3">
         One signed transaction: tokens move into the Zap contract, swap if needed with on-chain
         slippage checks, then shares are minted to your address. If the swap would deliver less than
-        the minimum, the whole transaction reverts.
+        the minimum, the whole transaction reverts. Quotes expire in ~60s and are invalidated by freezes — requote if blocked.
       </p>
     </div>
   );

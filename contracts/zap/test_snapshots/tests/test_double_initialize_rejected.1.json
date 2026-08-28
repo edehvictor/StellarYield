@@ -76,6 +76,18 @@
                         "val": {
                           "bool": true
                         }
+                      },
+                      {
+                        "key": {
+                          "vec": [
+                            {
+                              "symbol": "Paused"
+                            }
+                          ]
+                        },
+                        "val": {
+                          "bool": false
+                        }
                       }
                     ]
                   }

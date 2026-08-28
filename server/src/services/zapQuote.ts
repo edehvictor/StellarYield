@@ -1,4 +1,6 @@
 import * as StellarSdk from "@stellar/stellar-sdk";
+import NodeCache from "node-cache";
+import { createHash, randomUUID } from "crypto";
 import { slippageRegistry } from "./slippageRegistry";
 import { getYieldData } from "./yieldService";
 import { freezeService } from "./freezeService";
@@ -23,9 +25,79 @@ export interface ZapQuoteResult {
   minAmountOutStroops: string;
   quoteAgeMs: number;
   isFallback: boolean;
+  // Safety envelope fields
+  quoteId: string;
+  expiresAt: string;
+  ttlMs: number;
+  inputTokenContract: string;
+  vaultTokenContract: string;
+  amountInStroops: string;
+  protocol: string;
+  freezeCheckedAt: string;
+  quoteSource: "router_simulation" | "fallback_rate";
+  // Optional signature over assumptions (persist-or-sign requirement)
+  quoteSignature?: string;
+}
+
+export interface VerifyQuoteRequest {
+  quoteId: string;
+  inputTokenContract?: string;
+  vaultTokenContract?: string;
+  amountInStroops?: string;
+  protocol?: string;
+  path?: { contractId: string }[];
+  expectedAmountOutStroops?: string;
+  minAmountOutStroops?: string;
+}
+
+export interface VerifyQuoteResult {
+  valid: boolean;
+  reason?: string;
+  code?: "QUOTE_NOT_FOUND" | "QUOTE_EXPIRED" | "ASSET_MISMATCH" | "ROUTE_MISMATCH" | "FROZEN" | "AMOUNT_MISMATCH" | "SLIPPAGE_INVALID";
+  storedQuote?: ZapQuoteResult;
+  isFallback?: boolean;
 }
 
 const rpcUrl = process.env.SOROBAN_RPC_URL ?? "https://soroban-testnet.stellar.org";
+
+// In-memory quote store. TTL is managed per entry; keep entries a bit longer than
+// quoted TTL so we can return QUOTE_EXPIRED instead of QUOTE_NOT_FOUND for a short window.
+const quoteCache = new NodeCache({ stdTTL: 0, checkperiod: 60, useClones: false });
+
+export function getQuoteTtlMs(): number {
+  const raw = process.env.ZAP_QUOTE_TTL_MS ?? "60000";
+  const parsed = parseInt(raw, 10);
+  if (Number.isNaN(parsed) || parsed <= 0) return 60_000;
+  // Clamp to 5s – 5min for safety
+  return Math.min(Math.max(parsed, 5_000), 300_000);
+}
+
+function generateQuoteId(): string {
+  try {
+    return randomUUID();
+  } catch {
+    return `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+  }
+}
+
+function signQuoteAssumptions(quote: Omit<ZapQuoteResult, "quoteSignature">): string {
+  const secret = process.env.ZAP_QUOTE_SIGNING_SECRET ?? "dev-only-signing-secret";
+  const payload = JSON.stringify({
+    quoteId: quote.quoteId,
+    inputTokenContract: quote.inputTokenContract,
+    vaultTokenContract: quote.vaultTokenContract,
+    amountInStroops: quote.amountInStroops,
+    expectedAmountOutStroops: quote.expectedAmountOutStroops,
+    minAmountOutStroops: quote.minAmountOutStroops,
+    slippageApplied: quote.slippageApplied,
+    source: quote.source,
+    protocol: quote.protocol,
+    path: quote.path,
+    quotedAt: quote.quotedAt,
+    expiresAt: quote.expiresAt,
+  });
+  return createHash("sha256").update(payload + secret).digest("hex").slice(0, 32);
+}
 
 function mulDivStroops(amountIn: string, numerator: string, denominator: string): string {
   const a = BigInt(amountIn);
@@ -94,6 +166,8 @@ export async function quoteViaRouterSimulation(
 
     const now = Date.now();
 
+    // These interim fields will be overwritten by getZapQuote with envelope values,
+    // but return a shape compatible with legacy callers.
     return {
       path: [
         { contractId: body.inputTokenContract, label: "in" },
@@ -107,6 +181,15 @@ export async function quoteViaRouterSimulation(
       minAmountOutStroops: expected.toString(),
       quoteAgeMs: 0,
       isFallback: false,
+      quoteId: "",
+      expiresAt: new Date(now + getQuoteTtlMs()).toISOString(),
+      ttlMs: getQuoteTtlMs(),
+      inputTokenContract: body.inputTokenContract,
+      vaultTokenContract: body.vaultTokenContract,
+      amountInStroops: body.amountInStroops,
+      protocol: body.protocol || "default",
+      freezeCheckedAt: new Date(now).toISOString(),
+      quoteSource: "router_simulation",
     };
   } catch {
     return null;
@@ -116,9 +199,10 @@ export async function quoteViaRouterSimulation(
 export function quoteFallback(body: ZapQuoteBody): ZapQuoteResult {
   const amountIn = body.amountInStroops;
   const now = Date.now();
+  const ttlMs = getQuoteTtlMs();
 
   if (body.inputTokenContract === body.vaultTokenContract) {
-    return {
+    const base: Omit<ZapQuoteResult, "quoteSignature"> = {
       path: [{ contractId: body.inputTokenContract }],
       expectedAmountOutStroops: amountIn,
       source: "fallback_rate",
@@ -128,14 +212,25 @@ export function quoteFallback(body: ZapQuoteBody): ZapQuoteResult {
       minAmountOutStroops: amountIn,
       quoteAgeMs: 0,
       isFallback: true,
+      quoteId: generateQuoteId(),
+      expiresAt: new Date(now + ttlMs).toISOString(),
+      ttlMs,
+      inputTokenContract: body.inputTokenContract,
+      vaultTokenContract: body.vaultTokenContract,
+      amountInStroops: body.amountInStroops,
+      protocol: body.protocol || "default",
+      freezeCheckedAt: new Date(now).toISOString(),
+      quoteSource: "fallback_rate",
     };
+    const sig = signQuoteAssumptions(base);
+    return { ...base, quoteSignature: sig };
   }
 
   const num = process.env.ZAP_FALLBACK_NUMERATOR ?? "1";
   const den = process.env.ZAP_FALLBACK_DENOMINATOR ?? "1";
   const expected = mulDivStroops(amountIn, num, den);
 
-  return {
+  const base: Omit<ZapQuoteResult, "quoteSignature"> = {
     path: [
       { contractId: body.inputTokenContract, label: "in" },
       { contractId: body.vaultTokenContract, label: "out" },
@@ -148,7 +243,145 @@ export function quoteFallback(body: ZapQuoteBody): ZapQuoteResult {
     minAmountOutStroops: expected,
     quoteAgeMs: 0,
     isFallback: true,
+    quoteId: generateQuoteId(),
+    expiresAt: new Date(now + ttlMs).toISOString(),
+    ttlMs,
+    inputTokenContract: body.inputTokenContract,
+    vaultTokenContract: body.vaultTokenContract,
+    amountInStroops: body.amountInStroops,
+    protocol: body.protocol || "default",
+    freezeCheckedAt: new Date(now).toISOString(),
+    quoteSource: "fallback_rate",
   };
+  const sig = signQuoteAssumptions(base);
+  return { ...base, quoteSignature: sig };
+}
+
+export function isQuoteExpired(quote: Pick<ZapQuoteResult, "expiresAt" | "quotedAt"> & { ttlMs?: number }): boolean {
+  const expiresMs = new Date(quote.expiresAt).getTime();
+  if (!Number.isNaN(expiresMs)) {
+    return Date.now() > expiresMs;
+  }
+  // Fallback to quotedAt + ttlMs if expiresAt is missing (backward compat)
+  const quotedAtMs = new Date(quote.quotedAt).getTime();
+  const ttl = quote.ttlMs ?? getQuoteTtlMs();
+  if (!Number.isNaN(quotedAtMs)) {
+    return Date.now() > quotedAtMs + ttl;
+  }
+  return true;
+}
+
+export function getStoredQuote(quoteId: string): ZapQuoteResult | undefined {
+  return quoteCache.get<ZapQuoteResult>(quoteId);
+}
+
+export function storeQuote(quote: ZapQuoteResult): void {
+  // Keep cache entry longer than quote TTL so callers get QUOTE_EXPIRED instead of QUOTE_NOT_FOUND
+  const cacheTtlSec = Math.ceil(quote.ttlMs / 1000) + 60;
+  quoteCache.set(quote.quoteId, quote, cacheTtlSec);
+}
+
+export function clearQuoteCache(): void {
+  quoteCache.flushAll();
+}
+
+export function verifyQuoteForExecution(request: VerifyQuoteRequest): VerifyQuoteResult {
+  if (!request.quoteId) {
+    return { valid: false, reason: "Missing quoteId", code: "QUOTE_NOT_FOUND" };
+  }
+
+  const stored = getStoredQuote(request.quoteId);
+  if (!stored) {
+    return {
+      valid: false,
+      reason: "Quote not found or expired — please request a fresh quote.",
+      code: "QUOTE_NOT_FOUND",
+    };
+  }
+
+  if (isQuoteExpired(stored)) {
+    return {
+      valid: false,
+      reason: `Quote expired at ${stored.expiresAt}. Please requote.`,
+      code: "QUOTE_EXPIRED",
+      storedQuote: stored,
+      isFallback: stored.isFallback,
+    };
+  }
+
+  // Freeze invalidation: if a freeze happened after the quote was created, reject.
+  if (freezeService.isQuoteInvalidatedByFreeze(stored.quotedAt, stored.protocol) ||
+      (request.protocol && freezeService.isQuoteInvalidatedByFreeze(stored.quotedAt, request.protocol))) {
+    return {
+      valid: false,
+      reason: `Quote invalidated by protocol freeze after ${stored.quotedAt}. Please requote.`,
+      code: "FROZEN",
+      storedQuote: stored,
+      isFallback: stored.isFallback,
+    };
+  }
+
+  // Asset pair binding
+  if (request.inputTokenContract && stored.inputTokenContract !== request.inputTokenContract) {
+    return {
+      valid: false,
+      reason: `Quote was for input ${stored.inputTokenContract} but execution requested ${request.inputTokenContract}. Please requote.`,
+      code: "ASSET_MISMATCH",
+      storedQuote: stored,
+      isFallback: stored.isFallback,
+    };
+  }
+  if (request.vaultTokenContract && stored.vaultTokenContract !== request.vaultTokenContract) {
+    return {
+      valid: false,
+      reason: `Quote was for vault asset ${stored.vaultTokenContract} but execution requested ${request.vaultTokenContract}. Please requote.`,
+      code: "ASSET_MISMATCH",
+      storedQuote: stored,
+      isFallback: stored.isFallback,
+    };
+  }
+
+  // Amount binding (if provided)
+  if (request.amountInStroops && stored.amountInStroops !== request.amountInStroops) {
+    return {
+      valid: false,
+      reason: `Quote amount ${stored.amountInStroops} does not match execution amount ${request.amountInStroops}. Please requote.`,
+      code: "AMOUNT_MISMATCH",
+      storedQuote: stored,
+      isFallback: stored.isFallback,
+    };
+  }
+
+  // Route binding
+  if (request.path && Array.isArray(request.path) && request.path.length > 0) {
+    const storedRoute = stored.path.map(p => p.contractId);
+    const reqRoute = request.path.map((p: any) => p.contractId ?? p);
+    if (storedRoute.length !== reqRoute.length || storedRoute.some((c, i) => c !== reqRoute[i])) {
+      return {
+        valid: false,
+        reason: `Quote route ${storedRoute.join("->")} does not match execution route ${reqRoute.join("->")}. Please requote.`,
+        code: "ROUTE_MISMATCH",
+        storedQuote: stored,
+        isFallback: stored.isFallback,
+      };
+    }
+  }
+
+  // Signature verification (if present) — ensures assumptions haven't been tampered with
+  if (stored.quoteSignature) {
+    const expectedSig = signQuoteAssumptions({ ...stored, quoteSignature: undefined } as any);
+    if (stored.quoteSignature !== expectedSig) {
+      return {
+        valid: false,
+        reason: "Quote signature mismatch — assumptions may have been tampered with. Please requote.",
+        code: "ROUTE_MISMATCH",
+        storedQuote: stored,
+        isFallback: stored.isFallback,
+      };
+    }
+  }
+
+  return { valid: true, storedQuote: stored, isFallback: stored.isFallback };
 }
 
 export async function getZapQuote(body: ZapQuoteBody): Promise<ZapQuoteResult> {
@@ -156,7 +389,10 @@ export async function getZapQuote(body: ZapQuoteBody): Promise<ZapQuoteResult> {
     throw new Error(`Quoting is temporarily disabled for ${body.protocol || "all protocols"} due to safety freeze.`);
   }
 
-  const quotedAt = new Date().toISOString();
+  const ttlMs = getQuoteTtlMs();
+  const quotedAtMs = Date.now();
+  const quotedAt = new Date(quotedAtMs).toISOString();
+  const expiresAt = new Date(quotedAtMs + ttlMs).toISOString();
 
   const sim = (await quoteViaRouterSimulation(body)) || quoteFallback(body);
 
@@ -176,20 +412,42 @@ export async function getZapQuote(body: ZapQuoteBody): Promise<ZapQuoteResult> {
 
   const effectiveSlippage = Math.max(slippage, userSlippage);
 
+  // Guard: if effective slippage is outside bounds, clamp to safe max
+  const clampedSlippage = Math.min(Math.max(effectiveSlippage, 0.001), 0.15);
+
   const expectedOut = BigInt(sim.expectedAmountOutStroops);
-  const multiplier = 1 - effectiveSlippage;
+  const multiplier = 1 - clampedSlippage;
   const outAfterSlippage = (expectedOut * BigInt(Math.floor(multiplier * 10000))) / BigInt(10000);
 
   const now = Date.now();
-  const quotedAtMs = new Date(quotedAt).getTime();
 
-  return {
+  const quoteId = generateQuoteId();
+  const freezeCheckedAt = new Date(now).toISOString();
+
+  const enriched: ZapQuoteResult = {
     ...sim,
-    slippageApplied: effectiveSlippage,
+    slippageApplied: clampedSlippage,
     amountOutAfterSlippage: outAfterSlippage.toString(),
     minAmountOutStroops: outAfterSlippage.toString(),
     quotedAt,
     quoteAgeMs: now - quotedAtMs,
     isFallback: sim.source === "fallback_rate",
+    quoteId,
+    expiresAt,
+    ttlMs,
+    inputTokenContract: body.inputTokenContract,
+    vaultTokenContract: body.vaultTokenContract,
+    amountInStroops: body.amountInStroops,
+    protocol,
+    freezeCheckedAt,
+    quoteSource: sim.source,
   };
+
+  // Sign assumptions for tamper detection
+  const signature = signQuoteAssumptions(enriched);
+  enriched.quoteSignature = signature;
+
+  storeQuote(enriched);
+
+  return enriched;
 }
