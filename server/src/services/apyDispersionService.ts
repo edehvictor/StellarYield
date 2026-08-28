@@ -5,6 +5,8 @@ export interface ProviderApyInput {
   fetchedAt: string;
 }
 
+import { computeAllSourceHealth, type SourceHealthResult } from './sourceHealthService';
+
 export interface ApyDispersionResult {
   strategyId: string;
   strategyName: string;
@@ -25,6 +27,7 @@ export interface ApyDispersionResult {
     apy: number;
     tvlUsd: number;
     deviationFromMean: number;
+    health: SourceHealthResult;
   }>;
   warning: string | null;
 }
@@ -132,11 +135,13 @@ export class ApyDispersionService {
     const dispersionLevel = computeDispersionLevel(coefficientOfVariation, this.config);
     const confidenceSignal = computeConfidenceSignal(dispersionLevel, inputs.length);
 
-    const sources = inputs.map(input => ({
+    const sourceHealthResults = computeAllSourceHealth(inputs);
+    const sources = inputs.map((input, i) => ({
       provider: input.provider,
       apy: input.apy,
       tvlUsd: input.tvlUsd,
       deviationFromMean: roundTo(input.apy - meanApy),
+      health: sourceHealthResults[i],
     }));
 
     const warning = buildWarning(dispersionLevel, coefficientOfVariation);
