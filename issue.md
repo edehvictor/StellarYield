@@ -7,7 +7,7 @@ All four issues from the upstream repository have been successfully implemented:
 - Circular referral chain detection
 - Referral reward validation (cannot exceed protocol fees)
 - Donation conservation invariants (yield_in = user_yield + donation)
-- Contract-derived referral status exposed to client
+- Contract-derived referral status exposed to client 
 
 ✅ **Issue #900**: Build a withdrawal queue with bounded liquidity and slippage protection
 - `WithdrawalQueueEntry` Prisma model with deterministic queue ordering

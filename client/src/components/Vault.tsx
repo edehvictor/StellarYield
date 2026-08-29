@@ -11,6 +11,7 @@ import type { VaultActionAvailabilityMap } from "../hooks/useVaultActionAvailabi
 import { RecoveryAdvisor } from "./AIAdvisor/RecoveryAdvisor";
 import { fetchVaultStats, type VaultStats, formatTvl, validateVaultSlug } from "../lib/vaultData";
 import VaultCapacityWarning, { type VaultCapacityStatus } from "./VaultCapacityWarning";
+import { VaultRiskBadge } from "./common/VaultRiskBadge";
 
 /**
  * Injects or updates a <meta> tag in document.head.
@@ -256,6 +257,10 @@ export default function Vault() {
             <span className="text-3xl font-black text-white">
               {stats.live ? formatTvl(stats.tvl) : "$0"}
             </span>
+          </div>
+          <div className="glass-panel p-4 col-span-2 flex items-center justify-between">
+            <span className="text-sm text-gray-500 font-bold uppercase tracking-widest">Risk Level</span>
+            <VaultRiskBadge risk={stats.risk} id={activeSlug} />
           </div>
         </div>
       )}

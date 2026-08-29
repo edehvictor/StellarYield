@@ -81,5 +81,84 @@ export const TX_PHASE_LABELS: Record<TxPhase, string> = {
   failure: "Failed",
 };
 
+// ── Deposit Receipt Tracking ───────────────────────────────────────────
+
+export type DepositReceiptStatus = "pending" | "confirmed" | "mismatched";
+
+export interface DepositReceipt {
+  txHash: string;
+  vaultId: string;
+  assetId: string;
+  amount: number;
+  submittedAt: string;
+  status: DepositReceiptStatus;
+  indexedEventId?: string;
+  confirmedAt?: string;
+  sharesAssigned?: number;
+  mismatchReason?: string;
+}
+
+export function createDepositReceipt(
+  txHash: string,
+  vaultId: string,
+  assetId: string,
+  amount: number,
+): DepositReceipt {
+  return {
+    txHash,
+    vaultId,
+    assetId,
+    amount,
+    submittedAt: new Date().toISOString(),
+    status: "pending",
+  };
+}
+
+export function updateReceiptFromEvent(
+  receipt: DepositReceipt,
+  event: { eventId: string; amount: number; sharesAssigned: number; processedAt: string },
+): DepositReceipt {
+  const amountMatches = Math.abs(event.amount - receipt.amount) < 0.0001;
+
+  if (!amountMatches) {
+    return {
+      ...receipt,
+      status: "mismatched",
+      indexedEventId: event.eventId,
+      mismatchReason: "amount_mismatch",
+      confirmedAt: event.processedAt,
+      sharesAssigned: event.sharesAssigned,
+    };
+  }
+
+  return {
+    ...receipt,
+    status: "confirmed",
+    indexedEventId: event.eventId,
+    confirmedAt: event.processedAt,
+    sharesAssigned: event.sharesAssigned,
+  };
+}
+
+export function markReceiptDuplicate(
+  receipt: DepositReceipt,
+  eventIds: string[],
+): DepositReceipt {
+  return {
+    ...receipt,
+    status: "mismatched",
+    mismatchReason: "duplicate_events",
+    indexedEventId: eventIds[0],
+  };
+}
 /** Recovery pipeline shown after a poll timeout while checking finality by hash. */
 export const TX_PHASE_RECOVERY: readonly TxPhase[] = ["recovering"];
+
+export {
+  saveTransactionDraft,
+  getTransactionDraft,
+  clearPendingTransactionDrafts,
+  clearSensitiveWalletState,
+  type TransactionDraft,
+} from "./transactionDraft";
+

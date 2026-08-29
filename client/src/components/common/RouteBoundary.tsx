@@ -5,6 +5,7 @@ import {
   logRouteFailure,
 } from "../../utils/diagnostics";
 import type { RouteFailureType } from "../../utils/diagnostics";
+import { openDiagnosticsPanel } from "../../lib/config";
 
 interface ErrorBoundaryProps {
   children: ReactNode;
@@ -106,13 +107,22 @@ class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundaryState> {
             {error.message}
           </p>
 
-          <button
-            type="button"
-            onClick={isChunkError ? this.handleChunkRetry : this.handleRenderRetry}
-            className="mt-4 rounded-lg bg-red-500/20 px-3 py-1.5 text-red-100 transition-colors hover:bg-red-500/30"
-          >
-            {isChunkError ? "Reload page" : "Try again"}
-          </button>
+          <div className="mt-4 flex items-center gap-3">
+            <button
+              type="button"
+              onClick={isChunkError ? this.handleChunkRetry : this.handleRenderRetry}
+              className="rounded-lg bg-red-500/20 px-3 py-1.5 text-red-100 transition-colors hover:bg-red-500/30"
+            >
+              {isChunkError ? "Reload page" : "Try again"}
+            </button>
+            <button
+              type="button"
+              onClick={() => openDiagnosticsPanel()}
+              className="rounded-lg bg-slate-800 border border-slate-700 px-3 py-1.5 text-slate-300 transition-colors hover:bg-slate-700 text-xs font-medium"
+            >
+              Inspect Diagnostics
+            </button>
+          </div>
         </div>
       );
     }

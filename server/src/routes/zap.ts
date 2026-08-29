@@ -4,6 +4,7 @@ import { getZapQuote, verifyQuoteForExecution, verifyZapQuote, isQuoteExpired, t
 import { freezeService } from "../services/freezeService";
 import { sendError } from "../utils/errorResponse";
 import { validateZapQuote } from "../middleware/validation";
+import { recordFailure, resolveNetworkLabel } from "../monitoring/prometheus";
 
 const router = Router();
 
@@ -66,8 +67,12 @@ router.post("/quote", validateZapQuote, async (req: Request, res: Response) => {
       isFrozen: freezeService.isFrozen(quote.protocol),
     });
   } catch (e) {
-    // Quote generation blocked by freeze should surface as 423, not generic 500
     const msg = e instanceof Error ? e.message : String(e);
+    recordFailure({
+      route: "zap/quote",
+      network: resolveNetworkLabel(),
+      failure_category: "quote_failed",
+    });
     if (msg.toLowerCase().includes("freeze")) {
       sendError(res, 423, "FROZEN", msg, msg);
       return;

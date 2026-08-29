@@ -1,3 +1,5 @@
+import { recordFailure as recordFailureMetric, resolveNetworkLabel } from "../monitoring/prometheus";
+
 export interface ResilientFetchOptions {
   timeoutMs: number;
   maxRetries: number;
@@ -67,6 +69,12 @@ function recordFailure(key: string): void {
   if (cb.failures >= CIRCUIT_BREAKER_THRESHOLD) {
     cb.isOpen = true;
   }
+  recordFailureMetric({
+    provider: key,
+    network: resolveNetworkLabel(),
+    route: "resilient_fetch",
+    failure_category: "circuit_breaker",
+  });
 }
 
 function sleep(ms: number): Promise<void> {

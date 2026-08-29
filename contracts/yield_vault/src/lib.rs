@@ -1502,6 +1502,101 @@ mod tests {
         client.set_fee_recipient(&admin, &first);
         assert_eq!(client.get_fee_recipient(), first);
     }
+
+    // ── Donation routing limits & invalid recipient handling (#1036) ─────
+
+    #[test]
+    fn test_charity_whitelist_admin_and_unauthorized() {
+        let (env, client, admin, _, _) = setup_env();
+        let charity = Address::generate(&env);
+        let impostor = Address::generate(&env);
+
+        // Unauthorized caller rejected
+        let res_unauth = client.try_set_charity_whitelist(&impostor, &charity, &true);
+        assert_eq!(res_unauth, Err(Ok(VaultError::Unauthorized)));
+
+        // Reject vault contract self
+        let res_self = client.try_set_charity_whitelist(&admin, &client.address, &true);
+        assert_eq!(res_self, Err(Ok(VaultError::InvalidRecipient)));
+
+        // Admin success
+        client.set_charity_whitelist(&admin, &charity, &true);
+
+        // Assert event
+        let events = env.events().all();
+        let (_contract, _topics, data) = events.last().unwrap();
+        let decoded: (Address, bool) = data.into_val(&env);
+        assert_eq!(decoded.0, charity);
+        assert_eq!(decoded.1, true);
+    }
+
+    #[test]
+    fn test_donation_split_boundaries_and_invalid_recipient() {
+        let (env, client, admin, _, _) = setup_env();
+        let user = Address::generate(&env);
+        let charity = Address::generate(&env);
+        let unapproved = Address::generate(&env);
+
+        client.set_charity_whitelist(&admin, &charity, &true);
+
+        // Valid boundary 0 bps
+        client.set_donation_split(&user, &0, &charity);
+        assert_eq!(client.get_donation_config(&user), (0, Some(charity.clone())));
+
+        // Valid boundary 10_000 bps
+        client.set_donation_split(&user, &10_000, &charity);
+        assert_eq!(client.get_donation_config(&user), (10_000, Some(charity.clone())));
+
+        // Over-limit bps (> 10_000) fails deterministically
+        let res_over = client.try_set_donation_split(&user, &10_001, &charity);
+        assert_eq!(res_over, Err(Ok(VaultError::InvalidDonationBps)));
+
+        // Negative bps fails deterministically
+        let res_neg = client.try_set_donation_split(&user, &-1, &charity);
+        assert_eq!(res_neg, Err(Ok(VaultError::InvalidDonationBps)));
+
+        // Unapproved charity fails
+        let res_unapproved = client.try_set_donation_split(&user, &5000, &unapproved);
+        assert_eq!(res_unapproved, Err(Ok(VaultError::CharityNotWhitelisted)));
+
+        // Vault-self fails
+        let res_self = client.try_set_donation_split(&user, &5000, &client.address);
+        assert_eq!(res_self, Err(Ok(VaultError::InvalidRecipient)));
+
+        // Prior valid state remains unchanged
+        assert_eq!(client.get_donation_config(&user), (10_000, Some(charity)));
+    }
+
+    #[test]
+    fn test_apply_donation_transfers_to_whitelisted_charity() {
+        let (env, client, admin, token_addr, token_admin) = setup_env();
+        let user = Address::generate(&env);
+        let charity = Address::generate(&env);
+
+        client.set_charity_whitelist(&admin, &charity, &true);
+        client.set_donation_split(&user, &2000, &charity); // 20%
+
+        let contract_id = client.address.clone();
+        mint_tokens(&env, &token_addr, &token_admin, &contract_id, 10_000);
+
+        let gross_yield = 1000i128;
+        let net = env.as_contract(&contract_id, || {
+            YieldVault::apply_donation(&env, &user, gross_yield, &token_addr)
+        });
+
+        assert_eq!(net, 800);
+        let token_client = token::Client::new(&env, &token_addr);
+        assert_eq!(token_client.balance(&charity), 200);
+        assert_eq!(client.get_total_donated(), 200);
+
+        // Assert donated event
+        let events = env.events().all();
+        let (_contract, _topics, data) = events.last().unwrap();
+        let decoded: (Address, Address, i128) = data.into_val(&env);
+        assert_eq!(decoded.0, user);
+        assert_eq!(decoded.1, charity);
+        assert_eq!(decoded.2, 200);
+    }
 }
 
 // ── Fuzz / Invariant Tests ───────────────────────────────────────────────

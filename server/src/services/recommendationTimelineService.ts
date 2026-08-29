@@ -42,15 +42,24 @@ export interface RecommendationTimelineEntry {
 const MAX_ENTRIES_PER_USER = 20;
 const historyStore = new Map<string, RecommendationTimelineEntry[]>();
 
-export const REASON_CODE_LABELS: Record<ReasonCode, { label: string; description: string; severity: "info" | "warning" | "critical" }> = {
+export const REASON_CODE_LABELS: Record<
+  ReasonCode,
+  {
+    label: string;
+    description: string;
+    severity: "info" | "warning" | "critical";
+  }
+> = {
   "risk-tolerance-change": {
     label: "Risk Tolerance Adjusted",
-    description: "Your risk tolerance input changed, affecting the recommendation.",
+    description:
+      "Your risk tolerance input changed, affecting the recommendation.",
     severity: "warning",
   },
   "apy-shift": {
     label: "APY Shift Detected",
-    description: "Projected APY changed significantly, triggering a re-evaluation.",
+    description:
+      "Projected APY changed significantly, triggering a re-evaluation.",
     severity: "info",
   },
   "liquidity-change": {
@@ -122,7 +131,9 @@ function generateReasonCodes(
     });
   }
 
-  if (Math.abs(previous.liquidityDepthUsd - current.liquidityDepthUsd) >= 50_000) {
+  if (
+    Math.abs(previous.liquidityDepthUsd - current.liquidityDepthUsd) >= 50_000
+  ) {
     codes.push({
       code: "liquidity-change",
       label: REASON_CODE_LABELS["liquidity-change"].label,
@@ -163,7 +174,9 @@ function diffInputs(
     changed.push("expectedApy");
   }
 
-  if (Math.abs(previous.liquidityDepthUsd - current.liquidityDepthUsd) >= 50_000) {
+  if (
+    Math.abs(previous.liquidityDepthUsd - current.liquidityDepthUsd) >= 50_000
+  ) {
     changed.push("liquidityDepthUsd");
   }
 
@@ -228,6 +241,94 @@ export function getRecommendationTimeline(
   userId: string,
 ): RecommendationTimelineEntry[] {
   return historyStore.get(userId) ?? [];
+}
+
+/**
+ * Cursor format: base64url(timestamp:index) where timestamp and index uniquely identify a position
+ */
+export interface PaginatedRecommendations {
+  data: RecommendationTimelineEntry[];
+  nextCursor: string | null;
+  hasMore: boolean;
+}
+
+function encodeCursor(timestamp: string, index: number): string {
+  const data = `${timestamp}:${index}`;
+  return Buffer.from(data).toString("base64url");
+}
+
+function decodeCursor(
+  cursor: string,
+): { timestamp: string; index: number } | null {
+  try {
+    const data = Buffer.from(cursor, "base64url").toString("utf-8");
+    const [timestamp, indexStr] = data.split(":");
+    const index = parseInt(indexStr, 10);
+    if (!timestamp || isNaN(index)) return null;
+    return { timestamp, index };
+  } catch {
+    return null;
+  }
+}
+
+export function getRecommendationTimelinePaginated(
+  userId: string,
+  cursor: string | null | undefined,
+  limit: number = 20,
+): PaginatedRecommendations {
+  const timeline = historyStore.get(userId) ?? [];
+  if (timeline.length === 0) {
+    return {
+      data: [],
+      nextCursor: null,
+      hasMore: false,
+    };
+  }
+
+  let startIndex = 0;
+
+  if (cursor) {
+    const decoded = decodeCursor(cursor);
+    if (!decoded) {
+      // Invalid cursor format - return empty with no nextCursor
+      return {
+        data: [],
+        nextCursor: null,
+        hasMore: false,
+      };
+    }
+
+    // Use the index directly. Cursor points to last item on previous page.
+    // Start from the position after that item.
+    startIndex = decoded.index + 1;
+
+    // If we're past the end, return empty
+    if (startIndex >= timeline.length) {
+      return {
+        data: [],
+        nextCursor: null,
+        hasMore: false,
+      };
+    }
+  }
+
+  // Get the page
+  const page = timeline.slice(startIndex, startIndex + limit);
+  const hasMore = startIndex + limit < timeline.length;
+
+  let nextCursor: string | null = null;
+  if (hasMore && page.length > 0) {
+    // nextCursor points to the last item on this page
+    const lastItemIndex = startIndex + page.length - 1;
+    const lastItem = page[page.length - 1];
+    nextCursor = encodeCursor(lastItem.timestamp, lastItemIndex);
+  }
+
+  return {
+    data: page,
+    nextCursor,
+    hasMore,
+  };
 }
 
 export function resetRecommendationTimelineStore(): void {

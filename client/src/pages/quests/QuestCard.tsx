@@ -36,11 +36,23 @@ interface Props {
  * Renders a single quest card with progress bar and claim button.
  */
 export default function QuestCard({ quest, onClaim, isMinting, progressPending }: Props) {
-  const obj = quest.objectives[0];
-  const pct = Math.min(100, Math.round((obj.progress / obj.target) * 100));
+  const obj = quest.objectives?.[0] ?? {
+    id: "obj",
+    description: quest.title || "Objective",
+    target: 1,
+    progress: 0,
+    unit: "",
+  };
+  const target = typeof obj.target === "number" && obj.target > 0 ? obj.target : 1;
+  const progress = typeof obj.progress === "number" && !isNaN(obj.progress) ? Math.max(0, obj.progress) : 0;
+  const calculatedPct = Math.round((progress / target) * 100);
+  const pct = Math.min(100, Math.max(0, isNaN(calculatedPct) ? 0 : calculatedPct));
+
   const isLocked = quest.status === "locked";
   const isCompleted = quest.status === "completed";
   const isClaimable = quest.status === "claimable";
+  const categoryGradient = CATEGORY_COLORS[quest.category] ?? "from-indigo-500/80 to-purple-600/80";
+  const iconElement = ICONS[quest.icon] ?? <Landmark size={20} />;
 
   return (
     <motion.div
@@ -53,18 +65,18 @@ export default function QuestCard({ quest, onClaim, isMinting, progressPending }
     >
       {/* Header */}
       <div className="flex items-start gap-3">
-        <div className={`w-10 h-10 rounded-xl bg-gradient-to-br ${CATEGORY_COLORS[quest.category]} flex items-center justify-center shrink-0`}>
-          {ICONS[quest.icon]}
+        <div className={`w-10 h-10 rounded-xl bg-gradient-to-br ${categoryGradient} flex items-center justify-center shrink-0`}>
+          {iconElement}
         </div>
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2 flex-wrap">
-            <h3 className="font-semibold text-white truncate">{quest.title}</h3>
+            <h3 className="font-semibold text-white truncate">{quest.title || "Quest"}</h3>
             {isCompleted && <CheckCircle2 size={15} className="text-green-400 shrink-0" />}
             {isLocked && <Lock size={14} className="text-gray-500 shrink-0" />}
           </div>
-          <p className="text-xs text-gray-400 mt-0.5 line-clamp-2">{quest.description}</p>
+          <p className="text-xs text-gray-400 mt-0.5 line-clamp-2">{quest.description || ""}</p>
         </div>
-        <span className="text-xs font-bold text-indigo-300 shrink-0">{quest.points} XP</span>
+        <span className="text-xs font-bold text-indigo-300 shrink-0">{quest.points ?? 0} XP</span>
       </div>
 
       {/* Progress */}
@@ -72,7 +84,7 @@ export default function QuestCard({ quest, onClaim, isMinting, progressPending }
         <div>
           <div className="flex justify-between text-xs text-gray-400 mb-1.5">
             <span>{obj.description}</span>
-            <span>{obj.progress} / {obj.target} {obj.unit}</span>
+            <span>{progress} / {target} {obj.unit || ""}</span>
           </div>
           <div className="h-1.5 bg-white/5 rounded-full overflow-hidden">
             <motion.div

@@ -6,6 +6,8 @@ import {
   cloneQuests,
   loadWalletQuestBundle,
   saveWalletQuestBundle,
+  isCacheStale,
+  invalidateWalletQuestCache,
 } from "./questPersistence";
 
 export type ProgressVerification =
@@ -200,6 +202,14 @@ export function useQuestStore(walletAddress: string | null) {
     return () => ac.abort();
   }, [walletAddress, refreshProgress]);
 
+  /** Invalidate cache and reset to default template */
+  const invalidateCache = useCallback(() => {
+    if (!walletAddress) return;
+    invalidateWalletQuestCache(walletAddress);
+    setQuests(cloneQuests(INITIAL_QUESTS));
+    setLastSyncedAt(null);
+  }, [walletAddress]);
+
   /**
    * Mint an achievement badge NFT via Soroban contract call.
    * The contract validates on-chain completion — client cannot spoof this.
@@ -250,8 +260,9 @@ export function useQuestStore(walletAddress: string | null) {
   }, 0);
 
   const isProgressVerifying = progressVerification.status === "loading";
+  const isStale = isCacheStale({ lastSyncedAt });
   const showStaleProgressBanner =
-    isProgressVerifying && lastSyncedAt !== null;
+    (isProgressVerifying && lastSyncedAt !== null) || (isStale && lastSyncedAt !== null);
 
   return {
     quests,
@@ -260,8 +271,10 @@ export function useQuestStore(walletAddress: string | null) {
     lastSyncedAt,
     progressVerification,
     isProgressVerifying,
+    isStale,
     showStaleProgressBanner,
     refreshProgress,
+    invalidateCache,
     mintBadge,
     totalPoints,
   };

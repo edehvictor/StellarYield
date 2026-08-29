@@ -8,6 +8,12 @@ import type { TxPhase } from "../../services/transactionPhase";
 import { TX_PHASE_PIPELINE } from "../../services/transactionPhase";
 <import { fetchSwapQuote, fetchVerifyQuote, isQuoteExpiredLocal, verifySwapQuote } from "./fetchSwapQuote";
 import { minAmountAfterSlippage } from "./slippage";
+import {
+  buildZapQuoteRequestKey,
+  isZapQuoteExpired,
+  quoteAgeSeconds,
+  recalculateMinOut,
+} from "./quoteFreshness";
 import { parseDecimalToStroops, formatStroopsToDecimal } from "./amount";
 import {
   buildSelectableZapAssetsFromMetadata,
@@ -31,12 +37,7 @@ export interface ZapDepositPanelProps {
 
 const MIN_SLIPPAGE = 0.1;
 const MAX_SLIPPAGE = 15;
-const STALE_QUOTE_AGE_MS = 60_000;
 const FALLBACK_SOURCE = "fallback_rate";
-
-function quoteAgeSeconds(quotedAt: string): number {
-  return Math.floor((Date.now() - new Date(quotedAt).getTime()) / 1000);
-}
 
 export default function ZapDepositPanel({ walletAddress }: ZapDepositPanelProps) {
   const useApiAssets = shouldLoadZapMetadataFromApi();
@@ -101,12 +102,35 @@ export default function ZapDepositPanel({ walletAddress }: ZapDepositPanelProps)
   const [fallbackAcknowledged, setFallbackAcknowledged] = useState(false);
   const [verifyError, setVerifyError] = useState("");
   const [confirmFallbackForTest] = useState(false);
+  // Tracks the most recently fetched route, independent of React state, so a
+  // route-path change can be detected even when the headline output amount
+  // stays nominally the same between fetches.
+  const latestRouteRef = useRef<string[] | null>(null);
+  const prevRouteRef = useRef<string[] | null>(null);
+  const [quoteNowMs, setQuoteNowMs] = useState(Date.now());
+  const quoteRequestSeqRef = useRef(0);
 
   const needsSwap = inputAsset?.contractId !== vaultToken.contractId;
+
+  useEffect(() => {
+    prevExpectedOutRef.current = null;
+    setExpectedOut(null);
+    setQuotePath("");
+    setQuoteSource("");
+    setQuoteData(null);
+  }, [inputAsset?.contractId, vaultToken.contractId]);
+
+  useEffect(() => {
+    if (!quoteData) return;
+    const id = setInterval(() => setQuoteNowMs(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, [quoteData]);
 
   const refreshQuote = useCallback(async () => {
     if (!inputAsset || !amount || !vaultToken.contractId) {
       prevExpectedOutRef.current = null;
+      prevRouteRef.current = null;
+      latestRouteRef.current = null;
       setExpectedOut(null);
       setQuotePath("");
       setQuoteData(null);
@@ -128,9 +152,19 @@ export default function ZapDepositPanel({ walletAddress }: ZapDepositPanelProps)
     setQuoteLoading(true);
     setError("");
     setVerifyError("");
+    const requestSeq = ++quoteRequestSeqRef.current;
+    const requestKey = buildZapQuoteRequestKey({
+      inputTokenContract: inputAsset.contractId,
+      vaultTokenContract: vaultToken.contractId,
+      amountInStroops: stroops.toString(),
+      slippageTolerance,
+    });
     try {
       if (!needsSwap) {
+        if (requestSeq !== quoteRequestSeqRef.current) return;
         prevExpectedOutRef.current = expectedOut;
+        prevRouteRef.current = latestRouteRef.current;
+        latestRouteRef.current = null;
         setExpectedOut(stroops);
         setQuotePath(`${inputAsset.symbol} (no swap)`);
         setQuoteSource("direct");
@@ -145,7 +179,17 @@ export default function ZapDepositPanel({ walletAddress }: ZapDepositPanelProps)
           vaultDecimals: vaultToken.decimals,
           slippageTolerance: slippageTolerance / 100,
         });
+        if (requestSeq !== quoteRequestSeqRef.current) return;
+        const responseKey = buildZapQuoteRequestKey({
+          inputTokenContract: inputAsset.contractId,
+          vaultTokenContract: vaultToken.contractId,
+          amountInStroops: stroops.toString(),
+          slippageTolerance,
+        });
+        if (responseKey !== requestKey) return;
         prevExpectedOutRef.current = expectedOut;
+        prevRouteRef.current = latestRouteRef.current;
+        latestRouteRef.current = q.path.map((h) => h.contractId);
         setExpectedOut(BigInt(q.expectedAmountOutStroops));
         setQuotePath(q.path.map((h) => h.label ?? h.contractId.slice(0, 6)).join(" → "));
         setQuoteSource(q.source);
@@ -155,16 +199,22 @@ export default function ZapDepositPanel({ walletAddress }: ZapDepositPanelProps)
         if (confirmFallbackForTest) {
           // keep test helper
         }
+        setQuoteNowMs(Date.now());
       }
     } catch (e) {
+      if (requestSeq !== quoteRequestSeqRef.current) return;
       prevExpectedOutRef.current = null;
+      prevRouteRef.current = null;
+      latestRouteRef.current = null;
       setExpectedOut(null);
       setError(e instanceof Error ? e.message : "Could not load quote");
       setQuoteData(null);
     } finally {
-      setQuoteLoading(false);
+      if (requestSeq === quoteRequestSeqRef.current) {
+        setQuoteLoading(false);
+      }
     }
-  }, [amount, inputAsset, needsSwap, slippageTolerance, vaultToken, expectedOut, confirmFallbackForTest]);
+<  }, [amount, inputAsset, needsSwap, slippageTolerance, vaultToken, expectedOut, confirmFallbackForTest]);
 
   useEffect(() => {
     const t = setTimeout(() => {
@@ -189,12 +239,12 @@ export default function ZapDepositPanel({ walletAddress }: ZapDepositPanelProps)
 
   const isExpired = useMemo(() => {
     if (!quoteData) return false;
-    // Prefer explicit expiresAt, fallback to age-based staleness
+    // Prefer explicit expiresAt/ttlMs (our envelope), fallback to upstream's isZapQuoteExpired
     if (quoteData.expiresAt || quoteData.ttlMs !== undefined) {
       return isQuoteExpiredLocal(quoteData);
     }
-    return quoteAgeSeconds(quoteData.quotedAt) > STALE_QUOTE_AGE_MS / 1000;
-  }, [quoteData]);
+    return isZapQuoteExpired(quoteData, quoteNowMs);
+  }, [quoteData, quoteNowMs]);
 
   const isStale = useMemo(() => {
     if (!quoteData) return false;
@@ -221,6 +271,7 @@ export default function ZapDepositPanel({ walletAddress }: ZapDepositPanelProps)
       expectedOut,
       minOut: minOutVal,
       prevExpectedOut: prevExpectedOutRef.current ?? undefined,
+      prevRoute: prevRouteRef.current ?? undefined,
       isFallback,
       isStale,
       source: quoteData.source,
@@ -261,6 +312,10 @@ export default function ZapDepositPanel({ walletAddress }: ZapDepositPanelProps)
     if (amountIn <= 0n) return;
     if (minOut === null || minOut <= 0n) {
       setError("Wait for a valid quote or reduce slippage");
+      return;
+    }
+    if (quoteData && isZapQuoteExpired(quoteData)) {
+      setError("Quote expired. Refresh and try again.");
       return;
     }
 
@@ -376,6 +431,7 @@ export default function ZapDepositPanel({ walletAddress }: ZapDepositPanelProps)
     isFrozenQuote,
     isFallback,
     fallbackAcknowledged,
+    quoteNowMs,
   ]);
 
   const retryZap = useCallback(() => {
@@ -585,7 +641,7 @@ export default function ZapDepositPanel({ walletAddress }: ZapDepositPanelProps)
             {quoteData && (
               <span className="text-[10px] text-gray-500 flex items-center gap-1">
                 <Clock size={10} />
-                {quoteAgeSeconds(quoteData.quotedAt)}s ago
+                {quoteAgeSeconds(quoteData.quotedAt, quoteNowMs)}s ago
               </span>
             )}
             {/* TTL / expiry */}

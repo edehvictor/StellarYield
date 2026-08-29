@@ -2,7 +2,7 @@
 
 Thanks for contributing to StellarYield, a Stellar-native DeFi yield aggregator and automated vault system. We rely on the community to help build secure, efficient, and accessible DeFi tools.
 
-### Before You Start
+### Before You Start 
 
 * **Read the Docs:** Review the `README.md` for overall architecture context.
 * **Claim an Issue:** Browse the active issues, especially those tagged for the Stellar Wave, before starting work. Please ask to be assigned before opening a PR.
@@ -194,6 +194,19 @@ Before requesting a review on a **Stellar Wave** PR, please review the **[Releas
 - ✅ PR template completed (all checkboxes checked)
 
 See [docs/release-checklist.md](./docs/release-checklist.md) for the full checklist and guidance on deployment (for maintainers).
+
+## Yield Normalization
+
+Any change that produces, aggregates, or displays a yield figure must follow the
+[yield normalization contract](./server/docs/yield-normalization-contract.md):
+APY in percent at two decimals, USD in dollars at two decimals, rounded half
+away from zero, exactly once, at the point the value is emitted.
+
+Import the helpers from `server/src/utils/yieldNormalizationContract.ts` rather
+than writing a local `round2` or dividing by `100` inline — a local copy is how
+feed ingestion and portfolio summaries drift apart. `npm test --prefix server -- yieldNormalization`
+runs the parity checks, and `GET /api/yields/parity` reports the same
+diagnostics against a running server.
 
 ## Contract Security
 

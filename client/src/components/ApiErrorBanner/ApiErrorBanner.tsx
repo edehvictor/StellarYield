@@ -4,7 +4,8 @@
  * A reusable error banner for API failures.
  * Supports retry, dismiss, and compact display variants.
  */
-import { AlertCircle, RefreshCw, X } from "lucide-react";
+import { AlertCircle, RefreshCw, X, Activity } from "lucide-react";
+import { openDiagnosticsPanel } from "../../lib/config";
 
 export interface ApiErrorBannerProps {
     /** The error message to display. */
@@ -13,6 +14,8 @@ export interface ApiErrorBannerProps {
     onRetry?: () => void;
     /** If provided, a dismiss (×) button is shown that calls this on click. */
     onDismiss?: () => void;
+    /** Whether to show a button opening system diagnostics */
+    showDiagnostics?: boolean;
     /**
      * Compact mode: renders a small inline pill rather than a full-width banner.
      * Useful inside dense UIs (e.g. PortfolioBuilder).
@@ -26,6 +29,7 @@ export default function ApiErrorBanner({
     message,
     onRetry,
     onDismiss,
+    showDiagnostics = true,
     compact = false,
     className = "",
 }: ApiErrorBannerProps) {
@@ -43,6 +47,17 @@ export default function ApiErrorBanner({
                     aria-hidden="true"
                 />
                 <span className="text-red-400 truncate flex-1">{message}</span>
+                {showDiagnostics && (
+                    <button
+                        type="button"
+                        onClick={() => openDiagnosticsPanel()}
+                        aria-label="Inspect diagnostics"
+                        title="Inspect Diagnostics"
+                        className="text-red-400 hover:text-red-300 transition-colors shrink-0 p-0.5"
+                    >
+                        <Activity size={13} />
+                    </button>
+                )}
                 {onRetry && (
                     <button
                         type="button"
@@ -79,6 +94,17 @@ export default function ApiErrorBanner({
             />
             <p className="text-red-400 text-sm flex-1">{message}</p>
             <div className="flex items-center gap-2 shrink-0">
+                {showDiagnostics && (
+                    <button
+                        type="button"
+                        onClick={() => openDiagnosticsPanel()}
+                        aria-label="Inspect diagnostics"
+                        className="flex items-center gap-1 text-xs font-semibold text-red-300 hover:text-red-200 bg-red-500/10 hover:bg-red-500/20 border border-red-500/20 rounded-lg px-2.5 py-1 transition-colors"
+                    >
+                        <Activity size={12} />
+                        Diagnostics
+                    </button>
+                )}
                 {onRetry && (
                     <button
                         type="button"

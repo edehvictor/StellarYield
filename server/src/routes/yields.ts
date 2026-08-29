@@ -3,7 +3,10 @@ import { sendError } from "../utils/errorResponse";
 import {
   CURRENT_YIELDS_TTL_SECONDS,
   getYieldDataWithCacheStatus,
+  getYieldParityReport,
+  type PortfolioPositionInput,
 } from "../services/yieldService";
+import { formatParityReport } from "../utils/yieldNormalization";
 import { calculateNetYield } from "../services/netYieldEngine";
 import { yieldReliabilityEngine } from "../services/yieldReliabilityService";
 
@@ -111,6 +114,58 @@ yieldsRouter.get("/ranking", async (req, res) => {
     sendError(res, 500, "RANKING_FAILED", "Unable to rank opportunities right now.");
   }
 });
+
+/**
+ * GET /api/yields/parity
+ *
+ * Runs the yield normalization parity check between the market feed and a
+ * portfolio summary built from that same feed, and returns the diagnostics.
+ *
+ * Optional `?positions=Blend:5000,Soroswap:2500` weights the summary by an
+ * actual portfolio; without it every protocol is weighted equally.
+ *
+ * Always 200 — this is a diagnostic report, not a request that can fail
+ * validation. Alert on `inParity: false`.
+ */
+yieldsRouter.get("/parity", async (req, res) => {
+  try {
+    const positions = parsePositionsQuery(req.query.positions);
+    const report = await getYieldParityReport(positions);
+
+    res.setHeader("Cache-Control", "no-store");
+    res.status(200).json({
+      ...report,
+      diagnostics: formatParityReport(report),
+    });
+  } catch (error) {
+    console.error("Failed to serve /api/yields/parity.", error);
+    sendError(
+      res,
+      500,
+      "YIELD_PARITY_FAILED",
+      "Unable to run the yield normalization parity check right now.",
+    );
+  }
+});
+
+/**
+ * Parses `Blend:5000,Soroswap:2500` into portfolio positions. Malformed or
+ * non-positive entries are dropped rather than rejected, so a bad query string
+ * degrades to the equal-weight default instead of hiding a real parity break.
+ */
+function parsePositionsQuery(raw: unknown): PortfolioPositionInput[] | undefined {
+  if (typeof raw !== "string" || raw.trim() === "") return undefined;
+
+  const positions: PortfolioPositionInput[] = [];
+  for (const chunk of raw.split(",")) {
+    const [protocol, value] = chunk.split(":");
+    const valueUsd = Number(value);
+    if (!protocol?.trim() || !Number.isFinite(valueUsd) || valueUsd <= 0) continue;
+    positions.push({ protocol: protocol.trim(), valueUsd });
+  }
+
+  return positions.length > 0 ? positions : undefined;
+}
 
 export default yieldsRouter;
 

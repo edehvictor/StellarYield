@@ -1,4 +1,9 @@
 import { PROTOCOLS } from "../config/protocols";
+import {
+  bpsToApyPercent,
+  normalizeApyPercent,
+  roundTo,
+} from "../utils/yieldNormalizationContract";
 import type { SimulationWarning } from "../../../shared/types/simulationWarning";
 
 // Re-export so consumers can import from a single service location.
@@ -166,7 +171,13 @@ export function simulateDeposit(params: SimulationParams): SimulationResult {
     result.routing.path.push(p.protocolName);
   });
 
-  result.postDepositExposure.expectedApy = blendedApyBps / 100;
+  // Contract: APY leaves this module as a percent at 2 decimals, exactly as the
+  // market feed publishes it. Emitting the raw quotient here is what made a
+  // single-protocol deposit preview disagree with /api/yields in the third
+  // decimal.
+  result.postDepositExposure.expectedApy = normalizeApyPercent(
+    bpsToApyPercent(blendedApyBps),
+  );
 
   // Assuming 1 token = 1 share for simplicity, with some small slippage loss mock
   const slippageLoss = amount > 100000 ? netAmount * 0.01 : netAmount * 0.001;
@@ -233,7 +244,11 @@ export const REBALANCE_THRESHOLDS = {
   weightSumTolerance: 0.5,
 } as const;
 
-const round2 = (value: number): number => Math.round(value * 100) / 100;
+// Emits at the yield normalization contract's precision and rounding rule, so
+// simulation output lines up with the market feed rather than with a private
+// `Math.round` that breaks ties differently for negative deltas. Used for both
+// percent and USD values, which the contract carries at the same 2 decimals.
+const round2 = (value: number): number => roundTo(value, 2);
 
 /**
  * Validate rebalance inputs. Returns a list of human-readable errors; an
@@ -409,7 +424,9 @@ export function simulateRebalance(params: RebalanceParams): RebalancePreview {
 export interface RebalanceAllocationRule {
   label: string;
   targetWeight: number;   // 0-100, must sum to ~100 across all allocations
-  apy: number;            // annual %, e.g. 10 = 10%
+  apy: number;            // annual % fallback / average, e.g. 10 = 10%
+  /** Optional per-day APY series (length = backtest day count). Overrides `apy` for that day. */
+  dailyApy?: number[];
   liquidityUsd?: number;  // optional, for context only
 }
 
@@ -535,7 +552,14 @@ export function runRebalanceBacktest(params: RebalanceBacktestParams): Rebalance
   const driftThresholdPct = params.driftThresholdPct ?? 5;
 
   const targetWeights = params.allocations.map(a => a.targetWeight / 100);
-  const dailyFactors = params.allocations.map(a => 1 + (a.apy / 100) / 365);
+
+  const dailyFactorFor = (alloc: RebalanceAllocationRule, dayIndex: number): number => {
+    const apy =
+      alloc.dailyApy && alloc.dailyApy.length > dayIndex
+        ? alloc.dailyApy[dayIndex]
+        : alloc.apy;
+    return 1 + (apy / 100) / 365;
+  };
 
   // Backtest-level structured warnings (evaluated once before the loop).
   const warnings: SimulationWarning[] = [];
@@ -601,8 +625,8 @@ export function runRebalanceBacktest(params: RebalanceBacktestParams): Rebalance
     const dateStr = new Date(ms).toISOString().slice(0, 10);
 
     // Compound growth for each allocation
-    portfolioAlloc = portfolioAlloc.map((v, i) => v * dailyFactors[i]);
-    passiveAlloc = passiveAlloc.map((v, i) => v * dailyFactors[i]);
+    portfolioAlloc = portfolioAlloc.map((v, i) => v * dailyFactorFor(params.allocations[i], dayNumber));
+    passiveAlloc = passiveAlloc.map((v, i) => v * dailyFactorFor(params.allocations[i], dayNumber));
 
     const totalPortfolio = portfolioAlloc.reduce((s, v) => s + v, 0);
     const currentWeights = portfolioAlloc.map(v => (v / totalPortfolio) * 100);
@@ -652,10 +676,11 @@ export function runRebalanceBacktest(params: RebalanceBacktestParams): Rebalance
 
     const portfolioTotal = portfolioAlloc.reduce((s, v) => s + v, 0);
     const passiveTotal = passiveAlloc.reduce((s, v) => s + v, 0);
-    const blendedApy = params.allocations.reduce(
-      (sum, a, i) => sum + a.apy * (portfolioAlloc[i] / portfolioTotal),
-      0,
-    );
+    const blendedApy = params.allocations.reduce((sum, a, i) => {
+      const apy =
+        a.dailyApy && a.dailyApy.length > dayNumber ? a.dailyApy[dayNumber] : a.apy;
+      return sum + apy * (portfolioAlloc[i] / portfolioTotal);
+    }, 0);
 
     snapshots.push({
       date: dateStr,

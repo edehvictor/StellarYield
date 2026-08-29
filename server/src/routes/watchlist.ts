@@ -9,13 +9,33 @@ import { WatchlistService } from "../services/watchlistService";
 const router = Router();
 
 /**
+ * Extracts the wallet identity that scopes watchlist data.
+ * Mirrors contacts.ts's getWalletAddress helper for consistency: this is a
+ * self-reported header, not a cryptographically verified wallet address (no
+ * signature-verified wallet-auth middleware exists in this codebase yet).
+ * It is still a hard improvement over the previous hardcoded "user-1"
+ * default, which shared one watchlist across every caller regardless of
+ * which wallet was connected.
+ */
+const getWalletAddress = (req: Request): string | undefined => {
+  return (
+    (req.headers["x-wallet-address"] as string) ||
+    (req.query.userId as string) ||
+    req.body?.userId
+  );
+};
+
+/**
  * GET /api/watchlist
  * Get user's watchlist with alerts summary
  */
 router.get("/", async (req: Request, res: Response) => {
   try {
-    // In production, get userId from authenticated session
-    const userId = req.query.userId as string || "user-1"; // Demo: default user
+    const userId = getWalletAddress(req);
+    if (!userId) {
+      res.status(401).json({ error: "Wallet address required", code: "WALLET_ADDRESS_REQUIRED" });
+      return;
+    }
 
     const watchlist = await WatchlistService.getUserWatchlist(userId);
     res.json(watchlist);
@@ -31,7 +51,11 @@ router.get("/", async (req: Request, res: Response) => {
  */
 router.get("/alerts", async (req: Request, res: Response) => {
   try {
-    const userId = req.query.userId as string || "user-1";
+    const userId = getWalletAddress(req);
+    if (!userId) {
+      res.status(401).json({ error: "Wallet address required", code: "WALLET_ADDRESS_REQUIRED" });
+      return;
+    }
 
     const alerts = await WatchlistService.getUserAlerts(userId);
     res.json({
@@ -50,8 +74,13 @@ router.get("/alerts", async (req: Request, res: Response) => {
  */
 router.post("/", async (req: Request, res: Response) => {
   try {
+    const userId = getWalletAddress(req);
+    if (!userId) {
+      res.status(401).json({ error: "Wallet address required", code: "WALLET_ADDRESS_REQUIRED" });
+      return;
+    }
+
     const {
-      userId = "user-1",
       opportunityId,
       opportunityType,
       opportunityName,
@@ -88,7 +117,11 @@ router.post("/", async (req: Request, res: Response) => {
  */
 router.delete("/:itemId", async (req: Request, res: Response) => {
   try {
-    const userId = req.query.userId as string || "user-1";
+    const userId = getWalletAddress(req);
+    if (!userId) {
+      res.status(401).json({ error: "Wallet address required", code: "WALLET_ADDRESS_REQUIRED" });
+      return;
+    }
     const { itemId } = req.params;
 
     const item = await WatchlistService.removeFromWatchlist(userId, itemId);
@@ -105,7 +138,11 @@ router.delete("/:itemId", async (req: Request, res: Response) => {
  */
 router.post("/:itemId/rules", async (req: Request, res: Response) => {
   try {
-    const userId = req.query.userId as string || "user-1";
+    const userId = getWalletAddress(req);
+    if (!userId) {
+      res.status(401).json({ error: "Wallet address required", code: "WALLET_ADDRESS_REQUIRED" });
+      return;
+    }
     const { itemId } = req.params;
     const { type, value, triggerOnce } = req.body;
 
@@ -142,7 +179,11 @@ router.post("/:itemId/rules", async (req: Request, res: Response) => {
  */
 router.delete("/:itemId/rules/:ruleId", async (req: Request, res: Response) => {
   try {
-    const userId = req.query.userId as string || "user-1";
+    const userId = getWalletAddress(req);
+    if (!userId) {
+      res.status(401).json({ error: "Wallet address required", code: "WALLET_ADDRESS_REQUIRED" });
+      return;
+    }
     const { itemId, ruleId } = req.params;
 
     await WatchlistService.removeThresholdRule(userId, itemId, ruleId);
@@ -191,7 +232,11 @@ router.post("/:itemId/check", async (req: Request, res: Response) => {
  */
 router.post("/:itemId/alerts/:ruleId/acknowledge", async (req: Request, res: Response) => {
   try {
-    const userId = req.query.userId as string || "user-1";
+    const userId = getWalletAddress(req);
+    if (!userId) {
+      res.status(401).json({ error: "Wallet address required", code: "WALLET_ADDRESS_REQUIRED" });
+      return;
+    }
     const { itemId, ruleId } = req.params;
 
     await WatchlistService.acknowledgeAlert(userId, itemId, ruleId);
