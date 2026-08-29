@@ -2,13 +2,15 @@ export type AlertCondition = "above" | "below";
 
 export type NotificationChannel = "email" | "digest" | "in_app";
 
+export type OverridePrecedence = "global" | "channel" | "alert_class";
+
 export interface UserAlert {
   id: string;
   walletAddress: string;
   vaultId: string;
   condition: AlertCondition;
   thresholdValue: number;
-  email: string;
+  email: string | null;
   status: "active" | "triggered" | "deleted";
   triggeredAt: string | null;
   createdAt: string;
@@ -19,7 +21,7 @@ export interface CreateAlertPayload {
   vaultId: string;
   condition: AlertCondition;
   thresholdValue: number;
-  email: string;
+  email?: string;
   preferences?: AlertPreferences;
 }
 
@@ -38,6 +40,7 @@ export interface AlertPreferences {
   quietHoursStart: number;
   quietHoursEnd: number;
   overrides?: Partial<Record<NotificationChannel, ChannelNotificationPreferences>>;
+  precedence?: OverridePrecedence;
 }
 
 export interface WatchlistDigestPreference {
@@ -45,7 +48,7 @@ export interface WatchlistDigestPreference {
   scheduleMode: "daily" | "weekly" | "event_threshold";
   eventThreshold: number;
   watchedVaultIds: string[];
-  minApyDeltaPct: number;
+  minApyDeltaPCt: number;
   minRiskDelta: number;
   maxFreshnessHours: number;
 }
