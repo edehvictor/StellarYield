@@ -121,7 +121,7 @@ export function NotificationProvider({ children }: { children: React.ReactNode }
   );
 
   // Fetch notifications when wallet changes
-  useEffect(() {
+  useEffect(() => {
     if (walletAddress) {
       actions.fetchNotifications(walletAddress);
     }
@@ -237,7 +237,7 @@ export function useNotificationPreferences() {
  */
 export function useChannelPreference(channel: NotificationChannel) {
   const { preferences, preferenceActions } = useNotifications();
-  const enabled = preferences?.preferences.defaults[channel] ?? true; // default to true
+  const enabled = preferences?.defaults[channel] ?? true; // default to true
   const setEnabled = (value: boolean) => preferenceActions.setChannelDefault(channel, value);
   return { enabled, setEnabled };
 }
@@ -246,10 +246,10 @@ export function useChannelPreference(channel: NotificationChannel) {
  * Hook to get and set the effective preference for a specific alert class in a channel
  * Effective preference is the alert class override if present, else the channel default.
  */
-export function useAlertClassPreference(channel: NotificationChannel, alertClss: string) {
+export function useAlertClassPreference(channel: NotificationChannel, alertClass: string) {
   const { preferences, preferenceActions } = useNotifications();
-  const channelDefault = preferences?.preferences.defaults[channel] ?? true;
-  const override = preferences?.preferences.overrides[channel]?[alertClass];
+  const channelDefault = preferences?.defaults[channel] ?? true;
+  const override = preferences?.overrides[channel]?.[alertClass];
   const enabled = override !== undefined ? override : channelDefault;
   const setEnabled = (value: boolean) => preferenceActions.setAlertClassOverride(channel, alertClass, value);
   return { enabled, setEnabled };
