@@ -34,6 +34,18 @@ import {
 } from "./alertsApi";
 import { useOptimisticUpdate } from "../../hooks/useOptimisticUpdate";
 
+type ChannelOverride = "inherit" | "on" | "off";
+
+interface ChannelOverrides {
+  email: ChannelOverride;
+  digest: ChannelOverride;
+  in_app: ChannelOverride;
+}
+
+type AlertPreferencesWithChannelOverrides = AlertPreferences & {
+  channelOverrides: ChannelOverrides;
+};
+
 const MAX_ALERTS = 20;
 
 interface AlertsModalProps {
@@ -77,6 +89,14 @@ const DEFAULT_DIGEST_PREFERENCES: WatchlistDigestPreference = {
   maxFreshnessHours: 12,
 };
 
+const DEFAULT_CHANNEL_OVERRIDES: ChannelOverrides = {
+  email: "inherit",
+  digest: "inherit",
+  in_app: "inherit",
+};
+
+const CHANNEL_OVERRIDES_STORAGE_KEY = "stellar-yield.channel-overrides";
+
 const PREFS_STORAGE_KEY = "stellar-yield.alert-preferences";
 
 export default function AlertsModal({
@@ -88,6 +108,8 @@ export default function AlertsModal({
   const [alerts, setAlerts] = useState<UserAlert[]>([]);
   const [loading, setLoading] = useState(false);
   const [form, setForm] = useState<FormState>(DEFAULT_FORM);
+  const [channelOverrides, setChannelOverrides] =
+    useState<ChannelOverrides>(DEFAULT_CHANNEL_OVERRIDES);
   const [formError, setFormError] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [deletingId, setDeletingId] = useState<string | null>(null);
@@ -169,6 +191,25 @@ export default function AlertsModal({
   }, []);
 
   useEffect(() => {
+    const stored = window.localStorage.getItem(CHANNEL_OVERRIDES_STORAGE_KEY);
+    if (!stored) return;
+    try {
+      const overrides = JSON.parse(stored) as Partial<ChannelOverrides>;
+      setChannelOverrides((current) => ({ ...current, ...overrides }));
+    } catch {
+      // ignore malformed local storage data
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    window.localStorage.setItem(
+      CHANNEL_OVERRIDES_STORAGE_KEY,
+      JSON.stringify(channelOverrides),
+    );
+  }, [isOpen, channelOverrides]);
+
+  useEffect(() => {
     if (!isOpen) return;
     const handler = (event: KeyboardEvent) => {
       if (event.key === "Escape") onClose();
@@ -204,12 +245,13 @@ export default function AlertsModal({
       return;
     }
 
-    const preferences: AlertPreferences = {
+    const preferences: AlertPreferencesWithChannelOverrides = {
       channel: form.channel,
       cooldownMinutes: Number(form.cooldownMinutes),
       severityThreshold: Number(form.severityThreshold),
       quietHoursStart: Number(form.quietHoursStart),
       quietHoursEnd: Number(form.quietHoursEnd),
+      channelOverrides,
     };
 
     if (
@@ -526,6 +568,45 @@ export default function AlertsModal({
             {activeAlerts.length}/{MAX_ALERTS} active alerts
           </p>
         </form>
+
+        <section className="mb-5 rounded-2xl border border-white/10 bg-white/5 p-4 space-y-3">
+          <div>
+            <h3 className="text-sm font-semibold text-white">
+              Channel Overrides
+            </h3>
+            <p className="text-xs text-gray-400">
+              Configure per-channel delivery. "Inherit" follows your global
+              defaults.
+            </p>
+          </div>
+          <div className="space-y-2">
+            {(["email", "digest", "in_app"] as const).map((channel) => (
+              <label
+                key={channel}
+                className="flex items-center justify-between gap-3 rounded-xl bg-black/20 px-3 py-2 text-sm text-white"
+              >
+                <span className="capitalize">
+                  {channel === "in_app" ? "In-app" : channel}
+                </span>
+                <select
+                  value={channelOverrides[channel]}
+                  onChange={(event) =>
+                    setChannelOverrides((current) => ({
+                      ...current,
+                      [channel]: event.target.value as ChannelOverride,
+                    }))
+                  }
+                  aria-label={`${channel} notification override`}
+                  className="bg-white/10 text-white rounded-xl px-3 py-2 text-sm border border-white/10 focus:border-indigo-400 outline-none"
+                >
+                  <option value="inherit">Use default</option>
+                  <option value="on">Always send</option>
+                  <option value="off">Never send</option>
+                </select>
+              </label>
+            ))}
+          </div>
+        </section>
 
         <section className="mb-5 rounded-2xl border border-white/10 bg-white/5 p-4 space-y-3">
           <div>
