@@ -435,3 +435,53 @@ describe("Notification State Synchronization", () => {
     });
   });
 });
+
+describe("Preference Override Precedence", () => {
+  type DeliveryChannel = "email" | "digest" | "in-app";
+  type AlertClass = "DEPOSIT" | "HARVEST" | "ANNOUNCEMENT";
+  type DeliveryPreference = Record<DeliveryChannel, boolean>;
+
+  function resolvePreference(
+    globalPreference: DeliveryPreference,
+    sourceChannelOverrides: Record<string, Partial<DeliveryPreference>>,
+    sourceChannel: string,
+    alertClassOverrides: Partial<Record<AlertClass, Partial<DeliveryPreference>>>,
+    alertClass: AlertClass
+  ): DeliveryPreference {
+    const sourceChannelOverride = sourceChannelOverrides[sourceChannel];
+    const alertClassOverride = alertClassOverrides[alertClass];
+    return {
+      email: alertClassOverride?.email ?? sourceChannelOverride?.email ?? globalPreference.email,
+      digest: alertClassOverride?.digest ?? sourceChannelOverride?.digest ?? globalPreference.digest,
+      "in-app": alertClassOverride?.["in-app"] ?? sourceChannelOverride?.["in-app"] ?? globalPreference["in-app"],
+    };
+  }
+
+  it("uses global defaults when no override exists", () => {
+    const globalPreference: DeliveryPreference = { email: true, digest: false, "in-app": true };
+    expect(resolvePreference(globalPreference, {}, "pool-1", {}, "DEPOSIT")).toEqual(globalPreference);
+  });
+
+  it("applies source-channel then alert-class overrides with deterministic precedence", () => {
+    const globalPreference: DeliveryPreference = { email: true, digest: true, "in-app": true };
+    const sourceChannelOverrides: Record<string, Partial<DeliveryPreference>> = {
+      "pool-1": { email: false, digest: true, "in-app": true },
+    };
+    const alertClassOverrides: Partial<Record<AlertClass, Partial<DeliveryPreference>>> = {
+      DEPOSIT: { email: true, digest: true, "in-app": false },
+    };
+    expect(resolvePreference(globalPreference, sourceChannelOverrides, "pool-1", alertClassOverrides, "DEPOSIT")).toEqual({
+      email: true,
+      digest: true,
+      "in-app": false,
+    });
+  });
+
+  it("does not leak alert-class overrides across alert classes", () => {
+    const globalPreference: DeliveryPreference = { email: true, digest: true, "in-app": true };
+    const alertClassOverrides: Partial<Record<AlertClass, Partial<DeliveryPreference>>> = {
+      DEPOSIT: { email: false, digest: false, "in-app": false },
+    };
+    expect(resolvePreference(globalPreference, {}, "pool-1", alertClassOverrides, "HARVEST")).toEqual(globalPreference);
+  });
+});
