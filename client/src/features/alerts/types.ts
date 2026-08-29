@@ -1,5 +1,7 @@
 export type AlertCondition = "above" | "below";
 
+export type NotificationChannel = "email" | "digest" | "in_app";
+
 export interface UserAlert {
   id: string;
   walletAddress: string;
@@ -21,12 +23,21 @@ export interface CreateAlertPayload {
   preferences?: AlertPreferences;
 }
 
+export interface ChannelNotificationPreferences {
+  enabled?: boolean;
+  cooldownMinutes?: number;
+  severityThreshold?: number;
+  quietHoursStart?: number;
+  quietHoursEnd?: number;
+}
+
 export interface AlertPreferences {
-  channel: "email" | "in_app";
+  channel: NotificationChannel;
   cooldownMinutes: number;
   severityThreshold: number;
   quietHoursStart: number;
   quietHoursEnd: number;
+  overrides?: Partial<Record<NotificationChannel, ChannelNotificationPreferences>>;
 }
 
 export interface WatchlistDigestPreference {
