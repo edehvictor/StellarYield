@@ -11,6 +11,7 @@ import { useWallet } from "./useWallet";
 export type NotificationChannel = 'email' | 'digest' | 'in-app';
 
 export interface NotificationPreferences {
+  global: boolean;
   defaults: Record<NotificationChannel, boolean>;
   overrides: Record<NotificationChannel, Record<string, boolean>>;
 }
@@ -19,6 +20,7 @@ interface NotificationPreferenceActions {
   fetchPreferences: () => Promise<void>;
   updatePreferences: (preferences: NotificationPreferences) => Promise<void>;
   setChannelDefault: (channel: NotificationChannel, enabled: boolean) => Promise<void>;
+  setGlobalDefault: (enabled: boolean) => Promise<void>;
   setAlertClassOverride: (channel: NotificationChannel, alertClass: string, enabled: boolean) => Promise<void>;
 }
 
@@ -55,7 +57,7 @@ export function NotificationProvider({ children }: { children: React.ReactNode }
       const response = await fetch('/alerts/preferences', { headers: { 'Content-Type': 'application/json' } });
       if (!response.ok) throw new Error('Failed to fetch preferences');
       const data = await response.json();
-      setPreferences(data);
+      setPreferences({ global: false, ...data });
     } catch (err) {
       setPreferencesError(err instanceof Error ? err.message : 'Unknown error');
     } finally {
@@ -77,7 +79,7 @@ export function NotificationProvider({ children }: { children: React.ReactNode }
         });
         if (!response.ok) throw new Error('Failed to update preferences');
         const data = await response.json();
-        setPreferences(data);
+        setPreferences({ global: newPreferences.global, ...data });
       } catch (err) {
         setPreferencesError(err instanceof Error ? err.message : 'Unknown error');
         throw err;
@@ -99,6 +101,19 @@ export function NotificationProvider({ children }: { children: React.ReactNode }
       const newPreferences: NotificationPreferences = {
         ...preferences,
         defaults: { ...preferences.defaults, [channel]: enabled },
+      };
+      return updatePreferences(newPreferences);
+    },
+    [preferences, updatePreferences]
+  );
+
+  // Set global default preference
+  const setGlobalDefault = useCallback(
+    (enabled: boolean) => {
+      if (!preferences) return Promise.resolve();
+      const newPreferences: NotificationPreferences = {
+        ...preferences,
+        global: enabled,
       };
       return updatePreferences(newPreferences);
     },
@@ -148,6 +163,7 @@ export function NotificationProvider({ children }: { children: React.ReactNode }
       fetchPreferences,
       updatePreferences,
       setChannelDefault,
+      setGlobalDefault,
       setAlertClassOverride,
     },
   };
@@ -237,20 +253,31 @@ export function useNotificationPreferences() {
  */
 export function useChannelPreference(channel: NotificationChannel) {
   const { preferences, preferenceActions } = useNotifications();
-  const enabled = preferences?.defaults[channel] ?? true; // default to true
+  const enabled = preferences?.defaults[channel] ?? false; // default to false
   const setEnabled = (value: boolean) => preferenceActions.setChannelDefault(channel, value);
   return { enabled, setEnabled };
 }
 
 /**
+ * Hook to get and set the global notification preference
+ */
+export function useGlobalPreference() {
+  const { preferences, preferenceActions } = useNotifications();
+  const enabled = preferences?.global ?? false; // default to false
+  const setEnabled = (value: boolean) => preferenceActions.setGlobalDefault(value);
+  return { enabled, setEnabled };
+}
+
+/**
  * Hook to get and set the effective preference for a specific alert class in a channel
- * Effective preference is the alert class override if present, else the channel default.
+ * Effective preference is global, then alert class override, else channel default.
  */
 export function useAlertClassPreference(channel: NotificationChannel, alertClass: string) {
   const { preferences, preferenceActions } = useNotifications();
-  const channelDefault = preferences?.defaults[channel] ?? true;
+  const globalEnabled = preferences?.global ?? false;
+  const channelDefault = preferences?.defaults[channel] ?? false;
   const override = preferences?.overrides[channel]?.[alertClass];
-  const enabled = override !== undefined ? override : channelDefault;
+  const enabled = globalEnabled ? (override !== undefined ? override : channelDefault) : false;
   const setEnabled = (value: boolean) => preferenceActions.setAlertClassOverride(channel, alertClass, value);
   return { enabled, setEnabled };
 }
