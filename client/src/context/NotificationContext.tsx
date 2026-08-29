@@ -253,7 +253,7 @@ export function useNotificationPreferences() {
  */
 export function useChannelPreference(channel: NotificationChannel) {
   const { preferences, preferenceActions } = useNotifications();
-  const enabled = preferences?.defaults[channel] ?? false; // default to false
+  const enabled = preferences?.defaults[channel] ?? preferences?.global ?? false; // default to global
   const setEnabled = (value: boolean) => preferenceActions.setChannelDefault(channel, value);
   return { enabled, setEnabled };
 }
@@ -270,14 +270,14 @@ export function useGlobalPreference() {
 
 /**
  * Hook to get and set the effective preference for a specific alert class in a channel
- * Effective preference is global, then alert class override, else channel default.
+ * Effective preference is alert class override, then channel default, then global default.
  */
 export function useAlertClassPreference(channel: NotificationChannel, alertClass: string) {
   const { preferences, preferenceActions } = useNotifications();
-  const globalEnabled = preferences?.global ?? false;
-  const channelDefault = preferences?.defaults[channel] ?? false;
+  const globalDefault = preferences?.global ?? false;
+  const channelDefault = preferences?.defaults[channel] ?? globalDefault;
   const override = preferences?.overrides[channel]?.[alertClass];
-  const enabled = globalEnabled ? (override !== undefined ? override : channelDefault) : false;
+  const enabled = override ?? channelDefault;
   const setEnabled = (value: boolean) => preferenceActions.setAlertClassOverride(channel, alertClass, value);
   return { enabled, setEnabled };
 }
