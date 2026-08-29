@@ -484,4 +484,36 @@ describe("Preference Override Precedence", () => {
     };
     expect(resolvePreference(globalPreference, {}, "pool-1", alertClassOverrides, "HARVEST")).toEqual(globalPreference);
   });
+
+  it("applies source-channel overrides when no alert-class override exists", () => {
+    const globalPreference: DeliveryPreference = { email: true, digest: true, "in-app": true };
+    const sourceChannelOverrides: Record<string, Partial<DeliveryPreference>> = {
+      "pool-1": { email: false, digest: true, "in-app": false },
+    };
+    expect(resolvePreference(globalPreference, sourceChannelOverrides, "pool-1", {}, "DEPOSIT")).toEqual({
+      email: false,
+      digest: true,
+      "in-app": false,
+    });
+  });
+
+  it("applies alert-class overrides when no source-channel override exists", () => {
+    const globalPreference: DeliveryPreference = { email: true, digest: true, "in-app": true };
+    const alertClassOverrides: Partial<Record<AlertClass, Partial<DeliveryPreference>>> = {
+      DEPOSIT: { email: false, digest: true, "in-app": false },
+    };
+    expect(resolvePreference(globalPreference, {}, "pool-1", alertClassOverrides, "DEPOSIT")).toEqual({
+      email: false,
+      digest: true,
+      "in-app": false,
+    });
+  });
+
+  it("does not leak source-channel overrides across source channels", () => {
+    const globalPreference: DeliveryPreference = { email: true, digest: true, "in-app": true };
+    const sourceChannelOverrides: Record<string, Partial<DeliveryPreference>> = {
+      "pool-1": { email: false, digest: false, "in-app": false },
+    };
+    expect(resolvePreference(globalPreference, sourceChannelOverrides, "pool-2", {}, "DEPOSIT")).toEqual(globalPreference);
+  });
 });
