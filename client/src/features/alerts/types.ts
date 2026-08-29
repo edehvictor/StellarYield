@@ -4,6 +4,8 @@ export type NotificationChannel = "email" | "digest" | "in_app";
 
 export type OverridePrecedence = "global" | "channel" | "alert_class";
 
+export type AlertClass = "price" | "risk" | "yield" | "system";
+
 export interface UserAlert {
   id: string;
   walletAddress: string;
@@ -39,8 +41,8 @@ export interface AlertPreferences {
   severityThreshold: number;
   quietHoursStart: number;
   quietHoursEnd: number;
-  overrides?: Partial<Record<NotificationChannel, ChannelNotificationPreferences>>;
-  precedence?: OverridePrecedence;
+  overrides?: Partial<Record<AlertClass, Partial<Record<NotificationChannel, ChannelNotificationPreferences>>>;
+  precedence?: OverridePrecedence[];
 }
 
 export interface WatchlistDigestPreference {
