@@ -8,6 +8,20 @@ import type {
 const ALERTS_BASE = apiUrl("/api/alerts");
 const NOTIFICATIONS_BASE = apiUrl("/api/notifications");
 
+export type AlertClassPreference = Record<string, boolean>;
+
+export interface ChannelNotificationPreference {
+  alertClasses: AlertClassPreference;
+}
+
+export interface NotificationPreferences {
+  channels: {
+    email: ChannelNotificationPreference;
+    digest: ChannelNotificationPreference;
+    in_app: ChannelNotificationPreference;
+  };
+}
+
 export async function fetchAlerts(walletAddress: string): Promise<UserAlert[]> {
   const res = await fetch(`${ALERTS_BASE}/${encodeURIComponent(walletAddress)}`);
   if (!res.ok) throw new Error("Failed to fetch alerts");
@@ -63,4 +77,33 @@ export async function saveDigestPreference(
     throw new Error(body.error ?? "Failed to save digest preferences");
   }
   return res.json() as Promise<WatchlistDigestPreference>;
+}
+
+export async function fetchNotificationPreferences(
+  walletAddress: string,
+): Promise<NotificationPreferences> {
+  const res = await fetch(
+    `${NOTIFICATIONS_BASE}/preferences/${encodeURIComponent(walletAddress)}`,
+  );
+  if (!res.ok) throw new Error("Failed to fetch notification preferences");
+  return res.json() as Promise<NotificationPreferences>;
+}
+
+export async function saveNotificationPreferences(
+  walletAddress: string,
+  payload: NotificationPreferences,
+): Promise<NotificationPreferences> {
+  const res = await fetch(
+    `${NOTIFICATIONS_BASE}/preferences/${encodeURIComponent(walletAddress)}`,
+    {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    },
+  );
+  if (!res.ok) {
+    const body = (await res.json().catch(() => ({}))) as { error?: string };
+    throw new Error(body.error ?? "Failed to save notification preferences");
+  }
+  return res.json() as Promise<NotificationPreferences>;
 }
