@@ -10,7 +10,13 @@ const NOTIFICATIONS_BASE = apiUrl("/api/notifications");
 
 export type AlertClassPreference = Record<string, boolean>;
 
+/**
+ * Channel-level notification preferences.
+ * `enabled` is the default state for all alert classes on this channel.
+ * `alertClasses` values override `enabled` for specific alert classes.
+ */
 export interface ChannelNotificationPreference {
+  enabled: boolean;
   alertClasses: AlertClassPreference;
 }
 
