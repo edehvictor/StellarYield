@@ -516,4 +516,17 @@ describe("Preference Override Precedence", () => {
     };
     expect(resolvePreference(globalPreference, sourceChannelOverrides, "pool-2", {}, "DEPOSIT")).toEqual(globalPreference);
   });
+
+  it("does not leak per-channel overrides across alert classes or delivery channels", () => {
+    const globalPreference: DeliveryPreference = { email: true, digest: true, "in-app": true };
+    const alertClassOverrides: Partial<Record<AlertClass, Partial<DeliveryPreference>>> = {
+      DEPOSIT: { email: false },
+    };
+    expect(resolvePreference(globalPreference, {}, "pool-1", alertClassOverrides, "DEPOSIT")).toEqual({
+      email: false,
+      digest: true,
+      "in-app": true,
+    });
+    expect(resolvePreference(globalPreference, {}, "pool-1", alertClassOverrides, "HARVEST")).toEqual(globalPreference);
+  });
 });
