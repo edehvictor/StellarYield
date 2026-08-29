@@ -108,6 +108,9 @@ const DEFAULT_CHANNEL_OVERRIDES: AlertClassChannelOverrides = {
 
 const CHANNEL_OVERRIDES_STORAGE_KEY = "stellar-yield.channel-overrides";
 
+const getChannelOverridesStorageKey = (walletAddress: string) =>
+  `${CHANNEL_OVERRIDES_STORAGE_KEY}.${walletAddress}`;
+
 const PREFS_STORAGE_KEY = "stellar-yield.alert-preferences";
 
 export default function AlertsModal({
@@ -208,34 +211,46 @@ export default function AlertsModal({
   }, []);
 
   useEffect(() => {
-    const stored = window.localStorage.getItem(CHANNEL_OVERRIDES_STORAGE_KEY);
-    if (!stored) return;
+    const stored = window.localStorage.getItem(
+      getChannelOverridesStorageKey(walletAddress),
+    );
+    if (!stored) {
+      setChannelOverrides({
+        apy: { ...DEFAULT_CHANNEL_OVERRIDES.apy },
+        watchlist: { ...DEFAULT_CHANNEL_OVERRIDES.watchlist },
+      });
+      return;
+    }
     try {
       const overrides = JSON.parse(stored) as Partial<AlertClassChannelOverrides> &
         Partial<ChannelOverrides>;
-      setChannelOverrides((current) => {
-        if (overrides.apy || overrides.watchlist) {
-          return {
-            apy: { ...current.apy, ...overrides.apy },
-            watchlist: { ...current.watchlist, ...overrides.watchlist },
-          };
+      const apy = { ...DEFAULT_CHANNEL_OVERRIDES.apy };
+      const watchlist = { ...DEFAULT_CHANNEL_OVERRIDES.watchlist };
+      if (overrides.apy || overrides.watchlist) {
+        if (overrides.apy && typeof overrides.apy === "object") {
+          Object.assign(apy, overrides.apy);
         }
-        // Migrate legacy global overrides to every alert class
+        if (overrides.watchlist && typeof overrides.watchlist === "object") {
+          Object.assign(watchlist, overrides.watchlist);
+        }
+      } else {
         const legacy = overrides as Partial<ChannelOverrides>;
-        return {
-          apy: { ...current.apy, ...legacy },
-          watchlist: { ...current.watchlist, ...legacy },
-        };
-      });
+        Object.assign(apy, legacy);
+        Object.assign(watchlist, legacy);
+      }
+      setChannelOverrides({ apy, watchlist });
     } catch {
-      // ignore malformed local storage data
+      setChannelOverrides({
+        apy: { ...DEFAULT_CHANNEL_OVERRIDES.apy },
+        watchlist: { ...DEFAULT_CHANNEL_OVERRIDES.watchlist },
+      });
     }
-  }, []);
+  }, [walletAddress]);
 
   useEffect(() => {
     if (!isOpen) return;
     window.localStorage.setItem(
-      CHANNEL_OVERRIDES_STORAGE_KEY,
+      getChannelOverridesStorageKey(walletAddress),
       JSON.stringify(channelOverrides),
     );
   }, [isOpen, channelOverrides]);
