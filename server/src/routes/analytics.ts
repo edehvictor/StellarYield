@@ -5,20 +5,16 @@ import {
   protocolCompatibilityEngine,
   strategyHealthEngine,
   yieldReliabilityEngine,
-} from '../services';
-import { strategyStateTransitionAuditService } from '../services/strategyStateTransitionAuditService';
-import { getSourceHealthRegistry } from '../services/yieldSourceRegistryService';
-import { getRegistryLoadState } from '../services/contractRegistry';
 } from "../services";
 import { strategyStateTransitionAuditService } from "../services/strategyStateTransitionAuditService";
 import { getSourceHealthRegistry } from "../services/yieldSourceRegistryService";
+import { getRegistryLoadState } from "../services/contractRegistry";
 import {
   generateRecommendationStabilityReport,
   type RecommendationOutput,
 } from "../services/recommendationStabilityService";
 import {
   getRecommendationTimelinePaginated,
-  parsePaginationLimit,
 } from "../services/recommendationTimelineService";
 import {
   validateAttributionRequest,
@@ -920,24 +916,14 @@ router.get("/recommendations/timeline/:walletAddress", (req, res) => {
     }
 
     const limit = parsePaginationLimitGeneric(rawLimit);
-    const cursorStr = typeof cursor === "string" ? cursor : null;
+    const cursorStr = typeof cursor === "string" ? cursor : undefined;
 
-    const paginated = getRecommendationTimelinePaginated(
-      walletAddress,
-      cursorStr,
+    const paginated = getRecommendationTimelinePaginated(walletAddress, {
+      cursor: cursorStr,
       limit,
-    );
+    });
 
-    const response: PaginatedResponse<any> = {
-      data: paginated.data,
-      pagination: {
-        nextCursor: paginated.nextCursor,
-        hasMore: paginated.hasMore,
-        limit,
-      },
-    };
-
-    res.json(successEnvelope(response, "analytics/recommendations/timeline"));
+    res.json(successEnvelope(paginated, "analytics/recommendations/timeline"));
   } catch (error) {
     console.error("Recommendation timeline fetch failed:", error);
     res

@@ -1,9 +1,13 @@
 // Analytics Services Export
 export { portfolioAttributionEngine } from './portfolioAttributionService';
 export { protocolCompatibilityEngine } from './protocolCompatibilityService';
-export { strategyHealthEngine } from './strategyHealthService';
+export { strategyHealthEngine, extractStrategyHealthDriftSignals } from './strategyHealthService';
 export { yieldReliabilityEngine } from './yieldReliabilityService';
 export { opportunityMomentumEngine } from './opportunityMomentumEngine';
+export { DriftService } from './driftService';
+export { driftAnomalyGrouper } from './driftAnomalyGrouper';
+export { extractPressureDriftSignals } from './vaultPressureService';
+export { extractAttributionDriftSignals } from './portfolioAttributionService';
 
 // Fallback Tree Service
 export { fallbackTreeRegistry } from './fallbackTreeService';

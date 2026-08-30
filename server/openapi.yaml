@@ -73,8 +73,174 @@ tags:
     description: Fiat onramp provider webhook integration
   - name: Deposits
     description: Multi-asset deposit routing recommendations
+  - name: Drift
+    description: Drift detection and anomaly grouping across portfolio, vault, and strategy services
 
 paths:
+  /api/drift/group:
+    post:
+      summary: Group arbitrary drift signals
+      description: Groups related drift signals by source, asset, and severity band with deduplication and hierarchical support
+      tags:
+        - Drift
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - signals
+              properties:
+                signals:
+                  type: array
+                  items:
+                    type: object
+                    required:
+                      - id
+                      - source
+                      - asset
+                      - metric
+                      - currentValue
+                      - expectedValue
+                      - deviation
+                      - severity
+                      - timestamp
+                    properties:
+                      id:
+                        type: string
+                      source:
+                        type: string
+                        enum: [portfolio, vault, strategy]
+                      subSource:
+                        type: string
+                      asset:
+                        type: string
+                      metric:
+                        type: string
+                      currentValue:
+                        type: number
+                      expectedValue:
+                        type: number
+                      deviation:
+                        type: number
+                      severity:
+                        type: string
+                        enum: [INFO, LOW, MEDIUM, HIGH, CRITICAL]
+                      timestamp:
+                        type: string
+                      rootCauseId:
+                        type: string
+                      parentSignalId:
+                        type: string
+                options:
+                  type: object
+                  properties:
+                    strategy:
+                      type: string
+                      enum: [bySourceAssetSeverity, byAssetAndProximity, byRootCause, hierarchical]
+                    dedupWindowMs:
+                      type: number
+                    correlationWindowMs:
+                      type: number
+      responses:
+        '200':
+          description: Grouped drift anomalies
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  data:
+                    type: array
+                    items:
+                      type: object
+        '400':
+          description: Invalid request body
+
+  /api/drift/evaluate:
+    post:
+      summary: Evaluate and group vault drift with external signals
+      description: Evaluates current vault USD allocations and external signals, records state, and returns grouped anomalies
+      tags:
+        - Drift
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - vaultValuesUsd
+              properties:
+                vaultValuesUsd:
+                  type: object
+                  additionalProperties:
+                    type: number
+                externalSignals:
+                  type: array
+                  items:
+                    type: object
+                options:
+                  type: object
+      responses:
+        '200':
+          description: Evaluated grouped anomalies
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  data:
+                    type: array
+                    items:
+                      type: object
+        '400':
+          description: Invalid request body
+
+  /api/drift/anomalies:
+    get:
+      summary: Get active grouped drift anomalies
+      description: Retrieves active grouped anomalies with optional filtering by source, severity, or asset
+      tags:
+        - Drift
+      parameters:
+        - in: query
+          name: source
+          schema:
+            type: string
+          description: Filter by source type (portfolio, vault, strategy)
+        - in: query
+          name: severity
+          schema:
+            type: string
+          description: Filter by severity band (INFO, LOW, MEDIUM, HIGH, CRITICAL)
+        - in: query
+          name: asset
+          schema:
+            type: string
+          description: Filter by asset or vault ID
+      responses:
+        '200':
+          description: Active grouped drift anomalies
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  count:
+                    type: integer
+                  data:
+                    type: array
+                    items:
+                      type: object
+
   /api/health:
     get:
       summary: Check system health status
