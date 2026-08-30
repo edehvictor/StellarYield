@@ -147,14 +147,6 @@ export class PortfolioService {
     );
     return [headers.join(","), ...rows].join("\n");
   }
-}
-
-/** Escape a CSV field: quote and double-up inner quotes if it contains a comma, quote, or newline. */
-function escapeCsvField(value: string): string {
-  if (/[",\n]/.test(value)) {
-    return `"${value.replace(/"/g, '""')}"`;
-  }
-  return value;
   public static readonly SUPPORTED_ASSET_CLASSES = ["stablecoin", "crypto"];
 
   public static getAssetClass(asset: string): string {
@@ -199,6 +191,14 @@ function escapeCsvField(value: string): string {
 
     return filtered;
   }
+}
+
+/** Escape a CSV field: quote and double-up inner quotes if it contains a comma, quote, or newline. */
+function escapeCsvField(value: string): string {
+  if (/[",\n]/.test(value)) {
+    return `"${value.replace(/"/g, '""')}"`;
+  }
+  return value;
 }
 
 export type { ConcentrationAnalysis, ConcentrationWarning };
