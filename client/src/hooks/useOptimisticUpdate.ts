@@ -67,8 +67,10 @@ export function useOptimisticUpdate<T>(
   clearError: () => void;
 } {
   const [state, setState] = useState<T>(options.initialValue);
+  const [previous, setPrevious] = useState<T | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [isPending, setIsPending] = useState(false);
+  const [canRetry, setCanRetry] = useState(false);
 
   // Track previous state for rollback and last failed operation
   const previousRef = useRef<T | null>(null);
@@ -81,11 +83,13 @@ export function useOptimisticUpdate<T>(
     async (optimisticValue: T, operation: () => Promise<T | void>) => {
       // Save current state before optimistic update
       previousRef.current = state;
+      setPrevious(state);
       lastOperationRef.current = { optimisticValue, operation };
 
       // Optimistically update UI
       setState(optimisticValue);
       setError(null);
+      setCanRetry(false);
       setIsPending(true);
 
       try {
@@ -98,11 +102,13 @@ export function useOptimisticUpdate<T>(
         }
 
         setIsPending(false);
+        setCanRetry(false);
         options.onSuccess?.(result !== undefined ? result : optimisticValue);
       } catch (err) {
         // Rollback to previous state on failure
         setState(previousRef.current!);
         setIsPending(false);
+        setCanRetry(true);
 
         const errorMessage =
           err instanceof Error ? err.message : "Operation failed. Please try again.";
@@ -129,14 +135,15 @@ export function useOptimisticUpdate<T>(
 
   const clearError = useCallback(() => {
     setError(null);
+    setCanRetry(false);
   }, []);
 
   return {
     current: state,
-    previous: previousRef.current,
+    previous,
     error,
     isPending,
-    canRetry: error !== null && lastOperationRef.current !== null,
+    canRetry,
     optimisticUpdate,
     retry,
     clearError,

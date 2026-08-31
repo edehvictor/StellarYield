@@ -24,7 +24,6 @@ import {
     Legend,
     ResponsiveContainer,
 } from "recharts";
-import { getApiBaseUrl } from "../../lib/api";
 import { parseSmokeRunResult } from "./smokeResults";
 import VaultReliabilityPanel from "./VaultReliabilityPanel";
 import AuditReplayReportPanel from "./AuditReplayReportPanel";
