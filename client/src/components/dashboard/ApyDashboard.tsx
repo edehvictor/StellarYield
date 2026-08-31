@@ -1,5 +1,6 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useCallback } from "react";
 import { useReducedMotion } from "../../hooks/useReducedMotion";
+import { useStaleResponseGuard } from "../../hooks/useStaleResponseGuard";
 import { FeeAssumptionsModal } from "../FeeAssumptionsModal";
 import {
   BarChart3,
@@ -289,8 +290,11 @@ export default function ApyDashboard() {
   const [viewMode, setViewMode] = useState<ViewMode>("grid");
   const [selectedCategory, setSelectedCategory] = useState<string>("All");
   const [refreshing, setRefreshing] = useState(false);
+  const { startRequest, isCurrent } = useStaleResponseGuard();
 
-  const fetchApyData = async (showLoadingState = true) => {
+  const fetchApyData = useCallback(async (showLoadingState = true) => {
+    const token = startRequest();
+
     if (showLoadingState) {
       setLoading(true);
     }
@@ -300,6 +304,7 @@ export default function ApyDashboard() {
       const res = await fetch(apiUrl("/api/yields"));
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data: unknown = await res.json();
+      if (!isCurrent(token)) return;
       const rows = Array.isArray(data) ? data : [];
       const augmented: ApyEntry[] = rows.map((row) => {
         const entry = normalizeApyEntry(row as ApiApyEntry);
@@ -317,17 +322,20 @@ export default function ApyDashboard() {
       });
       setApyData(augmented);
     } catch (err) {
+      if (!isCurrent(token)) return;
       setError(getErrorMessage(err));
       setApyData([]);
     } finally {
-      setLoading(false);
-      setRefreshing(false);
+      if (isCurrent(token)) {
+        setLoading(false);
+        setRefreshing(false);
+      }
     }
-  };
+  }, [startRequest, isCurrent]);
 
   useEffect(() => {
     void fetchApyData();
-  }, []);
+  }, [fetchApyData]);
 
   const handleRefresh = () => {
     setRefreshing(true);

@@ -1,4 +1,5 @@
 import React, { useEffect, useState, Suspense } from "react";
+import { useStaleResponseGuard } from "../hooks/useStaleResponseGuard";
 import { Activity, ArrowUpRight, ShieldCheck, TrendingUp, Gauge, Network, Sparkles } from "lucide-react";
 import { Link } from "react-router-dom";
 import ApyHistoryChart from "./charts/ApyHistoryChart";
@@ -39,15 +40,19 @@ export default function Dashboard() {
   };
 
   const [expandedRows, setExpandedRows] = useState<Record<number, boolean>>({});
+  const { startRequest, isCurrent } = useStaleResponseGuard();
 
   useEffect(() => {
+    const token = startRequest();
     fetch(apiUrl("/api/yields"))
       .then((res) => res.json())
       .then((data) => {
+        if (!isCurrent(token)) return;
         setYields(data);
         setLoading(false);
       })
       .catch((err) => {
+        if (!isCurrent(token)) return;
         console.error("Failed to fetch yields", err);
         setError("Unable to fetch yield data from backend");
         setLoading(false);
