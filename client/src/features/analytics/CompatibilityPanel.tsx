@@ -31,6 +31,10 @@ interface CompatibilityIssue {
   affectedStrategies: string[];
   affectedActions?: ActionType[];
   lastUpdated?: string;
+  /** Machine-readable code explaining why the source was downgraded. */
+  fallbackReasonCode?: string;
+  /** Human-readable sentence explaining the downgrade reason. */
+  fallbackReason?: string;
 }
 
 interface CompatibilityStatus {
@@ -441,6 +445,14 @@ export default function CompatibilityPanel() {
                           <span className="text-gray-400">{issue.component}</span>
                         </div>
                         <p className="text-sm text-gray-300 mt-0.5">{issue.issue}</p>
+                        {issue.fallbackReason && (
+                          <div className="flex items-center gap-1.5 mt-1.5">
+                            <span className="inline-flex items-center px-2 py-0.5 rounded bg-[#6C5DD3]/15 border border-[#6C5DD3]/30 text-[#A78BFA] text-xs font-medium">
+                              Fallback reason
+                            </span>
+                            <span className="text-xs text-gray-400">{issue.fallbackReason}</span>
+                          </div>
+                        )}
                         {issue.lastUpdated && (
                           <p className="text-xs text-gray-500 mt-1">
                             Updated {formatDate(issue.lastUpdated)}
@@ -676,6 +688,17 @@ export default function CompatibilityPanel() {
 
                     <p className="text-gray-300 mb-2">{issue.issue}</p>
                     <p className="text-sm text-gray-400 mb-3">{issue.impact}</p>
+
+                    {issue.fallbackReason && (
+                      <div className="flex items-start gap-2 mb-3 p-2.5 rounded-lg bg-[#6C5DD3]/10 border border-[#6C5DD3]/25">
+                        <span
+                          className="flex-shrink-0 px-2 py-0.5 rounded text-xs font-semibold bg-[#6C5DD3]/20 text-[#A78BFA] border border-[#6C5DD3]/30"
+                        >
+                          Fallback reason
+                        </span>
+                        <span className="text-sm text-gray-300">{issue.fallbackReason}</span>
+                      </div>
+                    )}
 
                     <div className="border-t border-white/10 pt-3">
                       <p className="text-sm font-semibold mb-1 text-[#3EAC75]">Recommendation:</p>
