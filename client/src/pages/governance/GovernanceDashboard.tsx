@@ -5,6 +5,7 @@ import { useGovernanceStore } from "./useGovernanceStore";
 import TransactionBuilder from "./TransactionBuilder";
 import PendingTransactionCard from "./PendingTransactionCard";
 import GovernanceForecast from "./GovernanceForecast";
+import ProposalAttachments from "./ProposalAttachments";
 import type { GovernanceConfig, PendingTransaction } from "./types";
 
 export default function GovernanceDashboard() {
@@ -162,6 +163,9 @@ export default function GovernanceDashboard() {
           onTransactionCreated={handleTransactionCreated}
         />
       )}
+
+      {/* Proposal Attachments */}
+      {isSigner && <ProposalAttachments />}
 
       {!isSigner && walletAddress && (
         <div className="glass-card p-5 text-center text-gray-400">

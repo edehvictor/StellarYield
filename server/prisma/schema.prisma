@@ -142,6 +142,28 @@ model DeadLetterEvent {
   @@index([resolved, createdAt])
 }
 
+// ── Weekly Report Generation Tracking Models ──────────────────────────────────
+
+model WeeklyReportGeneration {
+  id              String   @id @default(uuid())
+  reportType      String   // e.g., "weekly-yield-report"
+  periodStart     DateTime // Start of the reporting period (week)
+  periodEnd       DateTime // End of the reporting period (week)
+  status          String   // SUCCESS | MISSING | DELAYED | FAILED
+  expectedAt      DateTime // When the report was expected to be generated
+  generatedAt     DateTime? // When the report was actually generated
+  errorMessage    String?  // Error message if generation failed
+  retryCount      Int      @default(0)
+  lastRetryAt     DateTime?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@unique([reportType, periodStart]) // One record per report type per period
+  @@index([reportType, status])
+  @@index([periodStart])
+  @@index([status, expectedAt])
+}
+
 // ── APY Alert Models ─────────────────────────────────────────────────────────
 
 model UserAlert {
@@ -240,6 +262,9 @@ model RebalanceQueueEntry {
   deferredUntil       DateTime?
   followUpEntryId      String?  // Link to follow-up queue entry
   
+  // Saga linkage (Issue #184)
+  sagaId              String?  // Reference to the active RebalanceSaga
+  
   // Audit fields
   triggeredBy         String?  // System or user who triggered
   completedAt         DateTime?
@@ -267,6 +292,97 @@ model RebalanceHistory {
 
   @@index([vaultId, completedAt])
   @@index([completedAt])
+}
+
+// ── Rebalance Saga Models (Issue #184) ───────────────────────────────────────
+// Durable execution state machine for idempotent rebalance execution.
+
+model RebalanceSaga {
+  id                  String   @id @default(uuid())
+  queueEntryId        String   @unique
+  vaultId             String
+  
+  // Terminal state model
+  state               String   @default("pending") // pending, simulated, submitted, confirmed, failed, cancelled, requires_manual_review
+  
+  // Idempotency keys for each phase
+  quoteKey            String?  // Unique key for quote phase
+  approvalKey         String?  // Unique key for approval phase
+  submissionKey       String?  // Unique key for transaction submission phase
+  confirmationKey     String?  // Unique key for confirmation phase
+  snapshotKey         String?  // Unique key for post-execution snapshot phase
+  
+  // Checkpoint data for resuming after process restarts
+  checkpoint          Json?    // Durable checkpoint data (phase, payload, timestamps)
+  currentPhase        String   @default("INIT") // INIT | QUOTE | APPROVAL | SUBMIT | CONFIRM | SNAPSHOT | COMPLETE
+  
+  // Transaction tracking
+  transactionHash     String?  // On-chain transaction hash
+  feeBumpHash         String?  // Relayer fee-bump hash
+  innerTxXdr          String?  // Inner transaction XDR for recovery
+  
+  // Concurrency guard
+  lockedBy            String?  // Worker ID holding the lock
+  lockedAt            DateTime?
+  lockExpiresAt       DateTime?
+  
+  // Failure tracking
+  failureClass        String?  // TRANSIENT | FEE_SEQUENCE | CONSTRAINT | STALE_INTENT | PERMANENT
+  failureReason       String?
+  failureCount        Int      @default(0)
+  maxRetries          Int      @default(3)
+  
+  // Manual review
+  reviewRequired      Boolean  @default(false)
+  reviewReason        String?
+  reviewedAt          DateTime?
+  reviewedBy          String?
+  
+  // Audit
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+  completedAt         DateTime?
+
+  checkpoints         RebalanceSagaCheckpoint[]
+  retries             RebalanceSagaRetry[]
+
+  @@index([vaultId, state])
+  @@index([state, updatedAt])
+  @@index([queueEntryId])
+}
+
+model RebalanceSagaCheckpoint {
+  id                  String   @id @default(uuid())
+  sagaId              String
+  saga                RebalanceSaga @relation(fields: [sagaId], references: [id], onDelete: Cascade)
+  
+  phase               String   // QUOTE | APPROVAL | SUBMIT | CONFIRM | SNAPSHOT
+  idempotencyKey      String   // Unique key for this phase
+  status              String   // PENDING | COMPLETED | FAILED | SKIPPED
+  payload             Json?    // Phase-specific checkpoint data
+  error               String?
+  
+  createdAt           DateTime @default(now())
+  completedAt         DateTime?
+
+  @@index([sagaId, phase])
+  @@unique([sagaId, idempotencyKey])
+}
+
+model RebalanceSagaRetry {
+  id                  String   @id @default(uuid())
+  sagaId              String
+  saga                RebalanceSaga @relation(fields: [sagaId], references: [id], onDelete: Cascade)
+  
+  attemptNumber       Int
+  phase               String   // Phase where retry occurred
+  reason              String
+  failureClass        String?
+  error               String?
+  
+  createdAt           DateTime @default(now())
+
+  @@index([sagaId, attemptNumber])
 }
 
 // ── Withdrawal Queue Models (Issue #900) ────────────────────────────────────
@@ -470,6 +586,33 @@ model ReconciliationAnomaly {
   @@index([eventId, severity])
   @@index([anomalyType, severity, resolvedAt])
   @@index([assetId, createdAt])
+}
+
+// ── Daily Portfolio Snapshot Models (Daily Movement Comparison) ──────────────
+
+model DailyPortfolioSnapshot {
+  id                  String   @id @default(uuid())
+  walletAddress       String
+  snapshotDate        DateTime // UTC date (normalized to start of day)
+  
+  // Portfolio totals at snapshot time
+  totalValueUsd       Float
+  totalDepositedUsd   Float    // Cumulative amount deposited
+  totalWithdrawnUsd   Float    // Cumulative amount withdrawn
+  
+  // Per-asset snapshot
+  assetBreakdown      Json     // { [asset]: { valueUsd: number, quantity: number } }
+  protocolBreakdown   Json     // { [protocol]: { valueUsd: number } }
+  
+  // Daily movement (calculated from previous day)
+  previousSnapshotId  String?  // ID of previous day's snapshot for reference
+  
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  @@unique([walletAddress, snapshotDate]) // One snapshot per wallet per day
+  @@index([walletAddress, snapshotDate])
+  @@index([walletAddress, createdAt])
 }
 
 // ── Indexer Continuity Models (Issue #891) ──────────────────────────────────

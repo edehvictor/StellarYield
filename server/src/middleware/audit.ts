@@ -25,6 +25,17 @@ export interface AuditLogEntry {
   previousHash: string;
   hash: string;
   signature?: string;
+  /**
+   * The human-readable confirmation text the actor reviewed before
+   * submitting.  Only present on ADMIN_ACTION_CONFIRMED entries.
+   */
+  confirmationText?: string;
+  /**
+   * True when the actor explicitly cancelled the action without
+   * submitting.  Only present on ADMIN_ACTION_CANCELLED entries.
+   * When true, no `changes` are recorded.
+   */
+  cancelled?: boolean;
 }
 
 export interface AuditContext {
@@ -36,6 +47,28 @@ export interface AuditContext {
   resource?: string;
   resourceId?: string;
   changes?: Record<string, unknown>;
+  confirmationText?: string;
+  cancelled?: boolean;
+}
+
+// ── Admin-confirmation record types ───────────────────────────────────────
+
+export interface AdminConfirmationInput {
+  /** Actor's user id (falls back to ANONYMOUS) */
+  actorId: string;
+  actorEmail?: string;
+  /** Logical action type, e.g. "UPDATE_TREASURY_FEE" */
+  actionType: string;
+  /** Resource category, e.g. "TREASURY", "PROTOCOL", "CAMPAIGN", "GOVERNANCE" */
+  resource: string;
+  /** Specific resource id, e.g. a vault id or campaign id */
+  resourceId?: string;
+  /** The text the actor read and confirmed in the UI */
+  confirmationText: string;
+  /** The delta / payload that was applied */
+  changes?: Record<string, unknown>;
+  ipAddress?: string;
+  userAgent?: string;
 }
 
 // In-memory audit log (in production, use a database)
@@ -126,8 +159,7 @@ function extractUserInfo(req: Request): {
 } {
   // Assuming user info is attached to request by auth middleware
   const user = (req as unknown as Record<string, unknown>).user as
-    | { id?: string; email?: string }
-    | undefined;
+    { id?: string; email?: string } | undefined;
   return {
     userId: user?.id || "ANONYMOUS",
     userEmail: user?.email,
@@ -172,6 +204,10 @@ export async function createAuditEntry(
     ipAddress: getClientIp(req),
     userAgent: req.headers["user-agent"] || "UNKNOWN",
     previousHash,
+    ...(context.confirmationText !== undefined && {
+      confirmationText: context.confirmationText,
+    }),
+    ...(context.cancelled !== undefined && { cancelled: context.cancelled }),
   };
 
   const hash = generateHash(entryData);
@@ -275,7 +311,8 @@ export async function getAuditLogs(filters?: {
   // Stable ordering: newest first; tie-break by id ascending so equal timestamps
   // produce a deterministic sequence.
   results.sort((a, b) => {
-    const ta = new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime();
+    const ta =
+      new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime();
     if (ta !== 0) return ta;
     if (a.id < b.id) return -1;
     if (a.id > b.id) return 1;
@@ -450,4 +487,120 @@ export async function getAuditStatistics(): Promise<{
     resourceCounts,
     lastEntry: entries[0],
   };
+}
+
+// ── Admin confirmation / cancellation helpers ─────────────────────────────
+
+/**
+ * Record a successful admin confirmation.
+ *
+ * Call this after the admin action has been applied successfully.
+ * It creates a signed, chained audit entry with:
+ *   - action = ADMIN_ACTION_CONFIRMED
+ *   - the actor, target resource, changes, and the confirmation text
+ *
+ * This is intentionally a direct call (not middleware-based) so it can be
+ * used in service-layer code that does not have an Express req/res in scope.
+ */
+export async function recordAdminConfirmation(
+  input: AdminConfirmationInput,
+): Promise<AuditLogEntry> {
+  const id = crypto.randomUUID();
+  const timestamp = new Date().toISOString();
+
+  const entryData: Omit<AuditLogEntry, "hash" | "signature"> = {
+    id,
+    timestamp,
+    userId: input.actorId || "ANONYMOUS",
+    userEmail: input.actorEmail,
+    action: "ADMIN_ACTION_CONFIRMED",
+    resource: input.resource,
+    resourceId: input.resourceId,
+    // method / endpoint are synthetic since this is a direct call
+    method: "INTERNAL",
+    endpoint: `admin/${input.actionType.toLowerCase()}`,
+    status: 200,
+    changes: input.changes,
+    ipAddress: input.ipAddress ?? "INTERNAL",
+    userAgent: input.userAgent ?? "INTERNAL",
+    previousHash,
+    confirmationText: input.confirmationText,
+  };
+
+  const hash = generateHash(entryData);
+  const signature = generateSignature(hash);
+  const entry: AuditLogEntry = { ...entryData, hash, signature };
+
+  auditLog.push(entry);
+  previousHash = hash;
+
+  try {
+    await fs.appendFile(AUDIT_LOG_FILE, JSON.stringify(entry) + "\n");
+  } catch (err) {
+    console.error("Failed to persist admin confirmation audit entry:", err);
+  }
+
+  return entry;
+}
+
+/**
+ * Record that an admin cancelled an action without applying changes.
+ *
+ * This creates an audit entry with:
+ *   - action = ADMIN_ACTION_CANCELLED
+ *   - cancelled = true
+ *   - NO changes field (nothing was applied)
+ *
+ * Cancelled records are stored so there is a paper trail of intent even
+ * when the actor chose not to proceed.
+ */
+export async function recordCancelledAction(input: {
+  actorId: string;
+  actorEmail?: string;
+  actionType: string;
+  resource: string;
+  resourceId?: string;
+  /** Optional note about why the action was cancelled */
+  cancellationReason?: string;
+  ipAddress?: string;
+  userAgent?: string;
+}): Promise<AuditLogEntry> {
+  const id = crypto.randomUUID();
+  const timestamp = new Date().toISOString();
+
+  const entryData: Omit<AuditLogEntry, "hash" | "signature"> = {
+    id,
+    timestamp,
+    userId: input.actorId || "ANONYMOUS",
+    userEmail: input.actorEmail,
+    action: "ADMIN_ACTION_CANCELLED",
+    resource: input.resource,
+    resourceId: input.resourceId,
+    method: "INTERNAL",
+    endpoint: `admin/${input.actionType.toLowerCase()}`,
+    status: 200,
+    // No changes — nothing was applied
+    ipAddress: input.ipAddress ?? "INTERNAL",
+    userAgent: input.userAgent ?? "INTERNAL",
+    previousHash,
+    cancelled: true,
+    ...(input.cancellationReason !== undefined && {
+      confirmationText: `CANCELLED: ${input.cancellationReason}`,
+    }),
+  };
+
+  const hash = generateHash(entryData);
+  const signature = generateSignature(hash);
+  const entry: AuditLogEntry = { ...entryData, hash, signature };
+
+  auditLog.push(entry);
+  previousHash = hash;
+
+  try {
+    await fs.appendFile(AUDIT_LOG_FILE, JSON.stringify(entry) + "\n");
+  } catch (err) {
+    console.error("Failed to persist cancelled action audit entry:", err);
+  }
+
+  return entry;
 }

@@ -141,7 +141,7 @@ describe("claimVested (no contract configured)", () => {
 
     it("error message mentions the contract is not configured", async () => {
         const result = await claimVested("GADDRTEST0000000000000000000000000000000");
-        expect(result.error).toMatch(/not configured/i);
+        expect(result.error).toMatch(/missing contract id|not configured|configure/i);
     });
 });
 

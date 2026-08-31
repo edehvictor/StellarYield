@@ -6,8 +6,14 @@ import { decodeTransactionError } from "../../utils/errorDecoder";
 import { zapDeposit } from "../../services/soroban";
 import type { TxPhase } from "../../services/transactionPhase";
 import { TX_PHASE_PIPELINE } from "../../services/transactionPhase";
-import { fetchSwapQuote, verifySwapQuote } from "./fetchSwapQuote";
+import { fetchSwapQuote, isQuoteCancellation, verifySwapQuote } from "./fetchSwapQuote";
 import { minAmountAfterSlippage } from "./slippage";
+import {
+  buildZapQuoteRequestKey,
+  isZapQuoteExpired,
+  quoteAgeSeconds,
+  recalculateMinOut,
+} from "./quoteFreshness";
 import { parseDecimalToStroops, formatStroopsToDecimal } from "./amount";
 import {
   buildSelectableZapAssetsFromMetadata,
@@ -24,6 +30,7 @@ import { resolveSlippage } from "../settings/types";
 import DepositRouteMaterialImpactWarning from "./DepositRouteMaterialImpactWarning";
 import { useDepositImpact } from "./useDepositImpact";
 import type { QuoteSnapshot } from "./useDepositImpact";
+import { getVaultSlippage, setVaultSlippage, resetVaultSlippage } from "../../lib/preferences";
 
 export interface ZapDepositPanelProps {
   walletAddress: string | null;
@@ -31,12 +38,7 @@ export interface ZapDepositPanelProps {
 
 const MIN_SLIPPAGE = 0.1;
 const MAX_SLIPPAGE = 15;
-const STALE_QUOTE_AGE_MS = 60_000;
 const FALLBACK_SOURCE = "fallback_rate";
-
-function quoteAgeSeconds(quotedAt: string): number {
-  return Math.floor((Date.now() - new Date(quotedAt).getTime()) / 1000);
-}
 
 export default function ZapDepositPanel({ walletAddress }: ZapDepositPanelProps) {
   const useApiAssets = shouldLoadZapMetadataFromApi();
@@ -94,15 +96,50 @@ export default function ZapDepositPanel({ walletAddress }: ZapDepositPanelProps)
   const [quotePath, setQuotePath] = useState<string>("");
   const [quoteSource, setQuoteSource] = useState<string>("");
   const [quoteData, setQuoteData] = useState<ZapQuoteResponse | null>(null);
-  const [slippageTolerance, setSlippageTolerance] = useState(settingsSlippage);
+  const [slippageTolerance, setSlippageTolerance] = useState(() =>
+    getVaultSlippage(vaultContractId, settingsSlippage)
+  );
+
+  useEffect(() => {
+    if (vaultContractId) {
+      setSlippageTolerance(getVaultSlippage(vaultContractId, settingsSlippage));
+    } else {
+      setSlippageTolerance(settingsSlippage);
+    }
+  }, [vaultContractId, settingsSlippage]);
+
   const [showSlippageEdit, setShowSlippageEdit] = useState(false);
   const prevExpectedOutRef = useRef<bigint | null>(null);
+  const quoteAbortRef = useRef<AbortController | null>(null);
+  const quoteRequestSeqRef = useRef(0);
+  const [quoteNowMs, setQuoteNowMs] = useState(() => Date.now());
+  // Tracks the most recently fetched route, independent of React state, so a
+  // route-path change can be detected even when the headline output amount
+  // stays nominally the same between fetches.
+  const latestRouteRef = useRef<string[] | null>(null);
+  const prevRouteRef = useRef<string[] | null>(null);
 
   const needsSwap = inputAsset?.contractId !== vaultToken.contractId;
+
+  useEffect(() => {
+    prevExpectedOutRef.current = null;
+    setExpectedOut(null);
+    setQuotePath("");
+    setQuoteSource("");
+    setQuoteData(null);
+  }, [inputAsset?.contractId, vaultToken.contractId]);
+
+  useEffect(() => {
+    if (!quoteData) return;
+    const id = setInterval(() => setQuoteNowMs(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, [quoteData]);
 
   const refreshQuote = useCallback(async () => {
     if (!inputAsset || !amount || !vaultToken.contractId) {
       prevExpectedOutRef.current = null;
+      prevRouteRef.current = null;
+      latestRouteRef.current = null;
       setExpectedOut(null);
       setQuotePath("");
       setQuoteData(null);
@@ -120,56 +157,97 @@ export default function ZapDepositPanel({ walletAddress }: ZapDepositPanelProps)
       return;
     }
 
+    const controller = new AbortController();
+    quoteAbortRef.current?.abort();
+    quoteAbortRef.current = controller;
+
     setQuoteLoading(true);
     setError("");
+    const requestSeq = ++quoteRequestSeqRef.current;
+    const requestKey = buildZapQuoteRequestKey({
+      inputTokenContract: inputAsset.contractId,
+      vaultTokenContract: vaultToken.contractId,
+      amountInStroops: stroops.toString(),
+      slippageTolerance,
+    });
     try {
       if (!needsSwap) {
+        if (requestSeq !== quoteRequestSeqRef.current) return;
         prevExpectedOutRef.current = expectedOut;
+        prevRouteRef.current = latestRouteRef.current;
+        latestRouteRef.current = null;
         setExpectedOut(stroops);
         setQuotePath(`${inputAsset.symbol} (no swap)`);
         setQuoteSource("direct");
         setQuoteData(null);
       } else {
-        const q = await fetchSwapQuote({
+        const q = await fetchSwapQuote(
+          {
+            inputTokenContract: inputAsset.contractId,
+            vaultTokenContract: vaultToken.contractId,
+            amountInStroops: stroops.toString(),
+            inputDecimals: inputAsset.decimals,
+            vaultDecimals: vaultToken.decimals,
+            slippageTolerance: slippageTolerance / 100,
+          },
+          { signal: controller.signal },
+        );
+        if (controller.signal.aborted || requestSeq !== quoteRequestSeqRef.current) return;
+        const responseKey = buildZapQuoteRequestKey({
           inputTokenContract: inputAsset.contractId,
           vaultTokenContract: vaultToken.contractId,
           amountInStroops: stroops.toString(),
-          inputDecimals: inputAsset.decimals,
-          vaultDecimals: vaultToken.decimals,
-          slippageTolerance: slippageTolerance / 100,
+          slippageTolerance,
         });
+        if (responseKey !== requestKey) return;
         prevExpectedOutRef.current = expectedOut;
+        prevRouteRef.current = latestRouteRef.current;
+        latestRouteRef.current = q.path.map((h) => h.contractId);
         setExpectedOut(BigInt(q.expectedAmountOutStroops));
         setQuotePath(q.path.map((h) => h.label ?? h.contractId.slice(0, 6)).join(" → "));
         setQuoteSource(q.source);
         setQuoteData(q);
+        setQuoteNowMs(Date.now());
       }
     } catch (e) {
+      if (
+        isQuoteCancellation(e) ||
+        controller.signal.aborted ||
+        requestSeq !== quoteRequestSeqRef.current
+      ) {
+        return;
+      }
       prevExpectedOutRef.current = null;
+      prevRouteRef.current = null;
+      latestRouteRef.current = null;
       setExpectedOut(null);
       setError(e instanceof Error ? e.message : "Could not load quote");
       setQuoteData(null);
     } finally {
-      setQuoteLoading(false);
+      if (!controller.signal.aborted && requestSeq === quoteRequestSeqRef.current) {
+        setQuoteLoading(false);
+      }
     }
-  }, [amount, inputAsset, needsSwap, slippageTolerance, vaultToken, expectedOut]);
+  }, [amount, inputAsset, needsSwap, slippageTolerance, vaultToken]);
 
   useEffect(() => {
     const t = setTimeout(() => {
       void refreshQuote();
     }, 350);
-    return () => clearTimeout(t);
+    return () => {
+      clearTimeout(t);
+      quoteAbortRef.current?.abort();
+    };
   }, [refreshQuote]);
 
   const minOut = useMemo(() => {
-    if (expectedOut === null || expectedOut <= 0n) return null;
-    return minAmountAfterSlippage(expectedOut, slippageTolerance);
+    return recalculateMinOut(expectedOut ?? 0n, slippageTolerance, minAmountAfterSlippage);
   }, [expectedOut, slippageTolerance]);
 
   const isStale = useMemo(() => {
     if (!quoteData) return false;
-    return quoteAgeSeconds(quoteData.quotedAt) > STALE_QUOTE_AGE_MS / 1000;
-  }, [quoteData]);
+    return isZapQuoteExpired(quoteData, quoteNowMs);
+  }, [quoteData, quoteNowMs]);
 
   const isFallback = useMemo(() => {
     if (!quoteData) return false;
@@ -185,6 +263,7 @@ export default function ZapDepositPanel({ walletAddress }: ZapDepositPanelProps)
       expectedOut,
       minOut: minOutVal,
       prevExpectedOut: prevExpectedOutRef.current ?? undefined,
+      prevRoute: prevRouteRef.current ?? undefined,
       isFallback,
       isStale,
       source: quoteData.source,
@@ -211,7 +290,17 @@ export default function ZapDepositPanel({ walletAddress }: ZapDepositPanelProps)
   const handleSlippageChange = useCallback((value: number) => {
     const clamped = Math.min(MAX_SLIPPAGE, Math.max(MIN_SLIPPAGE, value));
     setSlippageTolerance(clamped);
-  }, []);
+    if (vaultContractId) {
+      setVaultSlippage(vaultContractId, clamped);
+    }
+  }, [vaultContractId]);
+
+  const handleResetSlippage = useCallback(() => {
+    if (vaultContractId) {
+      resetVaultSlippage(vaultContractId);
+      setSlippageTolerance(settingsSlippage);
+    }
+  }, [vaultContractId, settingsSlippage]);
 
   const handleZap = useCallback(async () => {
     if (!walletAddress || !inputAsset || !vaultContractId || !vaultToken.contractId) return;
@@ -225,6 +314,10 @@ export default function ZapDepositPanel({ walletAddress }: ZapDepositPanelProps)
     if (amountIn <= 0n) return;
     if (minOut === null || minOut <= 0n) {
       setError("Wait for a valid quote or reduce slippage");
+      return;
+    }
+    if (quoteData && isZapQuoteExpired(quoteData)) {
+      setError("Quote expired. Refresh and try again.");
       return;
     }
 
@@ -278,6 +371,7 @@ export default function ZapDepositPanel({ walletAddress }: ZapDepositPanelProps)
     minOut,
     emitPhase,
     settings,
+    quoteData,
   ]);
 
   const retryZap = useCallback(() => {
@@ -431,7 +525,7 @@ export default function ZapDepositPanel({ walletAddress }: ZapDepositPanelProps)
             {quoteData && (
               <span className="text-[10px] text-gray-500 flex items-center gap-1">
                 <Clock size={10} />
-                {quoteAgeSeconds(quoteData.quotedAt)}s ago
+                {quoteAgeSeconds(quoteData.quotedAt, quoteNowMs)}s ago
               </span>
             )}
           </div>
@@ -467,7 +561,7 @@ export default function ZapDepositPanel({ walletAddress }: ZapDepositPanelProps)
 
           {showSlippageEdit && (
             <div className="space-y-2">
-              <div className="flex gap-2">
+              <div className="flex gap-2 flex-wrap items-center">
                 {[0.1, 0.5, 1, 2, 3, 5].map((val) => (
                   <button
                     key={val}
@@ -482,6 +576,13 @@ export default function ZapDepositPanel({ walletAddress }: ZapDepositPanelProps)
                     {val}%
                   </button>
                 ))}
+                <button
+                  type="button"
+                  onClick={handleResetSlippage}
+                  className="text-xs px-2 py-1 rounded bg-white/5 text-gray-400 hover:bg-white/10 border border-white/10 ml-auto"
+                >
+                  Reset
+                </button>
               </div>
               <div className="flex items-center gap-2">
                 <input

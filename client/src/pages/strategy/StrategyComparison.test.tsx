@@ -2,6 +2,10 @@ import { render, screen, waitFor } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import StrategyComparison from './StrategyComparison';
 
+vi.mock('../../hooks/useBackendStatus', () => ({
+  useBackendStatus: vi.fn(() => 'available'),
+}));
+
 // Mock matchMedia for recharts/lucide-react inner behaviors if needed
 Object.defineProperty(window, 'matchMedia', {
   writable: true,

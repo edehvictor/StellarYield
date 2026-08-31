@@ -37,7 +37,11 @@ function generateFixtureSnapshots(
   vaultId: string,
   days = 90,
 ): Array<{ date: string; sharePrice: number; vaultId: string }> {
-  const snapshots: Array<{ date: string; sharePrice: number; vaultId: string }> = [];
+  const snapshots: Array<{
+    date: string;
+    sharePrice: number;
+    vaultId: string;
+  }> = [];
   let price = 1.0;
   const now = Date.now();
 
@@ -72,11 +76,16 @@ sharePriceHistoryRouter.get(
     const { vaultId } = req.params;
 
     const rawDays = Number(req.query.days ?? 90);
-    const days = Number.isFinite(rawDays) && rawDays > 0 ? Math.min(rawDays, 365) : 90;
+    const days =
+      Number.isFinite(rawDays) && rawDays > 0 ? Math.min(rawDays, 365) : 90;
 
     const prisma = await loadPrismaClient();
 
-    if (!prisma || !("sharePriceSnapshot" in prisma) || !prisma.sharePriceSnapshot) {
+    if (
+      !prisma ||
+      !("sharePriceSnapshot" in prisma) ||
+      !prisma.sharePriceSnapshot
+    ) {
       const fixture = generateFixtureSnapshots(vaultId, days);
       res.json(fixture);
       return;
@@ -105,6 +114,13 @@ sharePriceHistoryRouter.get(
       res.json(result);
     } catch (error) {
       await prisma.$disconnect?.().catch(() => undefined);
+      sendError(
+        res,
+        500,
+        "SHARE_PRICE_HISTORY_ERROR",
+        "Failed to retrieve share price history.",
+      );
+      void error;
       const fixture = generateFixtureSnapshots(vaultId, days);
       res.json(fixture);
     }

@@ -324,7 +324,7 @@ export class RebalanceExecutorService {
     return { innerHash, feeBumpHash };
   }
 
-  private async confirmTransaction(txHash: string): Promise<boolean> {
+  async confirmTransaction(txHash: string): Promise<boolean> {
     const deadlineMs = Date.now() + this.config.confirmationTimeoutSecs * 1000;
 
     while (Date.now() < deadlineMs) {

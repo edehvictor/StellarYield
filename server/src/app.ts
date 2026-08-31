@@ -1,3 +1,4 @@
+import { randomBytes } from "crypto";
 import cors from "cors";
 import express, { Request, Response } from "express";
 import rateLimit from "express-rate-limit";
@@ -12,7 +13,10 @@ import { authMiddleware } from "./middleware/auth";
 import { sendError } from "./utils/errorResponse";
 import { requestContextMiddleware } from "./middleware/requestContext";
 import { correlationIdMiddleware } from "./middleware/correlationId";
-import { errorHandler, requestLoggerMiddleware } from "./middleware/requestLogger";
+import {
+  errorHandler,
+  requestLoggerMiddleware,
+} from "./middleware/requestLogger";
 import yieldsRouter from "./routes/yields";
 import leaderboardRouter from "./routes/leaderboard";
 import notificationsRouter from "./routes/notifications";
@@ -38,13 +42,16 @@ import correlationRouter from "./routes/correlation";
 import strategiesRouter from "./routes/strategies";
 import treasuryRouter from "./routes/treasury";
 import governanceRouter from "./routes/governance";
+import governanceVoteReceiptsRouter from "./routes/governanceVoteReceipts";
 import activityTimelineRouter from "./routes/activityTimeline";
+import portfolioReconcileRouter from "./routes/portfolioReconcile";
 import presetsRouter from "./routes/presets";
 import analyticsRouter from "./routes/analytics";
 import offrampRouter from "./routes/offramp";
 import contactsRouter from "./routes/contacts";
 import rebalancesRouter from "./routes/rebalances";
 import sharePriceHistoryRouter from "./routes/sharePriceHistory";
+import withdrawalPreviewRouter from "./routes/withdrawalPreview";
 import reliabilityRouter from "./routes/reliability";
 import relayerStatusRouter from "./routes/relayerStatus";
 import riskRouter from "./routes/risk";
@@ -56,6 +63,12 @@ import momentumRouter from "./routes/momentum";
 import queueRouter from "./routes/queue";
 import vaultActivityRouter from "./routes/vaultActivity";
 import watchlistRouter from "./routes/watchlist";
+import driftRouter from "./routes/drift";
+import portfolioMovementRouter from "./routes/portfolioMovement";
+import digestScheduleRouter from "./routes/digestScheduleSettings";
+import integrationsRouter from "./routes/integrations";
+import stablecoinBasketRouter from "./routes/stablecoinBasket";
+import deltaNeutralRouter from "./routes/deltaNeutral";
 
 import { createAuthChallenge, verifyAuthChallenge } from "./utils/stellarAuth";
 import {
@@ -67,7 +80,10 @@ import {
   type DepositWizardInput,
   type UserRiskProfile,
 } from "./services/depositRecommendationService";
-import { runStressScenario, StressScenarioType } from "./services/stressScenarioService";
+import {
+  runStressScenario,
+  StressScenarioType,
+} from "./services/stressScenarioService";
 
 type EventsPrismaClient = {
   event: {
@@ -147,13 +163,16 @@ export function createApp() {
   app.use("/api/strategies", strategiesRouter);
   app.use("/api/treasury", treasuryRouter);
   app.use("/api/governance", governanceRouter);
+  app.use("/api/governance", governanceVoteReceiptsRouter);
   app.use("/api/portfolio/activity", activityTimelineRouter);
+  app.use("/api/portfolio/reconcile", portfolioReconcileRouter);
   app.use("/api/presets", presetsRouter);
   app.use("/api/analytics", analyticsRouter);
   app.use("/api/offramp", offrampRouter);
   app.use("/api/contacts", contactsRouter);
   app.use("/api/rebalances", rebalancesRouter);
   app.use("/api/vaults", sharePriceHistoryRouter);
+  app.use("/api/vaults", withdrawalPreviewRouter);
   app.use("/api/reliability", reliabilityRouter);
   app.use("/api/relayer", relayerStatusRouter);
   app.use("/api/risk", riskRouter);
@@ -164,7 +183,13 @@ export function createApp() {
   app.use("/api/queue", queueRouter);
   app.use("/api/vaults/activity", vaultActivityRouter);
   app.use("/api/watchlist", watchlistRouter);
+  app.use("/api/drift", driftRouter);
+  app.use("/api/portfolio", portfolioMovementRouter);
+  app.use("/api/digest/schedule", digestScheduleRouter);
+  app.use("/api/strategies/stablecoin-basket", stablecoinBasketRouter);
+  app.use("/api/strategies/delta-neutral", deltaNeutralRouter);
   app.use("/api/google-sheets", googleSheetsRouter);
+  app.use("/api/integrations", integrationsRouter);
   app.use("/api", googleSheetsRouter);
 
   // Legacy JSON metrics (internal tooling)
@@ -172,8 +197,7 @@ export function createApp() {
   // Prometheus scrape endpoint
   app.use("/metrics", prometheusMetricsRouter);
 
-  app.get("/api/events", async (req: Request, res: Response) => {
-    void req;
+  app.get("/api/events", async (_req: Request, res: Response) => {
     const prisma = await loadPrismaClient();
 
     if (!prisma) {
@@ -181,7 +205,7 @@ export function createApp() {
         res,
         503,
         "DB_UNAVAILABLE",
-        "Events database is unavailable until Prisma client is generated."
+        "Events database is unavailable until Prisma client is generated.",
       );
       return;
     }
@@ -207,7 +231,11 @@ export function createApp() {
       userId?: string;
     };
 
-    const validProfiles: UserRiskProfile[] = ["conservative", "balanced", "aggressive"];
+    const validProfiles: UserRiskProfile[] = [
+      "conservative",
+      "balanced",
+      "aggressive",
+    ];
     const profile = validProfiles.includes(riskTolerance as UserRiskProfile)
       ? (riskTolerance as UserRiskProfile)
       : "balanced";
@@ -215,9 +243,13 @@ export function createApp() {
     const input: DepositWizardInput = {
       riskTolerance: profile,
       timeHorizon:
-        timeHorizon === "short" || timeHorizon === "long" ? timeHorizon : "medium",
+        timeHorizon === "short" || timeHorizon === "long"
+          ? timeHorizon
+          : "medium",
       liquidityNeeds:
-        liquidityNeeds === "high" || liquidityNeeds === "low" ? liquidityNeeds : "medium",
+        liquidityNeeds === "high" || liquidityNeeds === "low"
+          ? liquidityNeeds
+          : "medium",
     };
 
     const result = generateDepositRecommendations(input);
@@ -253,7 +285,7 @@ export function createApp() {
   });
 
   app.get("/api/recommend/timeline", (req: Request, res: Response) => {
-    const userId = String(req.query.userId || "anonymous");
+    const userId = typeof req.query.userId === "string" ? req.query.userId : "anonymous";
     res.json({
       userId,
       timeline: getRecommendationTimeline(userId),
@@ -269,7 +301,8 @@ export function createApp() {
     ];
     if (!allowedScenarios.includes(scenario)) {
       res.status(400).json({
-        error: "Scenario must be one of: apy-collapse, liquidity-drain, oracle-shock.",
+        error:
+          "Scenario must be one of: apy-collapse, liquidity-drain, oracle-shock.",
       });
       return;
     }
@@ -299,7 +332,8 @@ export function createApp() {
     for (let index = 29; index >= 0; index -= 1) {
       const date = new Date(now);
       date.setDate(date.getDate() - index);
-      const noise = (Math.random() - 0.5) * baseApy * 0.2;
+      const randomFloat = randomBytes(4).readUInt32LE(0) / 0xffffffff;
+      const noise = (randomFloat - 0.5) * baseApy * 0.2;
       historical.push({
         date: date.toISOString().split("T")[0],
         apy: Math.round((baseApy + noise) * 100) / 100,
@@ -315,6 +349,12 @@ export function createApp() {
     try {
       res.json(createAuthChallenge(req.body));
     } catch (error) {
+      sendError(
+        res,
+        400,
+        "INVALID_AUTH_REQUEST",
+        error instanceof Error ? error.message : "Invalid auth request.",
+      );
       res.status(400).json({
         error: error instanceof Error ? error.message : "Invalid auth request.",
         requestId: (req as unknown as { requestId?: string }).requestId,
@@ -326,6 +366,14 @@ export function createApp() {
     try {
       res.json(verifyAuthChallenge(req.body));
     } catch (error) {
+      sendError(
+        res,
+        400,
+        "INVALID_AUTH_VERIFICATION",
+        error instanceof Error
+          ? error.message
+          : "Invalid auth verification request.",
+      );
       res.status(400).json({
         error:
           error instanceof Error

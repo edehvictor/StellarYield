@@ -30,6 +30,8 @@ import {
     type VestingSchedule,
 } from "./vestingService";
 import { useCountdown } from "./useCountdown";
+import { useNowSec } from "./useNowSec";
+import { resolveVestingCountdown } from "./vestingCountdown";
 import { decodeTransactionError } from "../../utils/errorDecoder";
 import TransactionFailedModal from "../../components/transaction/TransactionFailedModal";
 import type { DecodedError } from "../../utils/errorDecoder";
@@ -113,6 +115,7 @@ function CountdownDisplay({ targetTimestamp, label }: CountdownDisplayProps) {
 
 export default function VestingDashboard() {
     const { isConnected, walletAddress } = useWallet();
+    const nowSec = useNowSec();
 
     const [schedule, setSchedule] = useState<VestingSchedule | null>(null);
     const [loading, setLoading] = useState(false);
@@ -192,16 +195,9 @@ export default function VestingDashboard() {
 
     const vPct = vestedPercent(schedule);
     const cPct = claimedPercent(schedule);
-    const nowSec = Math.floor(Date.now() / 1000);
-    const isCliffReached = nowSec >= schedule.cliffTimestamp;
-    const isFullyVested = nowSec >= schedule.endTimestamp;
+    const { countdownTarget, countdownLabel, isCliffReached, isFullyVested } =
+        resolveVestingCountdown(schedule, nowSec);
     const hasClaimable = schedule.claimableAmount > 0n;
-
-    // Use next unlock if cliff has been reached, otherwise use cliff
-    const countdownTarget = isCliffReached
-        ? schedule.nextUnlockTimestamp
-        : schedule.cliffTimestamp;
-    const countdownLabel = isCliffReached ? "Next unlock in" : "Cliff unlocks in";
 
     return (
         <>

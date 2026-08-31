@@ -20,6 +20,8 @@ vi.mock("../../../contracts/registry.json", () => ({
     testnet: {
       vault: "CDBA5T47Q4U5BOHH2T2K3V4C5D6E7F8G9H0J1K2L3M4N5P6Q7R8S9T0U",
       zap: "CDZAP47Q4U5BOHH2T2K3V4C5D6E7F8G9H0J1K2L3M4N5P6Q7R8S9T0UX",
+      vault: "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4", // 56 chars valid contract ID
+      zap: "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
       token: "",
       governance: "",
       strategy: "",
@@ -29,7 +31,7 @@ vi.mock("../../../contracts/registry.json", () => ({
       vesting: "",
     },
     mainnet: {
-      vault: "CDMAIN57Q4U5BOHH2T2K3V4C5D6E7F8G9H0J1K2L3M4N5P6Q7R8S9T0U",
+      vault: "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4",
       zap: "",
       token: "",
       governance: "",
@@ -89,12 +91,14 @@ describe("Contract Registry Validation", () => {
 
   it("validates correct contract registry entry", () => {
     const validId = "CDBA5T47Q4U5BOHH2T2K3V4C5D6E7F8G9H0J1K2L3M4N5P6Q7R8S9T0U";
+    const validId = "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4";
+    // Should not throw
     expect(() => validateContractRegistryEntry("vault", validId)).not.toThrow();
   });
 
   it("throws error for unsupported contract name", () => {
     expect(() =>
-      validateContractRegistryEntry("invalid_name", "CDBA5T47Q4U5BOHH2T2K3V4C5D6E7F8G9H0J1K2L3M4N5P6Q7R8S9T0U")
+      validateContractRegistryEntry("invalid_name", "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4")
     ).toThrow(/Unsupported contract name/);
   });
 
@@ -106,11 +110,15 @@ describe("Contract Registry Validation", () => {
   it("throws error for invalid contract ID format", () => {
     expect(() => validateContractRegistryEntry("vault", "CD123")).toThrow(/Invalid contract ID format/);
     const gAddress = "GDBA5T47Q4U5BOHH2T2K3V4C5D6E7F8G9H0J1K2L3M4N5P6Q7R8S9T0U";
+    // Doesn't start with C (starts with G, which is a public key address, not a contract ID)
+    const gAddress = "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF";
     expect(() => validateContractRegistryEntry("vault", gAddress)).toThrow(/Invalid contract ID format/);
   });
 
   it("throws error for network passphrase/contract mismatch", () => {
     const mainnetVaultId = "CDMAIN57Q4U5BOHH2T2K3V4C5D6E7F8G9H0J1K2L3M4N5P6Q7R8S9T0U";
+    // Mainnet contract ID
+    const mainnetVaultId = "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4";
     
     expect(() =>
       validateContractRegistryEntry("vault", mainnetVaultId, "testnet")
@@ -119,6 +127,8 @@ describe("Contract Registry Validation", () => {
 
   it("throws error for contract name mismatch", () => {
     const zapId = "CDZAP47Q4U5BOHH2T2K3V4C5D6E7F8G9H0J1K2L3M4N5P6Q7R8S9T0UX";
+    // Zap contract ID on testnet
+    const zapId = "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM";
 
     expect(() =>
       validateContractRegistryEntry("vault", zapId, "testnet")

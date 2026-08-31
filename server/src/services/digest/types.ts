@@ -1,65 +1,62 @@
 // Shared types and data models for the Adaptive Notification Digest feature
 
-// ─── String literal union types ───────────────────────────────────────────────
+export type EventType = "alert" | "recommendation" | "watchlist";
 
-export type EventType = 'alert' | 'recommendation' | 'watchlist';
+export type ScheduleMode = "daily" | "weekly" | "event_threshold";
 
-export type ScheduleMode = 'daily' | 'weekly' | 'event_threshold';
-
-export type Decision = 'MIGRATE' | 'HOLD' | 'DEFER';
+export type Decision = "MIGRATE" | "HOLD" | "DEFER";
 export type WatchlistDigestTrigger =
-  | 'apy_change'
-  | 'risk_change'
-  | 'freshness_change'
-  | 'alert_triggered';
-
-// ─── Notification Event types ─────────────────────────────────────────────────
+  | "apy_change"
+  | "risk_change"
+  | "freshness_change"
+  | "alert_triggered";
 
 export interface AlertEvent {
   eventId: string;
-  eventType: 'alert';
+  eventType: "alert";
   walletAddress: string;
   vaultId: string;
   condition: string;
   thresholdValue: number;
   currentValue: number;
-  triggeredAt: string; // ISO 8601
-  recordedAt: string;  // ISO 8601
+  triggeredAt: string;
+  recordedAt: string;
 }
 
 export interface RecommendationEvent {
   eventId: string;
-  eventType: 'recommendation';
+  eventType: "recommendation";
   walletAddress: string;
   sourceStrategyId: string;
   destinationStrategyId: string;
   previousDecision: Decision;
   newDecision: Decision;
-  recordedAt: string;  // ISO 8601
-  triggeredAt: string; // ISO 8601
+  recordedAt: string;
+  triggeredAt: string;
 }
 
 export interface WatchlistEvent {
   eventId: string;
-  eventType: 'watchlist';
+  eventType: "watchlist";
   walletAddress: string;
   vaultId: string;
   trigger: WatchlistDigestTrigger;
-  severity: 'info' | 'warning' | 'critical';
+  severity: "info" | "warning" | "critical";
   conditionDescription: string;
   previousValue?: number | null;
   currentValue?: number | null;
-  triggeredAt: string; // ISO 8601
-  recordedAt: string;  // ISO 8601
+  triggeredAt: string;
+  recordedAt: string;
 }
 
-export type NotificationEvent = AlertEvent | RecommendationEvent | WatchlistEvent;
-
-// ─── Cluster types ────────────────────────────────────────────────────────────
+export type NotificationEvent =
+  | AlertEvent
+  | RecommendationEvent
+  | WatchlistEvent;
 
 export interface Cluster {
   eventType: EventType;
-  clusterKey: string; // "{eventType}:{vaultId}" or "{eventType}:{sourceStrategyId}:{destinationStrategyId}"
+  clusterKey: string;
   vaultId?: string;
   events: NotificationEvent[];
 }
@@ -68,8 +65,6 @@ export interface RankedCluster extends Cluster {
   topImportanceScore: number;
   summary: string;
 }
-
-// ─── Digest Payload types ─────────────────────────────────────────────────────
 
 export interface RankedClusterEntry {
   eventType: EventType;
@@ -81,20 +76,19 @@ export interface RankedClusterEntry {
 
 export interface DigestPayload {
   walletAddress: string;
-  generatedAt: string; // ISO 8601
+  generatedAt: string;
   scheduleMode: ScheduleMode;
   clusters: RankedClusterEntry[];
 }
 
-// ─── Schedule Config ──────────────────────────────────────────────────────────
-
 export interface ScheduleConfig {
   walletAddress: string;
   mode: ScheduleMode;
-  deliveryTime?: string;    // HH:MM, for daily/weekly
-  dayOfWeek?: number;       // 0–6, for weekly
-  eventThreshold?: number;  // 1–100, for event_threshold
-  updatedAt: string;        // ISO 8601
+  timezone?: string;
+  deliveryTime?: string;
+  dayOfWeek?: number;
+  eventThreshold?: number;
+  updatedAt: string;
 }
 
 export interface WatchlistDigestPreference {
@@ -107,16 +101,25 @@ export interface WatchlistDigestPreference {
   maxFreshnessHours: number;
 }
 
-// ─── Result types ─────────────────────────────────────────────────────────────
+export type DeliveryFailureStatus = "temporary" | "retry_exhausted" | "terminal";
+
+export interface DeliveryRetryMetadata {
+  retryCount: number;
+  maxRetries: number;
+  nextRetryAt: string | null;
+  backoffMs: number;
+  status: DeliveryFailureStatus;
+  message: string;
+}
 
 export type IngestResult =
   | { ok: true; eventId: string }
-  | { ok: false; error: 'INVALID_EVENT' };
+  | { ok: false; error: "INVALID_EVENT" };
 
 export type ConfigureResult =
   | { ok: true }
-  | { ok: false; error: 'INVALID_THRESHOLD' };
+  | { ok: false; error: "INVALID_THRESHOLD" };
 
 export type DeliveryResult =
   | { ok: true }
-  | { ok: false; error: 'MISSING_EMAIL' };
+  | { ok: false; error: "MISSING_EMAIL" | "DELIVERY_FAILED"; retry: DeliveryRetryMetadata };

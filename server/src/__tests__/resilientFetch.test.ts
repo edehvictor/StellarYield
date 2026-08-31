@@ -245,4 +245,57 @@ describe("resilientFetch", () => {
       expect(report.timestamp).toBeDefined();
     });
   });
+
+  describe("retry budget tracking", () => {
+    it("records success metadata with retry count on transient failure recovery", async () => {
+      const { getProviderRetryMetadata, clearProviderRetryMetadata } = await import("../agents/resilientFetch");
+      clearProviderRetryMetadata();
+
+      let calls = 0;
+      global.fetch = jest.fn().mockImplementation(() => {
+        calls++;
+        if (calls === 1) return Promise.reject(new Error("network error"));
+        return Promise.resolve(new Response(JSON.stringify({ ok: true }), { status: 200 }));
+      });
+
+      const res = await resilientFetch(
+        "https://example.com/yield",
+        { method: "GET" },
+        "yield-provider-a",
+        { timeoutMs: 2000, maxRetries: 2, initialDelayMs: 10, maxDelayMs: 20 },
+      );
+
+      expect(res.status).toBe(200);
+      const meta = getProviderRetryMetadata("yield-provider-a");
+      expect(meta).toBeDefined();
+      expect(meta?.status).toBe("success");
+      expect(meta?.retryCount).toBe(1);
+      expect(meta?.maxRetries).toBe(2);
+      expect(meta?.exhausted).toBe(false);
+    });
+
+    it("records exhausted retry budget when all attempts fail", async () => {
+      const { getProviderRetryMetadata, clearProviderRetryMetadata } = await import("../agents/resilientFetch");
+      clearProviderRetryMetadata();
+
+      global.fetch = jest.fn().mockRejectedValue(new Error("provider connection timeout"));
+
+      await expect(
+        resilientFetch(
+          "https://example.com/yield-fail",
+          { method: "GET" },
+          "yield-provider-b",
+          { timeoutMs: 2000, maxRetries: 2, initialDelayMs: 5, maxDelayMs: 10 },
+        ),
+      ).rejects.toThrow();
+
+      const meta = getProviderRetryMetadata("yield-provider-b");
+      expect(meta).toBeDefined();
+      expect(meta?.status).toBe("exhausted");
+      expect(meta?.exhausted).toBe(true);
+      expect(meta?.retryCount).toBe(2);
+      expect(meta?.error).toContain("provider connection timeout");
+    });
+  });
 });
+

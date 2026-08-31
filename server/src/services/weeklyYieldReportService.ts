@@ -3,6 +3,57 @@
  * Generates and manages weekly yield reports for users
  */
 
+import { PrismaClient } from "@prisma/client";
+
+const prisma = new PrismaClient();
+
+export type ReportGenerationStatus = "SUCCESS" | "MISSING" | "DELAYED" | "FAILED";
+
+export interface WeeklyReportGenerationRecord {
+  id: string;
+  reportType: string;
+  periodStart: Date;
+  periodEnd: Date;
+  status: ReportGenerationStatus;
+  expectedAt: Date;
+  generatedAt: Date | null;
+  errorMessage: string | null;
+  retryCount: number;
+  lastRetryAt: Date | null;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+export interface WeeklyReportHealthCheck {
+  reportType: string;
+  currentPeriod: {
+    periodStart: string;
+    periodEnd: string;
+    expectedAt: string;
+    status: ReportGenerationStatus;
+    generatedAt: string | null;
+    errorMessage: string | null;
+    retryCount: number;
+  };
+  previousPeriods: Array<{
+    periodStart: string;
+    periodEnd: string;
+    expectedAt: string;
+    status: ReportGenerationStatus;
+    generatedAt: string | null;
+    errorMessage: string | null;
+    retryCount: number;
+  }>;
+  summary: {
+    totalPeriodsChecked: number;
+    successful: number;
+    missing: number;
+    delayed: number;
+    failed: number;
+    needsCatchUp: boolean;
+  };
+}
+
 export interface UserYieldData {
   userId: string;
   walletAddress: string;
@@ -281,4 +332,402 @@ export function exportReportsToCSV(reports: WeeklyYieldReport[]): string {
   ].join("\n");
 
   return csv;
+}
+
+/**
+ * Get the expected generation time for a weekly period
+ * Reports are expected to be generated on Monday at 9 AM for the previous week
+ */
+export function getExpectedGenerationTime(periodStart: Date): Date {
+  // Find the Monday after the period ends (period is 7 days, so periodEnd is Monday)
+  const expected = new Date(periodStart);
+  expected.setDate(expected.getDate() + 7); // Next Monday
+  expected.setHours(9, 0, 0, 0); // 9 AM
+  return expected;
+}
+
+/**
+ * Get the period start date for a given week offset from now
+ * Week 0 = current week (most recent completed week)
+ * Week -1 = previous week, etc.
+ */
+export function getWeeklyPeriodStart(weekOffset: number = 0): Date {
+  const now = new Date();
+  // Find the most recent Monday (start of current week)
+  const dayOfWeek = now.getDay(); // 0 = Sunday, 1 = Monday, etc.
+  const daysSinceMonday = dayOfWeek === 0 ? 6 : dayOfWeek - 1;
+  const mostRecentMonday = new Date(now);
+  mostRecentMonday.setDate(now.getDate() - daysSinceMonday);
+  mostRecentMonday.setHours(0, 0, 0, 0);
+
+  // Adjust by week offset
+  const periodStart = new Date(mostRecentMonday);
+  periodStart.setDate(mostRecentMonday.getDate() + weekOffset * 7);
+  return periodStart;
+}
+
+/**
+ * Get the period end date for a given period start
+ */
+export function getWeeklyPeriodEnd(periodStart: Date): Date {
+  const periodEnd = new Date(periodStart);
+  periodEnd.setDate(periodStart.getDate() + 6); // 6 days later = Sunday
+  periodEnd.setHours(23, 59, 59, 999);
+  return periodEnd;
+}
+
+/**
+ * Record the start of a report generation attempt
+ */
+export async function recordGenerationAttempt(
+  reportType: string,
+  periodStart: Date,
+  periodEnd: Date,
+): Promise<WeeklyReportGenerationRecord> {
+  const expectedAt = getExpectedGenerationTime(periodStart);
+
+  const record = await prisma.weeklyReportGeneration.upsert({
+    where: {
+      reportType_periodStart: {
+        reportType,
+        periodStart,
+      },
+    },
+    update: {
+      status: "MISSING", // Will be updated to SUCCESS or FAILED after attempt
+      expectedAt,
+      retryCount: { increment: 1 },
+      lastRetryAt: new Date(),
+      updatedAt: new Date(),
+    },
+    create: {
+      reportType,
+      periodStart,
+      periodEnd,
+      status: "MISSING",
+      expectedAt,
+      retryCount: 1,
+      lastRetryAt: new Date(),
+    },
+});
+ 
+   return record as WeeklyReportGenerationRecord;
+ }
+ 
+ /**
+  * Record successful report generation
+  */
+ export async function recordGenerationSuccess(
+   reportType: string,
+   periodStart: Date,
+ ): Promise<WeeklyReportGenerationRecord> {
+   const record = await prisma.weeklyReportGeneration.update({
+     where: {
+       reportType_periodStart: {
+         reportType,
+         periodStart,
+       },
+     },
+     data: {
+       status: "SUCCESS",
+       generatedAt: new Date(),
+       updatedAt: new Date(),
+     },
+   });
+ 
+   return record as WeeklyReportGenerationRecord;
+ }
+ 
+ /**
+  * Record failed report generation
+  */
+ export async function recordGenerationFailure(
+   reportType: string,
+   periodStart: Date,
+   errorMessage: string,
+ ): Promise<WeeklyReportGenerationRecord> {
+   const record = await prisma.weeklyReportGeneration.update({
+     where: {
+       reportType_periodStart: {
+         reportType,
+         periodStart,
+       },
+     },
+     data: {
+       status: "FAILED",
+       errorMessage,
+       generatedAt: new Date(), // Attempt was made
+       updatedAt: new Date(),
+     },
+   });
+ 
+   return record as WeeklyReportGenerationRecord;
+ }
+
+/**
+ * Determine the status of a generation record based on current time
+ */
+function determineStatus(record: WeeklyReportGenerationRecord): ReportGenerationStatus {
+  const now = new Date();
+
+  if (record.status === "SUCCESS") {
+    // Check if it was delayed (generated after expected time)
+    if (record.generatedAt && record.generatedAt > record.expectedAt) {
+      return "DELAYED";
+    }
+    return "SUCCESS";
+  }
+
+  if (record.status === "FAILED") {
+    return "FAILED";
+  }
+
+  // Status is MISSING - check if we're past the expected time
+  if (now > record.expectedAt) {
+    return "MISSING";
+  }
+
+  return "MISSING"; // Not yet expected
+}
+
+/**
+ * Get health check data for weekly report generations
+ */
+export async function getWeeklyReportHealth(
+  reportType: string = "weekly-yield-report",
+  periodsToCheck: number = 4,
+): Promise<WeeklyReportHealthCheck> {
+  const now = new Date();
+  const records: WeeklyReportGenerationRecord[] = [];
+
+  // Fetch records for the last N periods
+  for (let i = 0; i < periodsToCheck; i++) {
+    const periodStart = getWeeklyPeriodStart(-i);
+    const periodEnd = getWeeklyPeriodEnd(periodStart);
+
+    const record = await prisma.weeklyReportGeneration.findUnique({
+      where: {
+        reportType_periodStart: {
+          reportType,
+          periodStart,
+        },
+      },
+    });
+
+    if (record) {
+      records.push(record as WeeklyReportGenerationRecord);
+    } else {
+      // Create a synthetic record for missing periods
+      const expectedAt = getExpectedGenerationTime(periodStart);
+      const status: ReportGenerationStatus = now > expectedAt ? "MISSING" : "MISSING";
+      records.push({
+        id: `synthetic-${reportType}-${periodStart.toISOString()}`,
+        reportType,
+        periodStart,
+        periodEnd,
+        status,
+        expectedAt,
+        generatedAt: null,
+        errorMessage: null,
+        retryCount: 0,
+        lastRetryAt: null,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      } as WeeklyReportGenerationRecord);
+    }
+  }
+
+  // Determine status for each record
+  const periodsWithStatus = records.map((record) => ({
+    ...record,
+    computedStatus: determineStatus(record),
+  }));
+
+  // Current period is the most recent (index 0)
+  const currentPeriod = periodsWithStatus[0];
+  const previousPeriods = periodsWithStatus.slice(1);
+
+  const summary = {
+    totalPeriodsChecked: periodsWithStatus.length,
+    successful: periodsWithStatus.filter((p) => p.computedStatus === "SUCCESS").length,
+    missing: periodsWithStatus.filter((p) => p.computedStatus === "MISSING").length,
+    delayed: periodsWithStatus.filter((p) => p.computedStatus === "DELAYED").length,
+    failed: periodsWithStatus.filter((p) => p.computedStatus === "FAILED").length,
+    needsCatchUp: periodsWithStatus.some(
+      (p) => p.computedStatus === "MISSING" || p.computedStatus === "FAILED",
+    ),
+  };
+
+  return {
+    reportType,
+    currentPeriod: {
+      periodStart: currentPeriod.periodStart.toISOString().split("T")[0],
+      periodEnd: currentPeriod.periodEnd.toISOString().split("T")[0],
+      expectedAt: currentPeriod.expectedAt.toISOString(),
+      status: currentPeriod.computedStatus,
+      generatedAt: currentPeriod.generatedAt?.toISOString() ?? null,
+      errorMessage: currentPeriod.errorMessage,
+      retryCount: currentPeriod.retryCount,
+    },
+    previousPeriods: previousPeriods.map((p) => ({
+      periodStart: p.periodStart.toISOString().split("T")[0],
+      periodEnd: p.periodEnd.toISOString().split("T")[0],
+      expectedAt: p.expectedAt.toISOString(),
+      status: p.computedStatus,
+      generatedAt: p.generatedAt?.toISOString() ?? null,
+      errorMessage: p.errorMessage,
+      retryCount: p.retryCount,
+    })),
+    summary,
+  };
+}
+
+/**
+ * Get periods that need catch-up generation (MISSING or FAILED)
+ */
+export async function getPeriodsNeedingCatchUp(
+  reportType: string = "weekly-yield-report",
+  maxPeriods: number = 4,
+): Promise<Array<{ periodStart: Date; periodEnd: Date; status: ReportGenerationStatus }>> {
+  const health = await getWeeklyReportHealth(reportType, maxPeriods);
+  const catchUpPeriods: Array<{ periodStart: Date; periodEnd: Date; status: ReportGenerationStatus }> = [];
+
+  // Check current period
+  if (health.currentPeriod.status === "MISSING" || health.currentPeriod.status === "FAILED") {
+    catchUpPeriods.push({
+      periodStart: new Date(health.currentPeriod.periodStart),
+      periodEnd: new Date(health.currentPeriod.periodEnd),
+      status: health.currentPeriod.status,
+    });
+  }
+
+  // Check previous periods
+  for (const period of health.previousPeriods) {
+    if (period.status === "MISSING" || period.status === "FAILED") {
+      catchUpPeriods.push({
+        periodStart: new Date(period.periodStart),
+        periodEnd: new Date(period.periodEnd),
+        status: period.status,
+      });
+    }
+  }
+
+  return catchUpPeriods;
+}
+
+/**
+ * Generate catch-up reports for missed periods
+ */
+export async function generateCatchUpReports(
+  reportType: string = "weekly-yield-report",
+  maxPeriods: number = 4,
+): Promise<Array<{ periodStart: Date; periodEnd: Date; success: boolean; error?: string }>> {
+  const catchUpPeriods = await getPeriodsNeedingCatchUp(reportType, maxPeriods);
+  const results: Array<{ periodStart: Date; periodEnd: Date; success: boolean; error?: string }> = [];
+
+  for (const period of catchUpPeriods) {
+    try {
+      // Record attempt
+      await recordGenerationAttempt(reportType, period.periodStart, period.periodEnd);
+
+      // Generate reports for this period
+      // In production, this would generate actual reports for the specific period
+      const users = await getSubscribedUsers();
+      const reports: WeeklyYieldReport[] = [];
+
+      for (const user of users) {
+        if (!user.subscribed) continue;
+
+        try {
+          const vaultYields = await getUserVaultYields();
+          const report = calculateWeeklyYieldReport(
+            user,
+            vaultYields,
+            period.periodStart,
+            period.periodEnd,
+          );
+          reports.push(report);
+        } catch (error) {
+          console.error(
+            `Failed to generate catch-up report for user ${user.userId} (period ${period.periodStart.toISOString()}):`,
+            error,
+          );
+        }
+      }
+
+      // Record success
+      await recordGenerationSuccess(reportType, period.periodStart);
+
+      results.push({
+        periodStart: period.periodStart,
+        periodEnd: period.periodEnd,
+        success: true,
+      });
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : "Unknown error";
+      await recordGenerationFailure(reportType, period.periodStart, errorMessage);
+
+      results.push({
+        periodStart: period.periodStart,
+        periodEnd: period.periodEnd,
+        success: false,
+        error: errorMessage,
+      });
+    }
+  }
+
+  return results;
+}
+
+/**
+ * Run the weekly report generation with tracking
+ * This is the main entry point that should be called by the job scheduler
+ */
+export async function runWeeklyReportGenerationWithTracking(
+  reportType: string = "weekly-yield-report",
+): Promise<{
+  success: boolean;
+  reportsGenerated: number;
+  currentPeriodStatus: ReportGenerationStatus;
+  catchUpResults: Array<{ periodStart: Date; periodEnd: Date; success: boolean; error?: string }>;
+  error?: string;
+}> {
+  const now = new Date();
+  const periodStart = getWeeklyPeriodStart(0);
+  const periodEnd = getWeeklyPeriodEnd(periodStart);
+  const expectedAt = getExpectedGenerationTime(periodStart);
+
+  const isDelayed = now > expectedAt;
+
+  try {
+    // Record attempt for current period
+    await recordGenerationAttempt(reportType, periodStart, periodEnd);
+
+    // Generate reports for current period
+    const reports = await generateWeeklyYieldReports();
+
+    // Record success
+    await recordGenerationSuccess(reportType, periodStart);
+
+    // Also run catch-up for any missed periods
+    const catchUpResults = await generateCatchUpReports(reportType);
+
+    return {
+      success: true,
+      reportsGenerated: reports.length,
+      currentPeriodStatus: isDelayed ? "DELAYED" : "SUCCESS",
+      catchUpResults,
+    };
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : "Unknown error";
+    await recordGenerationFailure(reportType, periodStart, errorMessage);
+
+    return {
+      success: false,
+      reportsGenerated: 0,
+      currentPeriodStatus: "FAILED",
+      catchUpResults: [],
+      error: errorMessage,
+    };
+  }
 }

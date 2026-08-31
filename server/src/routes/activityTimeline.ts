@@ -2,6 +2,8 @@ import { Router, Request, Response } from "express";
 import {
   buildUnifiedAccountTimeline,
   type AccountActivityEventType,
+  type AccountActivityFilters,
+  type TransactionStatus,
 } from "../services/accountActivityTimelineService";
 
 const router = Router();
@@ -13,6 +15,12 @@ const VALID_TYPES: AccountActivityEventType[] = [
   "recommendation",
   "alert",
   "rebalance",
+];
+
+const VALID_STATUSES: TransactionStatus[] = [
+  "completed",
+  "pending",
+  "failed",
 ];
 
 router.get("/:walletAddress", (req: Request, res: Response) => {
@@ -32,9 +40,40 @@ router.get("/:walletAddress", (req: Request, res: Response) => {
     return;
   }
 
+  const filters: AccountActivityFilters = {};
+
+  if (rawTypes.length > 0) {
+    filters.types = rawTypes as AccountActivityEventType[];
+  }
+
+  if (req.query.protocol) {
+    filters.protocol = String(req.query.protocol);
+  }
+
+  if (req.query.asset) {
+    filters.asset = String(req.query.asset);
+  }
+
+  if (req.query.status) {
+    const rawStatus = String(req.query.status);
+    if (!VALID_STATUSES.includes(rawStatus as TransactionStatus)) {
+      res.status(400).json({
+        error: `Unknown status: ${rawStatus}. Must be one of: ${VALID_STATUSES.join(", ")}`,
+      });
+      return;
+    }
+    filters.status = rawStatus as TransactionStatus;
+  }
+
+  const hasFilters =
+    filters.types ||
+    filters.protocol ||
+    filters.asset ||
+    filters.status;
+
   const timeline = buildUnifiedAccountTimeline(
     walletAddress,
-    rawTypes as AccountActivityEventType[],
+    hasFilters ? filters : undefined,
   );
 
   res.json({

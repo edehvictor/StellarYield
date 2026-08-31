@@ -303,6 +303,25 @@ impl OrderBook {
         }
         order_ids
     }
+
+    /// Remove all expired active orders from the book.
+    /// Returns the IDs of cleaned orders.
+    pub fn cleanup_expired(&mut self) -> Vec<String> {
+        let expired_ids: Vec<String> = self
+            .orders
+            .iter()
+            .filter(|(_, order)| order.is_expired() && order.is_active())
+            .map(|(id, _)| id.clone())
+            .collect();
+
+        for order_id in &expired_ids {
+            if let Some(mut order) = self.remove_order(order_id) {
+                order.status = OrderStatus::Cancelled;
+            }
+        }
+
+        expired_ids
+    }
 }
 
 /// Depth snapshot returned by `OrderBook::depth`.
@@ -408,5 +427,139 @@ mod tests {
         book.add_order(ask);
 
         assert_eq!(book.spread(), Some(5));
+    }
+
+    fn create_expired_order(side: Side, price: u128, amount: u128) -> Order {
+        let mut order = Order::new(
+            "trader".to_string(),
+            side,
+            OrderType::Limit,
+            price,
+            amount,
+            "token0".to_string(),
+            "token1".to_string(),
+            "sig".to_string(),
+        );
+        order.expiration = 1; // already expired
+        order
+    }
+
+    #[test]
+    fn test_cleanup_expired_removes_expired_orders() {
+        let mut book = OrderBook::new(
+            "TOKEN0-TOKEN1".to_string(),
+            "token0".to_string(),
+            "token1".to_string(),
+        );
+
+        let expired = create_expired_order(Side::Buy, 100, 1000);
+        let expired_id = expired.id.clone();
+        book.add_order(expired);
+
+        let cleaned = book.cleanup_expired();
+        assert_eq!(cleaned.len(), 1);
+        assert_eq!(cleaned[0], expired_id);
+        assert!(book.get_order(&expired_id).is_none());
+    }
+
+    #[test]
+    fn test_cleanup_expired_preserves_active_orders() {
+        let mut book = OrderBook::new(
+            "TOKEN0-TOKEN1".to_string(),
+            "token0".to_string(),
+            "token1".to_string(),
+        );
+
+        let active = create_test_order(Side::Buy, 100, 1000);
+        let active_id = active.id.clone();
+        book.add_order(active);
+
+        let expired = create_expired_order(Side::Buy, 90, 500);
+        book.add_order(expired);
+
+        let cleaned = book.cleanup_expired();
+        assert_eq!(cleaned.len(), 1);
+        assert!(book.get_order(&active_id).is_some());
+    }
+
+    #[test]
+    fn test_cleanup_expired_ignores_filled_orders() {
+        let mut book = OrderBook::new(
+            "TOKEN0-TOKEN1".to_string(),
+            "token0".to_string(),
+            "token1".to_string(),
+        );
+
+        let mut filled = create_expired_order(Side::Buy, 100, 1000);
+        filled.status = OrderStatus::Filled;
+        filled.filled = 1000;
+        let filled_id = filled.id.clone();
+        book.add_order(filled);
+
+        let cleaned = book.cleanup_expired();
+        assert_eq!(cleaned.len(), 0);
+    }
+
+    #[test]
+    fn test_cleanup_expired_ignores_cancelled_orders() {
+        let mut book = OrderBook::new(
+            "TOKEN0-TOKEN1".to_string(),
+            "token0".to_string(),
+            "token1".to_string(),
+        );
+
+        let mut cancelled = create_expired_order(Side::Buy, 100, 1000);
+        cancelled.status = OrderStatus::Cancelled;
+        book.add_order(cancelled);
+
+        let cleaned = book.cleanup_expired();
+        assert_eq!(cleaned.len(), 0);
+    }
+
+    #[test]
+    fn test_cleanup_expired_no_expiration_orders_stay() {
+        let mut book = OrderBook::new(
+            "TOKEN0-TOKEN1".to_string(),
+            "token0".to_string(),
+            "token1".to_string(),
+        );
+
+        let no_expiry = create_test_order(Side::Buy, 100, 1000);
+        assert_eq!(no_expiry.expiration, 0);
+        let no_expiry_id = no_expiry.id.clone();
+        book.add_order(no_expiry);
+
+        let cleaned = book.cleanup_expired();
+        assert_eq!(cleaned.len(), 0);
+        assert!(book.get_order(&no_expiry_id).is_some());
+    }
+
+    #[test]
+    fn test_cleanup_expired_mixed_orders() {
+        let mut book = OrderBook::new(
+            "TOKEN0-TOKEN1".to_string(),
+            "token0".to_string(),
+            "token1".to_string(),
+        );
+
+        let active = create_test_order(Side::Buy, 100, 1000);
+        let active_id = active.id.clone();
+        book.add_order(active);
+
+        let expired_buy = create_expired_order(Side::Buy, 90, 500);
+        let expired_buy_id = expired_buy.id.clone();
+        book.add_order(expired_buy);
+
+        let expired_sell = create_expired_order(Side::Sell, 110, 300);
+        let expired_sell_id = expired_sell.id.clone();
+        book.add_order(expired_sell);
+
+        let cleaned = book.cleanup_expired();
+        assert_eq!(cleaned.len(), 2);
+        assert!(cleaned.contains(&expired_buy_id));
+        assert!(cleaned.contains(&expired_sell_id));
+        assert!(book.get_order(&active_id).is_some());
+        assert!(book.get_order(&expired_buy_id).is_none());
+        assert!(book.get_order(&expired_sell_id).is_none());
     }
 }

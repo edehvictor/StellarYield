@@ -200,6 +200,94 @@ describe("ema", () => {
   });
 });
 
+// ── History coverage decay integration (#1073) ─────────────────────────────
+
+describe("predictApy history coverage decay", () => {
+  function sparseHistory(baseApy: number, days = 30) {
+    // Only every 4th day has a reading — sparse coverage across the window.
+    return makeHistory(baseApy, days).filter((_, i) => i % 4 === 0);
+  }
+
+  function gappedHistory(baseApy: number) {
+    // Dense 7-day cluster, a 20-day gap, then a dense 7-day cluster up to "now".
+    const now = new Date();
+    const early = Array.from({ length: 7 }, (_, i) => {
+      const date = new Date(now);
+      date.setDate(now.getDate() - 30 - (6 - i));
+      return { date: date.toISOString().split("T")[0], apy: baseApy, tvl: 1_000_000 };
+    });
+    const recent = Array.from({ length: 7 }, (_, i) => {
+      const date = new Date(now);
+      date.setDate(now.getDate() - (6 - i));
+      return { date: date.toISOString().split("T")[0], apy: baseApy, tvl: 1_000_000 };
+    });
+    return [...early, ...recent];
+  }
+
+  function staleHistory(baseApy: number, days = 14) {
+    // Dense window, but the whole thing ended 25 days ago (nothing recent).
+    const now = new Date();
+    return Array.from({ length: days }, (_, i) => {
+      const date = new Date(now);
+      date.setDate(now.getDate() - 25 - (days - i));
+      return { date: date.toISOString().split("T")[0], apy: baseApy, tvl: 1_000_000 };
+    });
+  }
+
+  it("includes historyCoverage and coverageDecay in confidenceInputs", () => {
+    const result = predictApy("Blend", makeHistory(6.5), 7);
+    expect(typeof result.confidenceInputs.historyCoverage).toBe("number");
+    expect(typeof result.confidenceInputs.coverageDecay).toBe("number");
+    expect(Array.isArray(result.confidenceInputs.coverageReasons)).toBe(true);
+  });
+
+  it("dense, up-to-date history has full (or near-full) coverage decay", () => {
+    const result = predictApy("Blend", makeHistory(6.5, 30), 7);
+    expect(result.confidenceInputs.coverageDecay).toBeGreaterThan(0.9);
+  });
+
+  it("sparse history produces lower prediction confidence than dense history", () => {
+    const dense = predictApy("Blend", makeHistory(6.5, 30), 7);
+    const sparse = predictApy("Blend", sparseHistory(6.5, 30), 7);
+
+    expect(sparse.confidenceInputs.coverageDecay).toBeLessThan(
+      dense.confidenceInputs.coverageDecay,
+    );
+    expect(sparse.predictions[0].confidence).toBeLessThan(dense.predictions[0].confidence);
+    expect(sparse.confidenceInputs.coverageReasons).toContain("sparse_history");
+  });
+
+  it("a long gap in otherwise-dense history widens the forecast band", () => {
+    const dense = predictApy("Blend", makeHistory(6.5, 14), 7);
+    const gapped = predictApy("Blend", gappedHistory(6.5), 7);
+
+    const denseWidth = dense.predictions[0].upperApy - dense.predictions[0].lowerApy;
+    const gappedWidth = gapped.predictions[0].upperApy - gapped.predictions[0].lowerApy;
+
+    expect(gappedWidth).toBeGreaterThan(denseWidth);
+    expect(gapped.confidenceInputs.coverageReasons).toContain("gapped_history");
+  });
+
+  it("stale history (no recent data) degrades confidence even with a full window", () => {
+    const fresh = predictApy("Blend", makeHistory(6.5, 14), 7);
+    const stale = predictApy("Blend", staleHistory(6.5, 14), 7);
+
+    expect(stale.confidenceInputs.coverageDecay).toBeLessThan(
+      fresh.confidenceInputs.coverageDecay,
+    );
+    expect(stale.predictions[0].confidence).toBeLessThan(fresh.predictions[0].confidence);
+    expect(stale.confidenceInputs.coverageReasons).toContain("stale_history");
+  });
+
+  it("prediction confidence stays within [0, 1] even for badly sparse/stale/gapped history", () => {
+    const result = predictApy("Blend", sparseHistory(6.5, 30), 7);
+    for (const point of result.predictions) {
+      expect(point.confidence).toBeGreaterThanOrEqual(0);
+      expect(point.confidence).toBeLessThanOrEqual(1);
+    }
+  });
+});
+
 describe("linearRegression", () => {
   it("returns slope=0 and intercept=mean for constant data", () => {
     const { slope, intercept } = linearRegression([5, 5, 5, 5, 5]);

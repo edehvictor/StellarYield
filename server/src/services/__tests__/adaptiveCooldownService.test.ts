@@ -308,4 +308,127 @@ describe("AdaptiveCooldownOptimizer", () => {
       expect(AdaptiveCooldownOptimizer.formatDuration(90000000)).toBe("1d 1h");
     });
   });
+
+  describe("Determinism & Input Normalization", () => {
+    const {
+      normalizeStrategyMetrics,
+      saveCooldownRecommendation,
+      getLatestCooldownRecommendation,
+      getCooldownRecommendationHistory,
+      resetCooldownRecommendationStore,
+      COOLDOWN_REASON_DESCRIPTIONS,
+    } = require("../adaptiveCooldownService");
+
+    beforeEach(() => {
+      resetCooldownRecommendationStore();
+    });
+
+    it("should produce identical recommendation output across 100 repeated executions", () => {
+      const metrics: StrategyMetrics = {
+        strategyId: "strat_deterministic",
+        strategyName: "Deterministic Strategy",
+        rebalanceFrequency: 0.25,
+        volatility: 65,
+        liquidityScore: 35,
+        executionSuccessRate: 0.88,
+        lastRebalanceAt: new Date("2026-08-01T00:00:00Z"),
+        consecutiveFailures: 2,
+        averageSlippage: 8.5,
+      };
+
+      const baseline = optimizer.recommendCooldown(metrics, true);
+
+      for (let i = 0; i < 100; i++) {
+        const current = optimizer.recommendCooldown(metrics, true);
+        expect(current.recommendedCooldownMs).toBe(baseline.recommendedCooldownMs);
+        expect(current.primaryReasonCode).toBe(baseline.primaryReasonCode);
+        expect(current.reasonCodes).toEqual(baseline.reasonCodes);
+        expect(current.totalMultiplier).toBe(baseline.totalMultiplier);
+        expect(current.confidence).toBe(baseline.confidence);
+        expect(current.factors).toEqual(baseline.factors);
+      }
+    });
+
+    it("should normalize floating point jitter in metrics", () => {
+      const cleanMetrics: Partial<StrategyMetrics> = {
+        strategyId: "strat_jitter",
+        volatility: 70.0,
+        liquidityScore: 30.0,
+        executionSuccessRate: 0.90,
+      };
+
+      const jitteryMetrics: Partial<StrategyMetrics> = {
+        strategyId: "strat_jitter",
+        volatility: 70.00000000000001,
+        liquidityScore: 30.00000000000002,
+        executionSuccessRate: 0.9000000000000001,
+      };
+
+      const cleanRec = optimizer.recommendCooldown(cleanMetrics);
+      const jitteryRec = optimizer.recommendCooldown(jitteryMetrics);
+
+      expect(jitteryRec.recommendedCooldownMs).toBe(cleanRec.recommendedCooldownMs);
+      expect(jitteryRec.primaryReasonCode).toBe(cleanRec.primaryReasonCode);
+      expect(jitteryRec.reasonCodes).toEqual(cleanRec.reasonCodes);
+      expect(jitteryRec.totalMultiplier).toBe(cleanRec.totalMultiplier);
+    });
+
+    it("should clamp out-of-bounds metrics safely", () => {
+      const outOfBounds: Partial<StrategyMetrics> = {
+        volatility: 250,
+        liquidityScore: -50,
+        executionSuccessRate: 5.0,
+        consecutiveFailures: -3,
+        averageSlippage: -10,
+      };
+
+      const normalized = normalizeStrategyMetrics(outOfBounds);
+      expect(normalized.volatility).toBe(100);
+      expect(normalized.liquidityScore).toBe(0);
+      expect(normalized.executionSuccessRate).toBe(1);
+      expect(normalized.consecutiveFailures).toBe(0);
+      expect(normalized.averageSlippage).toBe(0);
+    });
+
+    it("should assign and describe all reason codes properly", () => {
+      const stressedMetrics: Partial<StrategyMetrics> = {
+        volatility: 85,
+        liquidityScore: 20,
+        consecutiveFailures: 4,
+        executionSuccessRate: 0.70,
+        averageSlippage: 15,
+      };
+
+      const rec = optimizer.recommendCooldown(stressedMetrics, true);
+
+      expect(rec.reasonCodes).toContain("HIGH_VOLATILITY");
+      expect(rec.reasonCodes).toContain("LOW_LIQUIDITY");
+      expect(rec.reasonCodes).toContain("CONSECUTIVE_FAILURES");
+      expect(rec.reasonCodes).toContain("LOW_EXECUTION_SUCCESS");
+      expect(rec.reasonCodes).toContain("HIGH_SLIPPAGE");
+      expect(rec.reasonCodes).toContain("MARKET_STRESS");
+
+      for (const code of rec.reasonCodes) {
+        expect(COOLDOWN_REASON_DESCRIPTIONS[code]).toBeDefined();
+      }
+    });
+
+    it("should persist cooldown recommendation and allow retrieval", () => {
+      const metrics: Partial<StrategyMetrics> = {
+        strategyId: "strat_persist_test",
+        volatility: 45,
+      };
+
+      const rec = optimizer.recommendCooldown(metrics);
+      const retrieved = getLatestCooldownRecommendation("strat_persist_test");
+
+      expect(retrieved).toBeDefined();
+      expect(retrieved?.recommendedCooldownMs).toBe(rec.recommendedCooldownMs);
+      expect(retrieved?.primaryReasonCode).toBe(rec.primaryReasonCode);
+
+      const history = getCooldownRecommendationHistory("strat_persist_test");
+      expect(history.length).toBeGreaterThanOrEqual(1);
+    });
+  });
 });
+

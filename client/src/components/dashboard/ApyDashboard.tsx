@@ -25,6 +25,7 @@ import { apiUrl } from "../../lib/api";
 import { LiquidityBufferPanel } from "./LiquidityBufferPanel";
 import { computeDecayedFreshnessConfidence } from "./freshnessDecay";
 import { RISK_EXPLANATIONS, RiskLevel } from "../../config/riskConfig";
+import { VaultRiskBadge } from "../common/VaultRiskBadge";
 import { useDensity } from "../../context/DensityContext";
 import type { DensityMode } from "../../context/DensityContext";
 
@@ -703,9 +704,6 @@ export default function ApyDashboard() {
           {loading
             ? Array.from({ length: 8 }).map((_, i) => <SkeletonCard key={i} />)
             : filtered.map((entry, i) => {
-                const risk =
-                  RISK_EXPLANATIONS[entry.risk as RiskLevel] ??
-                  RISK_EXPLANATIONS.Medium;
                 const gradient =
                   PROTOCOL_COLORS[entry.protocol] ??
                   "from-gray-500/80 to-gray-600/80";
@@ -743,25 +741,10 @@ export default function ApyDashboard() {
                             {entry.category}
                           </p>
                         </div>
-                        <button
-                          type="button"
-                          className="group/risk relative flex cursor-help outline-none"
-                          aria-describedby={`risk-tip-grid-${getApyRowId(entry)}`}
-                          aria-label={`${entry.protocol} ${entry.asset} risk: ${entry.risk}. ${risk.explanation}`}
-                        >
-                          <span
-                            className={`${risk.bg} ${risk.color} ${risk.border} border px-2 py-0.5 rounded-lg text-[10px] font-bold uppercase tracking-wider flex items-center gap-1`}
-                          >
-                            {entry.risk} <Info size={10} aria-hidden="true" />
-                          </span>
-                          <span
-                            id={`risk-tip-grid-${getApyRowId(entry)}`}
-                            role="tooltip"
-                            className="absolute hidden group-hover/risk:block group-focus-within/risk:block bottom-full mb-2 right-0 w-48 p-2 bg-[#1A1A24] border border-white/10 rounded-lg text-xs leading-relaxed text-gray-300 shadow-xl z-10 transition-opacity"
-                          >
-                            {risk.explanation}
-                          </span>
-                        </button>
+                        <VaultRiskBadge
+                          risk={entry.risk}
+                          id={`grid-${getApyRowId(entry)}`}
+                        />
                       </div>
 
                       {/* Freshness Indicator */}
@@ -996,9 +979,6 @@ export default function ApyDashboard() {
                       <SkeletonTableRow key={i} />
                     ))
                   : filtered.map((entry, i) => {
-                      const risk =
-                        RISK_EXPLANATIONS[entry.risk as RiskLevel] ??
-                        RISK_EXPLANATIONS.Medium;
                       const gradient =
                         PROTOCOL_COLORS[entry.protocol] ??
                         "from-gray-500/80 to-gray-600/80";
@@ -1079,26 +1059,10 @@ export default function ApyDashboard() {
                             {formatTvl(entry.tvl)}
                           </td>
                           <td className="px-6 py-5">
-                            <button
-                              type="button"
-                              className="group/risk relative inline-flex cursor-help outline-none"
-                              aria-describedby={`risk-tip-table-${getApyRowId(entry)}`}
-                              aria-label={`${entry.protocol} ${entry.asset} risk: ${entry.risk}. ${risk.explanation}`}
-                            >
-                              <span
-                                className={`${risk.bg} ${risk.color} ${risk.border} border px-2.5 py-1.5 rounded text-xs font-bold uppercase tracking-wider flex items-center gap-1`}
-                              >
-                                {entry.risk}{" "}
-                                <Info size={12} aria-hidden="true" />
-                              </span>
-                              <span
-                                id={`risk-tip-table-${getApyRowId(entry)}`}
-                                role="tooltip"
-                                className="absolute hidden group-hover/risk:block group-focus-within/risk:block bottom-full mb-2 left-1/2 -translate-x-1/2 w-48 p-2 bg-[#1A1A24] border border-white/10 rounded-lg text-xs leading-relaxed text-gray-300 shadow-xl z-10 transition-opacity"
-                              >
-                                {risk.explanation}
-                              </span>
-                            </button>
+                            <VaultRiskBadge
+                              risk={entry.risk}
+                              id={`table-${getApyRowId(entry)}`}
+                            />
                           </td>
                           <td className="px-6 py-5 text-right">
                             {entry.capitalEfficiency && (

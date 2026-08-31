@@ -37,7 +37,7 @@ export const KNOWN_CONTRACT_ERROR_CODES = new Set([
     // Vesting
     1001, 1002, 1003,
     // Donations
-    2001, 2002,
+    2001, 2002, 2007,
     // Intent Swap
     3001, 3002,
 ]);
@@ -129,6 +129,11 @@ const CONTRACT_ERROR_MAP: Record<
         title: "Charity Not Whitelisted",
         message: "The selected charity address is not on the protocol's whitelist.",
         suggestion: "Choose a charity from the approved list in the Yield for Good panel.",
+    },
+    2007: {
+        title: "Donation Below Minimum",
+        message: "Donation amount is below the minimum (dust).",
+        suggestion: "Increase the yield amount or donation split before submitting.",
     },
     // ── Intent Swap ────────────────────────────────────────────────────
     3001: {

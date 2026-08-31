@@ -752,4 +752,238 @@ router.get("/startup", async (_req: Request, res: Response) => {
   res.status(status === "failed" ? 503 : 200).json(body);
 });
 
+// ── Keeper Heartbeat & Degraded Recovery Guidance (#1034) ─────────────
+
+export type KeeperWorkerName = "rebalance" | "liquidation" | "reward" | "indexer";
+export type KeeperHealthState = "healthy" | "stale" | "missing";
+
+export interface KeeperWorkerHealth {
+  status: KeeperHealthState;
+  lastHeartbeat: string | null;
+  ageMs: number | null;
+  degradedBehavior: string;
+  recoveryGuidance: string;
+}
+
+export interface KeepersHealthResponse {
+  status: "healthy" | "degraded";
+  staleCount: number;
+  missingCount: number;
+  keepers: Record<KeeperWorkerName, KeeperWorkerHealth>;
+  timestamp: string;
+}
+
+export const KEEPER_NAMES: readonly KeeperWorkerName[] = [
+  "rebalance",
+  "liquidation",
+  "reward",
+  "indexer",
+] as const;
+
+export const KEEPER_HEALTH_THRESHOLDS = {
+  HEALTHY_MAX_AGE_MS: 60_000, // 1 minute
+  STALE_MAX_AGE_MS: 180_000,  // 3 minutes
+};
+
+export const KEEPER_DEGRADED_BEHAVIOR: Record<KeeperWorkerName, string> = {
+  rebalance:
+    "Portfolio drift uncorrected; vault asset allocations may diverge from target weights.",
+  liquidation:
+    "Undercollateralized positions are not liquidated; vault collateral ratio at risk of bad debt.",
+  reward:
+    "Yield harvesting paused; auto-compounding rewards and fee distributions are delayed.",
+  indexer:
+    "On-chain ledger events not indexed; dashboard transaction history and balances may lag.",
+};
+
+export const KEEPER_RECOVERY_GUIDANCE: Record<KeeperWorkerName, string> = {
+  rebalance:
+    "Check rebalance queue depth, verify Soroban RPC endpoint latency, and restart rebalance keeper: `docker compose restart keeper-rebalance`.",
+  liquidation:
+    "Verify oracle price feed freshness, check liquidation signer balance for gas, and restart liquidation keeper: `docker compose restart keeper-liquidation`.",
+  reward:
+    "Check gas balance on reward distribution key and restart compound worker: `docker compose restart keeper-compound`.",
+  indexer:
+    "Verify Horizon RPC connectivity, inspect database write latency, and restart indexer service: `docker compose restart indexer`.",
+};
+
+const keeperHeartbeats = new Map<KeeperWorkerName, number>();
+
+export function recordKeeperHeartbeat(
+  worker: KeeperWorkerName,
+  timestamp: number = Date.now(),
+): void {
+  keeperHeartbeats.set(worker, timestamp);
+}
+
+export function resetKeeperHeartbeats(): void {
+  keeperHeartbeats.clear();
+}
+
+export function getKeepersHealth(now: number = Date.now()): KeepersHealthResponse {
+  const keepers = {} as Record<KeeperWorkerName, KeeperWorkerHealth>;
+  let staleCount = 0;
+  let missingCount = 0;
+
+  for (const name of KEEPER_NAMES) {
+    const lastTimestamp = keeperHeartbeats.get(name) ?? null;
+    if (lastTimestamp === null) {
+      missingCount++;
+      keepers[name] = {
+        status: "missing",
+        lastHeartbeat: null,
+        ageMs: null,
+        degradedBehavior: KEEPER_DEGRADED_BEHAVIOR[name],
+        recoveryGuidance: KEEPER_RECOVERY_GUIDANCE[name],
+      };
+    } else {
+      const ageMs = Math.max(0, now - lastTimestamp);
+      const isHealthy = ageMs <= KEEPER_HEALTH_THRESHOLDS.HEALTHY_MAX_AGE_MS;
+      const status: KeeperHealthState = isHealthy ? "healthy" : "stale";
+      if (status === "stale") staleCount++;
+
+      keepers[name] = {
+        status,
+        lastHeartbeat: new Date(lastTimestamp).toISOString(),
+        ageMs,
+        degradedBehavior: KEEPER_DEGRADED_BEHAVIOR[name],
+        recoveryGuidance: KEEPER_RECOVERY_GUIDANCE[name],
+      };
+    }
+  }
+
+  const isDegraded = staleCount > 0 || missingCount > 0;
+
+  return {
+    status: isDegraded ? "degraded" : "healthy",
+    staleCount,
+    missingCount,
+    keepers,
+    timestamp: new Date(now).toISOString(),
+  };
+}
+
+/**
+ * GET /health/keepers (or /api/health/keepers)
+ *
+ * Exposes keeper heartbeat freshness, timeout states, and recovery guidance.
+ * Distinguishes stale keepers from backend API outages by returning 200 with degraded summary.
+ */
+router.get("/keepers", async (_req: Request, res: Response) => {
+  const summary = getKeepersHealth();
+  res.status(200).json(summary);
+});
+
+/**
+ * POST /health/keepers/heartbeat
+ *
+ * Records a heartbeat from a running keeper worker.
+ */
+router.post("/keepers/heartbeat", async (req: Request, res: Response) => {
+  const { worker } = req.body ?? {};
+  if (!worker || !KEEPER_NAMES.includes(worker)) {
+    res.status(400).json({ error: `Invalid worker name. Must be one of: ${KEEPER_NAMES.join(", ")}` });
+    return;
+  }
+
+  recordKeeperHeartbeat(worker as KeeperWorkerName);
+  res.status(200).json({ status: "ok", worker, timestamp: new Date().toISOString() });
+});
+
+// ── Weekly Report Generation Health Check ─────────────────────────────────
+
+import {
+  getWeeklyReportHealth,
+  getPeriodsNeedingCatchUp,
+  WeeklyReportHealthCheck,
+} from "../services/weeklyYieldReportService";
+
+export interface WeeklyReportsHealthResponse {
+  status: "healthy" | "degraded" | "unhealthy";
+  reportType: string;
+  currentPeriod: WeeklyReportHealthCheck["currentPeriod"];
+  previousPeriods: WeeklyReportHealthCheck["previousPeriods"];
+  summary: WeeklyReportHealthCheck["summary"];
+  catchUpPeriods: Array<{ periodStart: string; periodEnd: string; status: string }>;
+  timestamp: string;
+}
+
+/**
+ * GET /health/weekly-reports
+ *
+ * Returns health status for weekly report generation, distinguishing between:
+ * - SUCCESS: Generated on time
+ * - DELAYED: Generated but after expected time
+ * - MISSING: No generation occurred for the window
+ * - FAILED: Generation was attempted but errored out
+ *
+ * Also identifies periods needing catch-up generation.
+ */
+router.get("/weekly-reports", async (_req: Request, res: Response) => {
+  try {
+    const health = await getWeeklyReportHealth("weekly-yield-report", 4);
+    const catchUpPeriods = await getPeriodsNeedingCatchUp("weekly-yield-report", 4);
+
+    let overallStatus: WeeklyReportsHealthResponse["status"] = "healthy";
+    if (health.summary.failed > 0 || health.summary.missing > 0) {
+      overallStatus = "unhealthy";
+    } else if (health.summary.delayed > 0) {
+      overallStatus = "degraded";
+    }
+
+    const response: WeeklyReportsHealthResponse = {
+      status: overallStatus,
+      reportType: health.reportType,
+      currentPeriod: health.currentPeriod,
+      previousPeriods: health.previousPeriods,
+      summary: health.summary,
+      catchUpPeriods: catchUpPeriods.map((p) => ({
+        periodStart: p.periodStart.toISOString().split("T")[0],
+        periodEnd: p.periodEnd.toISOString().split("T")[0],
+        status: p.status,
+      })),
+      timestamp: new Date().toISOString(),
+    };
+
+    const statusCode = overallStatus === "unhealthy" ? 503 : overallStatus === "degraded" ? 200 : 200;
+    res.status(statusCode).json(response);
+  } catch (error) {
+    console.error("Weekly reports health check failed:", error);
+    res.status(500).json({
+      status: "error",
+      error: error instanceof Error ? error.message : "Health check failed",
+      timestamp: new Date().toISOString(),
+    });
+  }
+});
+
+/**
+ * POST /health/weekly-reports/catch-up
+ *
+ * Manually trigger catch-up generation for missed periods.
+ */
+router.post("/weekly-reports/catch-up", async (req: Request, res: Response) => {
+  try {
+    const { maxPeriods = 4 } = req.body ?? {};
+    const { generateCatchUpReports } = await import("../services/weeklyYieldReportService");
+
+    const results = await generateCatchUpReports("weekly-yield-report", maxPeriods);
+
+    res.json({
+      success: true,
+      triggeredAt: new Date().toISOString(),
+      maxPeriods,
+      results,
+    });
+  } catch (error) {
+    console.error("Catch-up generation failed:", error);
+    res.status(500).json({
+      success: false,
+      error: error instanceof Error ? error.message : "Catch-up generation failed",
+      timestamp: new Date().toISOString(),
+    });
+  }
+});
+
 export default router;
+

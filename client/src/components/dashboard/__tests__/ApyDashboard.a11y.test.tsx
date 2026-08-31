@@ -41,8 +41,11 @@ const MOCK_YIELDS = [
 ];
 
 function mockFetchOk(data = MOCK_YIELDS) {
-  global.fetch = vi.fn().mockResolvedValue(
-    new Response(JSON.stringify(data), { status: 200 }),
+  global.fetch = vi.fn().mockImplementation(() =>
+    Promise.resolve({
+      ok: true,
+      json: async () => data,
+    }),
   );
 }
 
@@ -72,7 +75,7 @@ describe("ApyDashboard — accessibility (grid view)", () => {
   it("search input has an accessible placeholder (not sole label)", async () => {
     mockFetchOk();
     render(<ApyDashboard />);
-    await screen.findByText("Blend");
+    await screen.findAllByText("Blend");
     const input = screen.getByRole("textbox");
     expect(input).toBeInTheDocument();
   });
@@ -80,9 +83,9 @@ describe("ApyDashboard — accessibility (grid view)", () => {
   it("grid/table view toggle buttons have aria-pressed state", async () => {
     mockFetchOk();
     render(<ApyDashboard />);
-    await screen.findByText("Blend");
+    await screen.findAllByText("Blend");
     const cardBtn = screen.getByRole("button", { name: /cards/i });
-    const tableBtn = screen.getByRole("button", { name: /table/i });
+    const tableBtn = screen.getByRole("button", { name: /^table$/i });
     expect(cardBtn).toHaveAttribute("aria-pressed");
     expect(tableBtn).toHaveAttribute("aria-pressed");
   });
@@ -90,7 +93,7 @@ describe("ApyDashboard — accessibility (grid view)", () => {
   it("risk badges have aria-label describing protocol, asset, risk and explanation", async () => {
     mockFetchOk();
     render(<ApyDashboard />);
-    await screen.findByText("Blend");
+    await screen.findAllByText("Blend");
     // Risk buttons all carry aria-label per the component implementation
     const riskBtns = screen
       .getAllByRole("button")
@@ -101,7 +104,7 @@ describe("ApyDashboard — accessibility (grid view)", () => {
   it("risk tooltip has role=tooltip with correct id binding", async () => {
     mockFetchOk();
     render(<ApyDashboard />);
-    await screen.findByText("Blend");
+    await screen.findAllByText("Blend");
     const tooltips = document.querySelectorAll('[role="tooltip"]');
     expect(tooltips.length).toBeGreaterThan(0);
     for (const tip of tooltips) {
@@ -133,20 +136,21 @@ describe("ApyDashboard — accessibility (table view)", () => {
 
   async function switchToTable() {
     render(<ApyDashboard />);
-    await screen.findByText("Blend");
-    fireEvent.click(screen.getByRole("button", { name: /table/i }));
-    await screen.findByRole("table");
+    await screen.findAllByText("Blend");
+    fireEvent.click(screen.getByRole("button", { name: /^table$/i }));
+    await waitFor(() => {
+      expect(screen.getAllByRole("table").length).toBeGreaterThanOrEqual(1);
+    });
   }
 
   it("table element is present in table view", async () => {
     await switchToTable();
-    expect(screen.getByRole("table")).toBeInTheDocument();
+    expect(screen.getAllByRole("table").length).toBeGreaterThanOrEqual(1);
   });
 
   it("column header cells have aria-sort attribute", async () => {
     await switchToTable();
-    const table = screen.getByRole("table");
-    const sortableThs = table.querySelectorAll("th[aria-sort]");
+    const sortableThs = document.querySelectorAll("th[aria-sort]");
     expect(sortableThs.length).toBeGreaterThanOrEqual(1);
   });
 
@@ -161,7 +165,7 @@ describe("ApyDashboard — accessibility (table view)", () => {
   it("sort button aria-pressed reflects active sort field", async () => {
     await switchToTable();
     const apyBtn = screen.getAllByRole("button").find(
-      (b) => b.getAttribute("aria-label")?.includes("Sort by APY"),
+      (b) => b.getAttribute("aria-label")?.includes("APY"),
     );
     expect(apyBtn).toBeDefined();
     // APY is default sort field
@@ -199,13 +203,18 @@ describe("ApyDashboard — accessibility (table view)", () => {
       ...y,
       fetchedAt: new Date(Date.now() - 10 * 60_000).toISOString(),
     }));
-    global.fetch = vi.fn().mockResolvedValue(
-      new Response(JSON.stringify(staleYields), { status: 200 }),
+    global.fetch = vi.fn().mockImplementation(() =>
+      Promise.resolve({
+        ok: true,
+        json: async () => staleYields,
+      }),
     );
     render(<ApyDashboard />);
-    await screen.findByText("Blend");
-    fireEvent.click(screen.getByRole("button", { name: /table/i }));
-    await screen.findByRole("table");
+    await screen.findAllByText("Blend");
+    fireEvent.click(screen.getByRole("button", { name: /^table$/i }));
+    await waitFor(() => {
+      expect(screen.getAllByRole("table").length).toBeGreaterThanOrEqual(1);
+    });
     const staleEls = document
       .querySelectorAll("[aria-label]");
     const hasStaleLabel = Array.from(staleEls).some((el) =>

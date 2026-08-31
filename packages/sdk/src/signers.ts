@@ -7,6 +7,9 @@ export interface SignerAdapter {
     unsignedXdr: string,
     opts: { networkPassphrase: string; contractId?: string }
   ): Promise<string>;
+  connect(): Promise<void>;
+  disconnect(): Promise<void>;
+  switchNetwork(networkPassphrase: string): Promise<void>;
 }
 
 export class ServerKeypairSigner implements SignerAdapter {

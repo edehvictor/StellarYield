@@ -31,6 +31,8 @@
  *   fail  — protocol must be excluded from ranking
  */
 
+import { recordFailure as recordFailureMetric, resolveNetworkLabel } from "../monitoring/prometheus";
+
 export type ProtocolHealthStatus =
   | "healthy"
   | "degraded"
@@ -328,6 +330,16 @@ export class FailoverRegistry {
         0,
         this.decisionLog.length - DECISION_LOG_MAX_ENTRIES,
       );
+    }
+    for (const decision of decisions) {
+      if (decision.action === "exclude") {
+        recordFailureMetric({
+          provider: decision.protocolId,
+          network: resolveNetworkLabel(),
+          route: "protocol_failover",
+          failure_category: decision.severity,
+        });
+      }
     }
   }
 }

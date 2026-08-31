@@ -4,6 +4,7 @@ import { slippageRegistry } from "./slippageRegistry";
 import { getYieldData } from "./yieldService";
 import { freezeService } from "./freezeService";
 import { getZapSupportedAssetsPayload } from "../config/zapAssetsConfig";
+import { recordFailure, resolveNetworkLabel } from "../monitoring/prometheus";
 
 export interface ZapQuoteBody {
   inputTokenContract: string;
@@ -126,6 +127,12 @@ export async function quoteViaRouterSimulation(
       isFallback: false,
     };
   } catch {
+    recordFailure({
+      provider: body.protocol || "default",
+      network: resolveNetworkLabel(),
+      route: "zap/quote",
+      failure_category: "router_simulation_failed",
+    });
     return null;
   }
 }
@@ -170,6 +177,12 @@ export function quoteFallback(body: ZapQuoteBody): Omit<ZapQuoteResult, "issuedA
 
 export async function getZapQuote(body: ZapQuoteBody): Promise<ZapQuoteResult> {
   if (freezeService.isFrozen(body.protocol)) {
+    recordFailure({
+      provider: body.protocol || "default",
+      network: resolveNetworkLabel(),
+      route: "zap/quote",
+      failure_category: "frozen",
+    });
     throw new Error(`Quoting is temporarily disabled for ${body.protocol || "all protocols"} due to safety freeze.`);
   }
 

@@ -1,6 +1,9 @@
 import React, { useState, useEffect } from "react";
 import { AlertTriangle, AlertCircle, Info } from "lucide-react";
-import { fetchDepositSimulation } from "./simulationService";
+import {
+  fetchDepositSimulation,
+  isSimulationCancellation,
+} from "./simulationService";
 import type { SimulationResult, SimulationWarning } from "./simulationService";
 
 interface DepositSimulatorProps {
@@ -33,20 +36,25 @@ const SEVERITY_STYLES: Record<
   },
 };
 
-function WarningItem({ warning }: { warning: SimulationWarning }) {
-  const styles = SEVERITY_STYLES[warning.severity];
+function WarningItem({ warning }: { warning: SimulationWarning | string }) {
+  const normWarning: SimulationWarning = typeof warning === "string"
+    ? { code: "UNSUPPORTED_STRATEGY", severity: "warning", message: warning, remediation: "Adjust inputs or check network conditions" }
+    : warning;
+  const styles = SEVERITY_STYLES[normWarning.severity] || SEVERITY_STYLES.warning;
   const { Icon } = styles;
   return (
     <li className={`flex gap-3 p-3 rounded ${styles.container}`} role="alert">
       <Icon size={16} className={`${styles.icon} shrink-0 mt-0.5`} aria-hidden="true" />
       <div className="space-y-0.5 text-sm">
-        <p className={`font-medium ${styles.text}`}>{warning.message}</p>
-        <p className="text-gray-400 text-xs">
-          <span className="font-semibold text-gray-300">Suggestion: </span>
-          {warning.remediation}
-        </p>
-        {warning.affectedField && (
-          <p className="text-gray-500 text-xs font-mono">Field: {warning.affectedField}</p>
+        <p className={`font-medium ${styles.text}`}>{normWarning.message}</p>
+        {normWarning.remediation && (
+          <p className="text-gray-400 text-xs">
+            <span className="font-semibold text-gray-300">Suggestion: </span>
+            {normWarning.remediation}
+          </p>
+        )}
+        {normWarning.affectedField && (
+          <p className="text-gray-500 text-xs font-mono">Field: {normWarning.affectedField}</p>
         )}
       </div>
     </li>
@@ -62,28 +70,61 @@ export const DepositSimulator: React.FC<DepositSimulatorProps> = ({
   const [loading, setLoading] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
 
+  // Consistency checks: track latest requested amount to discard stale / out-of-order responses (#1180)
+  const latestAmountRef = React.useRef(amount);
+  latestAmountRef.current = amount;
+  const requestIdRef = React.useRef(0);
+
   useEffect(() => {
-    let active = true;
-    const load = async () => {
-      if (!amount || amount <= 0) {
-        if (active) setSimulation(null);
-        return;
-      }
-      if (active) {
-        setLoading(true);
-        setError(null);
-      }
+    const controller = new AbortController();
+    const currentRequestId = ++requestIdRef.current;
+    const targetAmount = amount;
+
+    if (!targetAmount || targetAmount <= 0) {
+      setLoading(false);
+      setError(null);
+      setSimulation(null);
+      return;
+    }
+
+    setLoading(true);
+    setError(null);
+
+    // Debounce rapid manual edits
+    const debounceTimer = setTimeout(async () => {
       try {
-        const result = await fetchDepositSimulation({ strategyId, amount, token });
-        if (active) setSimulation(result);
+        const result = await fetchDepositSimulation(
+          { strategyId, amount: targetAmount, token },
+          { signal: controller.signal }
+        );
+
+        // Discard stale responses if amount has changed or newer request started
+        if (
+          !controller.signal.aborted &&
+          currentRequestId === requestIdRef.current &&
+          targetAmount === latestAmountRef.current
+        ) {
+          setSimulation(result);
+          setLoading(false);
+        }
       } catch (err) {
-        if (active) setError(err instanceof Error ? err.message : "Error running simulation");
-      } finally {
-        if (active) setLoading(false);
+        if (isSimulationCancellation(err) || controller.signal.aborted) {
+          return;
+        }
+        if (
+          currentRequestId === requestIdRef.current &&
+          targetAmount === latestAmountRef.current
+        ) {
+          setError(err instanceof Error ? err.message : "Error running simulation");
+          setLoading(false);
+        }
       }
+    }, 150);
+
+    return () => {
+      clearTimeout(debounceTimer);
+      controller.abort();
     };
-    load();
-    return () => { active = false; };
   }, [strategyId, amount, token]);
 
   if (loading) return <div className="p-4 text-gray-500 animate-pulse">Running simulation...</div>;
@@ -101,20 +142,24 @@ export const DepositSimulator: React.FC<DepositSimulatorProps> = ({
 
       <h3 className="text-xl font-bold mb-4 text-gray-800">Deposit Simulation</h3>
 
-      {criticalWarnings.length > 0 && (
-        <ul className="mb-4 space-y-2" aria-label="Critical warnings">
-          {criticalWarnings.map((w, idx) => (
-            <WarningItem key={idx} warning={w} />
-          ))}
-        </ul>
-      )}
-
-      {otherWarnings.length > 0 && (
-        <ul className="mb-4 space-y-2" aria-label="Simulation warnings">
-          {otherWarnings.map((w, idx) => (
-            <WarningItem key={idx} warning={w} />
-          ))}
-        </ul>
+      {(criticalWarnings.length > 0 || otherWarnings.length > 0) && (
+        <div className="mb-4">
+          <h4 className="font-semibold text-gray-700 mb-2">Warnings</h4>
+          {criticalWarnings.length > 0 && (
+            <ul className="space-y-2 mb-2" aria-label="Critical warnings">
+              {criticalWarnings.map((w, idx) => (
+                <WarningItem key={idx} warning={w} />
+              ))}
+            </ul>
+          )}
+          {otherWarnings.length > 0 && (
+            <ul className="space-y-2" aria-label="Simulation warnings">
+              {otherWarnings.map((w, idx) => (
+                <WarningItem key={idx} warning={w} />
+              ))}
+            </ul>
+          )}
+        </div>
       )}
 
       <div className="grid grid-cols-2 gap-4 mb-6">

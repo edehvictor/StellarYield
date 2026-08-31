@@ -123,20 +123,20 @@ describe("RouteBoundary", () => {
   });
 
   it("offers 'Try again' button for render errors that clears the error on click", () => {
-    const { rerender } = render(
+    let shouldThrow = true;
+    function MaybeBoom() {
+      if (shouldThrow) throw new Error("kaboom from child");
+      return <div>recovered</div>;
+    }
+    render(
       <RouteBoundary>
-        <Boom />
+        <MaybeBoom />
       </RouteBoundary>,
     );
     const btn = screen.getByRole("button", { name: /try again/i });
     expect(btn).not.toBeNull();
+    shouldThrow = false;
     fireEvent.click(btn);
-    // After retry the error is cleared; re-render with safe content to confirm.
-    rerender(
-      <RouteBoundary>
-        <div>recovered</div>
-      </RouteBoundary>,
-    );
     expect(screen.queryByText("recovered")).not.toBeNull();
   });
 

@@ -150,3 +150,88 @@ describe("filterByTimeWindow", () => {
     expect(filterByTimeWindow(items, "7d")).toHaveLength(1);
   });
 });
+
+describe("tie-breaking and deterministic ranking", () => {
+  it("equal RAY and TVL resolves by id alphabetically", () => {
+    const base = { apy: 10, riskScore: 8, ilVolatilityPct: 2, tvlUsd: 1_000_000 };
+    const strategies: StrategyInput[] = [
+      makeStrategy({ id: "zebra", ...base }),
+      makeStrategy({ id: "alpha", ...base }),
+      makeStrategy({ id: "middle", ...base }),
+    ];
+    const ranked = rankStrategies(strategies);
+    expect(ranked[0].id).toBe("alpha");
+    expect(ranked[1].id).toBe("middle");
+    expect(ranked[2].id).toBe("zebra");
+  });
+
+  it("ranking is stable across repeated calls", () => {
+    const strategies: StrategyInput[] = [
+      makeStrategy({ id: "a", apy: 10, riskScore: 8, ilVolatilityPct: 2, tvlUsd: 500_000 }),
+      makeStrategy({ id: "b", apy: 10, riskScore: 8, ilVolatilityPct: 2, tvlUsd: 500_000 }),
+      makeStrategy({ id: "c", apy: 12, riskScore: 7, ilVolatilityPct: 3, tvlUsd: 200_000 }),
+    ];
+
+    const first = rankStrategies(strategies);
+    const second = rankStrategies(strategies);
+    const third = rankStrategies(strategies);
+
+    expect(first.map((s) => s.id)).toEqual(second.map((s) => s.id));
+    expect(second.map((s) => s.id)).toEqual(third.map((s) => s.id));
+  });
+
+  it("secondary sort key is TVL descending when RAY is equal", () => {
+    const base = { apy: 10, riskScore: 8, ilVolatilityPct: 2 };
+    const strategies: StrategyInput[] = [
+      makeStrategy({ id: "small", ...base, tvlUsd: 100_000 }),
+      makeStrategy({ id: "large", ...base, tvlUsd: 5_000_000 }),
+      makeStrategy({ id: "medium", ...base, tvlUsd: 1_000_000 }),
+    ];
+    const ranked = rankStrategies(strategies);
+    expect(ranked[0].id).toBe("large");
+    expect(ranked[1].id).toBe("medium");
+    expect(ranked[2].id).toBe("small");
+  });
+
+  it("tertiary sort key is id ascending when RAY and TVL are equal", () => {
+    const base = { apy: 10, riskScore: 8, ilVolatilityPct: 2, tvlUsd: 1_000_000 };
+    const strategies: StrategyInput[] = [
+      makeStrategy({ id: "soroswap", ...base }),
+      makeStrategy({ id: "blend", ...base }),
+      makeStrategy({ id: "defindex", ...base }),
+    ];
+    const ranked = rankStrategies(strategies);
+    expect(ranked.map((s) => s.id)).toEqual(["blend", "defindex", "soroswap"]);
+  });
+
+  it("handles many tied strategies deterministically", () => {
+    const base = { apy: 8, riskScore: 7, ilVolatilityPct: 3, tvlUsd: 500_000 };
+    const ids = ["g", "a", "f", "b", "e", "c", "d"];
+    const strategies = ids.map((id) => makeStrategy({ id, ...base }));
+    const ranked = rankStrategies(strategies);
+    expect(ranked.map((s) => s.id)).toEqual(["a", "b", "c", "d", "e", "f", "g"]);
+  });
+
+  it("mixed ties and non-ties produce correct ordering", () => {
+    const tied = { apy: 10, riskScore: 8, ilVolatilityPct: 2, tvlUsd: 1_000_000 };
+    const strategies: StrategyInput[] = [
+      makeStrategy({ id: "winner", apy: 20, riskScore: 9, ilVolatilityPct: 1, tvlUsd: 500_000 }),
+      makeStrategy({ id: "tied-b", ...tied }),
+      makeStrategy({ id: "tied-a", ...tied }),
+      makeStrategy({ id: "loser", apy: 2, riskScore: 3, ilVolatilityPct: 8, tvlUsd: 10_000_000 }),
+    ];
+    const ranked = rankStrategies(strategies);
+    expect(ranked[0].id).toBe("winner");
+    expect(ranked[1].id).toBe("tied-a");
+    expect(ranked[2].id).toBe("tied-b");
+    expect(ranked[3].id).toBe("loser");
+  });
+
+  it("ranks are always sequential starting from 1", () => {
+    const strategies = Array.from({ length: 10 }, (_, i) =>
+      makeStrategy({ id: `s-${i}`, apy: 10 - i, tvlUsd: 100_000 * (i + 1) }),
+    );
+    const ranked = rankStrategies(strategies);
+    expect(ranked.map((s) => s.rank)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+  });
+});

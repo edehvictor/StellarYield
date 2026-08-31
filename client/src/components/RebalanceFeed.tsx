@@ -86,6 +86,7 @@ function RebalanceEventCard({
           </span>
           <button
             onClick={handleExpand}
+            aria-label={expanded ? "Collapse details" : "Expand details"}
             className="p-1 hover:bg-slate-100 rounded transition-colors"
           >
             {expanded ? (

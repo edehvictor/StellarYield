@@ -44,6 +44,13 @@ interface CompatibilityStatus {
   autoUpdateAvailable: boolean;
 }
 
+interface RegistryWarning {
+  code: string;
+  message: string;
+  network?: string;
+  contract?: string;
+}
+
 interface CompatibilityReport {
   overallStatus: 'compatible' | 'degraded' | 'incompatible';
   protocols: CompatibilityStatus[];
@@ -51,6 +58,8 @@ interface CompatibilityReport {
   actionGroups: ActionGroup[];
   generatedAt: string;
   nextCheckDue: string;
+  /** Warnings from registry metadata loading — present when data is incomplete. */
+  registryWarnings?: RegistryWarning[];
 }
 
 // ── Constants ───────────────────────────────────────────────────────────
@@ -153,6 +162,9 @@ export default function CompatibilityPanel() {
       setIsLoading(false);
     }
   };
+
+  /** Registry warnings surfaced when metadata loading fails or is partial. */
+  const registryWarnings = report?.registryWarnings ?? [];
 
   // Protocol issues grouped by action (used for the protocol detail view)
   const protocolActionGroups = useMemo(() => {
@@ -264,6 +276,33 @@ export default function CompatibilityPanel() {
           Refresh
         </button>
       </div>
+
+      {/* Registry Warning Banner */}
+      {registryWarnings.length > 0 && (
+        <div className="glass-panel p-4 border-l-4 border-[#F5A623]">
+          <div className="flex items-start gap-3">
+            <AlertTriangle size={20} className="text-[#F5A623] flex-shrink-0 mt-0.5" />
+            <div className="min-w-0">
+              <h4 className="font-semibold text-sm text-[#F5A623]">
+                Registry Metadata Incomplete
+              </h4>
+              <div className="mt-1 space-y-1">
+                {registryWarnings.map((w, i) => (
+                  <div key={i} className="text-sm text-gray-300">
+                    <span className="font-mono text-xs bg-white/10 px-1.5 py-0.5 rounded mr-1">
+                      {w.code}
+                    </span>
+                    {w.message}
+                  </div>
+                ))}
+              </div>
+              <p className="text-xs text-gray-500 mt-2">
+                Contract views are displaying with fallback data. Resolve the registry issue above to restore full functionality.
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Overall Status */}
       <div className="glass-panel p-6">

@@ -31,6 +31,11 @@ export interface ApiRequestOptions {
    * GET/HEAD are always treated as idempotent.
    */
   retrySafe?: boolean;
+  /**
+   * AbortSignal to cancel the in-flight request (e.g. on route change or rapid input edits).
+   * Cancellation surfaces as {@link ApiCancelledError}, not a timeout.
+   */
+  signal?: AbortSignal;
 }
 
 export interface DepositParams {
