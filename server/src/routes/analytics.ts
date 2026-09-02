@@ -9,9 +9,6 @@ import {
 import { strategyStateTransitionAuditService } from '../services/strategyStateTransitionAuditService';
 import { getSourceHealthRegistry } from '../services/yieldSourceRegistryService';
 import { getRegistryLoadState } from '../services/contractRegistry';
-} from "../services";
-import { strategyStateTransitionAuditService } from "../services/strategyStateTransitionAuditService";
-import { getSourceHealthRegistry } from "../services/yieldSourceRegistryService";
 import {
   generateRecommendationStabilityReport,
   type RecommendationOutput,
