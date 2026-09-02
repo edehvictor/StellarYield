@@ -29,6 +29,8 @@ export interface TreasuryScenario {
 
 export interface SimulationResult {
   scenarioId: string;
+  import { validateAllocationsPayload } from "./allocationValidation";
+
   scenarioName: string;
   projectedYieldPct: number;
   projectedYieldUsd: number;
@@ -77,44 +79,14 @@ export class TreasuryValidationError extends Error {
     message: string,
     public readonly statusCode = 400,
     public readonly details?: Record<string, unknown>,
-  ) {
-    super(message);
-    this.name = 'TreasuryValidationError';
-  }
-}
-
-export function assertValidScenarioInput(body: unknown): TreasuryScenario {
-  if (!body || typeof body !== 'object') {
-    throw new TreasuryValidationError(
-      'invalid_request',
-      'Request body must be a JSON object.',
-    );
-  }
-
-  const payload = body as Record<string, unknown>;
-
-  if (typeof payload.id !== 'string' || payload.id.trim().length === 0) {
-    throw new TreasuryValidationError(
-      'invalid_id',
-      'Field "id" is required and must be a non-empty string.',
-      400,
-      { field: 'id' },
-    );
-  }
-
-  if (typeof payload.name !== 'string' || payload.name.trim().length === 0) {
-    throw new TreasuryValidationError(
-      'invalid_name',
-      'Field "name" is required and must be a non-empty string.',
-      400,
-      { field: 'name' },
-    );
-  }
-
-  if (!Number.isFinite((payload as any).totalCapitalUsd) || (payload as any).totalCapitalUsd < 0) {
-    throw new TreasuryValidationError(
-      'invalid_totalCapitalUsd',
-      'Field "totalCapitalUsd" is required and must be a finite number >= 0.',
+    const validation = validateAllocationsPayload(allocations);
+    if (!validation.valid) {
+      throw new TreasuryValidationError(
+        'allocation_validation_failed',
+        'Allocation validation failed.',
+        422,
+        { fieldErrors: validation.errors },
+      );
       400,
       { field: 'totalCapitalUsd' },
     );
