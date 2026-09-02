@@ -4,6 +4,7 @@ import { Horizon, rpc as SorobanRpc } from "@stellar/stellar-sdk";
 import { Queue } from "bullmq";
 import { Redis } from "ioredis";
 import { validateServerEnv } from "../config/env";
+import { rebalanceQueueService, type QueueHealthSnapshot } from "../services/rebalanceQueueService";
 import type {
   DependencyHealthStatus,
   HorizonHealthSnapshot,
@@ -28,6 +29,7 @@ const _INDEXER_LAG_WARN_THRESHOLD = Number(process.env.INDEXER_LAG_WARN_LEDGERS 
 const REDIS_URL = process.env.REDIS_URL ?? "redis://localhost:6379";
 const QUEUE_FAILED_THRESHOLD = Number(process.env.QUEUE_FAILED_THRESHOLD ?? "10");
 const QUEUE_DELAYED_THRESHOLD = Number(process.env.QUEUE_DELAYED_THRESHOLD ?? "50");
+const QUEUE_DEAD_LETTER_THRESHOLD = Number(process.env.QUEUE_DEAD_LETTER_THRESHOLD ?? "5");
 
 const ALL_QUEUE_NAMES = [
   "liquidation",
@@ -58,6 +60,15 @@ export interface QueueHealthEntry {
 
 export interface QueueHealthSummary {
   queues: QueueHealthEntry[];
+  /**
+   * Backlog health summary for the Prisma-backed rebalance queue (#1076),
+   * distinguishing waiting/delayed/retrying/active/failed/dead-lettered
+   * states — a job that's simply scheduled for later is not the same
+   * signal as one that already failed and is awaiting retry, and a
+   * terminal failure with retries still on paper is not the same as one
+   * that's exhausted every attempt.
+   */
+  rebalanceQueue: QueueHealthSnapshot;
   overallStatus: QueueStatus;
   timestamp: string;
 }
@@ -227,8 +238,42 @@ router.get("/queues", async (_req: Request, res: Response) => {
         ? "warning"
         : "healthy";
 
-    const body: QueueHealthSummary = { queues: entries, overallStatus, timestamp: new Date().toISOString() };
-    res.status(overallStatus === "error" ? 503 : 200).json(body);
+    // Rebalance queue backlog health (#1076) — fetched alongside the BullMQ
+    // job counts above so /health/queues stays a single, complete view of
+    // queue backlog health. A failure here degrades to a zeroed summary
+    // rather than failing the whole route, matching the per-queue
+    // try/catch behavior above.
+    let rebalanceQueue: QueueHealthSnapshot;
+    try {
+      rebalanceQueue = await rebalanceQueueService.getQueueHealthSummary();
+    } catch {
+      rebalanceQueue = {
+        active: 0,
+        waiting: 0,
+        delayed: 0,
+        retrying: 0,
+        failed: 0,
+        deadLettered: 0,
+        total: 0,
+        generatedAt: new Date().toISOString(),
+      };
+    }
+
+    const rebalanceQueueDegraded = rebalanceQueue.deadLettered > QUEUE_DEAD_LETTER_THRESHOLD;
+    const finalOverallStatus: QueueStatus =
+      overallStatus === "error"
+        ? "error"
+        : overallStatus === "warning" || rebalanceQueueDegraded
+          ? "warning"
+          : "healthy";
+
+    const body: QueueHealthSummary = {
+      queues: entries,
+      rebalanceQueue,
+      overallStatus: finalOverallStatus,
+      timestamp: new Date().toISOString(),
+    };
+    res.status(finalOverallStatus === "error" ? 503 : 200).json(body);
   } finally {
     await redis.quit().catch(() => {});
   }
