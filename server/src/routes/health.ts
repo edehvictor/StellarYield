@@ -12,7 +12,10 @@ import type {
   DatabaseHealthSnapshot,
   IndexerHealthSnapshot,
   ReadinessResponse as DeploymentReadinessResponse,
+  BootSummaryResponse,
 } from "../monitoring/healthSnapshots";
+import { getWalletBootStatus } from "../utils/stellarAuth";
+import { getIndexerBootStatus } from "../indexer/indexerStatus";
 
 const router = Router();
 const prisma = new PrismaClient();
@@ -1028,6 +1031,169 @@ router.post("/weekly-reports/catch-up", async (req: Request, res: Response) => {
       timestamp: new Date().toISOString(),
     });
   }
+});
+
+// ── Boot Summary for Startup Diagnostics (#1117) ───────────────────────────
+
+/**
+ * GET /health/boot-summary
+ *
+ * Structured health summary for wallet, API, and indexer boot status.
+ * Designed for startup diagnostics, showing readiness at a glance.
+ *
+ * Returns:
+ * - "ready": All core components (wallet, API, indexer) are operational
+ * - "partial": Some components are degraded but system is functional
+ * - "failed": One or more components are unavailable, startup should be deferred
+ */
+router.get("/boot-summary", async (_req: Request, res: Response) => {
+  const checkedAt = new Date().toISOString();
+
+  // Collect boot status from all three core components in parallel
+  const [walletStatus, indexerStatus, apiStatusPromise] = await Promise.all([
+    Promise.resolve(getWalletBootStatus()),
+    getIndexerBootStatus(),
+    (async () => {
+      const [database, horizon, sorobanRpc] = await Promise.all([
+        checkDatabaseSnapshot(),
+        checkHorizonSnapshot(),
+        checkSorobanRpcSnapshot(),
+      ]);
+      return { database, horizon, sorobanRpc };
+    })(),
+  ]);
+
+  const apiStatus = await apiStatusPromise;
+
+  // Map health statuses to boot statuses
+  const mapHealthToBoot = (status: DependencyHealthStatus): "ready" | "degraded" | "unavailable" => {
+    if (status === "unavailable" || status === "misconfigured") return "unavailable";
+    if (status === "degraded") return "degraded";
+    return "ready";
+  };
+
+  // Determine API boot status based on dependencies
+  const apiBootStatus = {
+    status: (() => {
+      const statuses = [
+        apiStatus.database.status,
+        apiStatus.horizon.status,
+        apiStatus.sorobanRpc.status,
+      ];
+      if (statuses.some((s) => s === "unavailable" || s === "misconfigured")) return "unavailable" as const;
+      if (statuses.some((s) => s === "degraded")) return "degraded" as const;
+      return "ready" as const;
+    })(),
+    database: mapHealthToBoot(apiStatus.database.status),
+    horizon: mapHealthToBoot(apiStatus.horizon.status),
+    sorobanRpc: mapHealthToBoot(apiStatus.sorobanRpc.status),
+  };
+
+  // Collect component details
+  const allReady =
+    walletStatus.status === "ready" &&
+    apiBootStatus.status === "ready" &&
+    indexerStatus.status === "ready";
+
+  const anyUnavailable =
+    walletStatus.status === "unavailable" ||
+    apiBootStatus.status === "unavailable" ||
+    indexerStatus.status === "unavailable";
+
+  // Determine overall boot status
+  const overallStatus: BootSummaryResponse["status"] = anyUnavailable
+    ? "failed"
+    : allReady
+      ? "ready"
+      : "partial";
+
+  // Generate recommendations based on failures
+  const recommendations: string[] = [];
+
+  if (walletStatus.status === "unavailable") {
+    recommendations.push(
+      "Wallet authentication unavailable — verify authentication module and session configuration"
+    );
+  } else if (walletStatus.status === "degraded") {
+    recommendations.push("Wallet degraded — check authentication rate limits and session store");
+  }
+
+  if (apiBootStatus.database.status === "unavailable" || apiStatus.database.status === "unavailable") {
+    recommendations.push("Database unavailable — verify DATABASE_URL and Postgres connectivity");
+  } else if (apiBootStatus.database.status === "degraded" || apiStatus.database.status === "degraded") {
+    recommendations.push("Database slow — check query performance and connection pool");
+  }
+
+  if (apiBootStatus.horizon.status === "unavailable" || apiStatus.horizon.status === "unavailable") {
+    recommendations.push(
+      "Horizon RPC unreachable — verify STELLAR_HORIZON_URL and network connectivity"
+    );
+  } else if (apiBootStatus.horizon.status === "degraded" || apiStatus.horizon.status === "degraded") {
+    recommendations.push("Horizon RPC slow — consider alternative RPC endpoint or geographic proximity");
+  }
+
+  if (apiBootStatus.sorobanRpc.status === "unavailable" || apiStatus.sorobanRpc.status === "unavailable") {
+    recommendations.push("Soroban RPC unreachable — verify SOROBAN_RPC_URL and network connectivity");
+  } else if (
+    apiBootStatus.sorobanRpc.status === "degraded" ||
+    apiStatus.sorobanRpc.status === "degraded"
+  ) {
+    recommendations.push(
+      "Soroban RPC slow — consider alternative RPC endpoint or geographic proximity"
+    );
+  }
+
+  if (indexerStatus.status === "unavailable") {
+    recommendations.push("Indexer unavailable — verify indexer process is running and database is reachable");
+  } else if (indexerStatus.status === "degraded") {
+    recommendations.push(
+      "Indexer degraded — check for stalled replay process or network lag (review details for lag)"
+    );
+  }
+
+  // Build structured response
+  const body: BootSummaryResponse = {
+    status: overallStatus,
+    summary:
+      overallStatus === "ready"
+        ? "All core components are ready — system startup is complete"
+        : overallStatus === "partial"
+          ? "Some components are degraded — system is functional but may have reduced capability"
+          : "One or more components are unavailable — defer startup until all dependencies recover",
+    components: {
+      wallet: {
+        status: walletStatus.status,
+        ready: walletStatus.ready,
+        reason: walletStatus.reason,
+        capabilities: walletStatus.capabilities,
+      },
+      api: {
+        status: apiBootStatus.status,
+        ready: apiBootStatus.status === "ready",
+        reason:
+          apiBootStatus.status === "unavailable"
+            ? "One or more API dependencies unavailable"
+            : apiBootStatus.status === "degraded"
+              ? "One or more API dependencies degraded"
+              : undefined,
+        dependencies: {
+          database: apiBootStatus.database,
+          horizon: apiBootStatus.horizon,
+          sorobanRpc: apiBootStatus.sorobanRpc,
+        },
+      },
+      indexer: {
+        status: indexerStatus.status,
+        ready: indexerStatus.ready,
+        reason: indexerStatus.reason,
+        details: indexerStatus.details,
+      },
+    },
+    checkedAt,
+    recommendations,
+  };
+
+  res.status(overallStatus === "failed" ? 503 : 200).json(body);
 });
 
 export default router;
