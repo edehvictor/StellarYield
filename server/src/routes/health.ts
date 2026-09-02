@@ -14,6 +14,14 @@ import type {
   ReadinessResponse as DeploymentReadinessResponse,
   BootSummaryResponse,
 } from "../monitoring/healthSnapshots";
+import {
+  buildServiceDependencyGraph,
+  type ServiceDependencyGraph,
+  type ServiceDependencyNode,
+  type ServiceDependencyEdge,
+  type DependencyGraphSummary,
+  type ServiceId,
+} from "../monitoring/dependencyGraph";
 import { getWalletBootStatus } from "../utils/stellarAuth";
 import { getIndexerBootStatus } from "../indexer/indexerStatus";
 
@@ -319,9 +327,19 @@ export interface DependenciesResponse {
   sorobanRpc: SorobanRpcSnapshot;
   indexer: IndexerSnapshot;
   cache: CacheSnapshot;
+  graph: ServiceDependencyGraph;
   timestamp: string;
   overallStatus: DependencyStatus;
 }
+
+export {
+  buildServiceDependencyGraph,
+  type ServiceDependencyGraph,
+  type ServiceDependencyNode,
+  type ServiceDependencyEdge,
+  type DependencyGraphSummary,
+  type ServiceId,
+};
 
 /**
  * Readiness probe — a lightweight summary of the combined dependency health
@@ -517,17 +535,60 @@ router.get("/dependencies", async (_req: Request, res: Response) => {
       ? "warning"
       : "up";
 
+  const graph = buildServiceDependencyGraph({
+    database,
+    horizon,
+    sorobanRpc,
+    indexer,
+    cache,
+  });
+
   const body: DependenciesResponse = {
     database,
     horizon,
     sorobanRpc,
     indexer,
     cache,
+    graph,
     timestamp: new Date().toISOString(),
     overallStatus,
   };
 
   res.status(overallStatus === "down" ? 503 : 200).json(body);
+});
+
+/**
+ * GET /health/graph
+ *
+ * Returns the full service dependency graph with topological relationships,
+ * root-cause analysis, and blast radius mappings.
+ */
+router.get("/graph", async (_req: Request, res: Response) => {
+  const [database, horizon, sorobanRpc] = await Promise.all([
+    checkDatabaseWithLatency(),
+    checkHorizonWithLatency(),
+    checkSorobanRpcWithLatency(),
+  ]);
+
+  const [indexer, cache] = await Promise.all([
+    checkIndexerWithLatency(horizon.latestLedger),
+    checkCacheWithLatency(),
+  ]);
+
+  const graph = buildServiceDependencyGraph({
+    database,
+    horizon,
+    sorobanRpc,
+    indexer,
+    cache,
+  });
+
+  const isOutage = graph.summary.overallStatus === "outage";
+  res.status(isOutage ? 503 : 200).json({
+    graph,
+    ok: !isOutage,
+    timestamp: new Date().toISOString(),
+  });
 });
 
 // ── Typed snapshot helpers ────────────────────────────────────────────────

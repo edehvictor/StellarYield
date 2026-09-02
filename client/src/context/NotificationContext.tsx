@@ -143,7 +143,7 @@ export function NotificationProvider({ children }: { children: React.ReactNode }
   }, [walletAddress, actions]);
 
   // Set up auto-refresh interval (check every 30 seconds)
-  useEffect(() {
+  useEffect(() => {
     if (!walletAddress) return;
 
     const interval = setInterval(() => {

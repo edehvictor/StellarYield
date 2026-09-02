@@ -24,7 +24,7 @@ export class ProvenanceService {
       where: { decisionId: provenance.decisionId },
     });
     if (existing) {
-      throw new Error(`@'` Allocation record with decisionId ${provenance.decisionId} already exists and is immutable.`);
+      throw new Error(`Allocation record with decisionId ${provenance.decisionId} already exists and is immutable.`);
     }
     const created = await prisma.allocationProvenance.create({
       data: {

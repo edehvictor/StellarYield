@@ -141,9 +141,6 @@ const RootLayout = () => {
       <DiagnosticsModal
         isOpen={isDiagnosticsOpen}
         onClose={() => setIsDiagnosticsOpen(false)}
-      <SettingsModal
-        isOpen={isSettingsOpen}
-        onClose={() => setIsSettingsOpen(false)}
       />
       {/* APY Alerts Modal */}
       {isConnected && walletAddress && (
@@ -424,12 +421,10 @@ const router = createBrowserRouter([
       {
         path: "/governance",
         element: (
-          <RouteBoundary>
+          <RouteBoundary routeName="governance">
             <RequireOnboarding require="wallet">
               <GovernanceDashboard />
             </RequireOnboarding>
-          <RouteBoundary routeName="governance">
-            <GovernanceDashboard />
           </RouteBoundary>
         ),
       },
@@ -554,12 +549,10 @@ const router = createBrowserRouter([
       {
         path: "/treasury",
         element: (
-          <RouteBoundary>
+          <RouteBoundary routeName="treasury">
             <RequireOnboarding require="wallet">
               <TreasurySimulation />
             </RequireOnboarding>
-          <RouteBoundary routeName="treasury">
-            <TreasurySimulation />
           </RouteBoundary>
         ),
       },

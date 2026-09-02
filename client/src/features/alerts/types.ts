@@ -41,7 +41,7 @@ export interface AlertPreferences {
   severityThreshold: number;
   quietHoursStart: number;
   quietHoursEnd: number;
-  overrides?: Partial<Record<AlertClass, Partial<Record<NotificationChannel, ChannelNotificationPreferences>>>;
+  overrides?: Partial<Record<AlertClass, Partial<Record<NotificationChannel, ChannelNotificationPreferences>>>>;
   precedence?: OverridePrecedence[];
 }
 
@@ -50,7 +50,7 @@ export interface WatchlistDigestPreference {
   scheduleMode: "daily" | "weekly" | "event_threshold";
   eventThreshold: number;
   watchedVaultIds: string[];
-  minApyDeltaPCt: number;
+  minApyDeltaPct: number;
   minRiskDelta: number;
   maxFreshnessHours: number;
 }
