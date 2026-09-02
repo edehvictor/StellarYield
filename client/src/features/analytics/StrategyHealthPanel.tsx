@@ -2,6 +2,8 @@ import { useState, useEffect } from "react";
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, RadarChart, PolarGrid, PolarAngleAxis, PolarRadiusAxis, Radar } from "recharts";
 import { Activity, AlertTriangle, CheckCircle, XCircle, TrendingUp, TrendingDown, Minus, RefreshCw, Settings } from "lucide-react";
 import StatusBadge from '../../components/StatusBadge';
+import EmptyState from '../../components/common/EmptyState';
+import { EMPTY_STATE_STRATEGY_HEALTH } from '../../utils/emptyStateCopy';
 import { FreshnessBanner } from "../../components/dashboard/FreshnessBanner";
 import { RISK_CHART_COLORS, CHART_PANEL_BG, CHART_PANEL_AXIS } from "../../components/charts/darkModeContrast";
 
@@ -166,13 +168,12 @@ export default function StrategyHealthPanel({ strategyIds = ['strategy_1', 'stra
   if (healthScores.length === 0) {
     return (
       <div className="glass-panel p-8" data-testid="strategy-health-empty">
-        <div className="text-center py-12">
-          <Activity className="mx-auto mb-4 text-gray-400" size={48} />
-          <h3 className="text-lg font-semibold mb-2">No strategy health data yet</h3>
-          <p className="text-gray-400">
-            Health scores will appear here once strategies report a snapshot.
-          </p>
-        </div>
+        <EmptyState
+          icon={<Activity className="text-gray-400" size={48} />}
+          title={EMPTY_STATE_STRATEGY_HEALTH.title}
+          description={EMPTY_STATE_STRATEGY_HEALTH.description}
+          testId="strategy-health-empty-state"
+        />
       </div>
     );
   }
