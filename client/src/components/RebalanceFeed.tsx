@@ -18,6 +18,8 @@ import {
   EyeOff,
   Loader,
 } from "lucide-react";
+import EmptyState from "./common/EmptyState";
+import { EMPTY_STATE_REBALANCE } from "../utils/emptyStateCopy";
 import type {
   RebalanceEvent,
   RebalanceAllocation,
@@ -447,12 +449,13 @@ export function RebalanceFeed({
 
       {/* Empty State */}
       {!state.loading && state.events.length === 0 && (
-        <div className="border border-dashed border-slate-300 rounded-lg p-8 text-center">
-          <TrendingUp className="w-12 h-12 text-slate-300 mx-auto mb-2" />
-          <p className="text-slate-600">No rebalance events yet</p>
-          <p className="text-sm text-slate-500">
-            Rebalances will appear here as they occur
-          </p>
+        <div className="border border-dashed border-slate-300 rounded-lg p-8">
+          <EmptyState
+            icon={<TrendingUp className="text-slate-300" size={48} />}
+            title={EMPTY_STATE_REBALANCE.title}
+            description={EMPTY_STATE_REBALANCE.description}
+            testId="rebalance-empty-state"
+          />
         </div>
       )}
 

@@ -79,6 +79,7 @@ export interface DigestPayload {
   generatedAt: string;
   scheduleMode: ScheduleMode;
   clusters: RankedClusterEntry[];
+  checksum?: string; // sha256 hex of stable representation of payload
 }
 
 export interface ScheduleConfig {

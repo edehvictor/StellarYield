@@ -13,6 +13,8 @@ import { useCallback, useRef, useState } from "react";
 export interface OptimisticUpdateState<T> {
   /** Current state (optimistic or confirmed) */
   current: T;
+  /** Setter for current state */
+  setCurrent: React.Dispatch<React.SetStateAction<T>>;
   /** Previous state for rollback */
   previous: T | null;
   /** Error message if operation failed */
@@ -140,6 +142,7 @@ export function useOptimisticUpdate<T>(
 
   return {
     current: state,
+    setCurrent: setState,
     previous,
     error,
     isPending,

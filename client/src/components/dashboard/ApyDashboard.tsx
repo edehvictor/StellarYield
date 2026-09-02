@@ -22,6 +22,8 @@ import {
   Maximize2,
 } from "lucide-react";
 import { apiUrl } from "../../lib/api";
+import EmptyState from "../common/EmptyState";
+import { EMPTY_STATE_APY } from "../../utils/emptyStateCopy";
 import { LiquidityBufferPanel } from "./LiquidityBufferPanel";
 import { computeDecayedFreshnessConfidence } from "./freshnessDecay";
 import { RISK_EXPLANATIONS, RiskLevel } from "../../config/riskConfig";
@@ -863,25 +865,20 @@ export default function ApyDashboard() {
 
       {!loading && apyData.length === 0 && (
         <div
-          className="glass-panel p-16 text-center"
+          className="glass-panel p-16"
           data-testid="apy-empty-state"
         >
-          <AlertTriangle size={32} className="text-gray-500 mx-auto mb-4" />
-          <p className="text-gray-300 font-medium">No APY data yet</p>
-          <p className="text-gray-500 text-sm mt-1">
-            New rates will appear here as protocols report yields. Refresh to
-            check again.
-          </p>
-          <button
-            onClick={handleRefresh}
-            className="btn-secondary inline-flex items-center gap-2 mt-6"
-          >
-            <RefreshCw
-              size={14}
-              className={refreshing && !reducedMotion ? "animate-spin" : ""}
-            />
-            Refresh
-          </button>
+          <EmptyState
+            icon={<AlertTriangle size={32} className="text-gray-500" />}
+            title={EMPTY_STATE_APY.title}
+            description={EMPTY_STATE_APY.description}
+            action={{
+              label: refreshing ? "Refreshing…" : "Refresh",
+              onClick: handleRefresh,
+              loading: refreshing && !reducedMotion,
+            }}
+            testId="apy-empty-state-content"
+          />
         </div>
       )}
 

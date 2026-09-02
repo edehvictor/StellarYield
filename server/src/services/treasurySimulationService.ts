@@ -5,6 +5,7 @@
  * for a proposed multi-position treasury deployment.
  */
 import type { SimulationWarning } from "../../../shared/types/simulationWarning";
+import { validateAllocationsPayload } from "./allocationValidation";
 
 // Re-export for consumers.
 export type { SimulationWarning } from "../../../shared/types/simulationWarning";
@@ -160,6 +161,16 @@ export function assertValidScenarioInput(body: unknown): TreasuryScenario {
     }
   }
 
+  const validation = validateAllocationsPayload(allocations);
+  if (!validation.valid) {
+    throw new TreasuryValidationError(
+      'allocation_validation_failed',
+      'Allocation validation failed.',
+      422,
+      { fieldErrors: validation.errors },
+    );
+  }
+
   const totalAllocationPct = allocations.reduce((sum, item) => sum + (item.allocationPct as number), 0);
   if (Math.abs(totalAllocationPct - 100) > 0.01) {
     throw new TreasuryValidationError(
@@ -180,6 +191,8 @@ export function assertValidScenarioInput(body: unknown): TreasuryScenario {
 }
 
 const CONCENTRATION_THRESHOLD = 0.5;
+const RESERVE_BREACH_THRESHOLD_PCT = 0.1;
+const NEGATIVE_CASHFLOW_THRESHOLD_USD = 0;
 
 const scenarioStore = new Map<string, TreasuryScenario>();
 
@@ -228,6 +241,19 @@ export function simulateTreasury(scenario: TreasuryScenario): SimulationResult {
     totalCapitalUsd > 0 ? (projectedYieldUsd / totalCapitalUsd) * 100 : 0;
 
   const liquidityRiskScore = Math.min(10, Math.max(0, weightedRisk));
+
+  const netYieldUsd = projectedYieldUsd - totalRotationCostUsd;
+  if (netYieldUsd < NEGATIVE_CASHFLOW_THRESHOLD_USD) {
+    const msg = `Net yield is negative ($${netYieldUsd.toFixed(2)}) — rotation costs exceed projected yield`;
+    legacyWarnings.push(msg);
+    warnings.push({
+      code: "NEGATIVE_NET_YIELD",
+      severity: "critical",
+      affectedField: "totalRotationCostUsd",
+      message: msg,
+      remediation: "Reduce rotation costs or increase yield by adjusting allocations to lower-cost or higher-yield vaults.",
+    });
+  }
 
   return {
     scenarioId: id,
@@ -305,6 +331,7 @@ export interface StressRunResult {
     riskScoreDelta: number;
   };
   warnings: string[];
+  structuredWarnings: SimulationWarning[];
 }
 
 export interface ScenarioComparisonResult {
@@ -326,6 +353,7 @@ export interface ScenarioComparisonResult {
       liquidityRiskScore: number;
     };
     warnings: string[];
+    structuredWarnings: SimulationWarning[];
   };
   stressRuns: StressRunResult[];
   summary: {
@@ -383,10 +411,44 @@ export function compareTreasuryScenarios(
     const riskScoreDelta = Math.round((stressSim.liquidityRiskScore - baselineSim.liquidityRiskScore) * 100) / 100;
 
     const stressWarnings = [...stressSim.concentrationWarnings];
-    if (stressNetYieldUsd < 0) {
-      stressWarnings.push(`Net yield turns negative ($${stressNetYieldUsd.toLocaleString()}) under ${config.name}`);
+    const structuredWarnings: SimulationWarning[] = [...stressSim.warnings];
+
+    if (stressNetYieldUsd < NEGATIVE_CASHFLOW_THRESHOLD_USD) {
+      const msg = `Negative cashflow: net yield is $${stressNetYieldUsd.toLocaleString()} under ${config.name}`;
+      stressWarnings.push(msg);
+      structuredWarnings.push({
+        code: "NEGATIVE_CASHFLOW",
+        severity: "critical",
+        affectedField: "netYieldUsd",
+        message: msg,
+        remediation: "Reduce exposure to high-cost positions or increase capital reserves to withstand market stress.",
+      });
     } else if (yieldDeltaPct <= -50) {
-      stressWarnings.push(`Severe yield reduction (${yieldDeltaPct.toFixed(1)}%) under ${config.name}`);
+      const msg = `Severe yield reduction (${yieldDeltaPct.toFixed(1)}%) under ${config.name}`;
+      stressWarnings.push(msg);
+      structuredWarnings.push({
+        code: "SEVERE_YIELD_REDUCTION",
+        severity: "warning",
+        affectedField: "projectedYieldUsd",
+        message: msg,
+        remediation: "Consider diversifying into more stable yield sources to reduce sensitivity to market stress.",
+      });
+    }
+
+    const reserveRatio = baselineSim.projectedYieldUsd > 0
+      ? stressNetYieldUsd / baselineSim.projectedYieldUsd
+      : stressNetYieldUsd >= 0 ? 1 : -1;
+
+    if (reserveRatio < RESERVE_BREACH_THRESHOLD_PCT && stressNetYieldUsd >= 0) {
+      const msg = `Reserve breach: net yield falls to ${(reserveRatio * 100).toFixed(1)}% of baseline under ${config.name}`;
+      stressWarnings.push(msg);
+      structuredWarnings.push({
+        code: "RESERVE_BREACH",
+        severity: "warning",
+        affectedField: "netYieldUsd",
+        message: msg,
+        remediation: "Increase reserve buffer or reduce allocation to volatile positions to maintain safe reserve levels.",
+      });
     }
 
     stressResults.push({
@@ -410,6 +472,7 @@ export function compareTreasuryScenarios(
         riskScoreDelta,
       },
       warnings: stressWarnings,
+      structuredWarnings,
     });
   }
 
@@ -451,6 +514,7 @@ export function compareTreasuryScenarios(
         liquidityRiskScore: baselineSim.liquidityRiskScore,
       },
       warnings: baselineSim.concentrationWarnings,
+      structuredWarnings: baselineSim.warnings,
     },
     stressRuns: stressResults,
     summary: {
