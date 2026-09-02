@@ -7,6 +7,7 @@ import {
   previewToCsvRecords,
   type RawTaxTransaction,
 } from "../services/export";
+import { exportService } from "../services/exportService";
 import { sendError } from "../utils/errorResponse";
 import { validateWalletAddress } from "../middleware/validation";
 
@@ -179,6 +180,27 @@ exportRouter.get(
 
       const records = previewToCsvRecords(preview);
 
+      // --- Idempotency key handling ---
+      const idempotencyKey = req.headers["idempotency-key"] as string | undefined;
+      const idempotencyParams = { address, type: "csv-export" };
+      if (idempotencyKey) {
+        const check = exportService.checkIdempotency(idempotencyKey, idempotencyParams);
+        if (check.status === "mismatch") {
+          sendError(
+            res,
+            422,
+            "IDEMPOTENCY_KEY_MISMATCH",
+            "The idempotency key has already been used with different parameters.",
+          );
+          return;
+        }
+        if (check.status === "hit" && check.result) {
+          res.setHeader("Idempotent-Replayed", "true");
+          res.status(200).json({ replayed: true });
+          return;
+        }
+      }
+
       const filename = createExportFilename(address);
       res.setHeader("Content-Type", "text/csv; charset=utf-8");
       res.setHeader(
@@ -188,6 +210,15 @@ exportRouter.get(
 
       const csvStream = createCSVStream(records);
       csvStream.pipe(res);
+
+      // Store the result for future idempotent replays
+      if (idempotencyKey) {
+        exportService.storeIdempotentResult(
+          idempotencyKey,
+          idempotencyParams,
+          { version: "1.0.0", generatedAt: new Date().toISOString(), timestamp: new Date().toISOString(), appVersion: "1.0.0", opportunities: [], metadata: { totalOpportunities: 0, scoringMethodology: "csv-export", sourceFreshness: 0, filtersApplied: { address } } },
+        );
+      }
     } catch (error) {
       console.error("[export] Failed to export data for address: %s", encodeURIComponent(address), error);
       sendError(res, 500, "EXPORT_FAILED", "Failed to generate export.");
