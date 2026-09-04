@@ -8,11 +8,6 @@ describe("PortfolioReconcileService", () => {
   const mockPrisma: {
     vaultBalance: { findUnique: jest.Mock; upsert: jest.Mock };
   } = {
-import { PortfolioReconcileService, resetReconciliationStore } from '../services/portfolioReconcileService'
-
-describe('PortfolioReconcileService', () => {
-  let service: PortfolioReconcileService
-  const mockPrisma: { vaultBalance: { findUnique: jest.Mock; upsert: jest.Mock } } = {
     vaultBalance: {
       findUnique: jest.fn(),
       upsert: jest.fn(),
@@ -24,10 +19,6 @@ describe('PortfolioReconcileService', () => {
     resetReconciliationStore();
     service = new PortfolioReconcileService(mockPrisma);
   });
-    jest.clearAllMocks()
-    resetReconciliationStore()
-    service = new PortfolioReconcileService(mockPrisma)
-  })
 
   describe("reconcilePortfolio", () => {
     it("should detect added positions", async () => {

@@ -2481,6 +2481,116 @@ paths:
 
   # ── Incidents ─────────────────────────────────────────────────────────────
 
+  /api/portfolio/reconcile:
+    post:
+      summary: Reconcile a portfolio and explain any failures
+      description: >
+        Reconciles a wallet's chain-authoritative positions against the cached
+        projection and returns a named cause for anything that did not come out
+        clean, so an operator can tell a missing holding from symbol drift from
+        a stale source. When both position lists are supplied the reconciliation
+        runs over that snapshot; otherwise the service reads its live sources.
+      tags:
+        - Portfolio
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [walletAddress]
+              properties:
+                walletAddress:
+                  type: string
+                chainPositions:
+                  type: array
+                  items:
+                    $ref: '#/components/schemas/PortfolioPosition'
+                cachedPositions:
+                  type: array
+                  items:
+                    $ref: '#/components/schemas/PortfolioPosition'
+                projectionVersion:
+                  type: integer
+                lastLedger:
+                  type: object
+                  properties:
+                    ledger:
+                      type: integer
+                    processedAt:
+                      type: string
+                      format: date-time
+      responses:
+        '200':
+          description: Reconciliation result with cause codes
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum: [success, partial, failed]
+                  primaryCause:
+                    description: The cause to act on first, by triage order; null on a clean run.
+                    nullable: true
+                    allOf:
+                      - $ref: '#/components/schemas/ReconcileCauseCode'
+                  causeCounts:
+                    type: object
+                    additionalProperties:
+                      type: integer
+                  causes:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/ReconcileCause'
+                  symbolDrifts:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        canonicalAsset: { type: string }
+                        chainAssetId: { type: string }
+                        cachedAssetId: { type: string }
+                        vaultId: { type: string }
+                        chainAmount: { type: number }
+                        cachedAmount: { type: number }
+                        amountsAgree: { type: boolean }
+                  isStale:
+                    type: boolean
+                  staleDurationMs:
+                    type: integer
+                  timestamp:
+                    type: string
+                    format: date-time
+        '400':
+          description: Invalid wallet address, position, or ledger timestamp
+        '500':
+          description: Reconciliation could not run
+
+  /api/portfolio/reconcile/causes:
+    get:
+      summary: List the reconciliation cause taxonomy
+      description: Returns every cause code with its category, severity, summary, and remediation, in triage order.
+      tags:
+        - Portfolio
+      responses:
+        '200':
+          description: The cause taxonomy
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  order:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/ReconcileCauseCode'
+                  causes:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/ReconcileCauseDescriptor'
+
   /api/incidents:
     get:
       summary: List incidents
@@ -2795,6 +2905,71 @@ paths:
 
 components:
   schemas:
+    PortfolioPosition:
+      type: object
+      required: [assetId, amount]
+      properties:
+        assetId:
+          type: string
+          description: Asset code, optionally qualified as CODE:ISSUER.
+        amount:
+          type: number
+        vaultId:
+          type: string
+        protocol:
+          type: string
+    ReconcileCauseCode:
+      type: string
+      enum:
+        - SOURCE_UNAVAILABLE
+        - STALE_SOURCE
+        - MISSING_HOLDING
+        - SYMBOL_DRIFT
+        - DUPLICATE_POSITION
+        - AMOUNT_DRIFT
+        - ORPHANED_HOLDING
+        - ORPHANED_TRANSACTION
+    ReconcileCauseDescriptor:
+      type: object
+      properties:
+        code:
+          $ref: '#/components/schemas/ReconcileCauseCode'
+        category:
+          type: string
+          enum: [missing-data, symbol-drift, stale-source, amount, integrity]
+        severity:
+          type: string
+          enum: [info, warning, critical]
+        title:
+          type: string
+        summary:
+          type: string
+        remediation:
+          type: string
+          description: The next action to take, not merely what happened.
+    ReconcileCause:
+      allOf:
+        - $ref: '#/components/schemas/ReconcileCauseDescriptor'
+        - type: object
+          properties:
+            assetId:
+              type: string
+            vaultId:
+              type: string
+            detail:
+              type: string
+              description: This occurrence, with the actual values.
+            evidence:
+              type: object
+              properties:
+                chainAssetId: { type: string }
+                cachedAssetId: { type: string }
+                chainAmount: { type: number }
+                cachedAmount: { type: number }
+                canonicalAsset: { type: string }
+                staleDurationMs: { type: integer }
+                projectionVersion: { type: integer }
+                lastLedger: { type: integer }
 
     # ── Contacts schemas ────────────────────────────────────────────────────
 

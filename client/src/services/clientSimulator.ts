@@ -11,9 +11,8 @@ interface ProtocolDef {
   baseApyBps: number;
 }
 const PROTOCOLS: ProtocolDef[] = [
-  { protocolName: "Blend", protocolType: "blend", baseApyBps: 500 },
-  { protocolName: "Soroswap", protocolType: "amm", baseApyBps: 300 },
-  { protocolName: "DeFindex", protocolType: "index", baseApyBps: 400 },
+  { protocolName: "Blend", protocolType: "blend", baseApyBps: 645 },
+  { protocolName: "Soroswap", protocolType: "soroswap", baseApyBps: 1120 },
 ];
 export interface SimulationParams {
   strategyId: string;
@@ -96,18 +95,27 @@ export function simulateDeposit(params: SimulationParams): SimulationResult {
   }
 
   // Protocol selection - MUST MATCH SERVER
+  const normalizedStrategy = (strategyId || "").toLowerCase();
   let targetProtocols = PROTOCOLS.filter((p) => p.protocolType === "blend");
   let baseApySum = targetProtocols.reduce((acc, p) => acc + p.baseApyBps, 0);
+  let isKnownStrategy = false;
 
-  if (strategyId.toLowerCase().includes("aggressive")) {
+  if (normalizedStrategy.includes("aggressive")) {
     targetProtocols = PROTOCOLS.filter((p) => p.protocolType !== "blend");
     baseApySum = targetProtocols.reduce((acc, p) => acc + p.baseApyBps, 0) || 1000;
+    isKnownStrategy = true;
+  } else if (normalizedStrategy.includes("conservative") || normalizedStrategy.includes("blend")) {
+    targetProtocols = PROTOCOLS.filter((p) => p.protocolType === "blend");
+    baseApySum = targetProtocols.reduce((acc, p) => acc + p.baseApyBps, 0);
+    isKnownStrategy = true;
   }
 
-  if (targetProtocols.length === 0) {
+  if (!isKnownStrategy || targetProtocols.length === 0) {
     result.warnings.push("Unsupported strategy or asset combination.");
-    targetProtocols = [PROTOCOLS[0]]; // fallback
-    baseApySum = targetProtocols[0].baseApyBps;
+    if (targetProtocols.length === 0) {
+      targetProtocols = [PROTOCOLS[0]]; // fallback
+      baseApySum = targetProtocols[0].baseApyBps;
+    }
   }
 
   // Allocate proportionally based on APY (must match server exactly)

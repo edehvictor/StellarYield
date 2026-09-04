@@ -61,6 +61,16 @@ export interface CooldownExpansionFactors {
   marketStressFactor: number;
 }
 
+export interface CooldownVisualizationState {
+  status: "ready" | "cooling_down" | "extended";
+  remainingMs: number;
+  elapsedMs: number;
+  progressPct: number;
+  nextEligibleAt: Date;
+  displayLabel: string;
+  reasonCodes: CooldownReasonCode[];
+}
+
 export interface CooldownRecommendation {
   strategyId: string;
   strategyName: string;
@@ -84,6 +94,8 @@ export interface CooldownRecommendation {
   normalizedMetrics: StrategyMetrics;
   /** Time this recommendation was generated. */
   generatedAt: Date;
+  /** UI-ready cooldown timing summary for alert cards and dashboard badges. */
+  cooldownState: CooldownVisualizationState;
 }
 
 export interface CooldownOptimizerConfig {
@@ -159,7 +171,7 @@ export function normalizeStrategyMetrics(raw: Partial<StrategyMetrics>): Strateg
   };
 }
 
-// ── In-Memory Persistence Store for Cooldown Recommendations ────────────
+// ?? In-Memory Persistence Store for Cooldown Recommendations ????????????
 
 const cooldownRecommendationStore = new Map<string, CooldownRecommendation[]>();
 
@@ -362,10 +374,22 @@ export class AdaptiveCooldownOptimizer {
 
     const confidence = roundToPrecision(Math.max(0.5, 1 - expansionCount * 0.15), 2);
 
+    const generatedAt = new Date();
+    const roundedRecommendedMs = Math.round(recommendedMs);
+    const cooldownState = computeCooldownVisualizationState(
+      {
+        lastRebalanceAt: metrics.lastRebalanceAt,
+        cooldownMs: roundedRecommendedMs,
+        generatedAt,
+        reasonCodes,
+      },
+      generatedAt,
+    );
+
     const recommendation: CooldownRecommendation = {
       strategyId: metrics.strategyId,
       strategyName: metrics.strategyName,
-      recommendedCooldownMs: Math.round(recommendedMs),
+      recommendedCooldownMs: roundedRecommendedMs,
       baselineCooldownMs: this.config.baselineCooldownMs,
       primaryReasonCode,
       reasonCodes,
@@ -379,7 +403,8 @@ export class AdaptiveCooldownOptimizer {
       totalMultiplier,
       confidence,
       normalizedMetrics: metrics,
-      generatedAt: new Date(),
+      generatedAt,
+      cooldownState,
     };
 
     saveCooldownRecommendation(metrics.strategyId, recommendation);

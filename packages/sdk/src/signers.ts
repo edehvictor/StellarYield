@@ -7,6 +7,9 @@ export interface SignerAdapter {
     unsignedXdr: string,
     opts: { networkPassphrase: string; contractId?: string }
   ): Promise<string>;
+  connect?(): Promise<void>;
+  disconnect?(): Promise<void>;
+  switchNetwork?(networkPassphrase: string): Promise<void>;
 }
 
 export class ServerKeypairSigner implements SignerAdapter {
@@ -39,6 +42,10 @@ export class ServerKeypairSigner implements SignerAdapter {
       );
     }
   }
+
+  async connect(): Promise<void> {}
+  async disconnect(): Promise<void> {}
+  async switchNetwork(_networkPassphrase: string): Promise<void> {}
 }
 
 export class CustomSigner implements SignerAdapter {
@@ -66,6 +73,10 @@ export class CustomSigner implements SignerAdapter {
       );
     }
   }
+
+  async connect(): Promise<void> {}
+  async disconnect(): Promise<void> {}
+  async switchNetwork(_networkPassphrase: string): Promise<void> {}
 }
 
 export class FreighterSigner implements SignerAdapter {
@@ -79,6 +90,9 @@ export class FreighterSigner implements SignerAdapter {
         opts: { networkPassphrase: string }
       ) => Promise<string>;
       isAllowed?: () => Promise<boolean>;
+      connect?: () => Promise<void>;
+      disconnect?: () => Promise<void>;
+      switchNetwork?: (networkPassphrase: string) => Promise<void>;
     }
   ) {}
 
@@ -139,6 +153,27 @@ export class FreighterSigner implements SignerAdapter {
       throw new WalletRejectedError(
         err instanceof Error ? err.message : String(err)
       );
+    }
+  }
+
+  async connect(): Promise<void> {
+    const api = this.getApi();
+    if (api.connect) {
+      await api.connect();
+    }
+  }
+
+  async disconnect(): Promise<void> {
+    const api = this.getApi();
+    if (api.disconnect) {
+      await api.disconnect();
+    }
+  }
+
+  async switchNetwork(networkPassphrase: string): Promise<void> {
+    const api = this.getApi();
+    if (api.switchNetwork) {
+      await api.switchNetwork(networkPassphrase);
     }
   }
 }

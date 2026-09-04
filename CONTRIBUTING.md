@@ -6,6 +6,7 @@ Thanks for contributing to StellarYield, a Stellar-native DeFi yield aggregator 
 
 * **Read the Docs:** Review the `README.md` for overall architecture context.
 * **Claim an Issue:** Browse the active issues, especially those tagged for the Stellar Wave, before starting work. Please ask to be assigned before opening a PR.
+* **Use Issue Canvases:** For non-trivial features, refactors, or smart contract tasks, review and follow the [Issue Canvases Framework](./docs/issue-canvases.md) and use the markdown templates in [`docs/templates/issue-canvases/`](./docs/templates/issue-canvases/README.md).
 * **Keep it Focused:** Keep pull requests limited to one specific feature, bug fix, or contract concern at a time.
 * **Discuss Major Changes:** Start a discussion in the issues tab before changing core architecture, smart contract storage models, or automated routing logic.
 

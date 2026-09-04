@@ -424,7 +424,7 @@ export class PortfolioAttributionEngine {
     if (totalDays === 0) return 0;
     
     // Check for data gaps
-    const sortedDecisions = decisions.sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
+    const sortedDecisions = [...decisions].sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
     
     let coveredDays = 0;
     let lastCoverageEnd = start;
@@ -495,7 +495,7 @@ export function validateAttributionRequest(
   const end = new Date(endTime);
   const now = new Date();
 
-  if (isNaN(start.getTime()) || isNaN(end.getTime())) {
+  if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) {
     return { valid: false, error: "Invalid date format" };
   }
 
@@ -538,4 +538,62 @@ export function formatAttributionReport(report: AttributionReport): AttributionR
     totalDeposited: Math.round(report.totalDeposited * 100) / 100,
     dataCompleteness: Math.round(report.dataCompleteness * 100) / 100,
   };
+}
+
+/**
+ * Extract standardized DriftSignals from portfolio attribution reports.
+ * Identifies attribution anomalies, low data completeness, and low decision confidence.
+ */
+export function extractAttributionDriftSignals(
+  report: AttributionReport
+): import("./driftAnomalyGrouper").DriftSignal[] {
+  const signals: import("./driftAnomalyGrouper").DriftSignal[] = [];
+  const timestamp = report.generatedAt || new Date().toISOString();
+
+  // 1. Check data completeness drift
+  if (report.dataCompleteness < 0.7) {
+    const severity: import("./driftAnomalyGrouper").AnomalySeverityBand =
+      report.dataCompleteness < 0.4 ? "HIGH" : "MEDIUM";
+    signals.push({
+      id: `portfolio_attribution_completeness_${report.walletAddress}_${Date.now()}`,
+      source: "portfolio",
+      subSource: "portfolio_attribution",
+      asset: report.walletAddress,
+      metric: "data_completeness",
+      currentValue: report.dataCompleteness,
+      expectedValue: 1.0,
+      deviation: Math.round((1.0 - report.dataCompleteness) * 100) / 100,
+      severity,
+      timestamp,
+      metadata: {
+        timeWindow: report.timeWindow,
+        totalDeposited: report.totalDeposited,
+      },
+    });
+  }
+
+  // 2. Check individual breakdown confidence and negative APY anomalies
+  for (const breakdown of report.attributionBreakdown) {
+    if (breakdown.confidence < 0.6) {
+      signals.push({
+        id: `portfolio_attribution_confidence_${report.walletAddress}_${breakdown.decisionType}_${Date.now()}`,
+        source: "portfolio",
+        subSource: "portfolio_attribution",
+        asset: report.walletAddress,
+        metric: `decision_confidence_${breakdown.decisionType}`,
+        currentValue: breakdown.confidence,
+        expectedValue: 1.0,
+        deviation: Math.round((1.0 - breakdown.confidence) * 100) / 100,
+        severity: breakdown.confidence < 0.4 ? "HIGH" : "LOW",
+        timestamp,
+        metadata: {
+          decisionType: breakdown.decisionType,
+          contribution: breakdown.contribution,
+          apyImpact: breakdown.apyImpact,
+        },
+      });
+    }
+  }
+
+  return signals;
 }

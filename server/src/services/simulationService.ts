@@ -492,12 +492,27 @@ export function validateRebalanceBacktestParams(params: RebalanceBacktestParams)
     if (isNaN(start.getTime()) || isNaN(end.getTime())) {
       errors.push("startDate and endDate must be valid ISO date strings.");
     } else if (start >= end) {
+      if (start.getTime() === end.getTime()) {
+        errors.push("startDate and endDate cannot be identical (zero-length window).");
+      }
       errors.push("startDate must be before endDate.");
     } else {
       const dayDiff = Math.round((end.getTime() - start.getTime()) / 86_400_000);
       if (dayDiff > BACKTEST_LIMITS.maxDays) {
         errors.push(`Date range exceeds maximum of ${BACKTEST_LIMITS.maxDays} days.`);
       }
+    }
+  }
+
+  if (params.rebalanceIntervalDays !== undefined && params.rebalanceIntervalDays !== null) {
+    if (
+      !Number.isFinite(params.rebalanceIntervalDays) ||
+      params.rebalanceIntervalDays <= 0 ||
+      !Number.isInteger(params.rebalanceIntervalDays)
+    ) {
+      errors.push("rebalanceIntervalDays must be a positive integer.");
+    } else if (params.rebalanceIntervalDays > BACKTEST_LIMITS.maxDays) {
+      errors.push(`rebalanceIntervalDays exceeds maximum allowed of ${BACKTEST_LIMITS.maxDays} days.`);
     }
   }
 

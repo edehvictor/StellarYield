@@ -39,6 +39,61 @@ export interface ArchiveQueryResult {
   queryTimeMs: number;
 }
 
+// ── Normalized event lookup (#1078) ─────────────────────────────────────────
+//
+// Audit replay and incident review tools need a consistent way to find an
+// archived event again — by which source emitted it, what kind of event it
+// was, and roughly when. This is a *lookup*, not a re-query of a date
+// range: it's indexed by (source, eventType, timeBucket) so a replay tool
+// can ask "what happened for contract X, event type Y, in bucket Z" and get
+// a deterministic, deduplicated answer — even if the same event id was
+// accidentally archived twice, or the requested bucket doesn't exist.
+
+export type PartitionStrategy = ArchiveServiceConfig["partitionStrategy"];
+
+/**
+ * Compute the time-bucket key for a date under a given partition strategy.
+ * Exposed as a pure function so callers (and tests) can compute the exact
+ * bucket key to look up without guessing the internal format.
+ */
+export function computeTimeBucket(date: Date, strategy: PartitionStrategy): string {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  const week = Math.floor(date.getDate() / 7) + 1;
+
+  switch (strategy) {
+    case "daily":
+      return `${year}-${month}-${day}`;
+    case "weekly":
+      return `${year}-W${String(week).padStart(2, "0")}`;
+    case "monthly":
+    default:
+      return `${year}-${month}`;
+  }
+}
+
+export interface NormalizedLookupFilters {
+  /** Event source — matches EventArchiveRecord.contractId. Omit to search across all sources. */
+  source?: string;
+  /** Event type — matches EventArchiveRecord.topic. Omit to search across all event types. */
+  eventType?: string;
+  /** Time bucket key, as produced by computeTimeBucket(). Omit to search all time buckets. */
+  timeBucket?: string;
+  /** Exact event id. When set, narrows to that single event across all matched archives. */
+  id?: string;
+}
+
+export interface NormalizedLookupResult {
+  records: EventArchiveRecord[];
+  totalCount: number;
+  /** Event ids that appeared more than once across matched archives (deduplicated in `records`). */
+  duplicateIds: string[];
+  /** Archive ids that contributed at least one matching record. */
+  matchedArchiveIds: string[];
+  queryTimeMs: number;
+}
+
 export interface ArchiveServiceConfig {
   /** Days before an event becomes eligible for archival. */
   archivalThresholdDays: number;
@@ -79,6 +134,12 @@ const gunzip = promisify(zlib.gunzip);
 export class EventArchiveService {
   private config: ArchiveServiceConfig;
   private archives: Map<string, ArchiveMetadata> = new Map();
+  /** Compressed event payload per archive — previously computed but discarded (#1078). */
+  private compressedStore: Map<string, Buffer> = new Map();
+  /** Normalized indexes: dimension value → set of archive ids that may contain a match. */
+  private sourceIndex: Map<string, Set<string>> = new Map();
+  private eventTypeIndex: Map<string, Set<string>> = new Map();
+  private timeBucketIndex: Map<string, Set<string>> = new Map();
 
   constructor(config: Partial<ArchiveServiceConfig> = {}) {
     this.config = { ...DEFAULT_ARCHIVE_CONFIG, ...config };
@@ -119,20 +180,17 @@ export class EventArchiveService {
    * Generate partition key based on date and strategy.
    */
   private getPartitionKey(date: Date): string {
-    const year = date.getFullYear();
-    const month = String(date.getMonth() + 1).padStart(2, "0");
-    const day = String(date.getDate()).padStart(2, "0");
-    const week = Math.floor(date.getDate() / 7) + 1;
+    return computeTimeBucket(date, this.config.partitionStrategy);
+  }
 
-    switch (this.config.partitionStrategy) {
-      case "daily":
-        return `${year}-${month}-${day}`;
-      case "weekly":
-        return `${year}-W${String(week).padStart(2, "0")}`;
-      case "monthly":
-      default:
-        return `${year}-${month}`;
+  /** Adds an archive id to an index bucket, creating the bucket set if needed. */
+  private addToIndex(index: Map<string, Set<string>>, key: string, archiveId: string): void {
+    let bucket = index.get(key);
+    if (!bucket) {
+      bucket = new Set();
+      index.set(key, bucket);
     }
+    bucket.add(archiveId);
   }
 
   /**
@@ -185,6 +243,20 @@ export class EventArchiveService {
 
       metadata.status = "completed";
       metadata.completedAt = new Date();
+
+      // Persist the compressed payload and index it (#1078) — previously
+      // this was computed above and discarded, making every archived
+      // event permanently unretrievable.
+      this.compressedStore.set(archiveId, compressedData);
+      for (const event of events) {
+        this.addToIndex(this.sourceIndex, event.contractId, archiveId);
+        this.addToIndex(this.eventTypeIndex, event.topic, archiveId);
+        this.addToIndex(
+          this.timeBucketIndex,
+          this.getPartitionKey(event.createdAt),
+          archiveId,
+        );
+      }
     } catch (error) {
       metadata.status = "failed";
       metadata.error = error instanceof Error ? error.message : "Unknown error";
@@ -192,6 +264,99 @@ export class EventArchiveService {
 
     this.archives.set(archiveId, metadata);
     return metadata;
+  }
+
+  /**
+   * Normalized lookup for archived events (#1078), indexed by source,
+   * event type, and time bucket. Powers audit replay and incident review
+   * tools that need to retrieve archived events consistently — rather
+   * than re-querying a date range, they ask for exactly the dimension(s)
+   * they know: a contract, an event type, a time bucket, or a specific id.
+   *
+   * - Any filter left unset searches across all values for that
+   *   dimension (e.g. omitting `source` searches across every source —
+   *   "mixed sources").
+   * - A time bucket (or any other filter) that matches nothing returns an
+   *   empty result rather than throwing.
+   * - Results are deduplicated by event id (first occurrence wins) and
+   *   sorted deterministically by (createdAt, id), so repeated lookups
+   *   with the same filters always return events in the same order.
+   * - Any id that appeared more than once across matched archives is
+   *   reported in `duplicateIds` rather than silently multiplying the
+   *   result set.
+   */
+  async lookupEvents(filters: NormalizedLookupFilters = {}): Promise<NormalizedLookupResult> {
+    const startTime = Date.now();
+
+    const candidateSets: Set<string>[] = [];
+    if (filters.source !== undefined) {
+      candidateSets.push(this.sourceIndex.get(filters.source) ?? new Set());
+    }
+    if (filters.eventType !== undefined) {
+      candidateSets.push(this.eventTypeIndex.get(filters.eventType) ?? new Set());
+    }
+    if (filters.timeBucket !== undefined) {
+      candidateSets.push(this.timeBucketIndex.get(filters.timeBucket) ?? new Set());
+    }
+
+    let candidateArchiveIds: string[];
+    if (candidateSets.length === 0) {
+      // No indexed filter provided — every completed archive is a candidate.
+      candidateArchiveIds = Array.from(this.archives.keys()).filter(
+        (id) => this.archives.get(id)?.status === "completed",
+      );
+    } else {
+      // Intersect all provided dimensions — a matching archive must be a
+      // member of every set (missing bucket => empty set => empty result).
+      const [first, ...rest] = candidateSets;
+      candidateArchiveIds = Array.from(first).filter((id) => rest.every((set) => set.has(id)));
+    }
+
+    const seen = new Map<string, EventArchiveRecord>();
+    const duplicateIds = new Set<string>();
+    const matchedArchiveIds = new Set<string>();
+
+    for (const archiveId of candidateArchiveIds) {
+      const metadata = this.archives.get(archiveId);
+      const compressed = this.compressedStore.get(archiveId);
+      if (!metadata || metadata.status !== "completed" || !compressed) continue;
+
+      const records = await this.decompressEventData(compressed);
+      for (const record of records) {
+        if (filters.source !== undefined && record.contractId !== filters.source) continue;
+        if (filters.eventType !== undefined && record.topic !== filters.eventType) continue;
+        if (
+          filters.timeBucket !== undefined &&
+          this.getPartitionKey(new Date(record.createdAt)) !== filters.timeBucket
+        ) {
+          continue;
+        }
+        if (filters.id !== undefined && record.id !== filters.id) continue;
+
+        matchedArchiveIds.add(archiveId);
+
+        if (seen.has(record.id)) {
+          duplicateIds.add(record.id);
+        } else {
+          seen.set(record.id, record);
+        }
+      }
+    }
+
+    const dedupedRecords = Array.from(seen.values()).sort((a, b) => {
+      const aTime = new Date(a.createdAt).getTime();
+      const bTime = new Date(b.createdAt).getTime();
+      if (aTime !== bTime) return aTime - bTime;
+      return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+    });
+
+    return {
+      records: dedupedRecords,
+      totalCount: dedupedRecords.length,
+      duplicateIds: Array.from(duplicateIds),
+      matchedArchiveIds: Array.from(matchedArchiveIds),
+      queryTimeMs: Date.now() - startTime,
+    };
   }
 
   /**
@@ -287,6 +452,7 @@ export class EventArchiveService {
    * Delete archive (after retention period).
    */
   deleteArchive(archiveId: string): boolean {
+    this.compressedStore.delete(archiveId);
     return this.archives.delete(archiveId);
   }
 
@@ -319,3 +485,6 @@ export class EventArchiveService {
     };
   }
 }
+
+// Export singleton instance
+export const eventArchiveService = new EventArchiveService();

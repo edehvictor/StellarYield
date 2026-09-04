@@ -142,6 +142,28 @@ model DeadLetterEvent {
   @@index([resolved, createdAt])
 }
 
+// ── Weekly Report Generation Tracking Models ──────────────────────────────────
+
+model WeeklyReportGeneration {
+  id              String   @id @default(uuid())
+  reportType      String   // e.g., "weekly-yield-report"
+  periodStart     DateTime // Start of the reporting period (week)
+  periodEnd       DateTime // End of the reporting period (week)
+  status          String   // SUCCESS | MISSING | DELAYED | FAILED
+  expectedAt      DateTime // When the report was expected to be generated
+  generatedAt     DateTime? // When the report was actually generated
+  errorMessage    String?  // Error message if generation failed
+  retryCount      Int      @default(0)
+  lastRetryAt     DateTime?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@unique([reportType, periodStart]) // One record per report type per period
+  @@index([reportType, status])
+  @@index([periodStart])
+  @@index([status, expectedAt])
+}
+
 // ── APY Alert Models ─────────────────────────────────────────────────────────
 
 model UserAlert {

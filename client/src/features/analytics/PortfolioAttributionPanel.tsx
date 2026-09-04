@@ -1,6 +1,8 @@
 import { useState, useEffect } from "react";
 import { PieChart, Pie, Cell, ResponsiveContainer, Tooltip, Legend, BarChart, Bar, XAxis, YAxis, CartesianGrid } from "recharts";
 import { TrendingUp, TrendingDown, Minus, Info, Calendar, DollarSign, Target } from "lucide-react";
+import EmptyState from "../../components/common/EmptyState";
+import { EMPTY_STATE_ATTRIBUTION } from "../../utils/emptyStateCopy";
 import {
   PERFORMANCE_CHART_COLORS,
   REWARD_SOURCE_CHART_COLORS,
@@ -181,11 +183,12 @@ export default function PortfolioAttributionPanel({ walletAddress }: PortfolioAt
   if (!report) {
     return (
       <div className="glass-panel p-8">
-        <div className="text-center py-12">
-          <Target className="mx-auto mb-4 text-gray-400" size={48} />
-          <h3 className="text-lg font-semibold mb-2">No Attribution Data</h3>
-          <p className="text-gray-400">No strategy decisions found in the selected time window.</p>
-        </div>
+        <EmptyState
+          icon={<Target className="text-gray-400" size={48} />}
+          title={EMPTY_STATE_ATTRIBUTION.title}
+          description={EMPTY_STATE_ATTRIBUTION.description}
+          testId="attribution-empty-state"
+        />
       </div>
     );
   }

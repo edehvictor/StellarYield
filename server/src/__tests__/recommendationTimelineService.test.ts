@@ -1,5 +1,6 @@
 import {
   getRecommendationTimeline,
+  getRecommendationTimelinePaginated,
   recordRecommendation,
   resetRecommendationTimelineStore,
   REASON_CODE_LABELS,
@@ -328,5 +329,159 @@ describe("recommendationTimelineService", () => {
         expect(timeline[timeline.length - 1]?.targetVault).toBe(initial.targetVault);
       },
     );
+  });
+
+  // ── Cursor pagination (#1071) ─────────────────────────────────────────────
+
+  describe("getRecommendationTimelinePaginated", () => {
+    const BASE_TIME = new Date(FIXED_BASE_TIME).getTime();
+
+    /** Record an entry at a specific offset from BASE_TIME, advancing the fake clock. */
+    async function recordAt(userId: string, offsetMs: number, targetVault: string) {
+      jest.setSystemTime(new Date(BASE_TIME + offsetMs));
+      jest.spyOn(Date, "now").mockReturnValue(BASE_TIME + offsetMs);
+      return recordRecommendation(userId, {
+        recommendation: `Recommendation for ${targetVault}`,
+        targetVault,
+        rationale: "Test rationale.",
+        inputSnapshot: {
+          riskTolerance: "moderate",
+          expectedApy: 6,
+          liquidityDepthUsd: 1_000_000,
+          volatilityPct: 1.5,
+        },
+      });
+    }
+
+    it("pages through entries newest-first with no duplicates or gaps", async () => {
+      const userId = "user-cursor-basic";
+      for (let i = 0; i < 5; i++) {
+        await recordAt(userId, i * 1000, `Vault-${i}`);
+      }
+
+      const page1 = getRecommendationTimelinePaginated(userId, { limit: 2 });
+      expect(page1.data).toHaveLength(2);
+      expect(page1.data.map((e) => e.targetVault)).toEqual(["Vault-4", "Vault-3"]);
+      expect(page1.pagination.hasMore).toBe(true);
+
+      const page2 = getRecommendationTimelinePaginated(userId, {
+        limit: 2,
+        cursor: page1.pagination.nextCursor!,
+      });
+      expect(page2.data.map((e) => e.targetVault)).toEqual(["Vault-2", "Vault-1"]);
+      expect(page2.pagination.hasMore).toBe(true);
+
+      const page3 = getRecommendationTimelinePaginated(userId, {
+        limit: 2,
+        cursor: page2.pagination.nextCursor!,
+      });
+      expect(page3.data.map((e) => e.targetVault)).toEqual(["Vault-0"]);
+      expect(page3.pagination.hasMore).toBe(false);
+      expect(page3.pagination.nextCursor).toBeNull();
+    });
+
+    it("remains stable when a new entry is recorded between page requests", async () => {
+      const userId = "user-cursor-concurrent";
+      await recordAt(userId, 0, "Vault-A");
+      await recordAt(userId, 1000, "Vault-B");
+      await recordAt(userId, 2000, "Vault-C");
+
+      const page1 = getRecommendationTimelinePaginated(userId, { limit: 2 });
+      expect(page1.data.map((e) => e.targetVault)).toEqual(["Vault-C", "Vault-B"]);
+
+      // Concurrent insert: a brand-new, newer entry arrives before page 2 is fetched.
+      await recordAt(userId, 3000, "Vault-D");
+
+      const page2 = getRecommendationTimelinePaginated(userId, {
+        limit: 2,
+        cursor: page1.pagination.nextCursor!,
+      });
+
+      // Page 2 must contain exactly what followed Vault-B at fetch time —
+      // never the newly inserted Vault-D, and never a repeat of A/B/C.
+      expect(page2.data.map((e) => e.targetVault)).toEqual(["Vault-A"]);
+      expect(page2.pagination.hasMore).toBe(false);
+    });
+
+    it("collects every entry exactly once across all pages", async () => {
+      const userId = "user-cursor-complete";
+      for (let i = 0; i < 9; i++) {
+        await recordAt(userId, i * 1000, `Vault-${i}`);
+      }
+
+      const seen = new Set<string>();
+      let cursor: string | undefined;
+      for (let i = 0; i < 10; i++) {
+        const page = getRecommendationTimelinePaginated(userId, { limit: 4, cursor });
+        for (const entry of page.data) {
+          expect(seen.has(entry.id)).toBe(false);
+          seen.add(entry.id);
+        }
+        if (!page.pagination.hasMore) break;
+        cursor = page.pagination.nextCursor!;
+      }
+
+      expect(seen.size).toBe(9);
+    });
+
+    it("falls back to the first page for a malformed cursor", async () => {
+      const userId = "user-cursor-malformed";
+      await recordAt(userId, 0, "Vault-A");
+      await recordAt(userId, 1000, "Vault-B");
+
+      const page = getRecommendationTimelinePaginated(userId, { cursor: "not-a-real-cursor" });
+      expect(page.data.map((e) => e.targetVault)).toEqual(["Vault-B", "Vault-A"]);
+    });
+
+    it("uses id as a tie-breaker when two entries share a timestamp", async () => {
+      const userId = "user-cursor-tie";
+      jest.setSystemTime(new Date(BASE_TIME));
+      jest.spyOn(Date, "now").mockReturnValue(BASE_TIME);
+      jest.spyOn(Math, "random").mockReturnValueOnce(0.1).mockReturnValueOnce(0.9);
+
+      const first = await recordRecommendation(userId, {
+        recommendation: "First",
+        targetVault: "Vault-First",
+        rationale: "Test rationale.",
+        inputSnapshot: {
+          riskTolerance: "moderate",
+          expectedApy: 6,
+          liquidityDepthUsd: 1_000_000,
+          volatilityPct: 1.5,
+        },
+      });
+      const second = await recordRecommendation(userId, {
+        recommendation: "Second",
+        targetVault: "Vault-Second",
+        rationale: "Test rationale.",
+        inputSnapshot: {
+          riskTolerance: "moderate",
+          expectedApy: 6,
+          liquidityDepthUsd: 1_000_000,
+          volatilityPct: 1.5,
+        },
+      });
+
+      expect(first.id).not.toBe(second.id);
+
+      const page1 = getRecommendationTimelinePaginated(userId, { limit: 1 });
+      expect(page1.data).toHaveLength(1);
+      expect(page1.pagination.hasMore).toBe(true);
+
+      const page2 = getRecommendationTimelinePaginated(userId, {
+        limit: 1,
+        cursor: page1.pagination.nextCursor!,
+      });
+      expect(page2.data).toHaveLength(1);
+      expect(page2.data[0].id).not.toBe(page1.data[0].id);
+      expect(page2.pagination.hasMore).toBe(false);
+    });
+
+    it("returns an empty page with hasMore=false for an unknown user", () => {
+      const page = getRecommendationTimelinePaginated("unknown-user-xyz");
+      expect(page.data).toEqual([]);
+      expect(page.pagination.hasMore).toBe(false);
+      expect(page.pagination.nextCursor).toBeNull();
+    });
   });
 });

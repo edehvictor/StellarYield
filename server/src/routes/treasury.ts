@@ -15,6 +15,7 @@ import {
   type AllocationPosition,
 } from "../services/treasurySimulationService";
 import { successEnvelope, errorEnvelope } from "../types/envelope";
+import { requireAdmin } from "../middleware/authz";
 
 const router = Router();
 
@@ -50,7 +51,7 @@ function validateAllocations(allocations: unknown): allocations is AllocationPos
  * POST /api/treasury/simulate
  * Run a treasury simulation. Optionally saves the scenario.
  */
-router.post("/simulate", (req: Request, res: Response) => {
+router.post("/simulate", requireAdmin, (req: Request, res: Response) => {
   try {
     const scenario = assertValidScenarioInput({
       ...req.body,
@@ -84,7 +85,7 @@ router.post("/simulate", (req: Request, res: Response) => {
  * POST /api/treasury/compare
  * Run scenario comparison for baseline versus selected stress runs.
  */
-router.post("/compare", treasuryMutationLimiter, (req: Request, res: Response) => {
+router.post("/compare", treasuryMutationLimiter, requireAdmin, (req: Request, res: Response) => {
   try {
     const scenario = assertValidScenarioInput({
       ...req.body,
@@ -114,7 +115,7 @@ router.post("/compare", treasuryMutationLimiter, (req: Request, res: Response) =
  * POST /api/treasury/export-comparison
  * Export baseline versus stress scenario comparison in CSV or JSON format.
  */
-router.post("/export-comparison", treasuryMutationLimiter, (req: Request, res: Response) => {
+router.post("/export-comparison", treasuryMutationLimiter, requireAdmin, (req: Request, res: Response) => {
   try {
     const scenario = assertValidScenarioInput({
       ...req.body,
@@ -153,7 +154,7 @@ router.post("/export-comparison", treasuryMutationLimiter, (req: Request, res: R
  * POST /api/treasury/scenarios
  * Save a scenario without simulating.
  */
-router.post("/scenarios", (req: Request, res: Response) => {
+router.post("/scenarios", requireAdmin, (req: Request, res: Response) => {
   try {
     const scenario = assertValidScenarioInput({
       ...req.body,
@@ -210,7 +211,7 @@ router.get("/scenarios/:id", (req: Request, res: Response) => {
 /**
  * DELETE /api/treasury/scenarios/:id
  */
-router.delete("/scenarios/:id", (req: Request, res: Response) => {
+router.delete("/scenarios/:id", requireAdmin, (req: Request, res: Response) => {
   const deleted = deleteScenario(req.params.id);
   if (!deleted) {
     res.status(404).json(
@@ -225,7 +226,7 @@ router.delete("/scenarios/:id", (req: Request, res: Response) => {
  * POST /api/treasury/cashflow/preview
  * Validate an array of cashflow rows before importing.
  */
-router.post("/cashflow/preview", (req: Request, res: Response) => {
+router.post("/cashflow/preview", requireAdmin, (req: Request, res: Response) => {
   const rows = req.body.rows ?? req.body;
   if (!Array.isArray(rows)) {
     res.status(400).json(
@@ -247,7 +248,7 @@ router.post("/cashflow/preview", (req: Request, res: Response) => {
  * Validate and store cashflow rows for a scenario.
  * For now this is a stub that delegates to previewImport and returns success.
  */
-router.post("/cashflow/import", (req: Request, res: Response) => {
+router.post("/cashflow/import", requireAdmin, (req: Request, res: Response) => {
   const { scenarioId, rows } = req.body;
   if (!scenarioId || !Array.isArray(rows)) {
     res.status(400).json(

@@ -31,7 +31,12 @@ export type SimulationWarningCode =
   | "INSUFFICIENT_LIQUIDITY"   // Not enough liquidity to route the full deposit.
   | "UNSUPPORTED_STRATEGY"     // Strategy/asset combination is not recognised.
   | "ZERO_AMOUNT"              // Deposit amount is zero or negative.
-  | "AMOUNT_TOO_LARGE";        // Deposit amount exceeds the simulation ceiling.
+  | "AMOUNT_TOO_LARGE"         // Deposit amount exceeds the simulation ceiling.
+  // Treasury / cashflow
+  | "NEGATIVE_CASHFLOW"        // Modeled cashflow turns negative in one or more periods.
+  | "RESERVE_BREACH"           // Reserve balance falls below the configured safety threshold.
+  | "NEGATIVE_NET_YIELD"       // Net yield (after costs) is negative.
+  | "SEVERE_YIELD_REDUCTION";  // Yield reduced by more than 50% under stress.
 
 /** Visual severity tier — maps to UI colour tokens. */
 export type SimulationWarningSeverity = "info" | "warning" | "critical";

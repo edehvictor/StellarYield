@@ -27,6 +27,7 @@ import {
   AuditedFallbackTreeRegistry,
   replayTraversal,
   AuditRecord,
+  createSafeFallbackRegistryRecord,
 } from '../fallbackTreeService';
 
 describe('Fallback Tree Service', () => {
@@ -1464,5 +1465,119 @@ describe('Fallback Tree Audit and Replay', () => {
       expect(result.terminalFailure).toBe(true);
       expect(result.terminalFailureReason).toMatch(/cycle/i);
     });
+  });
+});
+
+// ── Safe Fallback Registry Record ─────────────────────────────────────────
+
+describe('createSafeFallbackRegistryRecord', () => {
+  const NETWORKS = ['testnet', 'mainnet', 'local'] as const;
+  const CONTRACT_KEYS = [
+    'vault', 'zap', 'token', 'governance',
+    'strategy', 'emissionController', 'liquidStaking', 'stableswap',
+  ] as const;
+
+  it('returns file_not_found warning when input is undefined', () => {
+    const record = createSafeFallbackRegistryRecord(undefined);
+    expect(record.metadata.source).toBe('file_not_found');
+    expect(record.metadata.warning).toContain('not available');
+    expect(record.registry).toBeDefined();
+  });
+
+  it('returns file_not_found warning when input is null', () => {
+    const record = createSafeFallbackRegistryRecord(null);
+    expect(record.metadata.source).toBe('file_not_found');
+    expect(record.metadata.warning).toBeTruthy();
+  });
+
+  it('returns malformed_json warning when input is an array', () => {
+    const record = createSafeFallbackRegistryRecord([1, 2, 3] as any);
+    expect(record.metadata.source).toBe('malformed_json');
+    expect(record.metadata.warning).toContain('invalid structure');
+  });
+
+  it('returns malformed_json warning when input is a primitive', () => {
+    const record = createSafeFallbackRegistryRecord('not-an-object' as any);
+    expect(record.metadata.source).toBe('malformed_json');
+  });
+
+  it('returns missing_networks warning when no network keys are present', () => {
+    const record = createSafeFallbackRegistryRecord({ foo: 'bar' } as any);
+    expect(record.metadata.source).toBe('missing_networks');
+    expect(record.metadata.warning).toContain('no recognised network keys');
+  });
+
+  it('returns empty_contracts warning when all addresses are empty strings', () => {
+    const emptyRegistry: Record<string, Record<string, string>> = {
+      testnet: Object.fromEntries(CONTRACT_KEYS.map((k) => [k, ''])) as Record<string, string>,
+      mainnet: Object.fromEntries(CONTRACT_KEYS.map((k) => [k, ''])) as Record<string, string>,
+      local: Object.fromEntries(CONTRACT_KEYS.map((k) => [k, ''])) as Record<string, string>,
+    };
+    const record = createSafeFallbackRegistryRecord(emptyRegistry);
+    expect(record.metadata.source).toBe('empty_contracts');
+    expect(record.metadata.warning).toContain('no contract addresses');
+  });
+
+  it('returns partial_metadata warning when some networks are missing', () => {
+    const partialRegistry: Record<string, Record<string, string>> = {
+      testnet: { vault: 'VA', zap: 'ZA', token: 'TA', governance: 'GA', strategy: 'SA', emissionController: 'EA', liquidStaking: 'LA', stableswap: 'SS' },
+      mainnet: { vault: '', zap: '', token: '', governance: '', strategy: '', emissionController: '', liquidStaking: '', stableswap: '' },
+      local: { vault: '', zap: '', token: '', governance: '', strategy: '', emissionController: '', liquidStaking: '', stableswap: '' },
+    };
+    const record = createSafeFallbackRegistryRecord(partialRegistry);
+    expect(record.metadata.source).toBe('partial_metadata');
+    expect(record.metadata.warning).toContain('incomplete');
+  });
+
+  it('returns primary source with null warning when all data is present', () => {
+    const fullRegistry: Record<string, Record<string, string>> = {
+      testnet: { vault: 'VA', zap: 'ZA', token: 'TA', governance: 'GA', strategy: 'SA', emissionController: 'EA', liquidStaking: 'LA', stableswap: 'SS' },
+      mainnet: { vault: 'MV', zap: 'MZ', token: 'MT', governance: 'MG', strategy: 'MS', emissionController: 'ME', liquidStaking: 'ML', stableswap: 'MS' },
+      local: { vault: 'LV', zap: 'LZ', token: 'LT', governance: 'LG', strategy: 'LS', emissionController: 'LE', liquidStaking: 'LL', stableswap: 'LS' },
+    };
+    const record = createSafeFallbackRegistryRecord(fullRegistry);
+    expect(record.metadata.source).toBe('primary');
+    expect(record.metadata.warning).toBeNull();
+  });
+
+  it('always includes all networks and contract keys in output', () => {
+    const record = createSafeFallbackRegistryRecord(undefined);
+    for (const net of NETWORKS) {
+      expect(record.registry).toHaveProperty(net);
+      for (const key of CONTRACT_KEYS) {
+        expect(record.registry[net]).toHaveProperty(key);
+        expect(typeof record.registry[net][key]).toBe('string');
+      }
+    }
+  });
+
+  it('merges partial data into the safe scaffold', () => {
+    const partial: Record<string, Record<string, string>> = {
+      testnet: { vault: 'V_ONLY' },
+      mainnet: {},
+      local: {},
+    };
+    const record = createSafeFallbackRegistryRecord(partial);
+    expect(record.registry.testnet.vault).toBe('V_ONLY');
+    // Other keys should be empty strings from scaffold
+    expect(record.registry.testnet.zap).toBe('');
+    expect(record.registry.mainnet.vault).toBe('');
+  });
+
+  it('createdAt is a valid ISO timestamp', () => {
+    const record = createSafeFallbackRegistryRecord(undefined);
+    expect(new Date(record.metadata.createdAt).toISOString()).toBe(record.metadata.createdAt);
+  });
+
+  it('handles partial metadata with some contracts missing in a network', () => {
+    const partial: Record<string, Record<string, string>> = {
+      testnet: { vault: 'V', zap: 'Z', token: '', governance: '', strategy: '', emissionController: '', liquidStaking: '', stableswap: '' },
+      mainnet: { vault: 'V', zap: 'Z', token: 'T', governance: 'G', strategy: 'S', emissionController: 'E', liquidStaking: 'L', stableswap: 'SS' },
+      local: { vault: 'V', zap: 'Z', token: 'T', governance: 'G', strategy: 'S', emissionController: 'E', liquidStaking: 'L', stableswap: 'SS' },
+    };
+    const record = createSafeFallbackRegistryRecord(partial);
+    // testnet is not fully populated → partial_metadata
+    expect(record.metadata.source).toBe('partial_metadata');
+    expect(record.metadata.warning).toContain('testnet');
   });
 });

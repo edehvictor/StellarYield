@@ -119,6 +119,8 @@ pub enum VaultError {
     UnauthorizedContract = 2005,
     /// Fee recipient is invalid (contract self or zero-equivalent) (maps to error code 2006).
     InvalidRecipient = 2006,
+    /// Donation amount is zero or below the minimum dust threshold (maps to error code 2007).
+    DonationBelowMinimum = 2007,
 }
 
 // ── Contract ────────────────────────────────────────────────────────────

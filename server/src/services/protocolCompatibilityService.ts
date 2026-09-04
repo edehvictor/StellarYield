@@ -1,5 +1,10 @@
 import NodeCache from "node-cache";
 import { freezeService } from "./freezeService";
+import {
+  detectRegistryConflicts,
+  REGISTERED_SOURCES,
+  type RegistryConflict,
+} from "./yieldSourceRegistryService";
 
 // ── Types ───────────────────────────────────────────────────────────────
 
@@ -21,14 +26,19 @@ export interface CompatibilityRequirement {
   breakingChanges: string[];
 }
 
-export type ActionType = 'deposit' | 'withdraw' | 'rebalance' | 'quote' | 'reporting';
+export type ActionType =
+  | "deposit"
+  | "withdraw"
+  | "rebalance"
+  | "quote"
+  | "reporting";
 
 export const ACTION_LABELS: Record<ActionType, string> = {
-  deposit: 'Deposit',
-  withdraw: 'Withdraw',
-  rebalance: 'Rebalance',
-  quote: 'Quote',
-  reporting: 'Reporting',
+  deposit: "Deposit",
+  withdraw: "Withdraw",
+  rebalance: "Rebalance",
+  quote: "Quote",
+  reporting: "Reporting",
 };
 
 export interface ActionGroup {
@@ -36,7 +46,7 @@ export interface ActionGroup {
   label: string;
   issues: CompatibilityIssue[];
   issueCount: number;
-  status: 'clear' | 'warning' | 'degraded' | 'blocked';
+  status: "clear" | "warning" | "degraded" | "blocked";
 }
 
 const SEVERITY_RANK: Record<string, number> = {
@@ -46,10 +56,16 @@ const SEVERITY_RANK: Record<string, number> = {
   low: 3,
 };
 
-const ALL_ACTIONS: ActionType[] = ['deposit', 'withdraw', 'rebalance', 'quote', 'reporting'];
+const ALL_ACTIONS: ActionType[] = [
+  "deposit",
+  "withdraw",
+  "rebalance",
+  "quote",
+  "reporting",
+];
 
 export interface CompatibilityIssue {
-  severity: 'critical' | 'high' | 'medium' | 'low';
+  severity: "critical" | "high" | "medium" | "low";
   component: string;
   issue: string;
   impact: string;
@@ -58,13 +74,14 @@ export interface CompatibilityIssue {
   affectedActions?: ActionType[];
   lastUpdated?: string;
   protocolName?: string;
+  registryConflict?: RegistryConflict;
 }
 
 export interface CompatibilityStatus {
   protocolName: string;
   currentVersion: string;
   latestVersion: string;
-  status: 'compatible' | 'degraded' | 'incompatible';
+  status: "compatible" | "degraded" | "incompatible";
   issues: CompatibilityIssue[];
   lastChecked: string;
   recommendations: string[];
@@ -72,7 +89,7 @@ export interface CompatibilityStatus {
 }
 
 export interface CompatibilityReport {
-  overallStatus: 'compatible' | 'degraded' | 'incompatible';
+  overallStatus: "compatible" | "degraded" | "incompatible";
   protocols: CompatibilityStatus[];
   criticalIssues: CompatibilityIssue[];
   actionGroups: ActionGroup[];
@@ -104,12 +121,14 @@ const cache = new NodeCache({
   useClones: false,
 });
 
-function actionGroupStatus(issues: CompatibilityIssue[]): ActionGroup['status'] {
-  if (issues.length === 0) return 'clear';
-  if (issues.some(i => i.severity === 'critical')) return 'blocked';
-  if (issues.some(i => i.severity === 'high')) return 'degraded';
-  if (issues.some(i => i.severity === 'medium')) return 'degraded';
-  return 'warning';
+function actionGroupStatus(
+  issues: CompatibilityIssue[],
+): ActionGroup["status"] {
+  if (issues.length === 0) return "clear";
+  if (issues.some((i) => i.severity === "critical")) return "blocked";
+  if (issues.some((i) => i.severity === "high")) return "degraded";
+  if (issues.some((i) => i.severity === "medium")) return "degraded";
+  return "warning";
 }
 
 /**
@@ -117,7 +136,9 @@ function actionGroupStatus(issues: CompatibilityIssue[]): ActionGroup['status'] 
  * Issues with no affectedActions are placed into *every* group so they
  * remain visible regardless of which action tab the operator selects.
  */
-export function groupIssuesByAction(issues: CompatibilityIssue[]): ActionGroup[] {
+export function groupIssuesByAction(
+  issues: CompatibilityIssue[],
+): ActionGroup[] {
   const grouped: Record<ActionType, CompatibilityIssue[]> = {
     deposit: [],
     withdraw: [],
@@ -127,9 +148,10 @@ export function groupIssuesByAction(issues: CompatibilityIssue[]): ActionGroup[]
   };
 
   for (const issue of issues) {
-    const actions = (issue.affectedActions?.length ?? 0) > 0
-      ? issue.affectedActions!
-      : ALL_ACTIONS;
+    const actions =
+      (issue.affectedActions?.length ?? 0) > 0
+        ? issue.affectedActions!
+        : ALL_ACTIONS;
 
     for (const action of actions) {
       if (!grouped[action]) continue;
@@ -137,7 +159,7 @@ export function groupIssuesByAction(issues: CompatibilityIssue[]): ActionGroup[]
     }
   }
 
-  return ALL_ACTIONS.map(action => {
+  return ALL_ACTIONS.map((action) => {
     const issues = sortIssues(grouped[action]);
     return {
       action,
@@ -183,50 +205,50 @@ export class ProtocolCompatibilityEngine {
    */
   private initializeRequirements(): void {
     // Blend Protocol Requirements
-    this.requirements.set('Blend', [
+    this.requirements.set("Blend", [
       {
-        component: 'core_contract',
-        requiredVersion: '2.1.0',
-        minVersion: '2.0.0',
-        criticalFeatures: ['deposit', 'withdraw', 'get_apy'],
-        breakingChanges: ['fee_structure_change', 'withdrawal_delay'],
+        component: "core_contract",
+        requiredVersion: "2.1.0",
+        minVersion: "2.0.0",
+        criticalFeatures: ["deposit", "withdraw", "get_apy"],
+        breakingChanges: ["fee_structure_change", "withdrawal_delay"],
       },
       {
-        component: 'api',
-        requiredVersion: 'v1.3',
-        minVersion: 'v1.0',
-        criticalFeatures: ['yield_data', 'vault_info'],
-        breakingChanges: ['endpoint_deprecation', 'response_format_change'],
+        component: "api",
+        requiredVersion: "v1.3",
+        minVersion: "v1.0",
+        criticalFeatures: ["yield_data", "vault_info"],
+        breakingChanges: ["endpoint_deprecation", "response_format_change"],
       },
     ]);
 
     // Soroswap Requirements
-    this.requirements.set('Soroswap', [
+    this.requirements.set("Soroswap", [
       {
-        component: 'router_contract',
-        requiredVersion: '1.4.2',
-        minVersion: '1.3.0',
-        criticalFeatures: ['swap_exact_tokens', 'get_amount_out'],
-        breakingChanges: ['fee_calculation_change', 'slippage_formula_update'],
+        component: "router_contract",
+        requiredVersion: "1.4.2",
+        minVersion: "1.3.0",
+        criticalFeatures: ["swap_exact_tokens", "get_amount_out"],
+        breakingChanges: ["fee_calculation_change", "slippage_formula_update"],
       },
       {
-        component: 'pool_contract',
-        requiredVersion: '1.2.1',
-        minVersion: '1.1.0',
-        criticalFeatures: ['add_liquidity', 'remove_liquidity'],
-        breakingChanges: ['reward_distribution_change'],
+        component: "pool_contract",
+        requiredVersion: "1.2.1",
+        minVersion: "1.1.0",
+        criticalFeatures: ["add_liquidity", "remove_liquidity"],
+        breakingChanges: ["reward_distribution_change"],
       },
     ]);
 
     // DeFindex Requirements
-    this.requirements.set('DeFindex', [
+    this.requirements.set("DeFindex", [
       {
-        component: 'index_contract',
-        requiredVersion: '3.0.1',
-        minVersion: '2.5.0',
-        maxVersion: '3.1.0',
-        criticalFeatures: ['mint', 'redeem', 'rebalance'],
-        breakingChanges: ['index_composition_change', 'fee_structure_overhaul'],
+        component: "index_contract",
+        requiredVersion: "3.0.1",
+        minVersion: "2.5.0",
+        maxVersion: "3.1.0",
+        criticalFeatures: ["mint", "redeem", "rebalance"],
+        breakingChanges: ["index_composition_change", "fee_structure_overhaul"],
       },
     ]);
   }
@@ -235,9 +257,9 @@ export class ProtocolCompatibilityEngine {
    * Run comprehensive compatibility check
    */
   async runCompatibilityCheck(): Promise<CompatibilityReport> {
-    const cacheKey = 'compatibility:report';
+    const cacheKey = "compatibility:report";
     const cached = cache.get<CompatibilityReport>(cacheKey);
-    
+
     if (cached) {
       return cached;
     }
@@ -248,13 +270,49 @@ export class ProtocolCompatibilityEngine {
 
     try {
       const protocols = await this.checkAllProtocols();
+      const registryConflicts =
+        detectRegistryConflicts(REGISTERED_SOURCES).conflicts;
+      if (registryConflicts.length > 0) {
+        const now = new Date().toISOString();
+        protocols.push({
+          protocolName: "Yield Source Registry",
+          currentVersion: "unknown",
+          latestVersion: "unknown",
+          status: "incompatible",
+          issues: registryConflicts.map((conflict) => ({
+            severity: "critical" as const,
+            component: "yield_source_registry",
+            issue: `Conflicting ${conflict.type}: ${conflict.identity}`,
+            impact: conflict.message,
+            recommendation:
+              "Resolve duplicate provider identities before publishing analytics",
+            affectedStrategies: [],
+            affectedActions: ["reporting" as const],
+            lastUpdated: now,
+            protocolName: "Yield Source Registry",
+            registryConflict: conflict,
+          })),
+          lastChecked: now,
+          recommendations: [
+            "Resolve duplicate provider identities before publishing analytics",
+          ],
+          autoUpdateAvailable: false,
+        });
+      }
       const criticalIssues = protocols
-        .flatMap(p => p.issues)
-        .filter(issue => issue.severity === 'critical');
+        .flatMap((p) => p.issues)
+        .filter((issue) => issue.severity === "critical");
 
-      const overallStatus = this.determineOverallStatus(protocols, criticalIssues);
+      const overallStatus = this.determineOverallStatus(
+        protocols,
+        criticalIssues,
+      );
 
-      const actionGroups = groupIssuesByAction(criticalIssues.length > 0 ? criticalIssues : protocols.flatMap(p => p.issues));
+      const actionGroups = groupIssuesByAction(
+        criticalIssues.length > 0
+          ? criticalIssues
+          : protocols.flatMap((p) => p.issues),
+      );
 
       const report: CompatibilityReport = {
         overallStatus,
@@ -262,11 +320,13 @@ export class ProtocolCompatibilityEngine {
         criticalIssues,
         actionGroups,
         generatedAt: new Date().toISOString(),
-        nextCheckDue: new Date(Date.now() + this.config.checkIntervalMinutes * 60 * 1000).toISOString(),
+        nextCheckDue: new Date(
+          Date.now() + this.config.checkIntervalMinutes * 60 * 1000,
+        ).toISOString(),
       };
 
       cache.set(cacheKey, report);
-      
+
       // Auto-disable incompatible protocols if configured
       if (this.config.autoDisableIncompatible) {
         await this.handleIncompatibleProtocols(protocols);
@@ -275,7 +335,9 @@ export class ProtocolCompatibilityEngine {
       return report;
     } catch (error) {
       console.error("Compatibility check failed:", error);
-      throw new Error(`Compatibility check failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      throw new Error(
+        `Compatibility check failed: ${error instanceof Error ? error.message : "Unknown error"}`,
+      );
     }
   }
 
@@ -284,8 +346,8 @@ export class ProtocolCompatibilityEngine {
    */
   private async checkAllProtocols(): Promise<CompatibilityStatus[]> {
     const protocolNames = Array.from(this.requirements.keys());
-    const checks = protocolNames.map(name => this.checkProtocol(name));
-    
+    const checks = protocolNames.map((name) => this.checkProtocol(name));
+
     return Promise.all(checks);
   }
 
@@ -295,7 +357,9 @@ export class ProtocolCompatibilityEngine {
   async checkProtocol(protocolName: string): Promise<CompatibilityStatus> {
     const requirements = this.requirements.get(protocolName);
     if (!requirements) {
-      throw new Error(`No compatibility requirements defined for ${protocolName}`);
+      throw new Error(
+        `No compatibility requirements defined for ${protocolName}`,
+      );
     }
 
     try {
@@ -306,14 +370,19 @@ export class ProtocolCompatibilityEngine {
       // Check each component
       const issues: CompatibilityIssue[] = [];
       for (const requirement of requirements) {
-        const componentIssues = await this.checkComponentCompatibility(protocolName, requirement.component, requirement, currentVersion);
+        const componentIssues = await this.checkComponentCompatibility(
+          protocolName,
+          requirement.component,
+          requirement,
+          currentVersion,
+        );
         issues.push(...componentIssues);
       }
 
       const now = new Date().toISOString();
 
       // Annotate every issue with affectedActions and lastUpdated
-      const annotated = issues.map(issue => ({
+      const annotated = issues.map((issue) => ({
         ...issue,
         protocolName,
         lastUpdated: now,
@@ -323,7 +392,11 @@ export class ProtocolCompatibilityEngine {
       // Determine status
       const status = this.determineProtocolStatus(annotated);
       const recommendations = this.generateRecommendations(annotated, status);
-      const autoUpdateAvailable = await this.checkAutoUpdateAvailable(protocolName, currentVersion, latestVersion);
+      const autoUpdateAvailable = await this.checkAutoUpdateAvailable(
+        protocolName,
+        currentVersion,
+        latestVersion,
+      );
 
       return {
         protocolName,
@@ -336,24 +409,26 @@ export class ProtocolCompatibilityEngine {
         autoUpdateAvailable,
       };
     } catch (error) {
-      console.error('Failed to fetch protocol version:', { protocolName });
+      console.error("Failed to fetch protocol version:", { protocolName });
       return {
         protocolName,
-        currentVersion: 'unknown',
-        latestVersion: 'unknown',
-        status: 'incompatible' as const,
-        issues: [{
-          severity: 'critical' as const,
-          component: 'unknown',
-          issue: 'Failed to fetch protocol version',
-          impact: 'Cannot determine compatibility',
-          recommendation: 'Check protocol connectivity',
-          affectedStrategies: [],
-          protocolName,
-          lastUpdated: new Date().toISOString(),
-        }],
+        currentVersion: "unknown",
+        latestVersion: "unknown",
+        status: "incompatible" as const,
+        issues: [
+          {
+            severity: "critical" as const,
+            component: "unknown",
+            issue: "Failed to fetch protocol version",
+            impact: "Cannot determine compatibility",
+            recommendation: "Check protocol connectivity",
+            affectedStrategies: [],
+            protocolName,
+            lastUpdated: new Date().toISOString(),
+          },
+        ],
         lastChecked: new Date().toISOString(),
-        recommendations: ['Check protocol connectivity'],
+        recommendations: ["Check protocol connectivity"],
         autoUpdateAvailable: false,
       };
     }
@@ -372,51 +447,73 @@ export class ProtocolCompatibilityEngine {
 
     try {
       // Version compatibility check
-      const versionCheck = this.checkVersionCompatibility(requirements, currentVersion);
+      const versionCheck = this.checkVersionCompatibility(
+        requirements,
+        currentVersion,
+      );
       if (!versionCheck.compatible) {
         issues.push({
-          severity: versionCheck.isBreaking ? 'critical' : 'high',
+          severity: versionCheck.isBreaking ? "critical" : "high",
           component: requirements.component,
           issue: versionCheck.reason,
           impact: `Component ${requirements.component} may not function correctly`,
           recommendation: `Update ${requirements.component} to compatible version`,
-          affectedStrategies: await this.getAffectedStrategies(protocolName, requirements.component),
+          affectedStrategies: await this.getAffectedStrategies(
+            protocolName,
+            requirements.component,
+          ),
         });
       }
 
       // Critical features check
-      const featuresCheck = await this.checkCriticalFeatures(protocolName, requirements, currentVersion);
+      const featuresCheck = await this.checkCriticalFeatures(
+        protocolName,
+        requirements,
+        currentVersion,
+      );
       if (!featuresCheck.available) {
         issues.push({
-          severity: 'critical',
+          severity: "critical",
           component: requirements.component,
-          issue: 'Critical features unavailable',
-          impact: featuresCheck.missingFeatures.join(', ') + ' are not available',
-          recommendation: 'Upgrade protocol or use alternative implementation',
-          affectedStrategies: await this.getAffectedStrategies(protocolName, requirements.component),
+          issue: "Critical features unavailable",
+          impact:
+            featuresCheck.missingFeatures.join(", ") + " are not available",
+          recommendation: "Upgrade protocol or use alternative implementation",
+          affectedStrategies: await this.getAffectedStrategies(
+            protocolName,
+            requirements.component,
+          ),
         });
       }
 
       // Breaking changes check
-      const breakingChangesCheck = await this.checkBreakingChanges(protocolName, currentVersion.version, requirements);
+      const breakingChangesCheck = await this.checkBreakingChanges(
+        protocolName,
+        currentVersion.version,
+        requirements,
+      );
       if (breakingChangesCheck.hasBreakingChanges) {
         issues.push({
-          severity: breakingChangesCheck.affectsCriticalPath ? 'critical' : 'high',
+          severity: breakingChangesCheck.affectsCriticalPath
+            ? "critical"
+            : "high",
           component: requirements.component,
-          issue: 'Breaking changes detected',
-          impact: breakingChangesCheck.changes.join(', '),
-          recommendation: 'Review and update integration code',
-          affectedStrategies: await this.getAffectedStrategies(protocolName, requirements.component),
+          issue: "Breaking changes detected",
+          impact: breakingChangesCheck.changes.join(", "),
+          recommendation: "Review and update integration code",
+          affectedStrategies: await this.getAffectedStrategies(
+            protocolName,
+            requirements.component,
+          ),
         });
       }
-
     } catch (error) {
       issues.push({
-        severity: 'medium',
+        severity: "medium",
         component: requirements.component,
-        issue: 'Compatibility check failed',
-        impact: `Unable to verify component compatibility: ${error instanceof Error ? error.message : 'Unknown error'}`,
-        recommendation: 'Manual verification required',
+        issue: "Compatibility check failed",
+        impact: `Unable to verify component compatibility: ${error instanceof Error ? error.message : "Unknown error"}`,
+        recommendation: "Manual verification required",
         affectedStrategies: [],
       });
     }
@@ -437,17 +534,20 @@ export class ProtocolCompatibilityEngine {
     const max = requirement.maxVersion;
 
     // Simple version comparison (in production, use semver library)
-    const isCompatible = this.compareVersions(current, min) >= 0 && 
-                        (!max || this.compareVersions(current, max) <= 0);
+    const isCompatible =
+      this.compareVersions(current, min) >= 0 &&
+      (!max || this.compareVersions(current, max) <= 0);
 
     const isBreaking = this.compareVersions(current, required) < 0;
 
     return {
       compatible: isCompatible,
       isBreaking,
-      reason: isCompatible ? 'Versions compatible' : 
-               isBreaking ? `Version ${current} is below required ${required}` :
-               `Version ${current} exceeds maximum ${max}`,
+      reason: isCompatible
+        ? "Versions compatible"
+        : isBreaking
+          ? `Version ${current} is below required ${required}`
+          : `Version ${current} exceeds maximum ${max}`,
     };
   }
 
@@ -455,17 +555,17 @@ export class ProtocolCompatibilityEngine {
    * Simple version comparison (replace with semver in production)
    */
   private compareVersions(v1: string, v2: string): number {
-    const parts1 = v1.split('.').map(Number);
-    const parts2 = v2.split('.').map(Number);
-    
+    const parts1 = v1.split(".").map(Number);
+    const parts2 = v2.split(".").map(Number);
+
     for (let i = 0; i < Math.max(parts1.length, parts2.length); i++) {
       const part1 = parts1[i] || 0;
       const part2 = parts2[i] || 0;
-      
+
       if (part1 > part2) return 1;
       if (part1 < part2) return -1;
     }
-    
+
     return 0;
   }
 
@@ -478,9 +578,14 @@ export class ProtocolCompatibilityEngine {
     _currentVersion: ProtocolVersion,
   ): Promise<{ available: boolean; missingFeatures: string[] }> {
     // Mock implementation - in reality, this would test the actual protocol
-    const mockAvailableFeatures = ['deposit', 'withdraw', 'get_apy', 'swap_exact_tokens'];
+    const mockAvailableFeatures = [
+      "deposit",
+      "withdraw",
+      "get_apy",
+      "swap_exact_tokens",
+    ];
     const missingFeatures = requirement.criticalFeatures.filter(
-      feature => !mockAvailableFeatures.includes(feature)
+      (feature) => !mockAvailableFeatures.includes(feature),
     );
 
     return {
@@ -496,14 +601,20 @@ export class ProtocolCompatibilityEngine {
     protocolName: string,
     _currentVersion: string,
     requirement: CompatibilityRequirement,
-  ): Promise<{ hasBreakingChanges: boolean; affectsCriticalPath: boolean; changes: string[] }> {
+  ): Promise<{
+    hasBreakingChanges: boolean;
+    affectsCriticalPath: boolean;
+    changes: string[];
+  }> {
     // Mock implementation - in reality, this would analyze changelogs or contract diffs
-    const mockBreakingChanges = ['fee_structure_change'];
-    const changes = requirement.breakingChanges.filter(change => mockBreakingChanges.includes(change));
-    
+    const mockBreakingChanges = ["fee_structure_change"];
+    const changes = requirement.breakingChanges.filter((change) =>
+      mockBreakingChanges.includes(change),
+    );
+
     return {
       hasBreakingChanges: changes.length > 0,
-      affectsCriticalPath: changes.includes('fee_structure_change'),
+      affectsCriticalPath: changes.includes("fee_structure_change"),
       changes,
     };
   }
@@ -511,7 +622,10 @@ export class ProtocolCompatibilityEngine {
   /**
    * Get strategies affected by a component
    */
-  private async getAffectedStrategies(protocolName: string, _component: string): Promise<string[]> {
+  private async getAffectedStrategies(
+    protocolName: string,
+    _component: string,
+  ): Promise<string[]> {
     // Mock implementation - would query strategy registry
     return [
       `${protocolName}_yield_strategy`,
@@ -523,13 +637,15 @@ export class ProtocolCompatibilityEngine {
   /**
    * Determine overall protocol status
    */
-  private determineProtocolStatus(issues: CompatibilityIssue[]): 'compatible' | 'degraded' | 'incompatible' {
-    const hasCritical = issues.some(issue => issue.severity === 'critical');
-    const hasHigh = issues.some(issue => issue.severity === 'high');
-    
-    if (hasCritical) return 'incompatible';
-    if (hasHigh) return 'degraded';
-    return 'compatible';
+  private determineProtocolStatus(
+    issues: CompatibilityIssue[],
+  ): "compatible" | "degraded" | "incompatible" {
+    const hasCritical = issues.some((issue) => issue.severity === "critical");
+    const hasHigh = issues.some((issue) => issue.severity === "high");
+
+    if (hasCritical) return "incompatible";
+    if (hasHigh) return "degraded";
+    return "compatible";
   }
 
   /**
@@ -538,15 +654,16 @@ export class ProtocolCompatibilityEngine {
   private determineOverallStatus(
     protocols: CompatibilityStatus[],
     criticalIssues: CompatibilityIssue[],
-  ): 'compatible' | 'degraded' | 'incompatible' {
-    if (criticalIssues.length >= this.config.criticalFailureThreshold) return 'incompatible';
-    
-    const hasIncompatible = protocols.some(p => p.status === 'incompatible');
-    const hasDegraded = protocols.some(p => p.status === 'degraded');
-    
-    if (hasIncompatible) return 'incompatible';
-    if (hasDegraded) return 'degraded';
-    return 'compatible';
+  ): "compatible" | "degraded" | "incompatible" {
+    if (criticalIssues.length >= this.config.criticalFailureThreshold)
+      return "incompatible";
+
+    const hasIncompatible = protocols.some((p) => p.status === "incompatible");
+    const hasDegraded = protocols.some((p) => p.status === "degraded");
+
+    if (hasIncompatible) return "incompatible";
+    if (hasDegraded) return "degraded";
+    return "compatible";
   }
 
   /**
@@ -554,20 +671,22 @@ export class ProtocolCompatibilityEngine {
    */
   private generateRecommendations(
     issues: CompatibilityIssue[],
-    status: 'compatible' | 'degraded' | 'incompatible',
+    status: "compatible" | "degraded" | "incompatible",
   ): string[] {
     const recommendations = new Set<string>();
-    
-    issues.forEach(issue => {
+
+    issues.forEach((issue) => {
       recommendations.add(issue.recommendation);
     });
 
-    if (status === 'incompatible') {
-      recommendations.add('Consider disabling automated strategies for this protocol');
-      recommendations.add('Schedule immediate maintenance window');
-    } else if (status === 'degraded') {
-      recommendations.add('Monitor strategy performance closely');
-      recommendations.add('Plan upgrade at next opportunity');
+    if (status === "incompatible") {
+      recommendations.add(
+        "Consider disabling automated strategies for this protocol",
+      );
+      recommendations.add("Schedule immediate maintenance window");
+    } else if (status === "degraded") {
+      recommendations.add("Monitor strategy performance closely");
+      recommendations.add("Plan upgrade at next opportunity");
     }
 
     return Array.from(recommendations);
@@ -576,11 +695,13 @@ export class ProtocolCompatibilityEngine {
   /**
    * Get current version of a protocol
    */
-  private async getCurrentVersion(protocolName: string): Promise<ProtocolVersion> {
+  private async getCurrentVersion(
+    protocolName: string,
+  ): Promise<ProtocolVersion> {
     // Mock implementation - would query actual protocol
     return {
       protocolName,
-      version: '2.1.0',
+      version: "2.1.0",
       lastUpdated: new Date().toISOString(),
     };
   }
@@ -588,11 +709,13 @@ export class ProtocolCompatibilityEngine {
   /**
    * Get latest version of a protocol
    */
-  private async getLatestVersion(protocolName: string): Promise<ProtocolVersion> {
+  private async getLatestVersion(
+    protocolName: string,
+  ): Promise<ProtocolVersion> {
     // Mock implementation - would query version registry
     return {
       protocolName,
-      version: '2.2.0',
+      version: "2.2.0",
       lastUpdated: new Date().toISOString(),
     };
   }
@@ -606,7 +729,9 @@ export class ProtocolCompatibilityEngine {
     latestVersion: ProtocolVersion,
   ): Promise<boolean> {
     // Mock implementation - would check update mechanisms
-    return this.compareVersions(currentVersion.version, latestVersion.version) < 0;
+    return (
+      this.compareVersions(currentVersion.version, latestVersion.version) < 0
+    );
   }
 
   /**
@@ -615,23 +740,33 @@ export class ProtocolCompatibilityEngine {
   private mapComponentToActions(component: string): ActionType[] {
     const componentLower = component.toLowerCase();
     const actions: ActionType[] = [];
-    if (/deposit|mint|add_liquidity/i.test(componentLower)) actions.push('deposit');
-    if (/withdraw|redeem|remove_liquidity/i.test(componentLower)) actions.push('withdraw');
-    if (/rebalance|swap|router|pool/i.test(componentLower)) actions.push('rebalance');
-    if (/quote|get_amount_out|swap_exact/i.test(componentLower)) actions.push('quote');
-    if (/api|yield|vault_info|report|index/i.test(componentLower)) actions.push('reporting');
-    if (/core_contract|core/i.test(componentLower)) actions.push('deposit', 'withdraw', 'rebalance');
+    if (/deposit|mint|add_liquidity/i.test(componentLower))
+      actions.push("deposit");
+    if (/withdraw|redeem|remove_liquidity/i.test(componentLower))
+      actions.push("withdraw");
+    if (/rebalance|swap|router|pool/i.test(componentLower))
+      actions.push("rebalance");
+    if (/quote|get_amount_out|swap_exact/i.test(componentLower))
+      actions.push("quote");
+    if (/api|yield|vault_info|report|index/i.test(componentLower))
+      actions.push("reporting");
+    if (/core_contract|core/i.test(componentLower))
+      actions.push("deposit", "withdraw", "rebalance");
     return actions;
   }
 
   /**
    * Handle incompatible protocols
    */
-  private async handleIncompatibleProtocols(protocols: CompatibilityStatus[]): Promise<void> {
-    const incompatible = protocols.filter(p => p.status === 'incompatible');
-    
+  private async handleIncompatibleProtocols(
+    protocols: CompatibilityStatus[],
+  ): Promise<void> {
+    const incompatible = protocols.filter((p) => p.status === "incompatible");
+
     for (const protocol of incompatible) {
-      console.warn(`Auto-disabling incompatible protocol: ${protocol.protocolName}`);
+      console.warn(
+        `Auto-disabling incompatible protocol: ${protocol.protocolName}`,
+      );
       // In reality, this would call strategy management service
     }
   }
@@ -653,7 +788,10 @@ export class ProtocolCompatibilityEngine {
   /**
    * Add protocol requirements
    */
-  addProtocolRequirements(protocolName: string, requirements: CompatibilityRequirement[]): void {
+  addProtocolRequirements(
+    protocolName: string,
+    requirements: CompatibilityRequirement[],
+  ): void {
     this.requirements.set(protocolName, requirements);
   }
 
@@ -674,23 +812,25 @@ export const protocolCompatibilityEngine = new ProtocolCompatibilityEngine();
 /**
  * Format compatibility report for API response
  */
-export function formatCompatibilityReport(report: CompatibilityReport): CompatibilityReport {
+export function formatCompatibilityReport(
+  report: CompatibilityReport,
+): CompatibilityReport {
   return {
     ...report,
-    protocols: report.protocols.map(protocol => ({
+    protocols: report.protocols.map((protocol) => ({
       ...protocol,
-      issues: protocol.issues.map(issue => ({
+      issues: protocol.issues.map((issue) => ({
         ...issue,
         affectedStrategies: [...issue.affectedStrategies],
       })),
     })),
-    criticalIssues: report.criticalIssues.map(issue => ({
+    criticalIssues: report.criticalIssues.map((issue) => ({
       ...issue,
       affectedStrategies: [...issue.affectedStrategies],
     })),
-    actionGroups: report.actionGroups.map(group => ({
+    actionGroups: report.actionGroups.map((group) => ({
       ...group,
-      issues: group.issues.map(issue => ({
+      issues: group.issues.map((issue) => ({
         ...issue,
         affectedStrategies: [...issue.affectedStrategies],
       })),
@@ -705,10 +845,14 @@ export function isProtocolSafeForExecution(
   protocolName: string,
   report: CompatibilityReport,
 ): boolean {
-  const protocol = report.protocols.find(p => p.protocolName === protocolName);
-  
+  const protocol = report.protocols.find(
+    (p) => p.protocolName === protocolName,
+  );
+
   if (!protocol) return false;
-  
-  return protocol.status === 'compatible' && 
-         protocol.issues.filter(i => i.severity === 'critical').length === 0;
+
+  return (
+    protocol.status === "compatible" &&
+    protocol.issues.filter((i) => i.severity === "critical").length === 0
+  );
 }

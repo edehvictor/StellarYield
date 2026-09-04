@@ -6,6 +6,13 @@
  * Ensures failure isolation and composition integrity.
  */
 
+import {
+  recommendLiquidityBuffer,
+  type LiquidityBufferRecommendation,
+  type LiquidityBand,
+  type RouteRiskLevel,
+} from "./liquidityBufferService";
+
 export interface StrategyModule {
   id: string;
   name: string;
@@ -22,6 +29,22 @@ export interface StrategyModule {
   compatibilityTags: string[];
   /** Last rebalance timestamp. */
   lastRebalanceAt: Date;
+  /** Total liquidity depth available in USD. */
+  liquidityDepthUsd?: number;
+  /** Strategy TVL in USD. */
+  tvlUsd?: number;
+  /** Route risk level or numeric ratio/score for execution path. */
+  routeRisk?: RouteRiskLevel | number;
+  /** Route risk score (0-100). */
+  routeRiskScore?: number;
+  /** Volatility percentage. */
+  volatilityPct?: number;
+  /** Protocol health score (0-100). */
+  protocolHealthScore?: number;
+  /** Withdrawal velocity percentage per day. */
+  withdrawalVelocityPctPerDay?: number;
+  /** Explicit liquidity band if known. */
+  liquidityBand?: LiquidityBand;
 }
 
 export interface OrchestrationConfig {
@@ -67,6 +90,8 @@ export interface AllocationDecision {
   recommendedWeight: number;
   reason: string;
   confidence: number;
+  /** Liquidity buffer and route sizing guidance for execution planning. */
+  liquidityBuffer?: LiquidityBufferRecommendation;
 }
 
 export interface OrchestrationResult {
@@ -78,6 +103,13 @@ export interface OrchestrationResult {
     concentrationRisk: number;
     correlationRisk: number;
     failureRisk: number;
+  };
+  /** Aggregate liquidity buffer and execution path guidance surfaced before execution. */
+  liquidityBufferGuidance?: {
+    overallBufferPct: number;
+    overallBufferUsd: number;
+    recommendations: LiquidityBufferRecommendation[];
+    highestRiskRoute?: string;
   };
   nextRebalanceAt: Date;
 }
@@ -315,6 +347,22 @@ export class VaultOrchestrator {
     const allocationDecisions: AllocationDecision[] =
       this.config.strategies.map((strategy) => {
         const recommendation = this.recommendAllocation(strategy);
+        const liquidityBuffer = recommendLiquidityBuffer({
+          strategyId: strategy.id,
+          strategyVolatilityPct: strategy.volatilityPct ?? 8,
+          withdrawalVelocityPctPerDay: strategy.withdrawalVelocityPctPerDay ?? 3,
+          protocolHealthScore:
+            strategy.protocolHealthScore ??
+            Math.min(100, Math.round(strategy.performanceScore * 10)),
+          liquidityDepthUsd: strategy.liquidityDepthUsd ?? 1_000_000,
+          strategyTvlUsd: strategy.tvlUsd ?? 500_000,
+          routeRisk:
+            strategy.routeRisk ??
+            (strategy.compatibilityTags.includes("volatile") ? "medium" : "low"),
+          routeRiskScore: strategy.routeRiskScore,
+          liquidityBand: strategy.liquidityBand,
+        });
+
         return {
           strategyId: strategy.id,
           strategyName: strategy.name,
@@ -322,12 +370,52 @@ export class VaultOrchestrator {
           recommendedWeight: recommendation.weight,
           reason: recommendation.reason,
           confidence: recommendation.confidence,
+          liquidityBuffer,
         };
       });
 
     const nextRebalanceAt = new Date(
       Date.now() + this.config.rotationIntervalMs,
     );
+
+    const bufferRecommendations = allocationDecisions
+      .map((d) => d.liquidityBuffer)
+      .filter((b): b is LiquidityBufferRecommendation => Boolean(b));
+
+    const totalTvl = this.config.strategies.reduce(
+      (sum, s) => sum + (s.tvlUsd ?? 500_000),
+      0
+    );
+    const weightedBufferPct =
+      totalTvl > 0
+        ? bufferRecommendations.reduce(
+            (sum, b) =>
+              sum +
+              b.recommendedBufferPct *
+                (b.recommendedBufferUsd / (b.recommendedBufferPct || 1)),
+            0
+          ) / totalTvl
+        : 0.1;
+    const totalBufferUsd = bufferRecommendations.reduce(
+      (sum, b) => sum + b.recommendedBufferUsd,
+      0
+    );
+
+    const highestRisk = bufferRecommendations.reduce<
+      LiquidityBufferRecommendation | undefined
+    >((highest, current) => {
+      if (!highest || current.routeRiskScore > highest.routeRiskScore) {
+        return current;
+      }
+      return highest;
+    }, undefined);
+
+    const liquidityBufferGuidance = {
+      overallBufferPct: Math.round(weightedBufferPct * 10000) / 10000,
+      overallBufferUsd: Math.round(totalBufferUsd * 100) / 100,
+      recommendations: bufferRecommendations,
+      highestRiskRoute: highestRisk?.strategyId,
+    };
 
     const result: OrchestrationResult = {
       vaultId: this.config.vaultId,
@@ -339,6 +427,7 @@ export class VaultOrchestrator {
         correlationRisk: this.calculateCorrelationRisk(),
         failureRisk: this.calculateFailureRisk(),
       },
+      liquidityBufferGuidance,
       nextRebalanceAt,
     };
 

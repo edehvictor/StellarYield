@@ -243,4 +243,62 @@ describe("ZapDepositPanel", () => {
       });
     });
   });
+
+  describe("per-vault preferences", () => {
+    beforeEach(() => {
+      localStorage.clear();
+    });
+
+    it("saves custom slippage to localStorage per vault and updates view", async () => {
+      render(<ZapDepositPanel walletAddress="GABCDEF123" />);
+      openSlippageEditor();
+
+      const presetBtn = screen.getByText("2%");
+      fireEvent.click(presetBtn);
+
+      await waitFor(() => {
+        expect(screen.getAllByText("2%").length).toBeGreaterThan(0);
+      });
+
+      const stored = localStorage.getItem("vault_slippage_CVAULT");
+      expect(stored).toBeTruthy();
+      expect(JSON.parse(stored!).slippage).toBe(2);
+    });
+
+    it("loads slippage from localStorage for matching vault contract", async () => {
+      localStorage.setItem("vault_slippage_CVAULT", JSON.stringify({ slippage: 3.5 }));
+      render(<ZapDepositPanel walletAddress="GABCDEF123" />);
+
+      await waitFor(() => {
+        expect(screen.getAllByText("3.5%").length).toBeGreaterThan(0);
+      });
+    });
+
+    it("ignores malformed persisted values and uses default", async () => {
+      localStorage.setItem("vault_slippage_CVAULT", "{bad json}");
+      render(<ZapDepositPanel walletAddress="GABCDEF123" />);
+
+      await waitFor(() => {
+        expect(screen.getAllByText("0.5%").length).toBeGreaterThan(0);
+      });
+    });
+
+    it("resets slippage tolerance to default on Reset click", async () => {
+      localStorage.setItem("vault_slippage_CVAULT", JSON.stringify({ slippage: 4.5 }));
+      render(<ZapDepositPanel walletAddress="GABCDEF123" />);
+
+      await waitFor(() => {
+        expect(screen.getAllByText("4.5%").length).toBeGreaterThan(0);
+      });
+
+      openSlippageEditor();
+      const resetBtn = screen.getByText("Reset");
+      fireEvent.click(resetBtn);
+
+      await waitFor(() => {
+        expect(screen.getAllByText("0.5%").length).toBeGreaterThan(0);
+      });
+      expect(localStorage.getItem("vault_slippage_CVAULT")).toBeNull();
+    });
+  });
 });

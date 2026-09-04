@@ -1,7 +1,5 @@
 // Shared types and data models for the Adaptive Notification Digest feature
 
-// ─── String literal union types ───────────────────────────────────────────────
-
 export type EventType = "alert" | "recommendation" | "watchlist";
 
 export type ScheduleMode = "daily" | "weekly" | "event_threshold";
@@ -13,8 +11,6 @@ export type WatchlistDigestTrigger =
   | "freshness_change"
   | "alert_triggered";
 
-// ─── Notification Event types ─────────────────────────────────────────────────
-
 export interface AlertEvent {
   eventId: string;
   eventType: "alert";
@@ -23,8 +19,8 @@ export interface AlertEvent {
   condition: string;
   thresholdValue: number;
   currentValue: number;
-  triggeredAt: string; // ISO 8601
-  recordedAt: string; // ISO 8601
+  triggeredAt: string;
+  recordedAt: string;
 }
 
 export interface RecommendationEvent {
@@ -35,8 +31,8 @@ export interface RecommendationEvent {
   destinationStrategyId: string;
   previousDecision: Decision;
   newDecision: Decision;
-  recordedAt: string; // ISO 8601
-  triggeredAt: string; // ISO 8601
+  recordedAt: string;
+  triggeredAt: string;
 }
 
 export interface WatchlistEvent {
@@ -49,8 +45,8 @@ export interface WatchlistEvent {
   conditionDescription: string;
   previousValue?: number | null;
   currentValue?: number | null;
-  triggeredAt: string; // ISO 8601
-  recordedAt: string; // ISO 8601
+  triggeredAt: string;
+  recordedAt: string;
 }
 
 export type DriftSeverity = "low" | "medium" | "high" | "critical";
@@ -75,11 +71,9 @@ export type NotificationEvent =
   | RecommendationEvent
   | WatchlistEvent;
 
-// ─── Cluster types ────────────────────────────────────────────────────────────
-
 export interface Cluster {
   eventType: EventType;
-  clusterKey: string; // "{eventType}:{vaultId}" or "{eventType}:{sourceStrategyId}:{destinationStrategyId}"
+  clusterKey: string;
   vaultId?: string;
   events: NotificationEvent[];
 }
@@ -91,19 +85,17 @@ export interface RankedCluster extends Cluster {
 
 // ─── Digest Payload types ─────────────────────────────────────────────────────
 
-
 export interface DriftDigestItem {
-    portfolioId: string;
-      assetId: string;
-        severity: DriftSeverity;
-          driftCause: DriftCause;
-            occurrenceCount: number;
-              latestTriggeredAt: string;   // preserved max triggeredAt in the group
-                latestMessage: string;
-                  alertIds: string[];
-                  }
-                  
+  portfolioId: string;
+  assetId: string;
+  severity: DriftSeverity;
+  driftCause: DriftCause;
+  occurrenceCount: number;
+  latestTriggeredAt: string; // preserved max triggeredAt in the group
+  latestMessage: string;
+  alertIds: string[];
 }
+
 export interface RankedClusterEntry {
   eventType: EventType;
   vaultId?: string;
@@ -114,21 +106,20 @@ export interface RankedClusterEntry {
 
 export interface DigestPayload {
   walletAddress: string;
-  generatedAt: string; // ISO 8601
+  generatedAt: string;
   scheduleMode: ScheduleMode;
   clusters: RankedClusterEntry[];
+  checksum?: string; // sha256 hex of stable representation of payload
 }
-
-// ─── Schedule Config ──────────────────────────────────────────────────────────
 
 export interface ScheduleConfig {
   walletAddress: string;
   mode: ScheduleMode;
-  timezone?: string; // IANA timezone name (e.g. America/New_York), defaults to UTC
-  deliveryTime?: string; // HH:MM, for daily/weekly
-  dayOfWeek?: number; // 0–6, for weekly
-  eventThreshold?: number; // 1–100, for event_threshold
-  updatedAt: string; // ISO 8601
+  timezone?: string;
+  deliveryTime?: string;
+  dayOfWeek?: number;
+  eventThreshold?: number;
+  updatedAt: string;
 }
 
 export interface WatchlistDigestPreference {
@@ -141,7 +132,16 @@ export interface WatchlistDigestPreference {
   maxFreshnessHours: number;
 }
 
-// ─── Result types ─────────────────────────────────────────────────────────────
+export type DeliveryFailureStatus = "temporary" | "retry_exhausted" | "terminal";
+
+export interface DeliveryRetryMetadata {
+  retryCount: number;
+  maxRetries: number;
+  nextRetryAt: string | null;
+  backoffMs: number;
+  status: DeliveryFailureStatus;
+  message: string;
+}
 
 export type IngestResult =
   | { ok: true; eventId: string }
@@ -153,4 +153,4 @@ export type ConfigureResult =
 
 export type DeliveryResult =
   | { ok: true }
-  | { ok: false; error: "MISSING_EMAIL" };
+  | { ok: false; error: "MISSING_EMAIL" | "DELIVERY_FAILED"; retry: DeliveryRetryMetadata };

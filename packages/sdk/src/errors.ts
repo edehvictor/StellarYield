@@ -163,6 +163,83 @@ export class ApiTimeoutError extends SorobanSdkError {
   }
 }
 
+/**
+ * Caller-initiated cancellation via AbortSignal (route change, input edit, unmount).
+ * Distinct from {@link ApiTimeoutError}; not retryable.
+ */
+export class ApiCancelledError extends SorobanSdkError {
+  public readonly path: string;
+  public readonly cancelled = true as const;
+
+  constructor(path: string, reason?: string) {
+    super(
+      reason
+        ? `API request to '${path}' was cancelled: ${reason}`
+        : `API request to '${path}' was cancelled`,
+      undefined,
+      false
+    );
+    this.path = path;
+  }
+}
+
+export class ProviderConnectionError extends SorobanSdkError {
+  constructor(public readonly providerName: string, reason?: string) {
+    super(
+      reason
+        ? `Failed to connect to '${providerName}': ${reason}`
+        : `Failed to connect to '${providerName}'`,
+      "sign",
+      false
+    );
+    this.providerName = providerName;
+  }
+}
+
+export class ProviderMethodError extends SorobanSdkError {
+  constructor(
+    public readonly providerName: string,
+    public readonly method: string,
+    reason?: string
+  ) {
+    super(
+      reason
+        ? `Provider '${providerName}' does not support method '${method}': ${reason}`
+        : `Provider '${providerName}' does not support method '${method}'`,
+      "sign",
+      false
+    );
+    this.providerName = providerName;
+    this.method = method;
+  }
+}
+
+export class ProviderPermissionError extends SorobanSdkError {
+  constructor(public readonly providerName: string, reason?: string) {
+    super(
+      reason
+        ? `Permission denied by '${providerName}': ${reason}`
+        : `Permission denied by '${providerName}'`,
+      "sign",
+      true
+    );
+    this.providerName = providerName;
+  }
+}
+
+/** True when an error represents intentional request cancellation (not a timeout). */
+export function isApiCancellation(error: unknown): boolean {
+  if (error instanceof ApiCancelledError) return true;
+  if (
+    typeof error === "object" &&
+    error !== null &&
+    (error as { cancelled?: boolean }).cancelled === true
+  ) {
+    return true;
+  }
+  return false;
+}
+
 /** Underlying network failure (DNS, connection reset, offline, etc.). */
 export class ApiNetworkError extends SorobanSdkError {
   public readonly path: string;

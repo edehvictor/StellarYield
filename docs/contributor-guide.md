@@ -504,6 +504,7 @@ repository's default branch.
 Use the [PR template](../.github/pull_request_template.md) and make sure to:
 
 - Fill in every section (Description, Type of Change, Verification Commands).
+- Reference the relevant [Issue Canvas](./issue-canvases.md) or template if the work originates from a scoped canvas.
 - Check off `npm run lint` / `npm run test` (frontend/backend) or
   `cargo fmt` / `cargo clippy` / `cargo test` (contracts) as appropriate.
 - Add UI snapshots (Desktop 1024px+ and Mobile 375px) if the PR touches

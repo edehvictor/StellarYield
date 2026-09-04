@@ -8,6 +8,7 @@ import {
 } from "../services";
 import { strategyStateTransitionAuditService } from "../services/strategyStateTransitionAuditService";
 import { getSourceHealthRegistry } from "../services/yieldSourceRegistryService";
+import { getRegistryLoadState } from "../services/contractRegistry";
 import {
   generateRecommendationStabilityReport,
   type RecommendationOutput,
@@ -173,6 +174,17 @@ router.get("/compatibility", async (req, res) => {
     const report = await protocolCompatibilityEngine.runCompatibilityCheck();
     const formattedReport = formatCompatibilityReport(report);
 
+    // Surface registry load warnings to the client so the UI can display
+    // targeted messages when contract metadata is incomplete or missing.
+    const loadState = getRegistryLoadState();
+    if (loadState.status !== 'ok') {
+      (formattedReport as any).registryWarnings = [{
+        code: loadState.status === 'fallback' ? 'fallback_used' : 'empty_registry',
+        message: loadState.reason ?? 'Registry metadata is unavailable',
+      }];
+    }
+
+    res.json(successEnvelope(formattedReport, 'analytics/compatibility'));
     res.json(successEnvelope(formattedReport, "analytics/compatibility"));
   } catch (error) {
     console.error("Compatibility check failed:", error);

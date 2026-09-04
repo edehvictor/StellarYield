@@ -16,6 +16,26 @@ import type {
 const RPC_URL = process.env.RPC_URL || "https://soroban-testnet.stellar.org";
 
 export type IndexerHealthStatus = "healthy" | "degraded" | "unavailable";
+export type IndexerBootStatus = "ready" | "degraded" | "unavailable";
+
+export interface IndexerReplayError {
+  ledger: number | null;
+  message: string;
+  at: string; // ISO timestamp
+}
+
+export interface IndexerBootStatusSnapshot {
+  status: IndexerBootStatus;
+  component: "indexer";
+  ready: boolean;
+  reason?: string;
+  checkedAt: string;
+  details?: {
+    syncedLedger?: number;
+    lagLedgers?: number;
+    recentErrorCount?: number;
+  };
+}
 
 export interface IndexerReplayError {
   ledger: number | null;
@@ -218,4 +238,47 @@ export async function getIndexerStatusSnapshot(): Promise<IndexerStatus> {
     lastIndexedAt: null, // not persisted by the current indexer schema
     recentErrors: getRecentReplayErrors(),
   });
+}
+
+/**
+ * Get indexer boot status for startup diagnostics.
+ * Returns a snapshot of whether the indexer is ready to serve queries.
+ */
+export async function getIndexerBootStatus(): Promise<IndexerBootStatusSnapshot> {
+  const checkedAt = new Date().toISOString();
+  try {
+    const status = await getIndexerStatusSnapshot();
+
+    let bootStatus: IndexerBootStatus = "ready";
+    let reason: string | undefined;
+
+    if (status.status === "unavailable") {
+      bootStatus = "unavailable";
+      reason = status.reason ?? undefined;
+    } else if (status.status === "degraded") {
+      bootStatus = "degraded";
+      reason = status.reason ?? undefined;
+    }
+
+    return {
+      status: bootStatus,
+      component: "indexer",
+      ready: bootStatus === "ready",
+      reason,
+      checkedAt,
+      details: {
+        syncedLedger: status.indexedLedger ?? undefined,
+        lagLedgers: status.lagLedgers ?? undefined,
+        recentErrorCount: status.recentErrors.length,
+      },
+    };
+  } catch (error) {
+    return {
+      status: "unavailable",
+      component: "indexer",
+      ready: false,
+      reason: error instanceof Error ? error.message : "Unknown error",
+      checkedAt,
+    };
+  }
 }

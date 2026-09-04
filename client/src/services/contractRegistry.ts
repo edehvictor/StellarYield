@@ -9,6 +9,13 @@
  *   1. VITE_* environment variables
  *   2. contracts/registry.json for the active network
  *   3. Empty string (caller must handle missing IDs)
+ *
+ * Cache invalidation:
+ * The registry maintains an in-memory cache with TTL and version tracking.
+ * Cache is invalidated when:
+ *   1. TTL expires
+ *   2. Registry manifest changes (contract IDs differ)
+ *   3. Manual refresh is requested
  */
 
 import * as StellarSdk from "@stellar/stellar-sdk";
@@ -30,6 +37,20 @@ export type NetworkName = "testnet" | "mainnet" | "local";
 type Registry = Record<NetworkName, Record<ContractName, string>>;
 
 const registry = registryJson as Registry;
+
+export const REGISTRY_CACHE_TTL_MS = 5 * 60 * 1000;
+
+interface RegistryCacheEntry {
+  contractIds: Record<ContractName, string>;
+  version: number;
+  generatedAt: number;
+  network: NetworkName;
+  knownContractIds: Map<ContractName, string>;
+}
+
+let registryCache: RegistryCacheEntry | null = null;
+let cacheVersionCounter = 0;
+let lastInvalidatedAt = Date.now();
 
 export function detectNetwork(): NetworkName {
   const passphrase =
@@ -55,6 +76,96 @@ const ENV_OVERRIDES: Partial<Record<ContractName, string | undefined>> = {
   vesting: import.meta.env.VITE_VESTING_CONTRACT_ID,
 };
 
+function isCacheValid(entry: RegistryCacheEntry, network: NetworkName): boolean {
+  const age = Date.now() - entry.generatedAt;
+  if (age > REGISTRY_CACHE_TTL_MS) {
+    return false;
+  }
+
+  if (entry.network !== network) {
+    return false;
+  }
+
+  const contractNames: ContractName[] = [
+    "vault", "zap", "token", "governance", "strategy",
+    "emissionController", "liquidStaking", "stableswap", "vesting",
+  ];
+
+  for (const name of contractNames) {
+    const envOverride = ENV_OVERRIDES[name];
+    const currentId = envOverride || registry[network]?.[name] || "";
+    const cachedId = entry.knownContractIds.get(name);
+
+    if (cachedId !== currentId) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+function buildCacheEntry(network: NetworkName): RegistryCacheEntry {
+  const contractNames: ContractName[] = [
+    "vault", "zap", "token", "governance", "strategy",
+    "emissionController", "liquidStaking", "stableswap", "vesting",
+  ];
+
+  const contractIds: Record<ContractName, string> = {} as Record<ContractName, string>;
+  const knownContractIds = new Map<ContractName, string>();
+
+  for (const name of contractNames) {
+    const envOverride = ENV_OVERRIDES[name];
+    const id = envOverride || registry[network]?.[name] || "";
+    contractIds[name] = id;
+    knownContractIds.set(name, id);
+  }
+
+  cacheVersionCounter += 1;
+  lastInvalidatedAt = Date.now();
+
+  return {
+    contractIds,
+    version: cacheVersionCounter,
+    generatedAt: Date.now(),
+    network,
+    knownContractIds,
+  };
+}
+
+export function invalidateContractRegistryCache(): void {
+  registryCache = null;
+  cacheVersionCounter += 1;
+  lastInvalidatedAt = Date.now();
+}
+
+export function refreshContractRegistryCache(network?: NetworkName): void {
+  const net = network ?? detectNetwork();
+  registryCache = buildCacheEntry(net);
+}
+
+export function getContractRegistryCacheInfo(): {
+  cacheAge: number;
+  cacheVersion: number;
+  lastInvalidatedAt: string;
+  isCached: boolean;
+} {
+  if (!registryCache) {
+    return {
+      cacheAge: -1,
+      cacheVersion: cacheVersionCounter,
+      lastInvalidatedAt: new Date(lastInvalidatedAt).toISOString(),
+      isCached: false,
+    };
+  }
+
+  return {
+    cacheAge: Date.now() - registryCache.generatedAt,
+    cacheVersion: registryCache.version,
+    lastInvalidatedAt: new Date(lastInvalidatedAt).toISOString(),
+    isCached: true,
+  };
+}
+
 export function getContractId(
   name: ContractName,
   network?: NetworkName,
@@ -63,18 +174,24 @@ export function getContractId(
   if (envOverride) return envOverride;
 
   const net = network ?? detectNetwork();
-  return registry[net]?.[name] ?? "";
+
+  if (registryCache && isCacheValid(registryCache, net)) {
+    return registryCache.contractIds[name] ?? "";
+  }
+
+  registryCache = buildCacheEntry(net);
+  return registryCache.contractIds[name] ?? "";
 }
 
 export function getAllContractIds(network?: NetworkName): Record<ContractName, string> {
   const net = network ?? detectNetwork();
-  const names: ContractName[] = [
-    "vault", "zap", "token", "governance", "strategy",
-    "emissionController", "liquidStaking", "stableswap", "vesting",
-  ];
-  return Object.fromEntries(
-    names.map((n) => [n, getContractId(n, net)]),
-  ) as Record<ContractName, string>;
+
+  if (registryCache && isCacheValid(registryCache, net)) {
+    return { ...registryCache.contractIds };
+  }
+
+  registryCache = buildCacheEntry(net);
+  return { ...registryCache.contractIds };
 }
 
 export function validateContractRegistryEntry(

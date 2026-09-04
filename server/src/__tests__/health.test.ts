@@ -24,14 +24,18 @@ jest.mock("ioredis", () => ({
 }));
 
 jest.mock("@prisma/client", () => {
-  return {
-    PrismaClient: jest.fn().mockImplementation(() => ({
-      $queryRaw: jest.fn().mockResolvedValue([{}]),
-      indexerState: {
-        findFirst: jest.fn().mockResolvedValue({ lastLedger: 100 }),
-      },
-    })),
+  const instance = {
+    $queryRaw: jest.fn().mockResolvedValue([{}]),
+    indexerState: {
+      findFirst: jest.fn().mockResolvedValue({ lastLedger: 100 }),
+    },
+    rebalanceQueueEntry: {
+      findMany: jest.fn().mockResolvedValue([]),
+    },
   };
+  const MockPrismaClient = jest.fn(() => instance);
+  (MockPrismaClient as unknown as { __mockInstance: typeof instance }).__mockInstance = instance;
+  return { PrismaClient: MockPrismaClient };
 });
 
 const mockCall = jest.fn();
@@ -180,6 +184,83 @@ describe("GET /api/health/queues", () => {
     expect(names).toContain("liquidation");
     expect(names).toContain("compound");
     expect(names).toContain("rebalance-execution");
+  });
+
+  // ── Rebalance queue backlog health (#1076) ──────────────────────────────
+
+  describe("rebalanceQueue field", () => {
+    function getMockPrisma() {
+      const { PrismaClient } = jest.requireMock<{
+        PrismaClient: { __mockInstance: { rebalanceQueueEntry: { findMany: jest.Mock } } };
+      }>("@prisma/client");
+      return PrismaClient.__mockInstance;
+    }
+
+    beforeEach(() => {
+      mockGetJobCounts.mockResolvedValue({ waiting: 0, active: 0, completed: 0, failed: 0, delayed: 0 });
+    });
+
+    it("includes a rebalanceQueue summary on the response", async () => {
+      getMockPrisma().rebalanceQueueEntry.findMany.mockResolvedValue([]);
+
+      const res = await request(app).get("/api/health/queues");
+
+      expect(res.body.rebalanceQueue).toBeDefined();
+      expect(res.body.rebalanceQueue).toEqual(
+        expect.objectContaining({
+          active: 0,
+          waiting: 0,
+          delayed: 0,
+          retrying: 0,
+          failed: 0,
+          deadLettered: 0,
+          total: 0,
+        }),
+      );
+    });
+
+    it("reflects real classification from the rebalance queue entries", async () => {
+      getMockPrisma().rebalanceQueueEntry.findMany.mockResolvedValue([
+        { status: "PENDING", executionType: "FULL", attemptCount: 0, maxRetries: 3, nextRetryAt: null, deferredUntil: null },
+        { status: "PROCESSING", executionType: "FULL", attemptCount: 0, maxRetries: 3, nextRetryAt: null, deferredUntil: null },
+        { status: "FAILED", executionType: "FULL", attemptCount: 3, maxRetries: 3, nextRetryAt: null, deferredUntil: null },
+      ]);
+
+      const res = await request(app).get("/api/health/queues");
+
+      expect(res.body.rebalanceQueue.waiting).toBe(1);
+      expect(res.body.rebalanceQueue.active).toBe(1);
+      expect(res.body.rebalanceQueue.deadLettered).toBe(1);
+      expect(res.body.rebalanceQueue.total).toBe(3);
+    });
+
+    it("degrades overallStatus to warning when dead-lettered jobs exceed the threshold", async () => {
+      const overloaded = Array.from({ length: 10 }, () => ({
+        status: "FAILED",
+        executionType: "FULL",
+        attemptCount: 3,
+        maxRetries: 3,
+        nextRetryAt: null,
+        deferredUntil: null,
+      }));
+      getMockPrisma().rebalanceQueueEntry.findMany.mockResolvedValue(overloaded);
+
+      const res = await request(app).get("/api/health/queues");
+
+      expect(res.body.overallStatus).toBe("warning");
+      expect(res.body.rebalanceQueue.deadLettered).toBe(10);
+    });
+
+    it("falls back to a zeroed summary instead of failing the route when the query throws", async () => {
+      getMockPrisma().rebalanceQueueEntry.findMany.mockRejectedValue(new Error("DB unavailable"));
+
+      const res = await request(app).get("/api/health/queues");
+
+      expect(res.status).toBe(200);
+      expect(res.body.rebalanceQueue).toEqual(
+        expect.objectContaining({ active: 0, waiting: 0, total: 0 }),
+      );
+    });
   });
 });
 

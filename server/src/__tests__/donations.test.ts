@@ -1,6 +1,10 @@
 import request from "supertest";
 import { createApp } from "../app";
-import { _resetDonationsStore } from "../routes/donations";
+import {
+    _resetDonationsStore,
+    DONATION_VALIDATION_MESSAGES,
+    MIN_DONATION_AMOUNT,
+} from "../routes/donations";
 
 beforeEach(() => {
     _resetDonationsStore();
@@ -87,6 +91,158 @@ describe("POST /api/donations/set", () => {
             bps: 500,
         });
         expect(res.status).toBe(400);
+    });
+});
+
+describe("POST /api/donations/preview", () => {
+    const setupDonor = async (app: ReturnType<typeof createApp>, bps: number) => {
+        await request(app).post("/api/donations/set").send({
+            address: "GDONORPREVIEW",
+            bps,
+            charityAddress: "GDCHARITY000000000000000000000000001",
+        });
+    };
+
+    it("previews a valid donation amount", async () => {
+        const app = createApp();
+        await setupDonor(app, 1000); // 10 %
+
+        const res = await request(app).post("/api/donations/preview").send({
+            address: "GDONORPREVIEW",
+            yieldAmount: 100_000_000,
+        });
+        expect(res.status).toBe(200);
+        expect(res.body.donationAmount).toBe(10_000_000);
+        expect(res.body.bps).toBe(1000);
+        expect(res.body.charityAddress).toBe(
+            "GDCHARITY000000000000000000000000001",
+        );
+    });
+
+    it("accepts the minimum boundary donation", async () => {
+        const app = createApp();
+        await setupDonor(app, 10_000); // 100 %
+
+        const res = await request(app).post("/api/donations/preview").send({
+            address: "GDONORPREVIEW",
+            yieldAmount: MIN_DONATION_AMOUNT,
+        });
+        expect(res.status).toBe(200);
+        expect(res.body.donationAmount).toBe(MIN_DONATION_AMOUNT);
+    });
+
+    it("rejects zero yieldAmount", async () => {
+        const app = createApp();
+        await setupDonor(app, 1000);
+
+        const res = await request(app).post("/api/donations/preview").send({
+            address: "GDONORPREVIEW",
+            yieldAmount: 0,
+        });
+        expect(res.status).toBe(400);
+        expect(res.body.error).toBe(
+            DONATION_VALIDATION_MESSAGES.yieldAmountInvalid,
+        );
+    });
+
+    it("rejects negative yieldAmount", async () => {
+        const app = createApp();
+        await setupDonor(app, 1000);
+
+        const res = await request(app).post("/api/donations/preview").send({
+            address: "GDONORPREVIEW",
+            yieldAmount: -50,
+        });
+        expect(res.status).toBe(400);
+        expect(res.body.error).toBe(
+            DONATION_VALIDATION_MESSAGES.yieldAmountInvalid,
+        );
+    });
+
+    it("rejects non-numeric yieldAmount", async () => {
+        const app = createApp();
+        await setupDonor(app, 1000);
+
+        const res = await request(app).post("/api/donations/preview").send({
+            address: "GDONORPREVIEW",
+            yieldAmount: "lots",
+        });
+        expect(res.status).toBe(400);
+        expect(res.body.error).toBe(
+            DONATION_VALIDATION_MESSAGES.yieldAmountInvalid,
+        );
+    });
+
+    it("rejects previews for wallets without a donation config", async () => {
+        const app = createApp();
+
+        const res = await request(app).post("/api/donations/preview").send({
+            address: "GDONORNEVERCONFIGURED",
+            yieldAmount: 100_000_000,
+        });
+        expect(res.status).toBe(400);
+        expect(res.body.error).toBe(
+            DONATION_VALIDATION_MESSAGES.noDonationConfigured,
+        );
+    });
+
+    it("rejects previews when the split is disabled (bps = 0)", async () => {
+        const app = createApp();
+        await setupDonor(app, 0);
+
+        const res = await request(app).post("/api/donations/preview").send({
+            address: "GDONORPREVIEW",
+            yieldAmount: 100_000_000,
+        });
+        expect(res.status).toBe(400);
+        expect(res.body.error).toBe(
+            DONATION_VALIDATION_MESSAGES.noDonationConfigured,
+        );
+    });
+
+    it("rejects a donation that rounds to zero (dust)", async () => {
+        const app = createApp();
+        await setupDonor(app, 1); // 0.01 %
+
+        const res = await request(app).post("/api/donations/preview").send({
+            address: "GDONORPREVIEW",
+            yieldAmount: 5_000,
+        });
+        expect(res.status).toBe(400);
+        expect(res.body.error).toBe(DONATION_VALIDATION_MESSAGES.zeroValue);
+    });
+
+    it("rejects a donation below the minimum dust threshold", async () => {
+        const app = createApp();
+        await setupDonor(app, 1000); // 10 %
+
+        const res = await request(app).post("/api/donations/preview").send({
+            address: "GDONORPREVIEW",
+            yieldAmount: 1_000_000, // 10 % = 100_000 stroops < minimum
+        });
+        expect(res.status).toBe(400);
+        expect(res.body.error).toBe(DONATION_VALIDATION_MESSAGES.dustValue);
+    });
+
+    it("rejects missing address", async () => {
+        const app = createApp();
+        const res = await request(app).post("/api/donations/preview").send({
+            yieldAmount: 100_000_000,
+        });
+        expect(res.status).toBe(400);
+    });
+
+    it("preview never mutates the donations store", async () => {
+        const app = createApp();
+        await setupDonor(app, 1000);
+
+        await request(app).post("/api/donations/preview").send({
+            address: "GDONORPREVIEW",
+            yieldAmount: 100_000_000,
+        });
+
+        const total = await request(app).get("/api/donations/total");
+        expect(total.body.totalDonated).toBe(0);
     });
 });
 

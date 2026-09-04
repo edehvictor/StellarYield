@@ -16,7 +16,8 @@ import PresetsPanel from "../../features/presets/PresetsPanel";
 import UnifiedActivityTimeline from "./UnifiedActivityTimeline";
 import PortfolioExport from "./PortfolioExport";
 import RiskScoreBreakdownPanel from "./RiskScoreBreakdownPanel";
-import { useDailyMovement } from "../../hooks/useDailyMovement";
+import FreshnessBadge from "./FreshnessBadge";
+import { computeHoldingFreshness } from "./holdingFreshness";
 import {
   analyzeConcentration,
   buildExposureBuckets,
@@ -32,6 +33,8 @@ interface VaultPosition {
   currentValue: number;
   apy: number;
   shares: number;
+  /** ISO-8601 timestamp of when this position's source data was last fetched (#1107). */
+  fetchedAt?: string | null;
 }
 
 interface Transaction {
@@ -53,6 +56,7 @@ const MOCK_POSITIONS: VaultPosition[] = [
     currentValue: 5162.5,
     apy: 6.5,
     shares: 5000,
+    fetchedAt: new Date(Date.now() - 60_000).toISOString(), // fresh (1 min ago)
   },
   {
     protocol: "Soroswap",
@@ -61,6 +65,7 @@ const MOCK_POSITIONS: VaultPosition[] = [
     currentValue: 2122,
     apy: 12.2,
     shares: 1850,
+    fetchedAt: new Date(Date.now() - 60 * 60 * 1000).toISOString(), // stale (1 hour ago)
   },
   {
     protocol: "DeFindex",
@@ -69,6 +74,7 @@ const MOCK_POSITIONS: VaultPosition[] = [
     currentValue: 3133.5,
     apy: 8.9,
     shares: 2900,
+    fetchedAt: null, // unknown — source has never reported a fetch timestamp
   },
 ];
 
@@ -351,11 +357,13 @@ export default function PortfolioDashboard({
                 <th className="pb-3 text-right font-semibold">Current Value</th>
                 <th className="pb-3 text-right font-semibold">APY</th>
                 <th className="pb-3 text-right font-semibold">P&L</th>
+                <th className="pb-3 text-right font-semibold">Source</th>
               </tr>
             </thead>
             <tbody>
               {positions.map((pos, i) => {
                 const pnl = pos.currentValue - pos.deposited;
+                const freshness = computeHoldingFreshness(pos.fetchedAt);
                 return (
                   <tr
                     key={i}
@@ -377,6 +385,9 @@ export default function PortfolioDashboard({
                     >
                       {pnl >= 0 ? "+" : ""}
                       {formatCurrency(pnl)}
+                    </td>
+                    <td className="py-4 text-right">
+                      <FreshnessBadge status={freshness.status} ageSeconds={freshness.ageSeconds} />
                     </td>
                   </tr>
                 );
