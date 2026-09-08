@@ -8,6 +8,7 @@ import type {
   ScheduleMode,
   WatchlistEvent,
 } from './types';
+import { computeObjectChecksum } from '../../utils/checksum';
 
 /**
  * Produces a human-readable summary string for a single notification event.
@@ -98,5 +99,6 @@ export function formatDigest(
     generatedAt: new Date().toISOString(),
     scheduleMode,
     clusters,
+    checksum: computeObjectChecksum({ walletAddress, scheduleMode, clusters }),
   };
 }

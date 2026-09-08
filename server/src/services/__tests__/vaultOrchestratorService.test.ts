@@ -350,4 +350,39 @@ describe("VaultOrchestrator", () => {
       });
     });
   });
+
+  describe("liquidity buffer recommendations and route risk guidance", () => {
+    it("should surface liquidity buffer recommendations in orchestration output before execution", () => {
+      const result = orchestrator.orchestrate();
+
+      expect(result.liquidityBufferGuidance).toBeDefined();
+      expect(result.liquidityBufferGuidance?.overallBufferPct).toBeGreaterThan(0);
+      expect(result.liquidityBufferGuidance?.recommendations.length).toBe(3);
+
+      result.allocationDecisions.forEach((decision) => {
+        expect(decision.liquidityBuffer).toBeDefined();
+        expect(decision.liquidityBuffer?.recommendedBufferPct).toBeGreaterThan(0);
+        expect(decision.liquidityBuffer?.safeExecutionSizeUsd).toBeGreaterThanOrEqual(0);
+        expect(decision.liquidityBuffer?.rationale.length).toBeGreaterThan(0);
+      });
+    });
+
+    it("should increase buffer guidance for strategies with higher route risk and thin liquidity", () => {
+      orchestrator.updateStrategy("strat_3", {
+        liquidityDepthUsd: 150_000,
+        tvlUsd: 1_000_000,
+        routeRisk: "high",
+      });
+
+      const result = orchestrator.orchestrate();
+      const strat3Decision = result.allocationDecisions.find(
+        (d) => d.strategyId === "strat_3"
+      );
+
+      expect(strat3Decision?.liquidityBuffer?.liquidityBand).toBe("thin");
+      expect(strat3Decision?.liquidityBuffer?.routeRiskLevel).toBe("high");
+      expect(strat3Decision?.liquidityBuffer?.recommendedBufferPct).toBeGreaterThan(0.2);
+    });
+  });
 });
+

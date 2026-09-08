@@ -1,11 +1,11 @@
 import { PROTOCOLS } from "../config/protocols";
-import { 
-  rankStrategies, 
+import {
+  rankStrategies,
   type StrategyInput
 } from "./riskAdjustedYieldService";
 import { yieldReliabilityEngine } from "./yieldReliabilityService";
-import { 
-  computeConfidenceScore, 
+import {
+  computeConfidenceScore,
   computeFreshnessScore,
   computeProviderAgreement,
   computeLiquidityScore,
@@ -14,10 +14,55 @@ import {
 } from "./confidenceService";
 import { PortfolioService, type VaultPosition } from "./portfolioService";
 
+export const DEFAULT_EXPORT_RESPONSE_SIZE_LIMIT_BYTES = 1_000_000;
+
+export class ExportSizeLimitExceededError extends Error {
+  constructor(
+    public readonly actualBytes: number,
+    public readonly limitBytes: number,
+  ) {
+    super(
+      `Export response is ${actualBytes} bytes and exceeds the ${limitBytes} byte response-size limit.`,
+    );
+    this.name = "ExportSizeLimitExceededError";
+  }
+}
+
+function getExportPayloadSizeBytes(payload: string): number {
+  return typeof TextEncoder !== "undefined"
+    ? new TextEncoder().encode(payload).byteLength
+    : payload.length;
+}
+
+function resolveExportSizeLimit(filters: Record<string, any>): number {
+  const rawLimit = filters.maxResponseBytes ?? filters.responseSizeLimitBytes;
+  if (rawLimit === undefined || rawLimit === null || rawLimit === "") {
+    return DEFAULT_EXPORT_RESPONSE_SIZE_LIMIT_BYTES;
+  }
+
+  const limit = Number(rawLimit);
+  if (!Number.isFinite(limit) || limit <= 0) {
+    throw new Error("Export response-size limit must be a positive number of bytes.");
+  }
+
+  return Math.floor(limit);
+}
+
+export function assertWithinExportSizeLimit(
+  payload: string,
+  limitBytes: number = DEFAULT_EXPORT_RESPONSE_SIZE_LIMIT_BYTES,
+): string {
+  const actualBytes = getExportPayloadSizeBytes(payload);
+  if (actualBytes > limitBytes) {
+    throw new ExportSizeLimitExceededError(actualBytes, limitBytes);
+  }
+  return payload;
+}
+
 export interface SnapshotBundle {
   version: string;
   generatedAt: string;
-  timestamp: string;  // alias for generatedAt (backward-compat)
+  timestamp: string;
   appVersion: string;
   opportunities: OpportunitySnapshot[];
   metadata: {
@@ -60,10 +105,6 @@ export interface OpportunitySnapshot {
 }
 
 export class ExportService {
-  /**
-   * Generates a full snapshot bundle of current opportunity data.
-   * Excludes secrets and internal-only metadata.
-   */
   async generateSnapshotBundle(filters: Record<string, any> = {}): Promise<SnapshotBundle> {
     const now = new Date();
     const isoNow = now.toISOString();
@@ -75,7 +116,7 @@ export class ExportService {
       apy: p.baseApyBps / 100,
       tvlUsd: p.baseTvlUsd,
       ilVolatilityPct: p.volatilityPct,
-      riskScore: 7, // Default or derived risk score
+      riskScore: 7,
       fetchedAt: isoNow,
     }));
 
@@ -90,13 +131,13 @@ export class ExportService {
 
     const snapshots: OpportunitySnapshot[] = ranked.map((s, index) => {
       const protocol = PROTOCOLS.find(p => p.protocolName.toLowerCase() === s.id)!;
-      const reliability = reliabilityScores[index] || { reliabilityScore: 0, status: 'unknown', metrics: { freshness: 0 } };
-      
+      const reliability = reliabilityScores[index] || { reliabilityScore: 0, status: "unknown", metrics: { freshness: 0 } };
+
       const confidenceFactors: ConfidenceFactors = {
-        freshness: computeFreshnessScore(0), // Assumed fresh for snapshot
-        providerAgreement: computeProviderAgreement([s.apy]), // Mock agreement
+        freshness: computeFreshnessScore(0),
+        providerAgreement: computeProviderAgreement([s.apy]),
         liquidityQuality: computeLiquidityScore(s.tvlUsd),
-        modelCompleteness: computeModelCompleteness(['apy', 'tvl', 'risk'], ['apy', 'tvl', 'risk']),
+        modelCompleteness: computeModelCompleteness(["apy", "tvl", "risk"], ["apy", "tvl", "risk"]),
       };
       const confidence = computeConfidenceScore(confidenceFactors);
 
@@ -156,6 +197,7 @@ export class ExportService {
     filters: Record<string, any>
   ): Promise<string> {
     const filtered = PortfolioService.filterPositionsByAssetClass(positions, filters);
+    const limitBytes = resolveExportSizeLimit(filters);
 
     const headers = ["Protocol", "Asset", "Deposited USD", "Current Value USD", "Asset Class"];
     const rows = filtered.map(pos => [
@@ -172,7 +214,8 @@ export class ExportService {
       return s;
     }).join(","));
 
-    return [headers.join(","), ...rows].join("\n");
+    const csv = [headers.join(","), ...rows].join("\n");
+    return assertWithinExportSizeLimit(csv, limitBytes);
   }
 }
 

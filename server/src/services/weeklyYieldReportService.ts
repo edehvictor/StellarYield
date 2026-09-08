@@ -4,6 +4,7 @@
  */
 
 import { PrismaClient } from "@prisma/client";
+import { computeChecksum, computeObjectChecksum } from "../utils/checksum";
 
 const prisma = new PrismaClient();
 
@@ -332,6 +333,38 @@ export function exportReportsToCSV(reports: WeeklyYieldReport[]): string {
   ].join("\n");
 
   return csv;
+}
+
+export interface ReportArtifact {
+  format: 'csv' | 'html' | string;
+  content: string;
+  checksum: string; // sha256 hex
+  generatedAt: string;
+}
+
+/**
+ * Generate an artifact for weekly reports including a stable checksum.
+ */
+export function generateWeeklyReportsArtifact(reports: WeeklyYieldReport[]): ReportArtifact {
+  const csv = exportReportsToCSV(reports);
+  const checksum = computeChecksum(csv);
+
+  return {
+    format: 'csv',
+    content: csv,
+    checksum,
+    generatedAt: new Date().toISOString(),
+  };
+}
+
+/**
+ * Verify the checksum of an artifact. Returns true when matching, false when missing/mismatched.
+ */
+export function verifyReportArtifactChecksum(artifact: Partial<ReportArtifact>): boolean {
+  if (!artifact || !artifact.content) return false;
+  if (!artifact.checksum) return false;
+  const actual = computeChecksum(artifact.content);
+  return actual === artifact.checksum;
 }
 
 /**

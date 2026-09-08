@@ -48,6 +48,30 @@ export interface SourceHealthSummary {
   trend: DataSourceReliability["trend"];
 }
 
+export interface YieldSourceRegistryEntry {
+  id: string;
+  name: string;
+  source: string;
+  aliases?: string[];
+  sourceLabels?: string[];
+  sourceLabel?: string;
+}
+
+export type RegistryConflictType = "providerId" | "alias" | "sourceLabel";
+
+export interface RegistryConflict {
+  type: RegistryConflictType;
+  identityKinds: RegistryConflictType[];
+  identity: string;
+  entries: Array<{ providerId: string; providerName: string }>;
+  message: string;
+}
+
+export interface RegistryConflictResult {
+  status: "valid" | "conflicted";
+  conflicts: RegistryConflict[];
+}
+
 /**
  * Extended registry response with bounded cache invalidation diagnostics.
  * Exposes cacheAge (seconds since last generation) and cacheVersion (monotonic
@@ -55,6 +79,8 @@ export interface SourceHealthSummary {
  */
 export interface SourceHealthRegistry {
   generatedAt: string;
+  conflictStatus: RegistryConflictResult["status"];
+  conflicts: RegistryConflict[];
   totalSources: number;
   counts: Record<SourceHealthStatus, number>;
   sources: SourceHealthSummary[];
@@ -124,7 +150,10 @@ export function classifySourceHealth(input: SourceHealthInput): {
   }
 
   // Stale — connectivity is fine but the data is too old.
-  if (input.ageSeconds > t.staleAgeSeconds || input.freshness < t.minFreshness) {
+  if (
+    input.ageSeconds > t.staleAgeSeconds ||
+    input.freshness < t.minFreshness
+  ) {
     const minutes = Math.round(input.ageSeconds / 60);
     return {
       status: "stale",
@@ -216,14 +245,85 @@ export function summarizeSourceHealth(
 }
 
 /** Registered yield data sources tracked by the health dashboard. */
-const REGISTERED_SOURCES: Array<{ id: string; name: string; source: string }> =
-  [
-    { id: "blend_api", name: "Blend Protocol", source: "api" },
-    { id: "soroswap_api", name: "Soroswap", source: "api" },
-    { id: "defindex_api", name: "DeFindex", source: "api" },
-    { id: "stellar_expert", name: "Stellar Expert", source: "oracle" },
-    { id: "coingecko", name: "CoinGecko", source: "oracle" },
-  ];
+export const REGISTERED_SOURCES: YieldSourceRegistryEntry[] = [
+  { id: "blend_api", name: "Blend Protocol", source: "api" },
+  { id: "soroswap_api", name: "Soroswap", source: "api" },
+  { id: "defindex_api", name: "DeFindex", source: "api" },
+  { id: "stellar_expert", name: "Stellar Expert", source: "oracle" },
+  { id: "coingecko", name: "CoinGecko", source: "oracle" },
+];
+
+function normalizeIdentity(identity: string): string {
+  const value = identity.trim().toLowerCase();
+  if (!value) return "";
+
+  try {
+    const url = new URL(value);
+    return `${url.host}${url.pathname.replace(/\/$/, "") || "/"}`;
+  } catch {
+    return value.replace(/\s+/g, " ");
+  }
+}
+
+/**
+ * Find identities shared by different registry entries. URL labels retain
+ * their path, so two feeds on one host remain distinct when their paths differ.
+ */
+export function detectRegistryConflicts(
+  entries: YieldSourceRegistryEntry[],
+): RegistryConflictResult {
+  const identities = new Map<string, Map<RegistryConflictType, Set<number>>>();
+
+  const addIdentity = (
+    type: RegistryConflictType,
+    value: string,
+    index: number,
+  ) => {
+    const normalized = normalizeIdentity(value);
+    if (!normalized) return;
+    const byType = identities.get(normalized) ?? new Map();
+    const indexes = byType.get(type) ?? new Set<number>();
+    indexes.add(index);
+    byType.set(type, indexes);
+    identities.set(normalized, byType);
+  };
+
+  entries.forEach((entry, index) => {
+    addIdentity("providerId", entry.id, index);
+    for (const alias of entry.aliases ?? []) addIdentity("alias", alias, index);
+    for (const label of [entry.sourceLabel, ...(entry.sourceLabels ?? [])]) {
+      if (label) addIdentity("sourceLabel", label, index);
+    }
+  });
+
+  const conflicts: RegistryConflict[] = [];
+  for (const [identity, byType] of identities) {
+    const indexes = new Set(
+      [...byType.values()].flatMap((value) => [...value]),
+    );
+    if (indexes.size < 2) continue;
+    const type =
+      (["providerId", "alias", "sourceLabel"] as RegistryConflictType[]).find(
+        (candidate) => (byType.get(candidate)?.size ?? 0) > 1,
+      ) ?? ([...byType.keys()][0] as RegistryConflictType);
+    const conflictEntries = [...indexes].map((index) => ({
+      providerId: entries[index]!.id,
+      providerName: entries[index]!.name,
+    }));
+    conflicts.push({
+      type,
+      identityKinds: [...byType.keys()],
+      identity,
+      entries: conflictEntries,
+      message: `${type} "${identity}" is shared by ${conflictEntries.map((entry) => entry.providerName).join(", ")}`,
+    });
+  }
+
+  return {
+    status: conflicts.length > 0 ? "conflicted" : "valid",
+    conflicts,
+  };
+}
 
 // ── Bounded cache invalidation (#981) ──────────────────────────────────────
 
@@ -238,7 +338,10 @@ interface RegistryCacheEntry {
   /** Snapshot of provider IDs at generation time, used to detect changes. */
   knownProviderIds: string[];
   /** Snapshot of provider statuses (status + failureReason), used to detect health changes. */
-  knownStatuses: Map<string, { status: SourceHealthStatus; failureReason: string | null }>;
+  knownStatuses: Map<
+    string,
+    { status: SourceHealthStatus; failureReason: string | null }
+  >;
   /** Snapshot of provider metadata (name + source), used to detect metadata changes. */
   knownMetadata: Map<string, { name: string; source: string }>;
 }
@@ -279,7 +382,10 @@ function isRegistryCacheValid(entry: RegistryCacheEntry): boolean {
     if (!cachedMeta) return false;
 
     // Metadata changed
-    if (cachedMeta.name !== source.name || cachedMeta.source !== source.source) {
+    if (
+      cachedMeta.name !== source.name ||
+      cachedMeta.source !== source.source
+    ) {
       return false;
     }
 
@@ -302,9 +408,18 @@ function isRegistryCacheValid(entry: RegistryCacheEntry): boolean {
  * `lastInvalidatedAt` diagnostic fields.
  */
 export async function getSourceHealthRegistry(): Promise<SourceHealthRegistry> {
+  const conflictResult = detectRegistryConflicts(REGISTERED_SOURCES);
   const cached = registryCache.get<RegistryCacheEntry>(CACHE_KEY);
 
-  if (cached && isRegistryCacheValid(cached)) {
+  if (conflictResult.status === "conflicted") {
+    registryCache.del(CACHE_KEY);
+  }
+
+  if (
+    conflictResult.status === "valid" &&
+    cached &&
+    isRegistryCacheValid(cached)
+  ) {
     // Check health changes: we still need to compare statuses from the engine
     const reliabilityScores =
       await yieldReliabilityEngine.getReliabilityScores(REGISTERED_SOURCES);
@@ -338,6 +453,24 @@ export async function getSourceHealthRegistry(): Promise<SourceHealthRegistry> {
     }
   }
 
+  if (conflictResult.status === "conflicted") {
+    const now = Date.now();
+    cacheVersionCounter += 1;
+    lastInvalidatedAt = new Date().toISOString();
+    const registry: SourceHealthRegistry = {
+      generatedAt: new Date(now).toISOString(),
+      conflictStatus: conflictResult.status,
+      conflicts: conflictResult.conflicts,
+      totalSources: 0,
+      counts: summarizeSourceHealth([]),
+      sources: [],
+      cacheAge: 0,
+      cacheVersion: cacheVersionCounter,
+      lastInvalidatedAt,
+    };
+    return registry;
+  }
+
   // Build fresh registry
   const reliabilityScores =
     await yieldReliabilityEngine.getReliabilityScores(REGISTERED_SOURCES);
@@ -369,6 +502,8 @@ export async function getSourceHealthRegistry(): Promise<SourceHealthRegistry> {
 
   const registry: SourceHealthRegistry = {
     generatedAt: new Date(now).toISOString(),
+    conflictStatus: conflictResult.status,
+    conflicts: conflictResult.conflicts,
     totalSources: sources.length,
     counts: summarizeSourceHealth(sources),
     sources,

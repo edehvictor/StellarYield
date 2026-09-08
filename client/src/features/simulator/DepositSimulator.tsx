@@ -72,10 +72,10 @@ export const DepositSimulator: React.FC<DepositSimulatorProps> = ({
 
   // Consistency checks: track latest requested amount to discard stale / out-of-order responses (#1180)
   const latestAmountRef = React.useRef(amount);
-  latestAmountRef.current = amount;
   const requestIdRef = React.useRef(0);
 
   useEffect(() => {
+    latestAmountRef.current = amount;
     const controller = new AbortController();
     const currentRequestId = ++requestIdRef.current;
     const targetAmount = amount;

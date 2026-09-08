@@ -33,17 +33,16 @@ export interface ExposureMap {
   totalValueUsd: number;
   /** Warning messages, kept as plain strings for existing consumers. */
   concentrationWarnings: string[];
-  /** Structured grading (shares, severities, thresholds) behind those messages. */
+  /** Structured grading behind those messages. */
   concentration: ConcentrationAnalysis;
 }
 
 export class PortfolioService {
+  public static readonly SUPPORTED_ASSET_CLASSES = ["stablecoin", "crypto"];
+
   /**
    * Aggregates positions by asset, protocol, and strategy, then grades the
    * asset and protocol buckets for concentration risk.
-   *
-   * @param thresholds Optional per-request overrides. Omitted fields fall back
-   * to the deployment's configured thresholds, then to the shared defaults.
    */
   public static async getExposureMap(
     positions: VaultPosition[],
@@ -56,15 +55,9 @@ export class PortfolioService {
 
     for (const pos of positions) {
       totalValueUsd += pos.currentValueUsd;
-
-      // Aggregate by asset
       byAsset[pos.asset] = (byAsset[pos.asset] || 0) + pos.currentValueUsd;
-
-      // Aggregate by protocol
       byProtocol[pos.protocol] = (byProtocol[pos.protocol] || 0) + pos.currentValueUsd;
 
-      // For strategy, we might need to map protocol to strategy type
-      // Simple mapping for now
       const strategy = this.getStrategyForProtocol(pos.protocol);
       byStrategy[strategy] = (byStrategy[strategy] || 0) + pos.currentValueUsd;
     }
@@ -84,10 +77,6 @@ export class PortfolioService {
     };
   }
 
-  /**
-   * Grades an already-aggregated exposure map without rebuilding it — used when
-   * thresholds change but the underlying positions have not.
-   */
   public static gradeConcentration(
     exposure: Pick<ExposureMap, "byAsset" | "byProtocol" | "totalValueUsd">,
     thresholds?: ConcentrationThresholdsInput,
@@ -95,20 +84,48 @@ export class PortfolioService {
     return analyzeConcentration(exposure, thresholds ?? readConcentrationThresholdOverrides());
   }
 
-  private static getStrategyForProtocol(protocol: string): string {
-    const mapping: Record<string, string> = {
-      Blend: "Lending",
-      Soroswap: "Liquidity Provision",
-      DeFindex: "Yield Aggregation",
-    };
-    return mapping[protocol] || "Other";
+  public static getAssetClass(asset: string): string {
+    const normalized = asset.toUpperCase();
+    if (normalized === "USDC") {
+      return "stablecoin";
+    }
+    return "crypto";
   }
 
-  /**
-   * Attaches source-freshness metadata to each holding (#1107), so
-   * consumers (portfolio views, exports) can render a consistent
-   * fresh/stale/unknown badge per row.
-   */
+  public static filterPositionsByAssetClass(
+    positions: VaultPosition[],
+    filters: Record<string, any>,
+  ): VaultPosition[] {
+    const assetClassParam = filters.assetClass ?? filters.assetClasses;
+
+    let classes: string[] = [];
+    if (typeof assetClassParam === "string") {
+      classes = assetClassParam.split(",").map((c) => c.trim().toLowerCase()).filter(Boolean);
+    } else if (Array.isArray(assetClassParam)) {
+      classes = assetClassParam.map((c) => String(c).trim().toLowerCase()).filter(Boolean);
+    }
+
+    if (classes.length === 0) {
+      throw new Error("Export filters cannot be empty. Please select at least one asset class.");
+    }
+
+    for (const c of classes) {
+      if (!this.SUPPORTED_ASSET_CLASSES.includes(c)) {
+        throw new Error(
+          `Unsupported asset class: "${c}". Supported classes are: ${this.SUPPORTED_ASSET_CLASSES.join(", ")}.`,
+        );
+      }
+    }
+
+    const filtered = positions.filter((pos) => classes.includes(this.getAssetClass(pos.asset)));
+
+    if (filtered.length === 0) {
+      throw new Error("No portfolio data matches the selected filters.");
+    }
+
+    return filtered;
+  }
+
   public static attachFreshness(
     positions: VaultPosition[],
     now: Date = new Date(),
@@ -119,11 +136,6 @@ export class PortfolioService {
     }));
   }
 
-  /**
-   * Renders holdings (with freshness already attached) as a CSV string,
-   * preserving the same freshness state shown in the UI (#1107) so an
-   * exported report never silently drops that context.
-   */
   public static holdingsToCsv(holdings: HoldingWithFreshness[]): string {
     const headers = [
       "Protocol",
@@ -194,6 +206,25 @@ export class PortfolioService {
 }
 
 /** Escape a CSV field: quote and double-up inner quotes if it contains a comma, quote, or newline. */
+function escapeCsvField(value: string): string {
+  if (/[",\n]/.test(value)) {
+    return `"${value.replace(/"/g, '""')}"`;
+  }
+  return value;
+}
+
+export type { ConcentrationAnalysis, ConcentrationWarning };
+
+  private static getStrategyForProtocol(protocol: string): string {
+    const mapping: Record<string, string> = {
+      Blend: "Lending",
+      Soroswap: "Liquidity Provision",
+      DeFindex: "Yield Aggregation",
+    };
+    return mapping[protocol] || "Other";
+  }
+}
+
 function escapeCsvField(value: string): string {
   if (/[",\n]/.test(value)) {
     return `"${value.replace(/"/g, '""')}"`;

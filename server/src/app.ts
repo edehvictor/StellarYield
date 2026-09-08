@@ -59,6 +59,7 @@ import googleSheetsRouter from "./routes/googleSheets";
 import fragmentationRouter from "./routes/fragmentation";
 import indexerRouter from "./routes/indexer";
 import auditReplayRouter from "./routes/auditReplay";
+import eventArchiveRoutes from "./routes/eventArchiveRoutes";
 import momentumRouter from "./routes/momentum";
 import queueRouter from "./routes/queue";
 import vaultActivityRouter from "./routes/vaultActivity";
@@ -179,6 +180,7 @@ export function createApp() {
   app.use("/api/liquidity", fragmentationRouter);
   app.use("/api/indexer", indexerRouter);
   app.use("/api/audit-replay", auditReplayRouter);
+  app.use("/api/audit-archive", eventArchiveRoutes);
   app.use("/api/momentum", momentumRouter);
   app.use("/api/queue", queueRouter);
   app.use("/api/vaults/activity", vaultActivityRouter);
