@@ -86,7 +86,6 @@ sharePriceHistoryRouter.get(
       !("sharePriceSnapshot" in prisma) ||
       !prisma.sharePriceSnapshot
     ) {
-    if (!prisma || !("sharePriceSnapshot" in prisma) || !prisma.sharePriceSnapshot) {
       const fixture = generateFixtureSnapshots(vaultId, days);
       res.json(fixture);
       return;

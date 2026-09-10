@@ -816,3 +816,157 @@ export function extractFailedNodes(result: TraversalResult): Array<{
       healthScore: step.health.score,
     }));
 }
+
+// ── Safe Fallback Registry Record ─────────────────────────────────────────
+
+/**
+ * Describes the source and status of a fallback registry record.
+ */
+export type FallbackRegistryRecordSource =
+  | "primary"
+  | "file_not_found"
+  | "malformed_json"
+  | "missing_networks"
+  | "empty_contracts"
+  | "partial_metadata";
+
+export interface FallbackRegistryMetadata {
+  /** How the registry was loaded. */
+  source: FallbackRegistryRecordSource;
+  /** Human-readable warning describing what went wrong. */
+  warning: string | null;
+  /** ISO timestamp when the record was created. */
+  createdAt: string;
+}
+
+export interface FallbackRegistryRecord {
+  /** Normalised registry data with all expected keys present. */
+  registry: Record<string, Record<string, string>>;
+  /** Metadata about how this record was produced. */
+  metadata: FallbackRegistryMetadata;
+}
+
+/** Known network names (mirrors ContractName / NetworkName used elsewhere). */
+const NETWORKS = ["testnet", "mainnet", "local"] as const;
+const CONTRACT_KEYS = [
+  "vault", "zap", "token", "governance",
+  "strategy", "emissionController", "liquidStaking", "stableswap",
+] as const;
+
+/**
+ * Build an empty registry object with every expected network and contract
+ * key present, all values set to "".
+ */
+function buildEmptyRegistry(): Record<string, Record<string, string>> {
+  const registry: Record<string, Record<string, string>> = {};
+  for (const net of NETWORKS) {
+    registry[net] = {};
+    for (const key of CONTRACT_KEYS) {
+      registry[net][key] = "";
+    }
+  }
+  return registry;
+}
+
+/**
+ * Detect which source the given raw registry value came from, returning
+ * the merged record and a metadata object with the appropriate warning.
+ */
+export function createSafeFallbackRegistryRecord(
+  raw?: Record<string, Record<string, string>> | null,
+): FallbackRegistryRecord {
+  const now = new Date().toISOString();
+  const empty = buildEmptyRegistry();
+
+  if (raw === undefined || raw === null) {
+    return {
+      registry: empty,
+      metadata: {
+        source: "file_not_found",
+        warning: "Registry metadata was not available — falling back to safe defaults",
+        createdAt: now,
+      },
+    };
+  }
+
+  if (typeof raw !== "object" || Array.isArray(raw)) {
+    return {
+      registry: empty,
+      metadata: {
+        source: "malformed_json",
+        warning: "Registry metadata has an invalid structure — falling back to safe defaults",
+        createdAt: now,
+      },
+    };
+  }
+
+  // Merge present networks into the empty scaffold.
+  const registry = buildEmptyRegistry();
+  for (const net of NETWORKS) {
+    if (raw[net] !== undefined && raw[net] !== null && typeof raw[net] === "object" && !Array.isArray(raw[net])) {
+      for (const key of CONTRACT_KEYS) {
+        const val = (raw[net] as Record<string, unknown>)[key];
+        if (typeof val === "string") {
+          registry[net][key] = val;
+        }
+      }
+    }
+  }
+
+  // Check for missing networks.
+  const presentNetworks = NETWORKS.filter((n) => n in raw);
+  if (presentNetworks.length === 0) {
+    return {
+      registry,
+      metadata: {
+        source: "missing_networks",
+        warning: "Registry has no recognised network keys — falling back to safe defaults",
+        createdAt: now,
+      },
+    };
+  }
+
+  // Check for empty contracts across all networks.
+  const totalFilled = NETWORKS.reduce(
+    (sum, net) =>
+      sum + CONTRACT_KEYS.filter((k) => registry[net][k] !== "").length,
+    0,
+  );
+
+  if (totalFilled === 0) {
+    return {
+      registry,
+      metadata: {
+        source: "empty_contracts",
+        warning: "Registry loaded but contains no contract addresses",
+        createdAt: now,
+      },
+    };
+  }
+
+  // Check for partial metadata: some contracts present, but not all networks populated.
+  const networksFullyPopulated = NETWORKS.filter((net) =>
+    CONTRACT_KEYS.every((k) => registry[net][k] !== ""),
+  );
+
+  if (networksFullyPopulated.length < NETWORKS.length) {
+    const missing = NETWORKS.filter((n) => !networksFullyPopulated.includes(n));
+    return {
+      registry,
+      metadata: {
+        source: "partial_metadata",
+        warning: `Registry is incomplete — missing contracts for networks: ${missing.join(", ")}`,
+        createdAt: now,
+      },
+    };
+  }
+
+  return {
+    registry,
+    metadata: {
+      source: "primary",
+      warning: null,
+      createdAt: now,
+    },
+  };
+}

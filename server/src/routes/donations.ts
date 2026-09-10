@@ -5,6 +5,7 @@
  *
  * GET  /api/donations/config/:address — fetch user donation config
  * POST /api/donations/set             — update user donation config
+ * POST /api/donations/preview         — preview donation amount (rejects zero/dust)
  * GET  /api/donations/total           — protocol-wide total donated
  * GET  /api/donations/summary         — aggregate donation metrics
  * POST /api/donations/preview         — structured contract execution preview
@@ -24,6 +25,30 @@ interface UserDonationConfig {
 
 const userConfigs = new Map<string, UserDonationConfig>();
 let totalDonated = 0;
+
+// ── Donation validation (mirrors contracts/yield_vault/src/donations.rs) ──
+
+/**
+ * Minimum economically meaningful donation amount in stroops.
+ * Mirrors `MIN_DONATION_AMOUNT` in the yield vault contract.
+ */
+export const MIN_DONATION_AMOUNT = 1_000_000;
+
+const BPS_DENOMINATOR = 10_000;
+
+/**
+ * Validation messages shared with the client layer. Keep the wording in
+ * sync with the contract's donation error copy in
+ * `client/src/utils/errorDecoder.ts` (error code 2007 → "Donation Below
+ * Minimum") so validation is consistent across layers.
+ */
+export const DONATION_VALIDATION_MESSAGES = {
+    yieldAmountInvalid: "yieldAmount must be a positive number.",
+    noDonationConfigured:
+        "No donation is configured for this wallet. Set a donation split before previewing.",
+    zeroValue: "Donation amount must be greater than zero.",
+    dustValue: "Donation amount is below the minimum (dust).",
+} as const;
 
 // ── Routes ────────────────────────────────────────────────────────────────
 
@@ -79,6 +104,68 @@ donationsRouter.post("/set", (req: Request, res: Response): void => {
     });
 
     res.json({ success: true });
+});
+
+/**
+ * POST /api/donations/preview
+ *
+ * Preview the donation amount that would be routed for a given yield amount,
+ * rejecting zero-value and dust-value inputs before they reach the contract
+ * as unusable transactions.
+ *
+ * Body: { address: string, yieldAmount: number }
+ *
+ * Responses:
+ *   200 — { donationAmount, bps, charityAddress }
+ *   400 — validation error with an aligned message (DONATION_VALIDATION_MESSAGES)
+ */
+donationsRouter.post("/preview", (req: Request, res: Response): void => {
+    const { address, yieldAmount } = req.body as {
+        address?: string;
+        yieldAmount?: number;
+    };
+
+    if (!address || typeof address !== "string") {
+        res.status(400).json({ error: "address is required" });
+        return;
+    }
+    if (
+        typeof yieldAmount !== "number" ||
+        !Number.isFinite(yieldAmount) ||
+        yieldAmount <= 0
+    ) {
+        res.status(400).json({
+            error: DONATION_VALIDATION_MESSAGES.yieldAmountInvalid,
+        });
+        return;
+    }
+
+    const config = userConfigs.get(address);
+    const bps = config?.bps ?? 0;
+    if (!config || bps <= 0) {
+        res.status(400).json({
+            error: DONATION_VALIDATION_MESSAGES.noDonationConfigured,
+        });
+        return;
+    }
+
+    // Floor division mirrors the contract's integer math: (yield * bps) / 10_000.
+    const donationAmount = Math.floor((yieldAmount * bps) / BPS_DENOMINATOR);
+
+    if (donationAmount <= 0) {
+        res.status(400).json({ error: DONATION_VALIDATION_MESSAGES.zeroValue });
+        return;
+    }
+    if (donationAmount < MIN_DONATION_AMOUNT) {
+        res.status(400).json({ error: DONATION_VALIDATION_MESSAGES.dustValue });
+        return;
+    }
+
+    res.json({
+        donationAmount,
+        bps,
+        charityAddress: config.charityAddress,
+    });
 });
 
 /**

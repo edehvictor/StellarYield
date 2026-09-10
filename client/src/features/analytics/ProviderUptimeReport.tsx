@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { Activity, AlertTriangle, RefreshCw } from "lucide-react";
+import EmptyState from "../../components/common/EmptyState";
+import { EMPTY_STATE_PROVIDER_UPTIME } from "../../utils/emptyStateCopy";
 import { apiUrl } from "../../lib/api";
 
 interface OutageWindow {
@@ -187,7 +189,12 @@ export default function ProviderUptimeReport() {
       )}
 
       {reports.length === 0 && !isLoading && !error && (
-        <p className="text-sm text-gray-500">No provider uptime data available yet.</p>
+        <EmptyState
+          icon={<Activity className="text-gray-400" size={48} />}
+          title={EMPTY_STATE_PROVIDER_UPTIME.title}
+          description={EMPTY_STATE_PROVIDER_UPTIME.description}
+          testId="provider-uptime-empty-state"
+        />
       )}
 
       {generatedAt && (

@@ -64,7 +64,12 @@ function stdDev(varianceVal: number): number {
   return Math.sqrt(varianceVal);
 }
 
-function roundTo(value: number, digits = 4): number {
+// Rounds to 8 decimal places by default (#1070) — high enough to preserve
+// sub-basis-point APY precision (e.g. 0.00001%) without collapsing it to 0,
+// while still trimming floating-point noise. Display-layer formatting
+// (see client/src/lib/apyFormat.ts) decides how many of those digits to
+// actually show for a given magnitude.
+function roundTo(value: number, digits = 8): number {
   const factor = 10 ** digits;
   return Math.round(value * factor) / factor;
 }

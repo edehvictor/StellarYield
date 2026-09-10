@@ -8,13 +8,13 @@ import {
 } from "../services";
 import { strategyStateTransitionAuditService } from "../services/strategyStateTransitionAuditService";
 import { getSourceHealthRegistry } from "../services/yieldSourceRegistryService";
+import { getRegistryLoadState } from "../services/contractRegistry";
 import {
   generateRecommendationStabilityReport,
   type RecommendationOutput,
 } from "../services/recommendationStabilityService";
 import {
   getRecommendationTimelinePaginated,
-  parsePaginationLimit,
 } from "../services/recommendationTimelineService";
 import {
   validateAttributionRequest,
@@ -173,6 +173,17 @@ router.get("/compatibility", async (req, res) => {
     const report = await protocolCompatibilityEngine.runCompatibilityCheck();
     const formattedReport = formatCompatibilityReport(report);
 
+    // Surface registry load warnings to the client so the UI can display
+    // targeted messages when contract metadata is incomplete or missing.
+    const loadState = getRegistryLoadState();
+    if (loadState.status !== 'ok') {
+      (formattedReport as any).registryWarnings = [{
+        code: loadState.status === 'fallback' ? 'fallback_used' : 'empty_registry',
+        message: loadState.reason ?? 'Registry metadata is unavailable',
+      }];
+    }
+
+    res.json(successEnvelope(formattedReport, 'analytics/compatibility'));
     res.json(successEnvelope(formattedReport, "analytics/compatibility"));
   } catch (error) {
     console.error("Compatibility check failed:", error);
@@ -905,24 +916,14 @@ router.get("/recommendations/timeline/:walletAddress", (req, res) => {
     }
 
     const limit = parsePaginationLimitGeneric(rawLimit);
-    const cursorStr = typeof cursor === "string" ? cursor : null;
+    const cursorStr = typeof cursor === "string" ? cursor : undefined;
 
-    const paginated = getRecommendationTimelinePaginated(
-      walletAddress,
-      cursorStr,
+    const paginated = getRecommendationTimelinePaginated(walletAddress, {
+      cursor: cursorStr,
       limit,
-    );
+    });
 
-    const response: PaginatedResponse<any> = {
-      data: paginated.data,
-      pagination: {
-        nextCursor: paginated.nextCursor,
-        hasMore: paginated.hasMore,
-        limit,
-      },
-    };
-
-    res.json(successEnvelope(response, "analytics/recommendations/timeline"));
+    res.json(successEnvelope(paginated, "analytics/recommendations/timeline"));
   } catch (error) {
     console.error("Recommendation timeline fetch failed:", error);
     res

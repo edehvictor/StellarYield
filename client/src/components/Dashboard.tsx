@@ -10,6 +10,7 @@ import { useBackendStatus } from "../hooks/useBackendStatus";
 import { BackendUnavailableAlert } from "./BackendUnavailable";
 import ApyAttribution from "../features/yields/ApyAttribution";
 import ConnectWalletButton from "./wallet/ConnectWalletButton";
+import DependencyGraphPanel from "./dashboard/DependencyGraphPanel";
 
 interface YieldData {
   protocol: string;
@@ -264,6 +265,11 @@ export default function Dashboard() {
               <h4>Portfolio Intelligence</h4>
               <p>Track allocation drift, TVL movements, and strategy health metrics in one single dashboard workspace.</p>
             </article>
+          </div>
+
+          {/* Service Dependency & Health Status Graph */}
+          <div className="mt-8">
+            <DependencyGraphPanel />
           </div>
         </section>
       </div>

@@ -1,5 +1,13 @@
 import { assessConversionRisk } from "./conversionRiskService";
 import { ZapQuoteBody } from "./zapQuote";
+import {
+  PaginatedResponse,
+  PAGINATION_DEFAULT_LIMIT,
+  PAGINATION_MAX_LIMIT,
+  decodeTimelineCursor,
+  encodeTimelineCursor,
+  isBeforeTimelineCursor,
+} from "../types/pagination";
 
 export type ReasonCode =
   | "risk-tolerance-change"
@@ -244,91 +252,44 @@ export function getRecommendationTimeline(
 }
 
 /**
- * Cursor format: base64url(timestamp:index) where timestamp and index uniquely identify a position
+ * Cursor-paginated view of a user's recommendation timeline (#1071).
+ *
+ * Entries are already stored newest-first; pagination uses a stable
+ * (timestamp, id) cursor rather than an array offset, so a page boundary
+ * stays correct even if new entries are recorded between requests — a new
+ * entry only ever lands *before* the cursor position (it's newer), never
+ * inside a page that's already been issued.
  */
-export interface PaginatedRecommendations {
-  data: RecommendationTimelineEntry[];
-  nextCursor: string | null;
-  hasMore: boolean;
-}
-
-function encodeCursor(timestamp: string, index: number): string {
-  const data = `${timestamp}:${index}`;
-  return Buffer.from(data).toString("base64url");
-}
-
-function decodeCursor(
-  cursor: string,
-): { timestamp: string; index: number } | null {
-  try {
-    const data = Buffer.from(cursor, "base64url").toString("utf-8");
-    const [timestamp, indexStr] = data.split(":");
-    const index = parseInt(indexStr, 10);
-    if (!timestamp || isNaN(index)) return null;
-    return { timestamp, index };
-  } catch {
-    return null;
-  }
-}
-
 export function getRecommendationTimelinePaginated(
   userId: string,
-  cursor: string | null | undefined,
-  limit: number = 20,
-): PaginatedRecommendations {
-  const timeline = historyStore.get(userId) ?? [];
-  if (timeline.length === 0) {
-    return {
-      data: [],
-      nextCursor: null,
-      hasMore: false,
-    };
-  }
+  options: { cursor?: string; limit?: number } = {},
+): PaginatedResponse<RecommendationTimelineEntry> {
+  const limit = Math.min(
+    Math.max(1, options.limit ?? PAGINATION_DEFAULT_LIMIT),
+    PAGINATION_MAX_LIMIT,
+  );
 
-  let startIndex = 0;
+  const all = historyStore.get(userId) ?? [];
+  const cursor = decodeTimelineCursor(options.cursor);
 
-  if (cursor) {
-    const decoded = decodeCursor(cursor);
-    if (!decoded) {
-      // Invalid cursor format - return empty with no nextCursor
-      return {
-        data: [],
-        nextCursor: null,
-        hasMore: false,
-      };
-    }
+  const eligible = cursor
+    ? all.filter((entry) =>
+        isBeforeTimelineCursor(
+          { ts: new Date(entry.timestamp).getTime(), id: entry.id },
+          cursor,
+        ),
+      )
+    : all;
 
-    // Use the index directly. Cursor points to last item on previous page.
-    // Start from the position after that item.
-    startIndex = decoded.index + 1;
+  const hasMore = eligible.length > limit;
+  const data = hasMore ? eligible.slice(0, limit) : eligible;
+  const last = data[data.length - 1];
+  const nextCursor =
+    hasMore && last
+      ? encodeTimelineCursor({ ts: new Date(last.timestamp).getTime(), id: last.id })
+      : null;
 
-    // If we're past the end, return empty
-    if (startIndex >= timeline.length) {
-      return {
-        data: [],
-        nextCursor: null,
-        hasMore: false,
-      };
-    }
-  }
-
-  // Get the page
-  const page = timeline.slice(startIndex, startIndex + limit);
-  const hasMore = startIndex + limit < timeline.length;
-
-  let nextCursor: string | null = null;
-  if (hasMore && page.length > 0) {
-    // nextCursor points to the last item on this page
-    const lastItemIndex = startIndex + page.length - 1;
-    const lastItem = page[page.length - 1];
-    nextCursor = encodeCursor(lastItem.timestamp, lastItemIndex);
-  }
-
-  return {
-    data: page,
-    nextCursor,
-    hasMore,
-  };
+  return { data, pagination: { nextCursor, hasMore, limit } };
 }
 
 export function resetRecommendationTimelineStore(): void {

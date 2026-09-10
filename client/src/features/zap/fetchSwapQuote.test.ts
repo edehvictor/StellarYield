@@ -1,5 +1,9 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { fetchSwapQuote } from "./fetchSwapQuote";
+import {
+  fetchSwapQuote,
+  isQuoteCancellation,
+  QuoteRequestCancelledError,
+} from "./fetchSwapQuote";
 
 describe("fetchSwapQuote", () => {
   const origFetch = globalThis.fetch;
@@ -106,5 +110,61 @@ describe("fetchSwapQuote", () => {
         vaultDecimals: 7,
       }),
     ).rejects.toThrow("Quote failed (502)");
+  });
+
+  it("throws QuoteRequestCancelledError when aborted before response", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((_url: string, init?: RequestInit) => {
+        return new Promise((_resolve, reject) => {
+          init?.signal?.addEventListener(
+            "abort",
+            () => {
+              const err = new Error("aborted");
+              err.name = "AbortError";
+              reject(err);
+            },
+            { once: true },
+          );
+        });
+      }),
+    );
+
+    const controller = new AbortController();
+    const promise = fetchSwapQuote(
+      {
+        inputTokenContract: "A",
+        vaultTokenContract: "B",
+        amountInStroops: "1",
+        inputDecimals: 7,
+        vaultDecimals: 7,
+      },
+      { signal: controller.signal },
+    );
+    controller.abort();
+
+    await expect(promise).rejects.toBeInstanceOf(QuoteRequestCancelledError);
+    expect(isQuoteCancellation(await promise.catch((e) => e))).toBe(true);
+  });
+
+  it("rejects immediately when signal is already aborted", async () => {
+    const spy = vi.fn();
+    vi.stubGlobal("fetch", spy);
+    const controller = new AbortController();
+    controller.abort();
+
+    await expect(
+      fetchSwapQuote(
+        {
+          inputTokenContract: "A",
+          vaultTokenContract: "B",
+          amountInStroops: "1",
+          inputDecimals: 7,
+          vaultDecimals: 7,
+        },
+        { signal: controller.signal },
+      ),
+    ).rejects.toBeInstanceOf(QuoteRequestCancelledError);
+    expect(spy).not.toHaveBeenCalled();
   });
 });

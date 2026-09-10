@@ -34,6 +34,22 @@ import {
 } from "./alertsApi";
 import { useOptimisticUpdate } from "../../hooks/useOptimisticUpdate";
 
+type ChannelOverride = "inherit" | "on" | "off";
+
+type AlertClass = "apy" | "watchlist";
+
+interface ChannelOverrides {
+  email: ChannelOverride;
+  digest: ChannelOverride;
+  in_app: ChannelOverride;
+}
+
+type AlertClassChannelOverrides = Record<AlertClass, ChannelOverrides>;
+
+type AlertPreferencesWithChannelOverrides = AlertPreferences & {
+  channelOverrides: ChannelOverrides;
+};
+
 const MAX_ALERTS = 20;
 
 interface AlertsModalProps {
@@ -77,6 +93,24 @@ const DEFAULT_DIGEST_PREFERENCES: WatchlistDigestPreference = {
   maxFreshnessHours: 12,
 };
 
+const DEFAULT_CHANNEL_OVERRIDES: AlertClassChannelOverrides = {
+  apy: {
+    email: "inherit",
+    digest: "inherit",
+    in_app: "inherit",
+  },
+  watchlist: {
+    email: "inherit",
+    digest: "inherit",
+    in_app: "inherit",
+  },
+};
+
+const CHANNEL_OVERRIDES_STORAGE_KEY = "stellar-yield.channel-overrides";
+
+const getChannelOverridesStorageKey = (walletAddress: string) =>
+  `${CHANNEL_OVERRIDES_STORAGE_KEY}.${walletAddress}`;
+
 const PREFS_STORAGE_KEY = "stellar-yield.alert-preferences";
 
 export default function AlertsModal({
@@ -88,14 +122,18 @@ export default function AlertsModal({
   const [alerts, setAlerts] = useState<UserAlert[]>([]);
   const [loading, setLoading] = useState(false);
   const [form, setForm] = useState<FormState>(DEFAULT_FORM);
+  const [channelOverrides, setChannelOverrides] =
+    useState<AlertClassChannelOverrides>(DEFAULT_CHANNEL_OVERRIDES);
   const [formError, setFormError] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [digestLoading, setDigestLoading] = useState(false);
   const overlayRef = useRef<HTMLDivElement>(null);
 
   // Digest preferences with optimistic updates and rollback on failure
   const {
     current: digestPreferences,
+    setCurrent: setDigestPreferences,
     error: digestError,
     isPending: digestSaving,
     canRetry: canRetryDigestSave,
@@ -137,15 +175,19 @@ export default function AlertsModal({
         return;
       }
 
+      setDigestLoading(true);
       try {
         const preferences = await fetchDigestPreference(walletAddress);
         if (!cancelled) {
-          // Initialize hook with fetched preferences
-          // This updates the optimisticUpdate's initial state
+          setDigestPreferences(preferences);
         }
       } catch {
         if (!cancelled) {
           clearDigestError();
+        }
+      } finally {
+        if (!cancelled) {
+          setDigestLoading(false);
         }
       }
     }
@@ -155,7 +197,7 @@ export default function AlertsModal({
     return () => {
       cancelled = true;
     };
-  }, [isOpen, walletAddress, clearDigestError]);
+  }, [isOpen, walletAddress, clearDigestError, setDigestPreferences]);
 
   useEffect(() => {
     const stored = window.localStorage.getItem(PREFS_STORAGE_KEY);
@@ -167,6 +209,51 @@ export default function AlertsModal({
       // ignore malformed local storage data
     }
   }, []);
+
+  useEffect(() => {
+    const stored = window.localStorage.getItem(
+      getChannelOverridesStorageKey(walletAddress),
+    );
+    if (!stored) {
+      setChannelOverrides({
+        apy: { ...DEFAULT_CHANNEL_OVERRIDES.apy },
+        watchlist: { ...DEFAULT_CHANNEL_OVERRIDES.watchlist },
+      });
+      return;
+    }
+    try {
+      const overrides = JSON.parse(stored) as Partial<AlertClassChannelOverrides> &
+        Partial<ChannelOverrides>;
+      const apy = { ...DEFAULT_CHANNEL_OVERRIDES.apy };
+      const watchlist = { ...DEFAULT_CHANNEL_OVERRIDES.watchlist };
+      if (overrides.apy || overrides.watchlist) {
+        if (overrides.apy && typeof overrides.apy === "object") {
+          Object.assign(apy, overrides.apy);
+        }
+        if (overrides.watchlist && typeof overrides.watchlist === "object") {
+          Object.assign(watchlist, overrides.watchlist);
+        }
+      } else {
+        const legacy = overrides as Partial<ChannelOverrides>;
+        Object.assign(apy, legacy);
+        Object.assign(watchlist, legacy);
+      }
+      setChannelOverrides({ apy, watchlist });
+    } catch {
+      setChannelOverrides({
+        apy: { ...DEFAULT_CHANNEL_OVERRIDES.apy },
+        watchlist: { ...DEFAULT_CHANNEL_OVERRIDES.watchlist },
+      });
+    }
+  }, [walletAddress]);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    window.localStorage.setItem(
+      getChannelOverridesStorageKey(walletAddress),
+      JSON.stringify(channelOverrides),
+    );
+  }, [isOpen, channelOverrides]);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -204,12 +291,13 @@ export default function AlertsModal({
       return;
     }
 
-    const preferences: AlertPreferences = {
+    const preferences: AlertPreferencesWithChannelOverrides = {
       channel: form.channel,
       cooldownMinutes: Number(form.cooldownMinutes),
       severityThreshold: Number(form.severityThreshold),
       quietHoursStart: Number(form.quietHoursStart),
       quietHoursEnd: Number(form.quietHoursEnd),
+      channelOverrides: channelOverrides.apy,
     };
 
     if (
@@ -313,11 +401,16 @@ export default function AlertsModal({
     };
     // Update optimistically - will be saved when user clicks Save
     // No API call here, just local state update
+    setDigestPreferences(newPrefs);
   };
 
   const handleSaveDigestPreferences = async () => {
-    await optimisticDigestUpdate(digestPreferences, async () => {
-      return await saveDigestPreference(walletAddress, digestPreferences);
+    const preferencesWithOverrides = {
+      ...digestPreferences,
+      channelOverrides: channelOverrides.watchlist,
+    };
+    await optimisticDigestUpdate(preferencesWithOverrides, async () => {
+      return await saveDigestPreference(walletAddress, preferencesWithOverrides);
     });
   };
 
@@ -526,6 +619,60 @@ export default function AlertsModal({
             {activeAlerts.length}/{MAX_ALERTS} active alerts
           </p>
         </form>
+
+        <section className="mb-5 rounded-2xl border border-white/10 bg-white/5 p-4 space-y-3">
+          <div>
+            <h3 className="text-sm font-semibold text-white">
+              Channel Overrides
+            </h3>
+            <p className="text-xs text-gray-400">
+              Configure per-channel delivery for each alert class. "Inherit"
+              follows your global defaults.
+            </p>
+          </div>
+          <div className="space-y-4">
+            {(
+              [
+                { key: "apy", label: "APY Alerts" },
+                { key: "watchlist", label: "Watchlist Digest" },
+              ] as const
+            ).map((alertClass) => (
+              <div key={alertClass.key} className="space-y-2">
+                <p className="text-xs uppercase tracking-widest text-gray-500">
+                  {alertClass.label}
+                </p>
+                {(["email", "digest", "in_app"] as const).map((channel) => (
+                  <label
+                    key={channel}
+                    className="flex items-center justify-between gap-3 rounded-xl bg-black/20 px-3 py-2 text-sm text-white"
+                  >
+                    <span className="capitalize">
+                      {channel === "in_app" ? "In-app" : channel}
+                    </span>
+                    <select
+                      value={channelOverrides[alertClass.key][channel]}
+                      onChange={(event) =>
+                        setChannelOverrides((current) => ({
+                          ...current,
+                          [alertClass.key]: {
+                            ...current[alertClass.key],
+                            [channel]: event.target.value as ChannelOverride,
+                          },
+                        }))
+                      }
+                      aria-label={`${alertClass.label} ${channel} notification override`}
+                      className="bg-white/10 text-white rounded-xl px-3 py-2 text-sm border border-white/10 focus:border-indigo-400 outline-none"
+                    >
+                      <option value="inherit">Use default</option>
+                      <option value="on">Always send</option>
+                      <option value="off">Never send</option>
+                    </select>
+                  </label>
+                ))}
+              </div>
+            ))}
+          </div>
+        </section>
 
         <section className="mb-5 rounded-2xl border border-white/10 bg-white/5 p-4 space-y-3">
           <div>

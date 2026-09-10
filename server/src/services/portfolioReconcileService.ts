@@ -1,9 +1,11 @@
 import {
   resolveAssetIdentity,
+  resolveCanonicalSymbol,
   mergeHoldings,
   type RawHolding,
   type MergedHolding,
 } from "./assetIdentityService";
+import {
   analyzeConcentration,
   buildExposureBuckets,
   type ConcentrationAnalysis,
@@ -12,6 +14,12 @@ import {
 import { readConcentrationThresholdOverrides } from '../config/concentrationThresholds';
 import { safeWalletId } from '../utils/redact';
 import { recordFailure, resolveNetworkLabel } from '../monitoring/prometheus';
+import {
+  RECONCILE_CAUSE_ORDER,
+  describeReconcileCause,
+  type ReconcileCauseCode,
+  type ReconcileCauseDescriptor,
+} from '../../../shared/types/reconcileCause';
 
 export type Position = { asset: string; expected: number };
 export type ProviderBalance = {
@@ -122,6 +130,8 @@ export interface ReconciliationHistoryEntry {
     duplicatePositions?: string[];
     projectionVersion?: number;
     isStale?: boolean;
+    primaryCause?: ReconcileCauseCode | null;
+    causeCounts?: Partial<Record<ReconcileCauseCode, number>>;
   };
 }
 
@@ -204,6 +214,16 @@ export interface ReconciliationResult {
   orphanedTransactions?: string[]
   duplicatePositions?: string[]
   /**
+   * Named reasons this reconciliation did not come out clean. Empty on a clean
+   * run. See shared/types/reconcileCause.ts for the taxonomy.
+   */
+  causes: ReconcileCause[]
+  /** The cause to act on first, by triage order, or null on a clean run. */
+  primaryCause: ReconcileCauseCode | null
+  causeCounts: Partial<Record<ReconcileCauseCode, number>>
+  /** Positions carried under a different asset code on each side. */
+  symbolDrifts: SymbolDrift[]
+  /**
    * Asset and protocol concentration of the reconciled (chain-authoritative)
    * positions, so callers see exposure risk against the same snapshot they just
    * reconciled rather than a separately-fetched one.
@@ -257,10 +277,358 @@ export function analyzePositionConcentration(
   return analyzeConcentration(buckets, thresholds ?? readConcentrationThresholdOverrides())
 }
 
+// ── Reconciliation Cause Mapping ────────────────────────────────────────
+//
+// A reconciliation that comes back "partial" tells an operator nothing they can
+// act on. These helpers turn each discrepancy into a named cause so the API and
+// the UI can say whether a holding is missing, whether it merely moved to a new
+// asset code, or whether the source behind the comparison had stopped
+// advancing before the comparison was even made.
+
+/** A single named reason this reconciliation did not come out clean. */
+export interface ReconcileCause extends ReconcileCauseDescriptor {
+  /** Asset the cause attaches to, when it is position-specific. */
+  assetId?: string
+  vaultId?: string
+  /** This occurrence, with the actual values — the descriptor is generic. */
+  detail: string
+  evidence?: {
+    chainAssetId?: string
+    cachedAssetId?: string
+    chainAmount?: number
+    cachedAmount?: number
+    canonicalAsset?: string
+    staleDurationMs?: number
+    projectionVersion?: number
+    lastLedger?: number
+  }
+}
+
+/** A position carried under a different asset code on each side. */
+export interface SymbolDrift {
+  canonicalAsset: string
+  chainAssetId: string
+  cachedAssetId: string
+  vaultId: string
+  chainAmount: number
+  cachedAmount: number
+  /** True when the amounts match, i.e. only the code changed. */
+  amountsAgree: boolean
+}
+
+/**
+ * Bridged and wrapped forms that `assetIdentityService` deliberately does not
+ * fold together.
+ *
+ * That service backs holding *merge*, where collapsing a bridge wrapper into
+ * its underlying asset would silently combine two positions that can be
+ * redeemed on different rails. Drift reporting has no such risk — it only
+ * pairs a chain-side and a cache-side row so a rename is described once
+ * instead of twice — so these live here rather than in the shared table.
+ */
+const DRIFT_ONLY_ALIASES: Record<string, string> = {
+  'USDC.E': 'USDC',
+  USDCET: 'USDC',
+  USDCV2: 'USDC',
+  XUSDC: 'USDC',
+  USDCALLBRIDGE: 'USDC',
+  NATIVE: 'XLM',
+  WXLM: 'XLM',
+  'EURC.E': 'EURC',
+  EURCV2: 'EURC',
+  BTCLN: 'BTC',
+}
+
+/**
+ * Reduces an asset id to the key two sides must share to be the same asset.
+ *
+ * Strips the Stellar `CODE:ISSUER` qualifier — an issuer migration keeps the
+ * code and is drift, not a new asset — then resolves the code through the
+ * shared alias table in `assetIdentityService`, falling back to the
+ * drift-only supplement above. Symbol aliases live in one place; this adds
+ * only the issuer handling that drift detection specifically needs.
+ */
+export function canonicalAssetKey(assetId: string): string {
+  const code = assetId.split(':')[0].trim()
+
+  // The drift-only table is keyed on the separator-free form, so `USDC.e` and
+  // `usdc-e` both land on USDC.
+  const compact = code.toUpperCase().replace(/[^A-Z0-9.]/g, '')
+  const driftAlias = DRIFT_ONLY_ALIASES[compact]
+  if (driftAlias !== undefined) return driftAlias
+
+  // The shared table is looked up on the *unmodified* code, because several of
+  // its keys contain spaces or hyphens ("usd coin", "xlm-usdc"). Stripping
+  // first would silently miss them.
+  const { canonical, isKnown } = resolveCanonicalSymbol(code)
+  if (isKnown) return canonical.toUpperCase()
+
+  return compact.replace(/\./g, '')
+}
+
+/**
+ * Pairs chain-only positions with cache-only positions that resolve to the same
+ * canonical asset, in the same vault.
+ *
+ * Matching is per (canonical asset, vault) and consumes both sides, so one
+ * rename produces one drift rather than a missing holding *and* an orphaned
+ * one. Positions left unpaired are genuinely missing or genuinely orphaned.
+ */
+export function detectSymbolDrift(
+  chainOnly: PortfolioPosition[],
+  cachedOnly: PortfolioPosition[],
+): {
+  drifts: SymbolDrift[]
+  unmatchedChain: PortfolioPosition[]
+  unmatchedCached: PortfolioPosition[]
+} {
+  const drifts: SymbolDrift[] = []
+  const remainingCached = [...cachedOnly]
+  const unmatchedChain: PortfolioPosition[] = []
+
+  for (const chainPos of chainOnly) {
+    const chainKey = canonicalAssetKey(chainPos.assetId)
+    const matchIndex = remainingCached.findIndex(
+      (cachedPos) =>
+        cachedPos.vaultId === chainPos.vaultId &&
+        canonicalAssetKey(cachedPos.assetId) === chainKey &&
+        cachedPos.assetId !== chainPos.assetId,
+    )
+
+    if (matchIndex === -1) {
+      unmatchedChain.push(chainPos)
+      continue
+    }
+
+    const [cachedPos] = remainingCached.splice(matchIndex, 1)
+    drifts.push({
+      canonicalAsset: chainKey,
+      chainAssetId: chainPos.assetId,
+      cachedAssetId: cachedPos.assetId,
+      vaultId: chainPos.vaultId,
+      chainAmount: chainPos.amount,
+      cachedAmount: cachedPos.amount,
+      amountsAgree: Math.abs(chainPos.amount - cachedPos.amount) <= AMOUNT_EPSILON,
+    })
+  }
+
+  return { drifts, unmatchedChain, unmatchedCached: remainingCached }
+}
+
+/** Amounts closer than this are treated as equal. */
+const AMOUNT_EPSILON = 0.0001
+
+function cause(
+  code: ReconcileCauseCode,
+  detail: string,
+  extra: Pick<ReconcileCause, 'assetId' | 'vaultId' | 'evidence'> = {},
+): ReconcileCause {
+  return { ...describeReconcileCause(code), detail, ...extra }
+}
+
+export interface ClassifyReconcileInput {
+  chainPositions: PortfolioPosition[]
+  cachedPositions: PortfolioPosition[]
+  /** Milliseconds since the cached projection last advanced. */
+  projectionAgeMs?: number
+  projectionVersion?: number
+  lastLedger?: number
+  duplicatePositions?: string[]
+  orphanedTransactions?: string[]
+  /** Set when the reconciliation itself threw. */
+  sourceError?: unknown
+}
+
+export interface ReconcileClassification {
+  causes: ReconcileCause[]
+  symbolDrifts: SymbolDrift[]
+  /** The cause an operator should act on first, by triage order. */
+  primaryCause: ReconcileCauseCode | null
+  causeCounts: Partial<Record<ReconcileCauseCode, number>>
+}
+
+/** Projection age past which the cached side is reported as stale. */
+export const STALE_PROJECTION_MS = 5 * 60 * 1000
+
+/**
+ * Maps a reconciliation into named causes.
+ *
+ * Symbol drift is resolved *before* anything is called missing, because the
+ * same rename otherwise shows up twice — once as a holding the cache lacks and
+ * once as a holding the chain lacks — and an operator chasing either half is
+ * chasing a position that never moved.
+ */
+export function classifyReconciliation(
+  input: ClassifyReconcileInput,
+): ReconcileClassification {
+  const causes: ReconcileCause[] = []
+
+  if (input.sourceError !== undefined) {
+    return {
+      causes: [
+        cause(
+          'SOURCE_UNAVAILABLE',
+          `Reconciliation aborted: ${String(input.sourceError)}`,
+        ),
+      ],
+      symbolDrifts: [],
+      primaryCause: 'SOURCE_UNAVAILABLE',
+      causeCounts: { SOURCE_UNAVAILABLE: 1 },
+    }
+  }
+
+  // Staleness is reported first because it changes how every other cause in the
+  // same run should be read: against a projection that stopped advancing, a
+  // "missing" holding may simply not have been indexed yet.
+  const projectionAgeMs = input.projectionAgeMs ?? 0
+  if (projectionAgeMs > STALE_PROJECTION_MS) {
+    causes.push(
+      cause(
+        'STALE_SOURCE',
+        `Cached projection last advanced ${Math.round(projectionAgeMs / 1000)}s ago, past the ${STALE_PROJECTION_MS / 1000}s freshness budget.`,
+        {
+          evidence: {
+            staleDurationMs: projectionAgeMs,
+            ...(input.projectionVersion !== undefined
+              ? { projectionVersion: input.projectionVersion }
+              : {}),
+            ...(input.lastLedger !== undefined ? { lastLedger: input.lastLedger } : {}),
+          },
+        },
+      ),
+    )
+  }
+
+  const chainByAsset = new Map(input.chainPositions.map((p) => [p.assetId, p]))
+  const cachedByAsset = new Map(input.cachedPositions.map((p) => [p.assetId, p]))
+
+  const chainOnly = input.chainPositions.filter((p) => !cachedByAsset.has(p.assetId))
+  const cachedOnly = input.cachedPositions.filter((p) => !chainByAsset.has(p.assetId))
+
+  const { drifts, unmatchedChain, unmatchedCached } = detectSymbolDrift(chainOnly, cachedOnly)
+
+  for (const drift of drifts) {
+    causes.push(
+      cause(
+        'SYMBOL_DRIFT',
+        drift.amountsAgree
+          ? `${drift.cachedAssetId} is carried on-chain as ${drift.chainAssetId}; both sides hold ${drift.chainAmount}, so only the asset code changed.`
+          : `${drift.cachedAssetId} is carried on-chain as ${drift.chainAssetId}, and the amounts also differ (chain ${drift.chainAmount} vs cached ${drift.cachedAmount}).`,
+        {
+          assetId: drift.chainAssetId,
+          vaultId: drift.vaultId,
+          evidence: {
+            chainAssetId: drift.chainAssetId,
+            cachedAssetId: drift.cachedAssetId,
+            chainAmount: drift.chainAmount,
+            cachedAmount: drift.cachedAmount,
+            canonicalAsset: drift.canonicalAsset,
+          },
+        },
+      ),
+    )
+  }
+
+  for (const position of unmatchedChain) {
+    causes.push(
+      cause(
+        'MISSING_HOLDING',
+        `Chain reports ${position.amount} ${position.assetId} in ${position.vaultId}, which the cached projection has no record of.`,
+        {
+          assetId: position.assetId,
+          vaultId: position.vaultId,
+          evidence: { chainAssetId: position.assetId, chainAmount: position.amount },
+        },
+      ),
+    )
+  }
+
+  for (const position of unmatchedCached) {
+    causes.push(
+      cause(
+        'ORPHANED_HOLDING',
+        `Cache holds ${position.amount} ${position.assetId} in ${position.vaultId}, which the chain no longer reports.`,
+        {
+          assetId: position.assetId,
+          vaultId: position.vaultId,
+          evidence: { cachedAssetId: position.assetId, cachedAmount: position.amount },
+        },
+      ),
+    )
+  }
+
+  for (const [assetId, chainPos] of chainByAsset.entries()) {
+    const cachedPos = cachedByAsset.get(assetId)
+    if (!cachedPos) continue
+    if (Math.abs(chainPos.amount - cachedPos.amount) <= AMOUNT_EPSILON) continue
+
+    causes.push(
+      cause(
+        'AMOUNT_DRIFT',
+        `${assetId} differs by ${Math.abs(chainPos.amount - cachedPos.amount)} (chain ${chainPos.amount} vs cached ${cachedPos.amount}).`,
+        {
+          assetId,
+          vaultId: chainPos.vaultId,
+          evidence: {
+            chainAmount: chainPos.amount,
+            cachedAmount: cachedPos.amount,
+          },
+        },
+      ),
+    )
+  }
+
+  for (const key of input.duplicatePositions ?? []) {
+    const [assetId, vaultId] = key.split(':')
+    causes.push(
+      cause('DUPLICATE_POSITION', `${assetId} appears more than once in ${vaultId}.`, {
+        assetId,
+        vaultId,
+      }),
+    )
+  }
+
+  for (const txHash of input.orphanedTransactions ?? []) {
+    causes.push(
+      cause('ORPHANED_TRANSACTION', `Transaction ${txHash} has no matching on-chain event.`),
+    )
+  }
+
+  const causeCounts: Partial<Record<ReconcileCauseCode, number>> = {}
+  for (const item of causes) {
+    causeCounts[item.code] = (causeCounts[item.code] ?? 0) + 1
+  }
+
+  const primaryCause =
+    RECONCILE_CAUSE_ORDER.find((code) => causeCounts[code] !== undefined) ?? null
+
+  return { causes, symbolDrifts: drifts, primaryCause, causeCounts }
+}
+
+/**
+ * Where a reconciliation reads its two sides from.
+ *
+ * The chain side has no production implementation yet, so without a seam here
+ * every reconciliation compares an empty list against the cache and the cause
+ * mapping is unreachable. Callers that already hold a snapshot — the API
+ * running a reconciliation over a supplied pair, the tests — provide one.
+ */
+export interface ReconcilePositionSource {
+  fetchChainPositions(
+    walletAddress: string,
+  ): Promise<{
+    positions: PortfolioPosition[]
+    projectionVersion?: number
+    lastLedger?: { ledger: number; processedAt: Date }
+  }>
+  fetchCachedPositions?(walletAddress: string): Promise<PortfolioPosition[]>
+}
+
 export class PortfolioReconcileService {
   constructor(
     private prisma: PrismaClient,
     private concentrationThresholds?: ConcentrationThresholdsInput,
+    private positionSource?: ReconcilePositionSource,
   ) {}
 
   async reconcilePortfolio(
@@ -313,7 +681,19 @@ export class PortfolioReconcileService {
         await this.updateCachedPositions(walletAddress, chainPositions);
       }
 
-      // Step 8: Audit and log reconciliation with anomalies
+      // Step 8: Name every reason this run was not clean, so the API and the
+      // UI can say *which* problem this is rather than just "partial".
+      const classification = classifyReconciliation({
+        chainPositions,
+        cachedPositions,
+        projectionAgeMs: projectionAge,
+        ...(projectionVersion !== undefined ? { projectionVersion } : {}),
+        ...(lastLedger?.ledger !== undefined ? { lastLedger: lastLedger.ledger } : {}),
+        duplicatePositions,
+        orphanedTransactions,
+      });
+
+      // Step 9: Audit and log reconciliation with anomalies
       await this.logReconciliationEvent(
         walletAddress,
         changes,
@@ -325,14 +705,13 @@ export class PortfolioReconcileService {
           duplicatePositions,
           projectionVersion,
           isStale,
+          primaryCause: classification.primaryCause,
+          causeCounts: classification.causeCounts,
         },
       );
 
       return {
-        status:
-          mismatches.length === 0 && orphanedTransactions.length === 0
-            ? "success"
-            : "partial",
+        status: classification.causes.length === 0 ? "success" : "partial",
         changes,
         mismatches,
         timestamp: new Date(),
@@ -345,19 +724,32 @@ export class PortfolioReconcileService {
           orphanedTransactions.length > 0 ? orphanedTransactions : undefined,
         duplicatePositions:
           duplicatePositions.length > 0 ? duplicatePositions : undefined,
-      };
-        orphanedTransactions: orphanedTransactions.length > 0 ? orphanedTransactions : undefined,
-        duplicatePositions: duplicatePositions.length > 0 ? duplicatePositions : undefined,
+        causes: classification.causes,
+        primaryCause: classification.primaryCause,
+        causeCounts: classification.causeCounts,
+        symbolDrifts: classification.symbolDrifts,
         concentration: this.analyzeConcentration(chainPositions),
-      }
+      };
+
     } catch (error) {
-      await this.logReconciliationEvent(walletAddress, [], [], "failed", error);
-      await this.logReconciliationEvent(walletAddress, [], [], 'failed', error)
+      // A run that threw produced no information: an empty cause list here
+      // would read as "clean", so the failure itself is reported as a cause.
+      const classification = classifyReconciliation({
+        chainPositions: [],
+        cachedPositions: [],
+        sourceError: error,
+      });
+
+      await this.logReconciliationEvent(walletAddress, [], [], "failed", error, {
+        primaryCause: classification.primaryCause,
+        causeCounts: classification.causeCounts,
+      });
+
       recordFailure({
-        route: 'portfolio/reconcile',
+        route: "portfolio/reconcile",
         network: resolveNetworkLabel(),
-        failure_category: 'reconcile_failed',
-      })
+        failure_category: "reconcile_failed",
+      });
       return {
         status: "failed",
         changes: [],
@@ -365,9 +757,12 @@ export class PortfolioReconcileService {
         timestamp: new Date(),
         sourceOfTruth: "chain",
         isStale: true,
-      };
+        causes: classification.causes,
+        primaryCause: classification.primaryCause,
+        causeCounts: classification.causeCounts,
+        symbolDrifts: [],
         concentration: this.analyzeConcentration([]),
-      }
+      };
     }
   }
 
@@ -434,12 +829,16 @@ export class PortfolioReconcileService {
   }
 
   private async fetchChainPositionsWithMetadata(
-    _walletAddress: string,
+    walletAddress: string,
   ): Promise<{
     positions: PortfolioPosition[];
     projectionVersion?: number;
     lastLedger?: { ledger: number; processedAt: Date };
   }> {
+    if (this.positionSource) {
+      return this.positionSource.fetchChainPositions(walletAddress)
+    }
+
     // In production, this would query the actual blockchain/Stellar network
     // with projection version tracking from IndexerState
     // For now, return empty array (would be populated by SDK calls)
@@ -490,6 +889,10 @@ export class PortfolioReconcileService {
   private async fetchCachedPositions(
     walletAddress: string,
   ): Promise<PortfolioPosition[]> {
+    if (this.positionSource?.fetchCachedPositions) {
+      return this.positionSource.fetchCachedPositions(walletAddress);
+    }
+
     const vaultBalance = await this.prisma.vaultBalance.findUnique({
       where: { walletAddress },
     });
@@ -535,6 +938,8 @@ export class PortfolioReconcileService {
       duplicatePositions?: string[];
       projectionVersion?: number;
       isStale?: boolean;
+      primaryCause?: ReconcileCauseCode | null;
+      causeCounts?: Partial<Record<ReconcileCauseCode, number>>;
     },
   ): Promise<void> {
     const entry: ReconciliationHistoryEntry = {
@@ -553,10 +958,8 @@ export class PortfolioReconcileService {
     if (metadata) {
       entry.metadata = metadata;
     }
+    console.log(`[Reconciliation] ${status} for ${safeWalletId(walletAddress)}`);
     persistReconciliationEvent(entry);
-    console.log(`[Reconciliation] ${status} for ${walletAddress}`)
-    console.log(`[Reconciliation] ${status} for ${safeWalletId(walletAddress)}`)
-    persistReconciliationEvent(entry)
   }
 
   async getReconciliationHistory(
@@ -567,13 +970,38 @@ export class PortfolioReconcileService {
   }
 }
 
-export function createPortfolioReconcileService(prisma: PrismaClient) {
-  return new PortfolioReconcileService(prisma);
 export function createPortfolioReconcileService(
   prisma: PrismaClient,
   concentrationThresholds?: ConcentrationThresholdsInput,
+  positionSource?: ReconcilePositionSource,
 ) {
-  return new PortfolioReconcileService(prisma, concentrationThresholds)
+  return new PortfolioReconcileService(prisma, concentrationThresholds, positionSource)
+}
+
+/**
+ * A position source backed by an explicit pair of snapshots, for reconciling
+ * data the caller already has rather than re-fetching it.
+ */
+export function staticPositionSource(input: {
+  chainPositions: PortfolioPosition[]
+  cachedPositions: PortfolioPosition[]
+  projectionVersion?: number
+  lastLedger?: { ledger: number; processedAt: Date }
+}): ReconcilePositionSource {
+  return {
+    async fetchChainPositions() {
+      return {
+        positions: input.chainPositions,
+        ...(input.projectionVersion !== undefined
+          ? { projectionVersion: input.projectionVersion }
+          : {}),
+        ...(input.lastLedger !== undefined ? { lastLedger: input.lastLedger } : {}),
+      }
+    },
+    async fetchCachedPositions() {
+      return input.cachedPositions
+    },
+  }
 }
 
 // ── Deposit Receipt Reconciliation ─────────────────────────────────────

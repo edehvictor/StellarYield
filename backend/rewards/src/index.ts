@@ -53,3 +53,14 @@ export type {
   AuthoredScheduleWindow,
   NormalizedScheduleWindow,
 } from "./scheduleHealth";
+
+export {
+  normalizeClaimBatch,
+  compareClaims,
+  claimOrderKey,
+  DuplicateClaimError,
+} from "./claimBatchOrdering";
+export type {
+  BatchClaim,
+  DuplicateClaimErrorCode,
+} from "./claimBatchOrdering";

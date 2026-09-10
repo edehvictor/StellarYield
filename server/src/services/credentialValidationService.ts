@@ -248,9 +248,10 @@ export function validateProviderCredentials(
       return validateLlmCredentials();
     case "pinata":
       return validatePinataCredentials();
-    default:
+    default: {
       const exhaustive: never = provider;
       throw new Error(`Unknown provider: ${exhaustive}`);
+    }
   }
 }
 

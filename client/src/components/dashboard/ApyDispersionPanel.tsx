@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import { BarChart3, AlertTriangle, RefreshCw, CheckCircle, MinusCircle, XCircle, Info } from 'lucide-react';
+import { formatApy, formatApyDeviation } from '../../lib/apyFormat';
 
 interface DispersionSource {
   provider: string;
@@ -129,19 +130,19 @@ export default function ApyDispersionPanel({ strategyId = 'blend-usdc', strategy
       <div className="grid grid-cols-4 gap-3 mb-4">
         <div className="text-center p-2 bg-white/5 rounded-lg">
           <p className="text-[10px] text-gray-500 uppercase">Mean</p>
-          <p className="text-sm font-bold text-white">{dispersion.meanApy.toFixed(2)}%</p>
+          <p className="text-sm font-bold text-white">{formatApy(dispersion.meanApy)}</p>
         </div>
         <div className="text-center p-2 bg-white/5 rounded-lg">
           <p className="text-[10px] text-gray-500 uppercase">Median</p>
-          <p className="text-sm font-bold text-white">{dispersion.medianApy.toFixed(2)}%</p>
+          <p className="text-sm font-bold text-white">{formatApy(dispersion.medianApy)}</p>
         </div>
         <div className="text-center p-2 bg-white/5 rounded-lg">
           <p className="text-[10px] text-gray-500 uppercase">Range</p>
-          <p className="text-sm font-bold text-white">{dispersion.range.toFixed(2)}%</p>
+          <p className="text-sm font-bold text-white">{formatApy(dispersion.range)}</p>
         </div>
         <div className="text-center p-2 bg-white/5 rounded-lg">
           <p className="text-[10px] text-gray-500 uppercase">Std Dev</p>
-          <p className={`text-sm font-bold ${levelConfig.color}`}>{dispersion.stdDev.toFixed(3)}</p>
+          <p className={`text-sm font-bold ${levelConfig.color}`}>{formatApy(dispersion.stdDev, { suffix: false })}</p>
         </div>
       </div>
 
@@ -153,14 +154,14 @@ export default function ApyDispersionPanel({ strategyId = 'blend-usdc', strategy
           >
             <span className="text-xs text-gray-300">{source.provider}</span>
             <div className="flex items-center gap-3">
-              <span className="text-xs font-medium text-white">{source.apy.toFixed(2)}%</span>
+              <span className="text-xs font-medium text-white">{formatApy(source.apy)}</span>
               <span className="text-[10px] text-gray-500">{formatTvl(source.tvlUsd)}</span>
               <span
                 className={`text-[10px] font-medium ${
                   source.deviationFromMean >= 0 ? 'text-green-400' : 'text-red-400'
                 }`}
               >
-                {source.deviationFromMean >= 0 ? '+' : ''}{source.deviationFromMean.toFixed(2)}
+                {formatApyDeviation(source.deviationFromMean)}
               </span>
             </div>
           </div>

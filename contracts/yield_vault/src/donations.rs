@@ -34,11 +34,20 @@ pub enum DonationKey {
 
 const BPS_DENOMINATOR: i128 = 10_000;
 
+/// Minimum economically meaningful donation amount in stroops.
+///
+/// Donations below this threshold are considered dust: they cost gas to
+/// submit but have no meaningful impact. The donation preview rejects them
+/// up front so they never reach the contract as unusable transactions.
+/// `1_000_000` stroops = 0.1 units of a 7-decimal token (e.g. 0.1 XLM/USDC).
+const MIN_DONATION_AMOUNT: i128 = 1_000_000;
+
 // ── Error Codes ─────────────────────────────────────────────────────────
 // These map to the error dictionary in `errorDecoder.ts`
 // Error 5    — unauthorized caller
 // Error 2001 — invalid donation percentage
 // Error 2002 — charity not whitelisted
+// Error 2007 — donation zero or below the minimum dust threshold
 // Error 2006 — invalid recipient
 
 // ── Public API ───────────────────────────────────────────────────────────
@@ -164,6 +173,63 @@ impl YieldVault {
             .unwrap_or(0)
     }
 
+    /// Preview the donation amount that would be routed to the charity for
+    /// `yield_amount` at the user's configured split.
+    ///
+    /// This is a read-only validation gate used *before* submitting a
+    /// donation transaction. Zero-value inputs (`yield_amount <= 0`) and
+    /// dust-value inputs (a computed donation that rounds to zero, or that
+    /// falls below `MIN_DONATION_AMOUNT`) are rejected early so they never
+    /// reach the contract as unusable transactions. No state is read or
+    /// written beyond the user's donation configuration.
+    ///
+    /// # Arguments
+    /// * `user`         — The user whose donation split is applied.
+    /// * `yield_amount` — The gross yield amount in stroops.
+    ///
+    /// # Errors
+    /// * `VaultError::ZeroAmount` (code 3) — `yield_amount <= 0`.
+    /// * `VaultError::DonationBelowMinimum` (code 2007) — the computed
+    ///   donation is zero, or below `MIN_DONATION_AMOUNT` (dust).
+    ///
+    /// # Returns
+    /// The validated donation amount in stroops.
+    pub fn preview_donation(
+        env: Env,
+        user: Address,
+        yield_amount: i128,
+    ) -> Result<i128, VaultError> {
+        if yield_amount <= 0 {
+            return Err(VaultError::ZeroAmount);
+        }
+
+        let bps: i128 = env
+            .storage()
+            .instance()
+            .get(&DonationKey::DonationBps(user))
+            .unwrap_or(0);
+
+        // No split configured (or explicitly disabled) means nothing would
+        // be donated — reject instead of returning a zero-value preview.
+        if bps <= 0 {
+            return Err(VaultError::DonationBelowMinimum);
+        }
+
+        // Compute donation using the same integer math as `apply_donation`.
+        // `bps` is bounded to [0, 10_000] by `set_donation_split`, so the
+        // multiplication cannot overflow for any realistic `yield_amount`.
+        let donation = (yield_amount * bps) / BPS_DENOMINATOR;
+
+        // Reject dust: `MIN_DONATION_AMOUNT > 0`, so this single check also
+        // covers donations that round down to zero. A donation that is too
+        // small to be economically meaningful would waste a transaction.
+        if donation < MIN_DONATION_AMOUNT {
+            return Err(VaultError::DonationBelowMinimum);
+        }
+
+        Ok(donation)
+    }
+
     // ── Internal ────────────────────────────────────────────────────────
 
     /// Routes the donation slice out of `yield_amount` to the configured
@@ -277,6 +343,8 @@ impl YieldVault {
 mod tests {
     use super::*;
     use crate::{YieldVault, YieldVaultClient};
+    use soroban_sdk::testutils::Address as _;
+    use soroban_sdk::Env;
     use soroban_sdk::testutils::{Address as _, Events};
     use soroban_sdk::{Env, IntoVal};
 
@@ -297,6 +365,105 @@ mod tests {
         (env, client, admin, token_addr, token_admin)
     }
 
+    /// Register `user` with a donation split of `bps` toward a whitelisted
+    /// charity and return the user address.
+    fn setup_donor(
+        env: &Env,
+        client: &YieldVaultClient<'static>,
+        admin: &Address,
+        bps: i128,
+    ) -> Address {
+        let user = Address::generate(env);
+        let charity = Address::generate(env);
+        client.set_charity_whitelist(admin, &charity, &true);
+        client.set_donation_split(&user, &bps, &charity);
+        user
+    }
+
+    // ── Zero-value inputs ───────────────────────────────────────────────
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #3)")]
+    fn test_preview_donation_zero_yield_panics() {
+        let (env, client, admin, _, _) = setup_env();
+        let user = setup_donor(&env, &client, &admin, 1_000);
+        client.preview_donation(&user, &0);
+    }
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #3)")]
+    fn test_preview_donation_negative_yield_panics() {
+        let (env, client, admin, _, _) = setup_env();
+        let user = setup_donor(&env, &client, &admin, 1_000);
+        client.preview_donation(&user, &-100);
+    }
+
+    // ── Zero-value donations (nothing would be routed) ──────────────────
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #2007)")]
+    fn test_preview_donation_without_config_panics() {
+        let (env, client, _, _, _) = setup_env();
+        let user = Address::generate(&env);
+        client.preview_donation(&user, &100_000_000);
+    }
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #2007)")]
+    fn test_preview_donation_disabled_split_panics() {
+        let (env, client, admin, _, _) = setup_env();
+        let user = setup_donor(&env, &client, &admin, 0);
+        client.preview_donation(&user, &100_000_000);
+    }
+
+    // ── Dust-value inputs ───────────────────────────────────────────────
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #2007)")]
+    fn test_preview_donation_rounds_to_zero_panics() {
+        // bps = 1 (0.01 %) on a tiny yield rounds the donation down to 0.
+        let (env, client, admin, _, _) = setup_env();
+        let user = setup_donor(&env, &client, &admin, 1);
+        client.preview_donation(&user, &5_000);
+    }
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #2007)")]
+    fn test_preview_donation_below_minimum_panics() {
+        // 10 % of 1_000_000 stroops = 100_000 stroops < MIN_DONATION_AMOUNT.
+        let (env, client, admin, _, _) = setup_env();
+        let user = setup_donor(&env, &client, &admin, 1_000);
+        client.preview_donation(&user, &1_000_000);
+    }
+
+    // ── Boundary and valid inputs ───────────────────────────────────────
+
+    #[test]
+    fn test_preview_donation_at_minimum_boundary() {
+        // 100 % of MIN_DONATION_AMOUNT == MIN_DONATION_AMOUNT → accepted.
+        let (env, client, admin, _, _) = setup_env();
+        let user = setup_donor(&env, &client, &admin, 10_000);
+        let donation = client.preview_donation(&user, &MIN_DONATION_AMOUNT);
+        assert_eq!(donation, MIN_DONATION_AMOUNT);
+    }
+
+    #[test]
+    fn test_preview_donation_valid() {
+        // 10 % of 100_000_000 stroops = 10_000_000 stroops.
+        let (env, client, admin, _, _) = setup_env();
+        let user = setup_donor(&env, &client, &admin, 1_000);
+        let donation = client.preview_donation(&user, &100_000_000);
+        assert_eq!(donation, 10_000_000);
+    }
+
+    #[test]
+    fn test_preview_donation_is_read_only() {
+        let (env, client, admin, _, _) = setup_env();
+        let user = setup_donor(&env, &client, &admin, 1_000);
+        let _ = client.preview_donation(&user, &100_000_000);
+        // Preview must never mutate protocol state.
+        assert_eq!(client.get_total_donated(), 0);
+    }
     fn mint_tokens(env: &Env, token_addr: &Address, to: &Address, amount: i128) {
         let admin_client = soroban_sdk::token::StellarAssetClient::new(env, token_addr);
         admin_client.mint(to, &amount);

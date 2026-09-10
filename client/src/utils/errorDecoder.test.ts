@@ -109,6 +109,13 @@ describe("decodeTransactionError", () => {
         expect(result.title).toBe("Charity Not Whitelisted");
     });
 
+    it("decodes donation error 2007 → Donation Below Minimum", () => {
+        const result = decodeTransactionError("Error(Contract, #2007)");
+        expect(result.code).toBe(2007);
+        expect(result.title).toBe("Donation Below Minimum");
+        expect(result.message).toContain("below the minimum");
+    });
+
     it("decodes swap error 3001 → Insufficient Balance for Swap", () => {
         const result = decodeTransactionError("Error(Contract, #3001)");
         expect(result.code).toBe(3001);
@@ -232,9 +239,10 @@ describe("KNOWN_CONTRACT_ERROR_CODES", () => {
         expect(KNOWN_CONTRACT_ERROR_CODES.has(1003)).toBe(true);
     });
 
-    it("contains donation error codes 2001–2002", () => {
+    it("contains donation error codes 2001–2002 and 2007", () => {
         expect(KNOWN_CONTRACT_ERROR_CODES.has(2001)).toBe(true);
         expect(KNOWN_CONTRACT_ERROR_CODES.has(2002)).toBe(true);
+        expect(KNOWN_CONTRACT_ERROR_CODES.has(2007)).toBe(true);
     });
 
     it("contains swap error codes 3001–3002", () => {

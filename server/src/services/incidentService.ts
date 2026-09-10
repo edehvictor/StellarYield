@@ -1,6 +1,12 @@
 import { PrismaClient, Incident } from "@prisma/client"; // Type verified via tsc
 import { recoveryRecommendationService, RecoveryRecommendation, ShockEvent, ShockEventType } from "./recoveryRecommendationService";
-import { PaginatedResponse, PAGINATION_DEFAULT_LIMIT, PAGINATION_MAX_LIMIT } from "../types/pagination";
+import {
+    PaginatedResponse,
+    PAGINATION_DEFAULT_LIMIT,
+    PAGINATION_MAX_LIMIT,
+    decodeTimelineCursor,
+    encodeTimelineCursor,
+} from "../types/pagination";
 
 const prisma = new PrismaClient();
 
@@ -92,22 +98,42 @@ export class IncidentService {
             PAGINATION_MAX_LIMIT,
         );
 
+        // Stable cursor (#1071): `id` is a random UUID with no relationship
+        // to `startedAt` order, so an id-only cursor can skip or duplicate
+        // rows. Decode a compound (startedAt, id) cursor instead, and page
+        // using the same compound ordering the query sorts by.
+        const cursor = decodeTimelineCursor(options.cursor);
+
         const rows = await prisma.incident.findMany({
             where: {
                 protocol: filter.protocol || undefined,
                 severity: filter.severity || undefined,
                 type: filter.type || undefined,
                 resolved: filter.resolved,
-                ...(options.cursor ? { id: { lt: options.cursor } } : {}),
+                ...(cursor
+                    ? {
+                          OR: [
+                              { startedAt: { lt: new Date(cursor.ts) } },
+                              {
+                                  startedAt: new Date(cursor.ts),
+                                  id: { lt: cursor.id },
+                              },
+                          ],
+                      }
+                    : {}),
             },
-            orderBy: { startedAt: "desc" },
+            orderBy: [{ startedAt: "desc" }, { id: "desc" }],
             // Fetch one extra to determine whether a next page exists.
             take: limit + 1,
         });
 
         const hasMore = rows.length > limit;
         const data = hasMore ? rows.slice(0, limit) : rows;
-        const nextCursor = hasMore ? data[data.length - 1].id : null;
+        const last = data[data.length - 1];
+        const nextCursor =
+            hasMore && last
+                ? encodeTimelineCursor({ ts: last.startedAt.getTime(), id: last.id })
+                : null;
 
         return { data, pagination: { nextCursor, hasMore, limit } };
     }

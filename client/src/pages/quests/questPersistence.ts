@@ -352,12 +352,20 @@ export function mergeQuestsWithTemplate(
   const base = cloneQuests(template);
   if (!persisted?.length) return base;
 
-  const byId = new Map(persisted.map((q) => [q.id, q]));
-  return base.map((tpl) => {
-    const saved = byId.get(tpl.id);
-    if (!saved) return tpl;
-    const sanitized = sanitizeQuest(saved, tpl);
-    return sanitized ?? tpl;
+  const validPersisted = persisted.filter(
+    (q): q is Quest => Boolean(q && typeof q === "object" && "id" in q),
+  );
+  const byId = new Map(validPersisted.map((q) => [q.id, q]));
+  return base.map((q) => {
+    const saved = byId.get(q.id);
+    if (!saved) return q;
+    return {
+      ...q,
+      ...saved,
+      title: saved.title || q.title,
+      description: saved.description || q.description,
+      objectives: Array.isArray(saved.objectives) && saved.objectives.length > 0 ? saved.objectives : q.objectives,
+    };
   });
 }
 
@@ -435,75 +443,28 @@ export function loadWalletQuestBundle(
   storage: StorageBackend = localStorage,
   options?: LoadQuestBundleOptions,
 ): PersistedWalletQuestBundle {
-  const currentKey = walletQuestStorageKey(walletAddress);
-  let raw: string | null = null;
-  let sourceKey: string | null = null;
-
   try {
-    raw = storage.getItem(currentKey);
-    if (raw) sourceKey = currentKey;
-  } catch {
-    /* ignore */
-  }
+    const key = walletQuestStorageKey(walletAddress);
+    const fromDisk = parseBundle(storage.getItem(key));
 
-  // Fallback to older wallet-specific storage keys
-  if (!raw) {
-    const candidateKeys = [
-      `sy_quest_wallet_v0_${walletAddress}`,
-      `sy_quest_wallet_${walletAddress}`,
-      `sy_quests_${walletAddress}`,
-    ];
-    for (const k of candidateKeys) {
-      try {
-        const val = storage.getItem(k);
-        if (val) {
-          raw = val;
-          sourceKey = k;
-          break;
-        }
-      } catch {
-        /* ignore */
-      }
-    }
-  }
-
-  // Fallback to legacy global unversioned storage keys
-  if (!raw) {
-    const legacy = readLegacyBundle(storage);
-    if (legacy) {
-      const bundle: PersistedWalletQuestBundle = {
-        version: QUEST_STORAGE_VERSION,
-        quests: mergeQuestsWithTemplate(legacy.quests, template),
-        achievements: legacy.achievements,
-        lastSyncedAt: legacy.lastSyncedAt,
+    if (fromDisk) {
+      return {
+        ...fromDisk,
+        quests: mergeQuestsWithTemplate(fromDisk.quests, template),
       };
-      saveWalletQuestBundle(walletAddress, bundle, storage);
-      return bundle;
     }
-  }
 
-  if (!raw) {
-    return {
-      version: QUEST_STORAGE_VERSION,
-      quests: cloneQuests(template),
-      achievements: [],
-      lastSyncedAt: null,
-    };
-  }
-
-  let parsedJson: unknown = null;
-  try {
-    parsedJson = JSON.parse(raw);
+    const migrated = readLegacyBundle(storage);
+    if (migrated) {
+      return {
+        version: QUEST_STORAGE_VERSION,
+        quests: mergeQuestsWithTemplate(migrated.quests, template),
+        achievements: migrated.achievements,
+        lastSyncedAt: migrated.lastSyncedAt,
+      };
+    }
   } catch {
-    // Unrecoverable corrupted JSON -> initialize clean template and fix stored cache
-    const freshBundle: PersistedWalletQuestBundle = {
-      version: QUEST_STORAGE_VERSION,
-      quests: cloneQuests(template),
-      achievements: [],
-      lastSyncedAt: null,
-    };
-    saveWalletQuestBundle(walletAddress, freshBundle, storage);
-    return freshBundle;
+    /* private browsing mode or storage blocked — return default template */
   }
 
   const bundle = migrateQuestBundle(parsedJson, template);

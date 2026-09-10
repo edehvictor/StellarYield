@@ -1,6 +1,8 @@
 import { useEffect, useState } from "react";
 import { useParams, Link } from "react-router-dom";
 import { Landmark, Loader2, AlertCircle, ArrowLeft, Info } from "lucide-react";
+import EmptyState from "./common/EmptyState";
+import { EMPTY_STATE_VAULT_NOT_FOUND } from "../utils/emptyStateCopy";
 import { ZapDepositPanel } from "../features/zap";
 import { WithdrawPanel } from "../features/withdraw";
 import { useWallet } from "../context/useWallet";
@@ -149,13 +151,12 @@ export default function Vault() {
   if (notFound) {
     return (
       <div className="flex flex-col items-center justify-center min-h-[60vh] text-center space-y-6 max-w-md mx-auto px-4">
-        <div className="bg-red-500/20 p-6 rounded-full inline-block">
-          <AlertCircle size={64} className="text-red-500" />
-        </div>
-        <h2 className="text-3xl font-bold text-white">Vault Not Found</h2>
-        <p className="text-gray-400">
-          The vault slug <code className="text-red-400">"{activeSlug}"</code> does not exist in our registry.
-        </p>
+        <EmptyState
+          icon={<AlertCircle size={64} className="text-red-500" />}
+          title={EMPTY_STATE_VAULT_NOT_FOUND.title}
+          description={EMPTY_STATE_VAULT_NOT_FOUND.description}
+          testId="vault-not-found"
+        />
         <Link
           to="/"
           className="flex items-center gap-2 text-green-500 hover:text-green-400 font-semibold transition-colors"

@@ -7,13 +7,17 @@
 ## Public API
 
 - `initialize(admin, dex_router)`
-- `zap_deposit(user, input_token, vault_token, vault, amount_in, min_amount_out, min_shares_out)`
+- `zap_deposit(user, input_token, vault_token, vault, amount_in, min_amount_out, min_shares_out, expected_amount_out, allow_partial)`
 - `set_dex_router(admin, new_router)`
 
 ## Events
 
-- `zap_init`
-- `zap_dep`
+- `zap_init` — `(admin, dex_router)`
+- `zap_part` — partial fill when swap output is below quote but above minimum
+- `zap_ref` — unused input refunded to user after swap
+- `zap_dep` — successful execution and vault deposit
+
+See [Zap event reference](../../docs/contracts/zap-events.md) for indexer field schemas and ordering guarantees.
 
 ## Errors
 

@@ -3,6 +3,30 @@
  * Generates HTML email for weekly yield reports
  */
 
+export interface BuildMetadata {
+  version: string;
+  commit: string;
+  buildTime: string;
+}
+
+export function formatBuildMetadata(metadata: BuildMetadata): string {
+  return JSON.stringify(metadata, Object.keys(metadata).sort());
+}
+
+export function parseBuildMetadata(value: string): BuildMetadata {
+  const metadata = JSON.parse(value) as Partial<BuildMetadata>;
+  if (!metadata.version || !metadata.commit || !metadata.buildTime) {
+    throw new Error("Invalid build metadata");
+  }
+  return metadata as BuildMetadata;
+}
+
+export const buildMetadata: BuildMetadata = {
+  version: process.env.BUILD_VERSION ?? process.env.npm_package_version ?? "unknown",
+  commit: process.env.GIT_COMMIT ?? process.env.SOURCE_VERSION ?? "unknown",
+  buildTime: process.env.BUILD_TIME ?? "unknown",
+};
+
 export interface WeeklyYieldReportData {
   userName: string;
   walletAddress: string;
@@ -58,6 +82,7 @@ export function renderWeeklyYieldReport(data: WeeklyYieldReportData): string {
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="build-metadata" content="${escapeHtml(formatBuildMetadata(buildMetadata))}">
   <title>Weekly Yield Report</title>
   <style>
     body {

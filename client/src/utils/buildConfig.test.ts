@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, it, expect } from "vitest";
 
-const VITE_CONFIG_PATH = resolve(__dirname, "../../../vite.config.ts");
+const VITE_CONFIG_PATH = resolve(__dirname, "../../vite.config.ts");
 
 /**
  * Regression tests for the Vite/Vercel production build configuration.

@@ -669,6 +669,25 @@ adminRouter.post(
           req.socket.remoteAddress ??
           "UNKNOWN",
         userAgent: req.headers["user-agent"] ?? "UNKNOWN",
+      });
+
+      res.json({
+        success: true,
+        auditId: entry.id,
+        timestamp: entry.timestamp,
+      });
+    } catch (error) {
+      res.status(500).json({
+        error:
+          error instanceof Error
+            ? error.message
+            : "Failed to record admin confirmation.",
+      });
+    }
+  },
+);
+
+/**
  * GET /api/admin/rebalance-sagas
  * List rebalance sagas with optional filters.
  */
@@ -688,9 +707,6 @@ adminRouter.get(
 
       res.json({
         success: true,
-        auditId: entry.id,
-        timestamp: entry.timestamp,
-      });
         data: result.sagas,
         total: result.total,
       });
@@ -818,7 +834,19 @@ adminRouter.post(
           req.socket.remoteAddress ??
           "UNKNOWN",
         userAgent: req.headers["user-agent"] ?? "UNKNOWN",
-            : "Failed to cancel saga",
+      });
+
+      res.json({
+        success: true,
+        auditId: entry.id,
+        timestamp: entry.timestamp,
+      });
+    } catch (error) {
+      res.status(500).json({
+        error:
+          error instanceof Error
+            ? error.message
+            : "Failed to record cancelled action.",
       });
     }
   },
@@ -891,8 +919,6 @@ adminRouter.post(
 
       res.json({
         success: true,
-        auditId: entry.id,
-        timestamp: entry.timestamp,
         recovered: result.recovered,
         sagas: result.sagas,
       });
@@ -901,7 +927,6 @@ adminRouter.post(
         error:
           error instanceof Error
             ? error.message
-            : "Failed to record cancelled action.",
             : "Failed to recover stuck sagas",
       });
     }
