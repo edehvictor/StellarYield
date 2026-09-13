@@ -374,3 +374,119 @@ export function getBandColor(confidenceScore: number): string {
 export function formatAllocationBand(band: AllocationBand): string {
   return `${band.recommendedAllocation.toFixed(1)}% (${band.lowerBound.toFixed(1)}% - ${band.upperBound.toFixed(1)}%)`;
 }
+
+// ── History Coverage Decay (#1073) ──────────────────────────────────────────
+//
+// Forecast confidence should degrade smoothly as the underlying history
+// thins out — instead of a single "count of points" proxy, we look at three
+// independent dimensions of coverage:
+//   1. Sparsity  — how densely the observed window is actually populated
+//                  relative to the expected sampling interval.
+//   2. Gaps      — the single largest missing interval inside the window.
+//   3. Staleness — how long it's been since the most recent data point.
+//
+// Each dimension produces a [0, 1] factor; the combined decay is the
+// product of the three, so a single bad dimension (e.g. one very long gap)
+// can meaningfully degrade confidence even when the other two look fine.
+
+export interface CoverageDecayResult {
+  /** Density of data points across the observed window, [0, 1]. */
+  historyCoverage: number;
+  /** Largest gap between consecutive data points, in days. */
+  maxGapDays: number;
+  /** Days since the most recent data point. */
+  stalenessDays: number;
+  /** Combined multiplier to apply to a confidence score, [0, 1]. */
+  decayFactor: number;
+  /** Which dimensions triggered a meaningful penalty. */
+  reasons: string[];
+}
+
+/** Smooth exponential decay from 1 → 0 as `value` moves from `freeAt` to `severeAt`. */
+function smoothDecay(value: number, freeAt: number, severeAt: number, k = 3.5): number {
+  if (value <= freeAt) return 1;
+  if (value >= severeAt) return 0;
+  const normalized = (value - freeAt) / (severeAt - freeAt || 1);
+  return Math.max(0, Math.min(1, Math.exp(-k * normalized)));
+}
+
+const MS_PER_DAY = 24 * 60 * 60 * 1000;
+
+/**
+ * Compute a confidence-decay multiplier from a set of history dates,
+ * accounting for sparse, gapped, and stale coverage windows.
+ *
+ * @param dates ISO date (or datetime) strings for each historical data point.
+ * @param now Reference "current" time (defaults to Date.now()).
+ * @param expectedIntervalDays Expected spacing between samples (default: 1 = daily).
+ */
+export function computeHistoryCoverageDecay(
+  dates: string[],
+  now: Date = new Date(),
+  expectedIntervalDays: number = 1,
+): CoverageDecayResult {
+  const reasons: string[] = [];
+
+  const parsed = Array.from(
+    new Set(
+      dates
+        .map((d) => new Date(d).getTime())
+        .filter((t) => Number.isFinite(t)),
+    ),
+  ).sort((a, b) => a - b);
+
+  if (parsed.length === 0) {
+    return {
+      historyCoverage: 0,
+      maxGapDays: Infinity,
+      stalenessDays: Infinity,
+      decayFactor: 0,
+      reasons: ['no_history'],
+    };
+  }
+
+  const windowStart = parsed[0];
+  const windowEnd = parsed[parsed.length - 1];
+  const spanDays = Math.max(1, Math.round((windowEnd - windowStart) / MS_PER_DAY) + 1);
+  const expectedPoints = Math.max(1, spanDays / expectedIntervalDays);
+  const historyCoverage = Math.max(0, Math.min(1, parsed.length / expectedPoints));
+
+  let maxGapDays = 0;
+  for (let i = 1; i < parsed.length; i++) {
+    const gapDays = (parsed[i] - parsed[i - 1]) / MS_PER_DAY;
+    if (gapDays > maxGapDays) maxGapDays = gapDays;
+  }
+
+  const stalenessDays = Math.max(0, (now.getTime() - windowEnd) / MS_PER_DAY);
+
+  // Sparsity: penalize once density drops meaningfully below full coverage.
+  const sparsityFactor = smoothDecay(1 - historyCoverage, 0.1, 0.9);
+  if (sparsityFactor < 0.7) reasons.push('sparse_history');
+
+  // Gaps: tolerate small gaps (a couple of missed samples), decay sharply
+  // toward long missing intervals (two-plus weeks for daily data).
+  const gapFactor = smoothDecay(
+    maxGapDays,
+    expectedIntervalDays * 2,
+    expectedIntervalDays * 14,
+  );
+  if (gapFactor < 0.7) reasons.push('gapped_history');
+
+  // Staleness: how long since the last known point, relative to "now".
+  const stalenessFactor = smoothDecay(
+    stalenessDays,
+    expectedIntervalDays * 3,
+    expectedIntervalDays * 21,
+  );
+  if (stalenessFactor < 0.7) reasons.push('stale_history');
+
+  const decayFactor = Math.round(sparsityFactor * gapFactor * stalenessFactor * 1000) / 1000;
+
+  return {
+    historyCoverage: Math.round(historyCoverage * 1000) / 1000,
+    maxGapDays: Math.round(maxGapDays * 100) / 100,
+    stalenessDays: Math.round(stalenessDays * 100) / 100,
+    decayFactor,
+    reasons,
+  };
+}

@@ -2,10 +2,18 @@ import { describe, it, expect } from "vitest";
 import type { Quest } from "./types";
 import {
   QUEST_STORAGE_VERSION,
+  DEFAULT_CACHE_TTL_MS,
+  MIGRATION_FIXTURES,
   applySimulatedIndexerProgress,
   cloneQuests,
+  isCacheStale,
+  invalidateWalletQuestCache,
   loadWalletQuestBundle,
   mergeQuestsWithTemplate,
+  migrateQuestBundle,
+  sanitizeAchievement,
+  sanitizeQuest,
+  sanitizeQuestObjective,
   saveWalletQuestBundle,
   walletQuestStorageKey,
   type PersistedWalletQuestBundle,
@@ -33,6 +41,17 @@ const TEMPLATE: Quest[] = [
     category: "deposit",
     icon: "Landmark",
     objectives: [{ id: "o1", description: "Deposit 100 USDC", target: 100, progress: 0, unit: "USDC" }],
+  },
+  {
+    id: "q2",
+    title: "Diamond Hands",
+    description: "Hold your vault position for 30 consecutive days.",
+    points: 150,
+    status: "active",
+    badgeContractId: "CBADGE_DIAMOND_HANDS",
+    category: "hold",
+    icon: "Gem",
+    objectives: [{ id: "o2", description: "Hold for 30 days", target: 30, progress: 0, unit: "days" }],
   },
 ];
 
@@ -155,7 +174,7 @@ describe("save and load quest progress", () => {
   it("saves quest progress and loads it back correctly", () => {
     const storage = mockStorage();
     const wallet = "GDSAVETEST1234567890ABCDEFGHIJKLMNOPQRSTUVWXYZ123456";
-    
+
     const bundle: PersistedWalletQuestBundle = {
       version: QUEST_STORAGE_VERSION,
       quests: [
@@ -204,7 +223,7 @@ describe("save and load quest progress", () => {
     };
 
     saveWalletQuestBundle(wallet, bundle1, storage);
-    
+
     const bundle2: PersistedWalletQuestBundle = {
       version: QUEST_STORAGE_VERSION,
       quests: [
@@ -282,8 +301,8 @@ describe("save and load quest progress", () => {
   });
 });
 
-describe("malformed localStorage data handling", () => {
-  it("handles corrupted JSON gracefully", () => {
+describe("malformed localStorage data handling & corrupted state recovery", () => {
+  it("handles corrupted JSON gracefully without crashing", () => {
     const storage = mockStorage();
     const wallet = "GDCORRUPTTEST1234567890ABCDEFGHIJKLMNOPQRSTUVWXY";
     const key = walletQuestStorageKey(wallet);
@@ -298,7 +317,7 @@ describe("malformed localStorage data handling", () => {
     expect(loaded.lastSyncedAt).toBeNull();
   });
 
-  it("handles missing version field", () => {
+  it("handles missing version field by upgrading gracefully", () => {
     const storage = mockStorage();
     const wallet = "GDNOVERSIONTEST1234567890ABCDEFGHIJKLMNOPQRSTUVW";
     const key = walletQuestStorageKey(wallet);
@@ -306,7 +325,12 @@ describe("malformed localStorage data handling", () => {
     storage.setItem(
       key,
       JSON.stringify({
-        quests: [],
+        quests: [
+          {
+            ...TEMPLATE[1],
+            objectives: [{ ...TEMPLATE[1].objectives[0], progress: 65 }],
+          },
+        ],
         achievements: [],
         lastSyncedAt: 1000,
       }),
@@ -315,10 +339,10 @@ describe("malformed localStorage data handling", () => {
     const loaded = loadWalletQuestBundle(wallet, TEMPLATE, storage);
 
     expect(loaded.version).toBe(QUEST_STORAGE_VERSION);
-    expect(loaded.quests).toHaveLength(TEMPLATE.length);
+    expect(loaded.quests.find((q) => q.id === "q1")?.objectives[0].progress).toBe(65);
   });
 
-  it("handles wrong version number", () => {
+  it("handles wrong version number and recovers valid progress", () => {
     const storage = mockStorage();
     const wallet = "GDWRONGVERSIONTEST1234567890ABCDEFGHIJKLMNOPQRST";
     const key = walletQuestStorageKey(wallet);
@@ -327,7 +351,12 @@ describe("malformed localStorage data handling", () => {
       key,
       JSON.stringify({
         version: 999,
-        quests: [TEMPLATE[1]],
+        quests: [
+          {
+            ...TEMPLATE[1],
+            objectives: [{ ...TEMPLATE[1].objectives[0], progress: 70 }],
+          },
+        ],
         achievements: [],
         lastSyncedAt: 1000,
       }),
@@ -336,10 +365,10 @@ describe("malformed localStorage data handling", () => {
     const loaded = loadWalletQuestBundle(wallet, TEMPLATE, storage);
 
     expect(loaded.version).toBe(QUEST_STORAGE_VERSION);
-    expect(loaded.quests).toHaveLength(TEMPLATE.length);
+    expect(loaded.quests.find((q) => q.id === "q1")?.objectives[0].progress).toBe(70);
   });
 
-  it("handles non-array quests field", () => {
+  it("handles non-array quests field gracefully", () => {
     const storage = mockStorage();
     const wallet = "GDNONARRAYTEST1234567890ABCDEFGHIJKLMNOPQRSTUVWX";
     const key = walletQuestStorageKey(wallet);
@@ -360,7 +389,7 @@ describe("malformed localStorage data handling", () => {
     expect(Array.isArray(loaded.quests)).toBe(true);
   });
 
-  it("handles non-array achievements field", () => {
+  it("handles non-array achievements field gracefully", () => {
     const storage = mockStorage();
     const wallet = "GDNONARRAYACH1234567890ABCDEFGHIJKLMNOPQRSTUVWXY";
     const key = walletQuestStorageKey(wallet);
@@ -378,6 +407,7 @@ describe("malformed localStorage data handling", () => {
     const loaded = loadWalletQuestBundle(wallet, TEMPLATE, storage);
 
     expect(Array.isArray(loaded.achievements)).toBe(true);
+    expect(loaded.achievements).toHaveLength(0);
   });
 
   it("handles null storage value", () => {
@@ -404,9 +434,9 @@ describe("malformed localStorage data handling", () => {
     expect(loaded.quests).toHaveLength(TEMPLATE.length);
   });
 
-  it("handles malformed quest objects in array", () => {
+  it("recovers partially corrupted quest arrays and restores corrupted items from template", () => {
     const storage = mockStorage();
-    const wallet = "GDMALFORMEDQUEST1234567890ABCDEFGHIJKLMNOPQRSTUV";
+    const wallet = "GDPARTIALCORRUPT1234567890ABCDEFGHIJKLMNOPQRST";
     const key = walletQuestStorageKey(wallet);
 
     storage.setItem(
@@ -414,20 +444,63 @@ describe("malformed localStorage data handling", () => {
       JSON.stringify({
         version: QUEST_STORAGE_VERSION,
         quests: [
-          { id: "q1" }, // Missing required fields
           null,
           undefined,
-          "not an object",
+          "invalid string quest",
+          { id: "q1", objectives: [{ id: "o1", description: "Deposit 100", target: 100, progress: 88, unit: "USDC" }] },
+          { id: "q2", objectives: "corrupted_objectives", status: null },
         ],
-        achievements: [],
-        lastSyncedAt: 1000,
+        achievements: [
+          null,
+          { questId: "q1", title: "First Deposit", badgeContractId: "CB1", mintedAt: 1000, txHash: "tx_1" },
+          { questId: null, txHash: null },
+        ],
+        lastSyncedAt: 123456,
       }),
     );
 
     const loaded = loadWalletQuestBundle(wallet, TEMPLATE, storage);
 
     expect(loaded.quests).toHaveLength(TEMPLATE.length);
-    expect(loaded.quests.every((q) => q.id && q.title && q.objectives)).toBe(true);
+    // Preserves progress from valid quest
+    expect(loaded.quests.find((q) => q.id === "q1")?.objectives[0].progress).toBe(88);
+    // Repaired quest q2 has valid structure from template
+    const q2 = loaded.quests.find((q) => q.id === "q2");
+    expect(q2).toBeDefined();
+    expect(Array.isArray(q2?.objectives)).toBe(true);
+    expect(q2?.objectives[0].target).toBe(30);
+    // Filtered out corrupted achievements while keeping valid one
+    expect(loaded.achievements).toHaveLength(1);
+    expect(loaded.achievements[0].txHash).toBe("tx_1");
+  });
+
+  it("sanitizes invalid objective progress values (NaN, negative, string)", () => {
+    const fallbackObj = TEMPLATE[1].objectives[0];
+    const sanitizedNaN = sanitizeQuestObjective({ progress: NaN, target: 100 }, fallbackObj);
+    expect(sanitizedNaN.progress).toBe(0);
+
+    const sanitizedNegative = sanitizeQuestObjective({ progress: -50, target: 100 }, fallbackObj);
+    expect(sanitizedNegative.progress).toBe(0);
+
+    const sanitizedString = sanitizeQuestObjective({ progress: "75", target: "100" }, fallbackObj);
+    expect(sanitizedString.progress).toBe(75);
+    expect(sanitizedString.target).toBe(100);
+  });
+
+  it("sanitizes corrupted achievements safely", () => {
+    expect(sanitizeAchievement(null)).toBeNull();
+    expect(sanitizeAchievement({})).toBeNull();
+    expect(sanitizeAchievement({ questId: "", txHash: "" })).toBeNull();
+
+    const validAch = sanitizeAchievement({
+      questId: "q1",
+      title: "First Deposit",
+      mintedAt: "2026-01-01T00:00:00Z",
+      txHash: "tx_abc",
+    });
+    expect(validAch).not.toBeNull();
+    expect(validAch?.txHash).toBe("tx_abc");
+    expect(validAch?.mintedAt).toBe(new Date("2026-01-01T00:00:00Z").getTime());
   });
 
   it("silently handles storage quota exceeded errors", () => {
@@ -464,7 +537,7 @@ describe("malformed localStorage data handling", () => {
     const wallet = "GDPRIVATETEST1234567890ABCDEFGHIJKLMNOPQRSTUVWXY";
 
     expect(() => loadWalletQuestBundle(wallet, TEMPLATE, storage)).not.toThrow();
-    
+
     const bundle: PersistedWalletQuestBundle = {
       version: QUEST_STORAGE_VERSION,
       quests: cloneQuests(TEMPLATE),
@@ -473,6 +546,166 @@ describe("malformed localStorage data handling", () => {
     };
 
     expect(() => saveWalletQuestBundle(wallet, bundle, storage)).not.toThrow();
+  });
+});
+
+describe("migration fixtures and legacy state upgrade", () => {
+  it("upgrades global v0 unversioned state fixture to active wallet bundle", () => {
+    const storage = mockStorage({
+      sy_quests: MIGRATION_FIXTURES.v0Global.sy_quests,
+      sy_achievements: MIGRATION_FIXTURES.v0Global.sy_achievements,
+    });
+
+    const wallet = "GDMIGRATEV0GLOBAL1234567890ABCDEFGHIJKLMNOPQRSTU";
+    const loaded = loadWalletQuestBundle(wallet, TEMPLATE, storage);
+
+    expect(loaded.version).toBe(QUEST_STORAGE_VERSION);
+    expect(loaded.quests.find((q) => q.id === "q1")?.objectives[0].progress).toBe(60);
+    expect(loaded.achievements).toHaveLength(1);
+    expect(loaded.achievements[0].txHash).toBe("tx_legacy_001");
+    // Global keys should be removed after migration
+    expect(storage.getItem("sy_quests")).toBeNull();
+    expect(storage.getItem("sy_achievements")).toBeNull();
+  });
+
+  it("upgrades v0 unversioned wallet key (sy_quest_wallet_<addr>) to v1 key", () => {
+    const wallet = "GDMIGRATEV0WALLET1234567890ABCDEFGHIJKLMNOPQRSTU";
+    const oldKey = `sy_quest_wallet_${wallet}`;
+    const storage = mockStorage({
+      [oldKey]: JSON.stringify({
+        quests: [
+          {
+            id: "q1",
+            title: "First Deposit",
+            description: "Deposit USDC.",
+            points: 50,
+            status: "active",
+            badgeContractId: "CBADGE_FIRST_DEPOSIT",
+            category: "deposit",
+            icon: "Landmark",
+            objectives: [{ id: "o1", description: "Deposit 100 USDC", target: 100, progress: 95, unit: "USDC" }],
+          },
+        ],
+        achievements: [],
+        lastSyncedAt: 5000,
+      }),
+    });
+
+    const loaded = loadWalletQuestBundle(wallet, TEMPLATE, storage);
+    expect(loaded.version).toBe(QUEST_STORAGE_VERSION);
+    expect(loaded.quests.find((q) => q.id === "q1")?.objectives[0].progress).toBe(95);
+    expect(storage.getItem(oldKey)).toBeNull();
+    expect(storage.getItem(walletQuestStorageKey(wallet))).toBeTruthy();
+  });
+
+  it("migrates legacy flat objectives fixture into standard objective array", () => {
+    const migrated = migrateQuestBundle(MIGRATION_FIXTURES.v0FlatObjectives, TEMPLATE);
+    const q1 = migrated.quests.find((q) => q.id === "q1");
+
+    expect(q1).toBeDefined();
+    expect(Array.isArray(q1?.objectives)).toBe(true);
+    expect(q1?.objectives[0].progress).toBe(85);
+    expect(q1?.objectives[0].target).toBe(100);
+  });
+
+  it("migrates legacy boolean status fixture into valid QuestStatus", () => {
+    const migrated = migrateQuestBundle(MIGRATION_FIXTURES.v0LegacyStatus, TEMPLATE);
+    const q1 = migrated.quests.find((q) => q.id === "q1");
+    const q2 = migrated.quests.find((q) => q.id === "q2");
+
+    expect(q1?.status).toBe("claimable");
+    expect(q2?.status).toBe("completed");
+    expect(migrated.achievements).toHaveLength(1);
+    expect(migrated.achievements[0].txHash).toBe("tx_legacy_002");
+  });
+
+  it("migrates partially corrupted fixture without throwing", () => {
+    const migrated = migrateQuestBundle(MIGRATION_FIXTURES.partiallyCorrupted, TEMPLATE);
+    expect(migrated.version).toBe(QUEST_STORAGE_VERSION);
+    expect(migrated.quests).toHaveLength(TEMPLATE.length);
+    expect(migrated.quests.find((q) => q.id === "q1")?.objectives[0].progress).toBe(45);
+    expect(migrated.achievements).toHaveLength(1);
+    expect(migrated.achievements[0].txHash).toBe("tx_valid_1");
+  });
+});
+
+describe("stale cache detection, invalidation, and recovery", () => {
+  it("correctly evaluates isCacheStale based on lastSyncedAt and TTL", () => {
+    const now = 1700000000000;
+
+    // Fresh cache (within TTL)
+    expect(isCacheStale({ lastSyncedAt: now - 1000 }, DEFAULT_CACHE_TTL_MS, now)).toBe(false);
+    expect(isCacheStale({ lastSyncedAt: now - 3600000 }, DEFAULT_CACHE_TTL_MS, now)).toBe(false);
+
+    // Stale cache (older than TTL)
+    expect(isCacheStale({ lastSyncedAt: now - DEFAULT_CACHE_TTL_MS - 1000 }, DEFAULT_CACHE_TTL_MS, now)).toBe(true);
+
+    // Missing, null, undefined, or NaN timestamps are considered stale
+    expect(isCacheStale(null, DEFAULT_CACHE_TTL_MS, now)).toBe(true);
+    expect(isCacheStale({ lastSyncedAt: null }, DEFAULT_CACHE_TTL_MS, now)).toBe(true);
+    expect(isCacheStale({ lastSyncedAt: NaN }, DEFAULT_CACHE_TTL_MS, now)).toBe(true);
+    expect(isCacheStale({ lastSyncedAt: 0 }, DEFAULT_CACHE_TTL_MS, now)).toBe(true);
+
+    // Future clock skew beyond 5 minutes is considered stale
+    expect(isCacheStale({ lastSyncedAt: now + 10 * 60 * 1000 }, DEFAULT_CACHE_TTL_MS, now)).toBe(true);
+  });
+
+  it("invalidates wallet cache using invalidateWalletQuestCache", () => {
+    const storage = mockStorage();
+    const wallet = "GDINVALIDATETEST1234567890ABCDEFGHIJKLMNOPQRSTUV";
+    const key = walletQuestStorageKey(wallet);
+
+    const bundle: PersistedWalletQuestBundle = {
+      version: QUEST_STORAGE_VERSION,
+      quests: cloneQuests(TEMPLATE),
+      achievements: [],
+      lastSyncedAt: Date.now(),
+    };
+
+    saveWalletQuestBundle(wallet, bundle, storage);
+    expect(storage.getItem(key)).toBeTruthy();
+
+    invalidateWalletQuestCache(wallet, storage);
+    expect(storage.getItem(key)).toBeNull();
+  });
+
+  it("resets stale progress when allowStale is false", () => {
+    const storage = mockStorage();
+    const wallet = "GDSTALETEST1234567890ABCDEFGHIJKLMNOPQRSTUVWXY";
+    const staleTime = Date.now() - 30 * 24 * 60 * 60 * 1000; // 30 days ago
+
+    const bundle: PersistedWalletQuestBundle = {
+      version: QUEST_STORAGE_VERSION,
+      quests: [
+        {
+          ...TEMPLATE[1],
+          objectives: [{ ...TEMPLATE[1].objectives[0], progress: 99 }],
+        },
+      ],
+      achievements: [
+        {
+          questId: "q1",
+          title: "First Deposit",
+          badgeContractId: "CB1",
+          mintedAt: staleTime,
+          txHash: "tx_stale_1",
+        },
+      ],
+      lastSyncedAt: staleTime,
+    };
+
+    saveWalletQuestBundle(wallet, bundle, storage);
+
+    // Loading with allowStale: false resets progress to template
+    const loadedWithoutStale = loadWalletQuestBundle(wallet, TEMPLATE, storage, { allowStale: false });
+    expect(loadedWithoutStale.quests.find((q) => q.id === "q1")?.objectives[0].progress).toBe(0);
+    expect(loadedWithoutStale.achievements).toHaveLength(1); // achievements preserved
+    expect(loadedWithoutStale.lastSyncedAt).toBeNull();
+
+    // Loading with allowStale: true (default) returns cached progress for optimistic display
+    saveWalletQuestBundle(wallet, bundle, storage);
+    const loadedWithStale = loadWalletQuestBundle(wallet, TEMPLATE, storage, { allowStale: true });
+    expect(loadedWithStale.quests.find((q) => q.id === "q1")?.objectives[0].progress).toBe(99);
   });
 });
 

@@ -24,6 +24,8 @@ export interface QuoteSnapshot {
   minOut: bigint;
   /** Previous expectedOut for delta calculation */
   prevExpectedOut?: bigint;
+  /** Previous route hops, used to detect a path change between fetches */
+  prevRoute?: string[];
   /** Whether the quote came from fallback */
   isFallback: boolean;
   /** Whether the quote is stale */
@@ -61,6 +63,11 @@ const LOW_EXECUTION_QUALITY = 70;
 const CRITICAL_EXECUTION_QUALITY = 50;
 const DEFAULT_ROUTE_IMPACT_THRESHOLD = 75;
 const MAX_QUOTE_AGE_MS = 60_000;
+/** route.length - 1 = hop count. >=3 hops means more than one intermediate pool. */
+const WARNING_HOP_COUNT = 3;
+const CRITICAL_HOP_COUNT = 5;
+/** Output delta below this is treated as "nominally unchanged" for path-change detection. */
+const NOMINAL_OUTPUT_DELTA_PCT = 5;
 
 /**
  * Computes output impact delta as a percentage.
@@ -70,6 +77,17 @@ function computeOutputDelta(prev: bigint | undefined, current: bigint): number {
   if (!prev || prev <= 0n || current <= 0n) return 0;
   const delta = Number(current - prev) / Number(prev);
   return Math.abs(delta) * 100;
+}
+
+/** Number of conversion hops implied by a route's contract list (edges, not nodes). */
+function computeHopCount(route: string[]): number {
+  return route.length > 1 ? route.length - 1 : 0;
+}
+
+/** Whether two route hop lists are identical, in order. */
+function routesEqual(a: string[], b: string[]): boolean {
+  if (a.length !== b.length) return false;
+  return a.every((hop, i) => hop === b[i]);
 }
 
 /**
@@ -127,6 +145,36 @@ export function useDepositImpact(input: UseDepositImpactInput): DepositImpactRes
         const ageSec = Math.floor(quoteAgeMs / 1000);
         reasons.push(`Quote is ${ageSec}s old — freshness degraded`);
         impactScore += 15;
+      }
+
+      // Route depth signal — multi-hop routes (more than one intermediate pool)
+      // compound slippage and execution risk beyond what the output delta alone reflects.
+      const hopCount = computeHopCount(input.quote.route);
+      if (hopCount >= CRITICAL_HOP_COUNT) {
+        reasons.push(
+          `Route spans ${hopCount} hops through multiple intermediate pools — deep multi-hop paths compound execution risk`,
+        );
+        impactScore += 30;
+      } else if (hopCount >= WARNING_HOP_COUNT) {
+        reasons.push(
+          `Route spans ${hopCount} hops through intermediate pools — execution risk increases with route depth`,
+        );
+        impactScore += 15;
+      }
+
+      // Path-change signal — a different hop sequence was selected since the
+      // last fetch. This can hide behind a stable headline output number, so
+      // it's evaluated independently of the output-delta signal above.
+      if (input.quote.prevRoute && !routesEqual(input.quote.route, input.quote.prevRoute)) {
+        if (outputDelta < NOMINAL_OUTPUT_DELTA_PCT) {
+          reasons.push(
+            `Route path changed to a different ${hopCount}-hop sequence while expected output stayed nominal — confirm the new route before proceeding`,
+          );
+          impactScore += 20;
+        } else {
+          reasons.push("Route path changed alongside the output amount — verify the new route");
+          impactScore += 10;
+        }
       }
     }
 

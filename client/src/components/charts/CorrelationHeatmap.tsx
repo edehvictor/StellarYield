@@ -1,5 +1,7 @@
 import React, { useEffect, useState } from "react";
 import { AlertTriangle, RefreshCw } from "lucide-react";
+import EmptyState from "../common/EmptyState";
+import { EMPTY_STATE_CORRELATION } from "../../utils/emptyStateCopy";
 import { apiUrl } from "../../lib/api";
 
 interface CorrelationMatrix {
@@ -107,10 +109,11 @@ export default function CorrelationHeatmap() {
     return (
       <div className="glass-card mt-8 p-6">
         <div className="flex h-[260px] w-full flex-col items-center justify-center rounded-lg border border-white/10 bg-white/[0.02] px-6 py-8 text-center sm:h-[300px]">
-          <p className="font-semibold text-gray-300">No correlation data available</p>
-          <p className="mt-1 text-sm text-gray-500">
-            There isn&apos;t enough position history yet to compute asset correlations.
-          </p>
+          <EmptyState
+            title={EMPTY_STATE_CORRELATION.title}
+            description={EMPTY_STATE_CORRELATION.description}
+            testId="correlation-empty-state"
+          />
         </div>
       </div>
     );

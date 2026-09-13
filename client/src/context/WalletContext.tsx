@@ -9,6 +9,11 @@ import { getAdapter } from "../auth/walletAdapters";
 import type { ConnectWalletOptions, ExtensionWalletProviderId, WalletSession } from "../auth/types";
 import { WalletContext } from "./WalletContextObject";
 
+import {
+  clearSensitiveWalletState,
+  clearPendingTransactionDrafts,
+} from "../services/transactionDraft";
+
 export function WalletProvider({ children }: { children: ReactNode }) {
   const [session, setSession] = useState<WalletSession | null>(null);
   const [isConnecting, setIsConnecting] = useState(false);
@@ -47,6 +52,10 @@ export function WalletProvider({ children }: { children: ReactNode }) {
 
     try {
       const nextSession = await connectWalletSession(options);
+      // Account switch detection: if connecting a different account, clear prior pending draft payloads
+      if (session?.walletAddress && session.walletAddress !== nextSession.walletAddress) {
+        clearPendingTransactionDrafts();
+      }
       setSession(nextSession);
       return true;
     } catch (error) {
@@ -64,15 +73,12 @@ export function WalletProvider({ children }: { children: ReactNode }) {
 
   function disconnectWallet() {
     clearStoredSession();
+    clearSensitiveWalletState();
     setSession(null);
     setErrorMessage(null);
 
     // Clear wallet-specific cached data and session state
     try {
-      window.localStorage.removeItem('authToken');
-      window.localStorage.removeItem('stellar_yield_google_oauth');
-      window.localStorage.removeItem('stellar_yield_google_sheets');
-
       // Clear any in-flight pending transaction state or notifications
       // by resetting browser's fetch/cache for wallet-dependent endpoints
       if ('caches' in window) {

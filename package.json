@@ -2,6 +2,7 @@
   "name": "stellaryield",
   "private": true,
   "scripts": {
+    "test": "node ./client/node_modules/vitest/vitest.mjs run",
     "smoke-test": "bash scripts/smoke-test.sh",
     "smoke-test:node": "node scripts/smoke-test.js",
     "smoke-test:portable": "node scripts/smoke-test.js",

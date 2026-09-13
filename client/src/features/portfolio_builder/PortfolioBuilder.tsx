@@ -16,6 +16,7 @@ import {
   applyPreset,
 } from "./portfolioUtils";
 import RebalancePreview from "./RebalancePreviewPanel";
+import AllocationDeltaPreview from "./AllocationDeltaPreview";
 import { useWallet } from "../../context/useWallet";
 import { deposit } from "../../services/soroban";
 
@@ -49,9 +50,31 @@ export default function PortfolioBuilder({
   const [baselineAllocations] = useState<VaultAllocation[]>(() =>
     buildInitialAllocations(availableVaults),
   );
+  // Last-confirmed/saved allocations — used by AllocationDeltaPreview as the
+  // "before" snapshot so users can review pending changes before saving.
+  const [savedAllocations, setSavedAllocations] = useState<VaultAllocation[]>(
+    () => buildInitialAllocations(availableVaults),
+  );
+  const [isSavingAllocation, setIsSavingAllocation] = useState(false);
   const [txPhase, setTxPhase] = useState<TxPhase>("idle");
   const [error, setError] = useState("");
   const [executeTx, setExecuteTx] = useState(false);
+
+  /**
+   * Confirm the current draft allocations as the new saved state.
+   * In a production flow this would persist to a backend; here it updates
+   * the local saved snapshot so the delta preview reflects the new baseline.
+   */
+  const handleSaveAllocation = useCallback(async () => {
+    setIsSavingAllocation(true);
+    try {
+      // Simulate async save (replace with real API call if needed)
+      await new Promise<void>((resolve) => setTimeout(resolve, 400));
+      setSavedAllocations([...allocations]);
+    } finally {
+      setIsSavingAllocation(false);
+    }
+  }, [allocations]);
 
   const handlePresetApply = useCallback(
     (preset: PortfolioPreset) => {
@@ -175,7 +198,9 @@ export default function PortfolioBuilder({
 
         {/* Presets */}
         <div className="space-y-2">
-          <label className="block text-sm text-gray-400">Allocation Presets</label>
+          <label className="block text-sm text-gray-400">
+            Allocation Presets
+          </label>
           <div className="flex flex-wrap gap-2">
             {(
               [
@@ -272,6 +297,15 @@ export default function PortfolioBuilder({
           ))}
         </div>
       )}
+
+      {/* Allocation Delta Preview — before/after diff shown before saving */}
+      <AllocationDeltaPreview
+        totalValueUsd={Number(totalAmount) || 0}
+        savedAllocations={savedAllocations}
+        draftAllocations={allocations}
+        onConfirm={handleSaveAllocation}
+        isSaving={isSavingAllocation}
+      />
 
       {/* Rebalance Simulation Sandbox */}
       {totalAmount && Number(totalAmount) > 0 && (

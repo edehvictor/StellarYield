@@ -19,6 +19,7 @@ import {
   RegimeClassification,
 } from "./yieldRegimeService";
 import { sendEmail } from "./emailService";
+import { safeWalletId } from "../utils/redact";
 
 const prisma = new PrismaClient();
 
@@ -148,7 +149,7 @@ export async function detectAndNotifyRegimeShift(
         data: { notified: true, notifiedAt: new Date() },
       });
     } catch (err) {
-      console.error("[portfolioRegimeShift] Email dispatch failed for", wallet, err);
+      console.error("[portfolioRegimeShift] Email dispatch failed for", safeWalletId(wallet), err);
       notificationSent = false;
     }
   }

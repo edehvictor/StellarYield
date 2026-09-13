@@ -192,7 +192,6 @@ describe("cross-tab StorageEvent", () => {
       key: STORAGE_KEY,
       newValue: eventNewValue,
       oldValue: null,
-      storageArea: window.localStorage,
     });
 
     const parsed: WalletSession | null = event.newValue
@@ -209,7 +208,6 @@ describe("cross-tab StorageEvent", () => {
     const event = new StorageEvent("storage", {
       key: "some-other-key",
       newValue: "irrelevant",
-      storageArea: window.localStorage,
     });
 
     const isSessionKey = event.key === STORAGE_KEY;

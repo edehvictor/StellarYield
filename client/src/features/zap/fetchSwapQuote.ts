@@ -72,6 +72,33 @@ async function toZapQuoteError(res: Response): Promise<ZapQuoteError> {
     requestId: asString(body.requestId),
     recoverable: body.recoverable === true,
   });
+export interface FetchSwapQuoteOptions {
+  signal?: AbortSignal;
+}
+
+/** Typed cancellation for quote/verify fetches aborted by the caller. */
+export class QuoteRequestCancelledError extends Error {
+  readonly cancelled = true as const;
+
+  constructor(message = "Quote request was cancelled") {
+    super(message);
+    this.name = "QuoteRequestCancelledError";
+  }
+}
+
+export function isQuoteCancellation(error: unknown): boolean {
+  return (
+    error instanceof QuoteRequestCancelledError ||
+    (typeof error === "object" &&
+      error !== null &&
+      (error as { cancelled?: boolean }).cancelled === true)
+  );
+}
+
+function throwIfAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) {
+    throw new QuoteRequestCancelledError();
+  }
 }
 
 /**
@@ -80,10 +107,14 @@ async function toZapQuoteError(res: Response): Promise<ZapQuoteError> {
  * Includes slippage tolerance and returns quote metadata (age, source, min output).
  * Throws a typed `ZapQuoteError` when the preview fails so recovery links
  * can be rendered by the UI.
+ * Pass `signal` to cancel in-flight quotes after route changes or rapid edits.
  */
 export async function fetchSwapQuote(
   req: ZapQuoteRequest,
+  options?: FetchSwapQuoteOptions,
 ): Promise<ZapQuoteResponse> {
+  throwIfAborted(options?.signal);
+
   let res: Response;
   try {
     res = await fetch(apiUrl("/api/zap/quote"), {
@@ -97,6 +128,13 @@ export async function fetchSwapQuote(
       status: 0,
       recoverable: true,
     });
+      signal: options?.signal,
+    });
+  } catch (err) {
+    if (options?.signal?.aborted || (err instanceof Error && err.name === "AbortError")) {
+      throw new QuoteRequestCancelledError();
+    }
+    throw err;
   }
 
   if (!res.ok) {
@@ -105,12 +143,28 @@ export async function fetchSwapQuote(
 
   return res.json() as Promise<ZapQuoteResponse>;
 }
-export async function verifySwapQuote(quote: ZapQuoteResponse): Promise<boolean> {
-  const res = await fetch(apiUrl("/api/zap/verify"), {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(quote),
-  });
+
+export async function verifySwapQuote(
+  quote: ZapQuoteResponse,
+  options?: FetchSwapQuoteOptions,
+): Promise<boolean> {
+  throwIfAborted(options?.signal);
+
+  let res: Response;
+  try {
+    res = await fetch(apiUrl("/api/zap/verify"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(quote),
+      signal: options?.signal,
+    });
+  } catch (err) {
+    if (options?.signal?.aborted || (err instanceof Error && err.name === "AbortError")) {
+      throw new QuoteRequestCancelledError();
+    }
+    throw err;
+  }
+
   if (!res.ok) {
     const txt = await res.text();
     throw new Error(txt || `Quote verification failed (${res.status})`);

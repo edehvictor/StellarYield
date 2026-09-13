@@ -11,6 +11,15 @@ This directory contains GitHub workflows and automation scripts for the StellarY
 - **`ipfs-deploy.yml`** - IPFS deployment automation
 - **`stale.yml`** - **NEW** - Stale issue and PR triage workflow
 
+### Issue Canvas & Issue Templates (`.github/ISSUE_TEMPLATE/`)
+
+- **`feature_canvas.md`** - Full-stack feature and epic design canvas
+- **`contract_canvas.md`** - Soroban smart contract and invariant canvas
+- **`bug_canvas.md`** - Bug triage, root cause analysis, and invariant verification canvas
+- **`architecture_canvas.md`** - Architectural refactoring and migration canvas
+- **`security_canvas.md`** - Security vulnerability remediation canvas
+- **`task_canvas.md`** - Contributor task and Stellar Wave bounty canvas
+
 ### Configuration Files
 
 - **`labels.yml`** - **NEW** - Label definitions for issue triage

@@ -11,6 +11,15 @@ export type AccountActivityEventType =
   | "alert"
   | "rebalance";
 
+export type TransactionStatus = "completed" | "pending" | "failed";
+
+export interface AccountActivityFilters {
+  types?: AccountActivityEventType[];
+  protocol?: string;
+  asset?: string;
+  status?: TransactionStatus;
+}
+
 export interface AccountActivityEvent {
   id: string;
   walletAddress: string;
@@ -21,6 +30,8 @@ export interface AccountActivityEvent {
   source: "portfolio" | "rewards" | "advisor" | "monitoring" | "automation";
   amountUsd?: number;
   assetSymbol?: string;
+  protocol?: string;
+  status?: TransactionStatus;
   severity?: "info" | "warning" | "critical";
   relatedVaultId?: string;
   metadata?: Record<string, string | number | boolean | null>;
@@ -144,6 +155,8 @@ function mapRecommendationEvent(
     description: entry.rationale,
     timestamp: entry.timestamp,
     source: "advisor",
+    protocol: entry.targetVault,
+    status: "completed",
     severity: entry.reasonCodes.some((code) => code.severity === "critical")
       ? "critical"
       : entry.reasonCodes.some((code) => code.severity === "warning")
@@ -173,6 +186,8 @@ function buildSeededEvents(walletAddress: string): AccountActivityEvent[] {
     source: "portfolio",
     amountUsd: seed.amountUsd,
     assetSymbol: seed.assetSymbol,
+    protocol: seed.protocol,
+    status: "completed" as TransactionStatus,
     severity: "info",
     relatedVaultId: seed.protocol,
   }));
@@ -187,6 +202,8 @@ function buildSeededEvents(walletAddress: string): AccountActivityEvent[] {
     source: "rewards",
     amountUsd: seed.amountUsd,
     assetSymbol: seed.assetSymbol,
+    protocol: seed.protocol,
+    status: "completed" as TransactionStatus,
     severity: "info",
     relatedVaultId: seed.protocol,
   }));
@@ -225,7 +242,7 @@ function buildSeededEvents(walletAddress: string): AccountActivityEvent[] {
 
 export function buildUnifiedAccountTimeline(
   walletAddress: string,
-  filters?: AccountActivityEventType[],
+  filters?: AccountActivityFilters,
 ): AccountActivityEvent[] {
   const seededEvents = buildSeededEvents(walletAddress);
   const recommendationEvents = getRecommendationTimeline(walletAddress).map((entry) =>
@@ -237,11 +254,18 @@ export function buildUnifiedAccountTimeline(
       new Date(right.timestamp).getTime() - new Date(left.timestamp).getTime(),
   );
 
-  if (!filters || filters.length === 0) {
+  if (!filters) {
     return allEvents;
   }
 
-  const allowed = new Set(filters);
-  return allEvents.filter((event) => allowed.has(event.type));
+  return allEvents.filter((event) => {
+    if (filters.types && filters.types.length > 0) {
+      if (!filters.types.includes(event.type)) return false;
+    }
+    if (filters.protocol && event.protocol !== filters.protocol) return false;
+    if (filters.asset && event.assetSymbol !== filters.asset) return false;
+    if (filters.status && event.status !== filters.status) return false;
+    return true;
+  });
 }
 

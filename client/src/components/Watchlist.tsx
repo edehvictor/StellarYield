@@ -9,7 +9,7 @@
  * - Alert acknowledgment
  */
 
-import React, { useEffect, useState, useCallback } from "react";
+import React, { useState, useCallback } from "react";
 import {
   AlertCircle,
   Eye,
@@ -21,21 +21,10 @@ import {
   X,
   Loader,
 } from "lucide-react";
-import { WatchlistClientService } from "../services/watchlistClientService";
+import { useWallet } from "../context/useWallet";
+import { useWatchlistStore } from "./useWatchlistStore";
 import { formatThresholdRule } from "../../../shared/types/watchlist";
-import type {
-  WatchlistItem,
-  ThresholdRule,
-  WatchlistResponse,
-} from "../../../shared/types/watchlist";
-
-interface WatchlistState {
-  items: WatchlistItem[];
-  totalUnacknowledgedAlerts: number;
-  loading: boolean;
-  error: string | null;
-  expandedItems: Set<string>;
-}
+import type { WatchlistItem, ThresholdRule } from "../../../shared/types/watchlist";
 
 interface AddRuleDialogState {
   open: boolean;
@@ -310,13 +299,20 @@ function WatchlistItemCard({
  * Main Watchlist component
  */
 export function Watchlist() {
-  const [state, setState] = useState<WatchlistState>({
-    items: [],
-    totalUnacknowledgedAlerts: 0,
-    loading: true,
-    error: null,
-    expandedItems: new Set(),
-  });
+  const { walletAddress, isConnected } = useWallet();
+  const scopedWallet = isConnected && walletAddress ? walletAddress : null;
+
+  const {
+    items,
+    totalUnacknowledgedAlerts,
+    loading,
+    error,
+    removeItem,
+    addThresholdRule,
+    clearError,
+  } = useWatchlistStore(scopedWallet);
+
+  const [expandedItems, setExpandedItems] = useState<Set<string>>(new Set());
 
   const [dialogState, setDialogState] = useState<AddRuleDialogState>({
     open: false,
@@ -325,56 +321,24 @@ export function Watchlist() {
     triggerOnce: false,
   });
 
-  // Load watchlist
-  useEffect(() => {
-    const loadWatchlist = async () => {
-      try {
-        setState((prev) => ({ ...prev, loading: true, error: null }));
-        const result = await WatchlistClientService.getWatchlist();
-        setState((prev) => ({
-          ...prev,
-          items: result.items,
-          totalUnacknowledgedAlerts: result.totalUnacknowledgedAlerts,
-          loading: false,
-        }));
-      } catch (error) {
-        setState((prev) => ({
-          ...prev,
-          error: `Failed to load watchlist: ${error}`,
-          loading: false,
-        }));
-      }
-    };
-
-    loadWatchlist();
-  }, []);
-
   const handleToggleExpand = useCallback((itemId: string) => {
-    setState((prev) => {
-      const newExpanded = new Set(prev.expandedItems);
+    setExpandedItems((prev) => {
+      const newExpanded = new Set(prev);
       if (newExpanded.has(itemId)) {
         newExpanded.delete(itemId);
       } else {
         newExpanded.add(itemId);
       }
-      return { ...prev, expandedItems: newExpanded };
+      return newExpanded;
     });
   }, []);
 
-  const handleRemove = useCallback(async (itemId: string) => {
-    try {
-      await WatchlistClientService.removeFromWatchlist(itemId);
-      setState((prev) => ({
-        ...prev,
-        items: prev.items.filter((item) => item.id !== itemId),
-      }));
-    } catch (error) {
-      setState((prev) => ({
-        ...prev,
-        error: `Failed to remove from watchlist: ${error}`,
-      }));
-    }
-  }, []);
+  const handleRemove = useCallback(
+    (itemId: string) => {
+      void removeItem(itemId);
+    },
+    [removeItem]
+  );
 
   const handleAddRule = useCallback((itemId: string) => {
     setDialogState((prev) => ({
@@ -386,30 +350,15 @@ export function Watchlist() {
 
   const handleDialogAdd = useCallback(
     async (ruleType: string, value: number, triggerOnce: boolean) => {
-      try {
-        if (!dialogState.itemId) return;
-
-        await WatchlistClientService.addThresholdRule(
-          dialogState.itemId,
-          ruleType as any,
-          value,
-          triggerOnce
-        );
-
-        // Refresh watchlist
-        const result = await WatchlistClientService.getWatchlist();
-        setState((prev) => ({
-          ...prev,
-          items: result.items,
-        }));
-      } catch (error) {
-        setState((prev) => ({
-          ...prev,
-          error: `Failed to add rule: ${error}`,
-        }));
-      }
+      if (!dialogState.itemId) return;
+      await addThresholdRule(
+        dialogState.itemId,
+        ruleType as "apy_above" | "apy_below" | "tvl_above" | "tvl_below" | "spread_change_above",
+        value,
+        triggerOnce
+      );
     },
-    [dialogState.itemId]
+    [dialogState.itemId, addThresholdRule]
   );
 
   return (
@@ -418,8 +367,8 @@ export function Watchlist() {
       <div className="mb-6">
         <div className="flex items-center justify-between mb-2">
           <h2 className="text-2xl font-bold text-slate-900">Yield Watchlist</h2>
-          {state.totalUnacknowledgedAlerts > 0 && (
-            <AlertBadge count={state.totalUnacknowledgedAlerts} showIcon={true} />
+          {totalUnacknowledgedAlerts > 0 && (
+            <AlertBadge count={totalUnacknowledgedAlerts} showIcon={true} />
           )}
         </div>
         <p className="text-slate-600">
@@ -428,28 +377,34 @@ export function Watchlist() {
       </div>
 
       {/* Error State */}
-      {state.error && (
+      {error && (
         <div className="bg-red-50 border border-red-200 rounded-lg p-4 mb-4 flex items-start gap-3">
           <AlertCircle className="w-5 h-5 text-red-600 mt-0.5 flex-shrink-0" />
           <div className="flex-1">
-            <p className="text-sm text-red-700">{state.error}</p>
+            <p className="text-sm text-red-700">{error}</p>
           </div>
-          <button
-            onClick={() => setState((prev) => ({ ...prev, error: null }))}
-            className="text-red-600 hover:text-red-700"
-          >
+          <button onClick={clearError} className="text-red-600 hover:text-red-700">
             <X className="w-4 h-4" />
           </button>
         </div>
       )}
 
-      {/* Loading State */}
-      {state.loading ? (
+      {/* No wallet connected */}
+      {!scopedWallet ? (
+        <div className="border border-dashed border-slate-300 rounded-lg p-12 text-center">
+          <Bell className="w-16 h-16 text-slate-300 mx-auto mb-3" />
+          <p className="text-lg font-semibold text-slate-900 mb-1">Connect a wallet</p>
+          <p className="text-slate-600">
+            Connect your wallet to view and manage your watchlist
+          </p>
+        </div>
+      ) : loading ? (
+        /* Loading State */
         <div className="flex items-center justify-center py-12">
           <Loader className="w-6 h-6 text-slate-400 animate-spin" />
           <p className="text-slate-600 ml-3">Loading watchlist...</p>
         </div>
-      ) : state.items.length === 0 ? (
+      ) : items.length === 0 ? (
         /* Empty State */
         <div className="border border-dashed border-slate-300 rounded-lg p-12 text-center">
           <Bell className="w-16 h-16 text-slate-300 mx-auto mb-3" />
@@ -466,11 +421,11 @@ export function Watchlist() {
       ) : (
         /* Watchlist Items */
         <div className="space-y-3">
-          {state.items.map((item) => (
+          {items.map((item) => (
             <WatchlistItemCard
               key={item.id}
               item={item}
-              expanded={state.expandedItems.has(item.id)}
+              expanded={expandedItems.has(item.id)}
               onToggleExpand={() => handleToggleExpand(item.id)}
               onRemove={handleRemove}
               onAddRule={handleAddRule}

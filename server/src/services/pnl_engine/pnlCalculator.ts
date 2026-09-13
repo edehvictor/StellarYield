@@ -784,3 +784,180 @@ function generateDailySnapshots(
 
   return snapshots;
 }
+
+// ── PnL Export Schema & Validation (#1039) ──────────────────────────────
+
+export interface PnLExportRecord {
+  date: string;
+  action: string;
+  asset: string;
+  amount: number;
+  costBasisUsd: number;
+  realizedGainUsd: number;
+  unrealizedValueUsd: number;
+  rewardsUsd: number;
+  feesUsd: number;
+  txHash: string;
+}
+
+export const PNL_EXPORT_COLUMNS: readonly string[] = [
+  "Date",
+  "Action",
+  "Asset",
+  "Amount",
+  "Cost Basis USD",
+  "Realized Gain USD",
+  "Unrealized Value USD",
+  "Rewards USD",
+  "Fees USD",
+  "TxHash",
+] as const;
+
+export function validatePnLExportRecord(
+  raw: unknown,
+  rowIndex = 0,
+): { isValid: boolean; errors: string[]; record?: PnLExportRecord } {
+  const errors: string[] = [];
+  if (!raw || typeof raw !== "object") {
+    return { isValid: false, errors: [`Row ${rowIndex + 1}: expected object`] };
+  }
+
+  const obj = raw as Record<string, unknown>;
+  const dateVal = obj.date ?? obj.timestamp;
+  let dateIso: string | null = null;
+  if (dateVal instanceof Date && Number.isFinite(dateVal.getTime())) {
+    dateIso = dateVal.toISOString();
+  } else if (typeof dateVal === "string" || typeof dateVal === "number") {
+    const d = new Date(dateVal);
+    if (Number.isFinite(d.getTime())) dateIso = d.toISOString();
+  }
+
+  if (!dateIso) {
+    errors.push(`Row ${rowIndex + 1}: missing or invalid date.`);
+  }
+
+  const action = typeof obj.action === "string" ? obj.action.trim().toUpperCase() : "";
+  if (!action) errors.push(`Row ${rowIndex + 1}: missing action.`);
+
+  const asset = typeof obj.asset === "string" ? obj.asset.trim().toUpperCase() : "USDC";
+
+  const num = (v: unknown, fallback = 0): number => {
+    const n = Number(v ?? fallback);
+    return Number.isFinite(n) ? n : NaN;
+  };
+
+  const amount = num(obj.amount ?? obj.quantity ?? obj.shares);
+  if (Number.isNaN(amount) || amount < 0) {
+    errors.push(`Row ${rowIndex + 1}: amount must be a non-negative finite number.`);
+  }
+
+  const costBasisUsd = num(obj.costBasisUsd ?? obj.costBasis);
+  if (Number.isNaN(costBasisUsd)) {
+    errors.push(`Row ${rowIndex + 1}: costBasisUsd must be a finite number.`);
+  }
+
+  const realizedGainUsd = num(obj.realizedGainUsd ?? obj.realized ?? obj.realizedYieldUsd);
+  if (Number.isNaN(realizedGainUsd)) {
+    errors.push(`Row ${rowIndex + 1}: realizedGainUsd must be a finite number.`);
+  }
+
+  const unrealizedValueUsd = num(obj.unrealizedValueUsd ?? obj.unrealized ?? obj.currentValue);
+  if (Number.isNaN(unrealizedValueUsd)) {
+    errors.push(`Row ${rowIndex + 1}: unrealizedValueUsd must be a finite number.`);
+  }
+
+  const rewardsUsd = num(obj.rewardsUsd ?? obj.rewards ?? obj.reward);
+  if (Number.isNaN(rewardsUsd) || rewardsUsd < 0) {
+    errors.push(`Row ${rowIndex + 1}: rewardsUsd must be a non-negative finite number.`);
+  }
+
+  const feesUsd = num(obj.feesUsd ?? obj.fees ?? obj.fee);
+  if (Number.isNaN(feesUsd) || feesUsd < 0) {
+    errors.push(`Row ${rowIndex + 1}: feesUsd must be a non-negative finite number.`);
+  }
+
+  const txHash = typeof obj.txHash === "string" ? obj.txHash.trim() : (typeof obj.tx_hash === "string" ? obj.tx_hash.trim() : "0x");
+
+  if (errors.length > 0) {
+    return { isValid: false, errors };
+  }
+
+  return {
+    isValid: true,
+    errors: [],
+    record: {
+      date: dateIso!,
+      action,
+      asset,
+      amount: Number(amount.toFixed(7)),
+      costBasisUsd: Number(costBasisUsd.toFixed(2)),
+      realizedGainUsd: Number(realizedGainUsd.toFixed(2)),
+      unrealizedValueUsd: Number(unrealizedValueUsd.toFixed(2)),
+      rewardsUsd: Number(rewardsUsd.toFixed(2)),
+      feesUsd: Number(feesUsd.toFixed(2)),
+      txHash,
+    },
+  };
+}
+
+export function validatePnLExportDataset(rawRows: unknown[]): {
+  isValid: boolean;
+  errors: string[];
+  records: PnLExportRecord[];
+} {
+  if (!Array.isArray(rawRows)) {
+    return { isValid: false, errors: ["Export dataset must be an array."], records: [] };
+  }
+  const records: PnLExportRecord[] = [];
+  const errors: string[] = [];
+
+  rawRows.forEach((r, idx) => {
+    const res = validatePnLExportRecord(r, idx);
+    if (!res.isValid) {
+      errors.push(...res.errors);
+    } else if (res.record) {
+      records.push(res.record);
+    }
+  });
+
+  if (errors.length > 0) {
+    return { isValid: false, errors, records: [] };
+  }
+
+  records.sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+  return { isValid: true, errors: [], records };
+}
+
+function escapeCsvField(val: string | number): string {
+  const str = String(val ?? "");
+  if (str.includes(",") || str.includes('"') || str.includes("\n") || str.includes("\r")) {
+    return `"${str.replace(/"/g, '""')}"`;
+  }
+  return str;
+}
+
+export function generatePnLCSV(rawRows: unknown[]): string {
+  const validated = validatePnLExportDataset(rawRows);
+  if (!validated.isValid) {
+    throw new Error(`PnL CSV validation failed: ${validated.errors.join("; ")}`);
+  }
+
+  const rows = [PNL_EXPORT_COLUMNS.join(",")];
+  for (const rec of validated.records) {
+    rows.push(
+      [
+        escapeCsvField(rec.date),
+        escapeCsvField(rec.action),
+        escapeCsvField(rec.asset),
+        escapeCsvField(rec.amount.toFixed(7)),
+        escapeCsvField(rec.costBasisUsd.toFixed(2)),
+        escapeCsvField(rec.realizedGainUsd.toFixed(2)),
+        escapeCsvField(rec.unrealizedValueUsd.toFixed(2)),
+        escapeCsvField(rec.rewardsUsd.toFixed(2)),
+        escapeCsvField(rec.feesUsd.toFixed(2)),
+        escapeCsvField(rec.txHash),
+      ].join(","),
+    );
+  }
+  return rows.join("\n");
+}

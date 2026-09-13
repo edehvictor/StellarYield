@@ -144,4 +144,89 @@ describe('ApyDispersionService', () => {
       expect(service.getConfig().lowCvThreshold).toBe(0.02);
     });
   });
+
+  // ── Precision at extreme magnitudes (#1070) ─────────────────────────────
+
+  describe('sub-basis-point (tiny) APY values', () => {
+    it('does not round a sub-basis-point mean APY to zero', () => {
+      const inputs: ProviderApyInput[] = [
+        { provider: 'A', apy: 0.00003, tvlUsd: 1_000_000, fetchedAt: '2026-05-26T00:00:00Z' },
+        { provider: 'B', apy: 0.00004, tvlUsd: 1_000_000, fetchedAt: '2026-05-26T00:00:00Z' },
+      ];
+
+      const result = service.computeDispersion('tiny', 'Tiny Strategy', inputs);
+
+      expect(result.meanApy).toBeGreaterThan(0);
+      expect(result.medianApy).toBeGreaterThan(0);
+    });
+
+    it('preserves a tiny standard deviation instead of collapsing it to zero', () => {
+      const inputs: ProviderApyInput[] = [
+        { provider: 'A', apy: 0.00001, tvlUsd: 1_000_000, fetchedAt: '2026-05-26T00:00:00Z' },
+        { provider: 'B', apy: 0.00009, tvlUsd: 1_000_000, fetchedAt: '2026-05-26T00:00:00Z' },
+      ];
+
+      const result = service.computeDispersion('tiny-spread', 'Tiny Spread', inputs);
+
+      expect(result.stdDev).toBeGreaterThan(0);
+      expect(result.range).toBeGreaterThan(0);
+    });
+
+    it('keeps a tiny per-source deviation from mean non-zero', () => {
+      const inputs: ProviderApyInput[] = [
+        { provider: 'A', apy: 0.00002, tvlUsd: 1_000_000, fetchedAt: '2026-05-26T00:00:00Z' },
+        { provider: 'B', apy: 0.00006, tvlUsd: 1_000_000, fetchedAt: '2026-05-26T00:00:00Z' },
+      ];
+
+      const result = service.computeDispersion('tiny-dev', 'Tiny Deviation', inputs);
+
+      for (const source of result.sources) {
+        expect(source.deviationFromMean).not.toBe(0);
+      }
+    });
+  });
+
+  describe('unusually large (synthetic/stress) APY values', () => {
+    it('handles a very large synthetic rate without overflow', () => {
+      const inputs: ProviderApyInput[] = [
+        { provider: 'A', apy: 500_000, tvlUsd: 1_000_000, fetchedAt: '2026-05-26T00:00:00Z' },
+        { provider: 'B', apy: 520_000, tvlUsd: 1_000_000, fetchedAt: '2026-05-26T00:00:00Z' },
+      ];
+
+      const result = service.computeDispersion('extreme', 'Extreme Stress Test', inputs);
+
+      expect(Number.isFinite(result.meanApy)).toBe(true);
+      expect(Number.isFinite(result.stdDev)).toBe(true);
+      expect(Number.isFinite(result.coefficientOfVariation)).toBe(true);
+      expect(result.meanApy).toBeGreaterThan(0);
+    });
+
+    it('handles an extreme synthetic rate at the billions scale', () => {
+      const inputs: ProviderApyInput[] = [
+        { provider: 'A', apy: 9_000_000_000, tvlUsd: 1_000_000, fetchedAt: '2026-05-26T00:00:00Z' },
+        { provider: 'B', apy: 9_500_000_000, tvlUsd: 1_000_000, fetchedAt: '2026-05-26T00:00:00Z' },
+      ];
+
+      const result = service.computeDispersion('billions', 'Billions Scale', inputs);
+
+      expect(Number.isFinite(result.meanApy)).toBe(true);
+      expect(Number.isNaN(result.meanApy)).toBe(false);
+      expect(result.dispersionLevel).toBeDefined();
+    });
+  });
+
+  describe('mixed magnitude bands in the same input set', () => {
+    it('does not let a tiny value get swamped into zero by a large one', () => {
+      const inputs: ProviderApyInput[] = [
+        { provider: 'A', apy: 0.00001, tvlUsd: 1_000_000, fetchedAt: '2026-05-26T00:00:00Z' },
+        { provider: 'B', apy: 100_000, tvlUsd: 1_000_000, fetchedAt: '2026-05-26T00:00:00Z' },
+      ];
+
+      const result = service.computeDispersion('mixed', 'Mixed Magnitudes', inputs);
+
+      expect(result.minApy).toBeCloseTo(0.00001, 5);
+      expect(result.maxApy).toBe(100_000);
+      expect(Number.isFinite(result.stdDev)).toBe(true);
+    });
+  });
 });

@@ -11,9 +11,13 @@ import {
 import { YieldFlowCanvas } from "../visualizations";
 import PortfolioVisualizer from "../visualizer/PortfolioVisualizer";
 import { ExposureMap } from "../../portfolio/ExposureMap";
+import { DailyMovementPanel } from "../../portfolio/DailyMovementPanel";
 import PresetsPanel from "../../features/presets/PresetsPanel";
 import UnifiedActivityTimeline from "./UnifiedActivityTimeline";
 import PortfolioExport from "./PortfolioExport";
+import RiskScoreBreakdownPanel from "./RiskScoreBreakdownPanel";
+import FreshnessBadge from "./FreshnessBadge";
+import { computeHoldingFreshness } from "./holdingFreshness";
 import {
   analyzeConcentration,
   buildExposureBuckets,
@@ -29,6 +33,8 @@ interface VaultPosition {
   currentValue: number;
   apy: number;
   shares: number;
+  /** ISO-8601 timestamp of when this position's source data was last fetched (#1107). */
+  fetchedAt?: string | null;
 }
 
 interface Transaction {
@@ -43,16 +49,68 @@ interface Transaction {
 // ── Mock data (will be replaced with on-chain reads in future) ──────────
 
 const MOCK_POSITIONS: VaultPosition[] = [
-  { protocol: "Blend", asset: "USDC", deposited: 5000, currentValue: 5162.5, apy: 6.5, shares: 5000 },
-  { protocol: "Soroswap", asset: "XLM-USDC", deposited: 2000, currentValue: 2122, apy: 12.2, shares: 1850 },
-  { protocol: "DeFindex", asset: "Yield Index", deposited: 3000, currentValue: 3133.5, apy: 8.9, shares: 2900 },
+  {
+    protocol: "Blend",
+    asset: "USDC",
+    deposited: 5000,
+    currentValue: 5162.5,
+    apy: 6.5,
+    shares: 5000,
+    fetchedAt: new Date(Date.now() - 60_000).toISOString(), // fresh (1 min ago)
+  },
+  {
+    protocol: "Soroswap",
+    asset: "XLM-USDC",
+    deposited: 2000,
+    currentValue: 2122,
+    apy: 12.2,
+    shares: 1850,
+    fetchedAt: new Date(Date.now() - 60 * 60 * 1000).toISOString(), // stale (1 hour ago)
+  },
+  {
+    protocol: "DeFindex",
+    asset: "Yield Index",
+    deposited: 3000,
+    currentValue: 3133.5,
+    apy: 8.9,
+    shares: 2900,
+    fetchedAt: null, // unknown — source has never reported a fetch timestamp
+  },
 ];
 
 const MOCK_TRANSACTIONS: Transaction[] = [
-  { id: "1", type: "deposit", amount: 5000, asset: "USDC", timestamp: "2026-03-20T10:30:00Z", txHash: "abc123...def456" },
-  { id: "2", type: "deposit", amount: 2000, asset: "XLM-USDC", timestamp: "2026-03-18T14:15:00Z", txHash: "ghi789...jkl012" },
-  { id: "3", type: "withdraw", amount: 500, asset: "USDC", timestamp: "2026-03-15T09:00:00Z", txHash: "mno345...pqr678" },
-  { id: "4", type: "deposit", amount: 3000, asset: "Yield Index", timestamp: "2026-03-10T16:45:00Z", txHash: "stu901...vwx234" },
+  {
+    id: "1",
+    type: "deposit",
+    amount: 5000,
+    asset: "USDC",
+    timestamp: "2026-03-20T10:30:00Z",
+    txHash: "abc123...def456",
+  },
+  {
+    id: "2",
+    type: "deposit",
+    amount: 2000,
+    asset: "XLM-USDC",
+    timestamp: "2026-03-18T14:15:00Z",
+    txHash: "ghi789...jkl012",
+  },
+  {
+    id: "3",
+    type: "withdraw",
+    amount: 500,
+    asset: "USDC",
+    timestamp: "2026-03-15T09:00:00Z",
+    txHash: "mno345...pqr678",
+  },
+  {
+    id: "4",
+    type: "deposit",
+    amount: 3000,
+    asset: "Yield Index",
+    timestamp: "2026-03-10T16:45:00Z",
+    txHash: "stu901...vwx234",
+  },
 ];
 
 // ── Helpers ─────────────────────────────────────────────────────────────
@@ -82,10 +140,15 @@ interface PortfolioDashboardProps {
   walletAddress: string;
 }
 
-export default function PortfolioDashboard({ walletAddress }: PortfolioDashboardProps) {
+export default function PortfolioDashboard({
+  walletAddress,
+}: PortfolioDashboardProps) {
   const [positions, setPositions] = useState<VaultPosition[]>([]);
   const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [isLoading, setIsLoading] = useState(true);
+
+  // Fetch daily movement data
+  const { movement } = useDailyMovement({ walletAddress, enabled: true });
 
   useEffect(() => {
     // Simulate loading from chain / backend
@@ -113,7 +176,10 @@ export default function PortfolioDashboard({ walletAddress }: PortfolioDashboard
       })),
     [positions],
   );
-  const concentration = useMemo(() => analyzeConcentration(exposure), [exposure]);
+  const concentration = useMemo(
+    () => analyzeConcentration(exposure),
+    [exposure],
+  );
 
   if (isLoading) {
     return (
@@ -128,7 +194,9 @@ export default function PortfolioDashboard({ walletAddress }: PortfolioDashboard
       <div className="glass-panel p-12 text-center">
         <Wallet className="mx-auto mb-4 text-gray-400" size={48} />
         <h2 className="text-xl font-bold mb-2">No Active Positions</h2>
-        <p className="text-gray-400 mb-6">Start investing to build your portfolio and earn yield.</p>
+        <p className="text-gray-400 mb-6">
+          Start investing to build your portfolio and earn yield.
+        </p>
         <button className="btn-primary">Make Your First Deposit</button>
       </div>
     );
@@ -147,7 +215,10 @@ export default function PortfolioDashboard({ walletAddress }: PortfolioDashboard
         <div className="flex items-center gap-3">
           <PortfolioExport walletAddress={walletAddress} />
           <button
-            onClick={() => { setIsLoading(true); setTimeout(() => setIsLoading(false), 500); }}
+            onClick={() => {
+              setIsLoading(true);
+              setTimeout(() => setIsLoading(false), 500);
+            }}
             className="btn-secondary flex items-center gap-2 text-sm"
           >
             <RefreshCw size={14} /> Refresh
@@ -200,7 +271,12 @@ export default function PortfolioDashboard({ walletAddress }: PortfolioDashboard
                   : ""
             }`}
           >
-            {formatSharePct(Math.max(concentration.topAssetShare, concentration.topProtocolShare))}
+            {formatSharePct(
+              Math.max(
+                concentration.topAssetShare,
+                concentration.topProtocolShare,
+              ),
+            )}
           </p>
           <p className="text-xs text-gray-500 mt-1">
             {concentration.warnings.length > 0
@@ -214,7 +290,9 @@ export default function PortfolioDashboard({ walletAddress }: PortfolioDashboard
       {concentration.warnings.length > 0 && (
         <div
           className={`glass-panel p-5 border-l-4 ${
-            concentration.severity === "critical" ? "border-[#FF5E5E]" : "border-yellow-500"
+            concentration.severity === "critical"
+              ? "border-[#FF5E5E]"
+              : "border-yellow-500"
           }`}
           role="alert"
         >
@@ -222,18 +300,27 @@ export default function PortfolioDashboard({ walletAddress }: PortfolioDashboard
             <AlertTriangle
               size={16}
               className={
-                concentration.severity === "critical" ? "text-[#FF5E5E]" : "text-yellow-500"
+                concentration.severity === "critical"
+                  ? "text-[#FF5E5E]"
+                  : "text-yellow-500"
               }
             />
-            <h3 className="font-bold">Your portfolio is less diversified than it looks</h3>
+            <h3 className="font-bold">
+              Your portfolio is less diversified than it looks
+            </h3>
           </div>
           <ul className="list-disc list-inside space-y-1 text-sm text-gray-300">
             {concentration.warnings.map((warning) => (
-              <li key={`${warning.dimension}-${warning.name}`}>{warning.message}</li>
+              <li key={`${warning.dimension}-${warning.name}`}>
+                {warning.message}
+              </li>
             ))}
           </ul>
         </div>
       )}
+
+      {/* Daily Movement Panel */}
+      {movement && <DailyMovementPanel movement={movement} />}
 
       <Suspense
         fallback={
@@ -252,6 +339,8 @@ export default function PortfolioDashboard({ walletAddress }: PortfolioDashboard
         }}
       />
 
+      <RiskScoreBreakdownPanel />
+
       {/* 3D Visualizer Integration */}
       <PortfolioVisualizer />
 
@@ -268,11 +357,13 @@ export default function PortfolioDashboard({ walletAddress }: PortfolioDashboard
                 <th className="pb-3 text-right font-semibold">Current Value</th>
                 <th className="pb-3 text-right font-semibold">APY</th>
                 <th className="pb-3 text-right font-semibold">P&L</th>
+                <th className="pb-3 text-right font-semibold">Source</th>
               </tr>
             </thead>
             <tbody>
               {positions.map((pos, i) => {
                 const pnl = pos.currentValue - pos.deposited;
+                const freshness = computeHoldingFreshness(pos.fetchedAt);
                 return (
                   <tr
                     key={i}
@@ -280,11 +371,23 @@ export default function PortfolioDashboard({ walletAddress }: PortfolioDashboard
                   >
                     <td className="py-4 font-medium">{pos.protocol}</td>
                     <td className="py-4 text-gray-300">{pos.asset}</td>
-                    <td className="py-4 text-right">{formatCurrency(pos.deposited)}</td>
-                    <td className="py-4 text-right font-medium">{formatCurrency(pos.currentValue)}</td>
-                    <td className="py-4 text-right text-[#3EAC75]">{pos.apy}%</td>
-                    <td className={`py-4 text-right font-medium ${pnl >= 0 ? "text-[#3EAC75]" : "text-[#FF5E5E]"}`}>
-                      {pnl >= 0 ? "+" : ""}{formatCurrency(pnl)}
+                    <td className="py-4 text-right">
+                      {formatCurrency(pos.deposited)}
+                    </td>
+                    <td className="py-4 text-right font-medium">
+                      {formatCurrency(pos.currentValue)}
+                    </td>
+                    <td className="py-4 text-right text-[#3EAC75]">
+                      {pos.apy}%
+                    </td>
+                    <td
+                      className={`py-4 text-right font-medium ${pnl >= 0 ? "text-[#3EAC75]" : "text-[#FF5E5E]"}`}
+                    >
+                      {pnl >= 0 ? "+" : ""}
+                      {formatCurrency(pnl)}
+                    </td>
+                    <td className="py-4 text-right">
+                      <FreshnessBadge status={freshness.status} ageSeconds={freshness.ageSeconds} />
                     </td>
                   </tr>
                 );
@@ -305,7 +408,9 @@ export default function PortfolioDashboard({ walletAddress }: PortfolioDashboard
       <div className="glass-panel p-6">
         <h3 className="text-lg font-bold mb-4">Transaction History</h3>
         {transactions.length === 0 ? (
-          <p className="text-gray-400 text-center py-6">No transactions yet. Start by making your first deposit.</p>
+          <p className="text-gray-400 text-center py-6">
+            No transactions yet. Start by making your first deposit.
+          </p>
         ) : (
           <div className="space-y-3">
             {transactions.map((tx) => (
@@ -329,13 +434,18 @@ export default function PortfolioDashboard({ walletAddress }: PortfolioDashboard
                   </div>
                   <div>
                     <p className="font-medium capitalize">{tx.type}</p>
-                    <p className="text-xs text-gray-500 font-mono">{tx.txHash}</p>
+                    <p className="text-xs text-gray-500 font-mono">
+                      {tx.txHash}
+                    </p>
                   </div>
                 </div>
 
                 <div className="text-right">
-                  <p className={`font-medium ${tx.type === "deposit" ? "text-[#3EAC75]" : "text-[#F5A623]"}`}>
-                    {tx.type === "deposit" ? "+" : "-"}{formatCurrency(tx.amount)}
+                  <p
+                    className={`font-medium ${tx.type === "deposit" ? "text-[#3EAC75]" : "text-[#F5A623]"}`}
+                  >
+                    {tx.type === "deposit" ? "+" : "-"}
+                    {formatCurrency(tx.amount)}
                   </p>
                   <p className="text-xs text-gray-500 flex items-center gap-1 justify-end">
                     <Clock size={10} /> {formatDate(tx.timestamp)}

@@ -9,6 +9,7 @@ import {
 } from "../services/export";
 import { sendError } from "../utils/errorResponse";
 import { validateWalletAddress } from "../middleware/validation";
+import { safeWalletId } from "../utils/redact";
 
 type ExportPrismaClient = {
   userTransaction: {
@@ -189,7 +190,7 @@ exportRouter.get(
       const csvStream = createCSVStream(records);
       csvStream.pipe(res);
     } catch (error) {
-      console.error("[export] Failed to export data for address: %s", encodeURIComponent(address), error);
+      console.error("[export] Failed to export data for: %s", safeWalletId(address), error);
       sendError(res, 500, "EXPORT_FAILED", "Failed to generate export.");
     }
   },

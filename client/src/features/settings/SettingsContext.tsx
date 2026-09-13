@@ -5,22 +5,7 @@
 import { createContext, useCallback, useContext, useEffect, useState, type ReactNode } from "react";
 import type { TxSettings } from "./types";
 import { DEFAULT_TX_SETTINGS, SLIPPAGE_MAX, SLIPPAGE_MIN, DEADLINE_MAX, DEADLINE_MIN } from "./types";
-
-const STORAGE_KEY = "stellar_yield_tx_settings";
-
-function loadSettings(): TxSettings {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (raw) return { ...DEFAULT_TX_SETTINGS, ...(JSON.parse(raw) as Partial<TxSettings>) };
-  } catch {
-    // ignore
-  }
-  return DEFAULT_TX_SETTINGS;
-}
-
-function saveSettings(s: TxSettings): void {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(s));
-}
+import { loadTxSettings, saveTxSettings } from "./settingsPersistence";
 
 interface SettingsContextValue {
   settings: TxSettings;
@@ -31,10 +16,10 @@ interface SettingsContextValue {
 const SettingsContext = createContext<SettingsContextValue | null>(null);
 
 export function SettingsProvider({ children }: { children: ReactNode }) {
-  const [settings, setSettings] = useState<TxSettings>(loadSettings);
+  const [settings, setSettings] = useState<TxSettings>(loadTxSettings);
 
   useEffect(() => {
-    saveSettings(settings);
+    saveTxSettings(settings);
   }, [settings]);
 
   const updateSettings = useCallback((patch: Partial<TxSettings>) => {

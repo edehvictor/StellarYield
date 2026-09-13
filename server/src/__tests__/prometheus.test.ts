@@ -3,6 +3,7 @@
  */
 import request from "supertest";
 import { createApp } from "../app";
+import { recordFailure } from "../monitoring/prometheus";
 
 // Stub heavy dependencies so tests run without real DB / Stellar
 jest.mock("@prisma/client", () => {
@@ -136,5 +137,66 @@ describe("GET /metrics (Prometheus)", () => {
     expect(res.text).not.toMatch(/G[A-Z0-9]{55}/);
 
     process.env.NODE_ENV = prev;
+  });
+
+  describe("stellaryield_failure_total (tagged failure counter)", () => {
+    it("records a fully-tagged failure and exposes all four labels", async () => {
+      const prev = process.env.NODE_ENV;
+      process.env.NODE_ENV = "development";
+      delete process.env.METRICS_TOKEN;
+
+      recordFailure({
+        provider: "blend",
+        network: "testnet",
+        route: "zap/quote",
+        failure_category: "router_simulation_failed",
+      });
+
+      const res = await request(app).get("/metrics");
+      expect(res.status).toBe(200);
+      expect(res.text).toContain("stellaryield_failure_total");
+      expect(res.text).toContain('provider="blend"');
+      expect(res.text).toContain('network="testnet"');
+      expect(res.text).toContain('route="zap/quote"');
+      expect(res.text).toContain('failure_category="router_simulation_failed"');
+
+      process.env.NODE_ENV = prev;
+    });
+
+    it("defaults missing optional tags to the stable unknown value", async () => {
+      const prev = process.env.NODE_ENV;
+      process.env.NODE_ENV = "development";
+      delete process.env.METRICS_TOKEN;
+
+      recordFailure({ route: "indexer/poll", failure_category: "replay_error" });
+
+      const res = await request(app).get("/metrics");
+      expect(res.text).toContain('route="indexer/poll"');
+      expect(res.text).toContain('failure_category="replay_error"');
+      expect(res.text).toMatch(/stellaryield_failure_total\{[^}]*provider="unknown"[^}]*\}/);
+      expect(res.text).toMatch(/stellaryield_failure_total\{[^}]*network="unknown"[^}]*\}/);
+
+      process.env.NODE_ENV = prev;
+    });
+
+    it("keeps all pre-existing metric names unchanged", async () => {
+      const prev = process.env.NODE_ENV;
+      process.env.NODE_ENV = "development";
+      delete process.env.METRICS_TOKEN;
+
+      const res = await request(app).get("/metrics");
+      for (const name of [
+        "stellaryield_tvl_usd",
+        "stellaryield_apy_percent",
+        "stellaryield_depositors_total",
+        "stellaryield_http_request_duration_ms",
+        "stellaryield_db_pool_status",
+        "stellaryield_indexer_lag_ledgers",
+      ]) {
+        expect(res.text).toContain(name);
+      }
+
+      process.env.NODE_ENV = prev;
+    });
   });
 });

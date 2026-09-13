@@ -9,6 +9,8 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
+import EmptyState from "../common/EmptyState";
+import { EMPTY_STATE_SHARE_PRICE } from "../../utils/emptyStateCopy";
 import { apiUrl } from "../../lib/api";
 
 type TimeRange = "1M" | "3M" | "All";
@@ -185,10 +187,11 @@ export default function SharePriceChart({ vaultId = "primary-yield-vault" }: Sha
           </div>
         ) : filteredHistory.length === 0 ? (
           <div className="h-full w-full rounded-lg border border-white/10 bg-white/[0.02] px-6 py-8 flex flex-col items-center justify-center text-center">
-            <p className="text-gray-300 font-semibold">No share price snapshots available</p>
-            <p className="text-gray-500 text-sm mt-1">
-              No recorded snapshots for this period. Snapshots are taken daily.
-            </p>
+            <EmptyState
+              title={EMPTY_STATE_SHARE_PRICE.title}
+              description={EMPTY_STATE_SHARE_PRICE.description}
+              testId="share-price-empty-state"
+            />
           </div>
         ) : (
           <ResponsiveContainer width="100%" height="100%">
