@@ -29,6 +29,9 @@ import { sendError } from "../utils/errorResponse";
  *   priceImpactPct         — slippage as a percentage
  *   isLowLiquidity         — true if price impact exceeds 2 %
  *   quotedAt               — ISO timestamp of when the estimate was generated
+ *   expiresAt              — ISO timestamp when the quote becomes stale
+ *                            (quotedAt + 60s TTL, see WITHDRAWAL_QUOTE_TTL_MS)
+ *   quoteTtlMs             — TTL in milliseconds (always 60000)
  */
 
 /** Derive a human-readable processing delay based on vault policy. */
@@ -49,6 +52,13 @@ function resolveProcessingDelay(vaultId: string): {
 }
 
 const withdrawalPreviewRouter = Router({ mergeParams: true });
+
+/**
+ * Quote time-to-live for withdrawal previews (#1308).
+ * Mirrors the zap quote TTL (60s) so transaction modals share one
+ * deterministic staleness contract: `expiresAt = quotedAt + TTL`.
+ */
+export const WITHDRAWAL_QUOTE_TTL_MS = 60_000;
 
 withdrawalPreviewRouter.post(
   "/:vaultId/withdrawal-preview",
@@ -120,6 +130,9 @@ withdrawalPreviewRouter.post(
     const { label: processingDelayLabel, seconds: processingDelaySeconds } =
       resolveProcessingDelay(String(vaultId));
 
+    const quotedAt = new Date();
+    const expiresAt = new Date(quotedAt.getTime() + WITHDRAWAL_QUOTE_TTL_MS);
+
     res.json({
       vaultId,
       requestedAmountUsd: amountUsd,
@@ -132,7 +145,9 @@ withdrawalPreviewRouter.post(
       conservativeNetUsd: estimate.conservativeAmountUsd,
       priceImpactPct: estimate.priceImpactPct,
       isLowLiquidity: estimate.isLowLiquidity,
-      quotedAt: new Date().toISOString(),
+      quotedAt: quotedAt.toISOString(),
+      expiresAt: expiresAt.toISOString(),
+      quoteTtlMs: WITHDRAWAL_QUOTE_TTL_MS,
     });
   },
 );

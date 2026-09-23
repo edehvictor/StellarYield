@@ -1,10 +1,12 @@
 import { Router, Request, Response } from "express";
 import {
   buildUnifiedAccountTimeline,
+  getAccountActivityPaginated,
   type AccountActivityEventType,
   type AccountActivityFilters,
   type TransactionStatus,
 } from "../services/accountActivityTimelineService";
+import { parsePaginationLimit } from "../types/pagination";
 
 const router = Router();
 
@@ -71,14 +73,40 @@ router.get("/:walletAddress", (req: Request, res: Response) => {
     filters.asset ||
     filters.status;
 
-  const timeline = buildUnifiedAccountTimeline(
+  // Cursor pagination (#1305) — shared `PaginatedResponse` contract.
+  // `timeline` is kept as the page payload for backward compatibility;
+  // `data` + `pagination` expose the canonical contract for new clients.
+  const limit = parsePaginationLimit(req.query.limit);
+  const cursor =
+    typeof req.query.cursor === "string" ? req.query.cursor : undefined;
+  const page = getAccountActivityPaginated(
     walletAddress,
     hasFilters ? filters : undefined,
+    { cursor, limit },
   );
+
+  // Preserve the legacy unpaginated shape when the client did not ask for
+  // paging (no cursor/limit params): full timeline + empty pagination.
+  const wantsPaging = req.query.cursor !== undefined || req.query.limit !== undefined;
+  if (!wantsPaging) {
+    const timeline = buildUnifiedAccountTimeline(
+      walletAddress,
+      hasFilters ? filters : undefined,
+    );
+    res.json({
+      walletAddress,
+      timeline,
+      data: timeline,
+      pagination: { nextCursor: null, hasMore: false, limit: timeline.length },
+    });
+    return;
+  }
 
   res.json({
     walletAddress,
-    timeline,
+    timeline: page.data,
+    data: page.data,
+    pagination: page.pagination,
   });
 });
 

@@ -18,6 +18,11 @@ import { parseDecimalToStroops, formatStroopsToDecimal } from "../zap/amount";
 import { getVaultTokenFromEnv } from "../zap/assets";
 import { apiFetch, getApiBaseUrlOrNull } from "../../lib/api";
 import { useParams } from "react-router-dom";
+import {
+  WITHDRAW_QUOTE_TTL_MS,
+  isWithdrawQuoteStale,
+  withdrawQuoteAgeSeconds,
+} from "./withdrawQuoteFreshness";
 
 export interface WithdrawPanelProps {
   walletAddress: string | null;
@@ -38,6 +43,8 @@ interface WithdrawalPreview {
   priceImpactPct: number;
   isLowLiquidity: boolean;
   quotedAt: string;
+  expiresAt?: string;
+  quoteTtlMs?: number;
 }
 
 // Fallback USD rate — in production this would come from a price oracle.
@@ -64,9 +71,19 @@ interface PreviewPanelProps {
   preview: WithdrawalPreview | null;
   loading: boolean;
   error: string | null;
+  isStale: boolean;
+  quoteAgeSecs: number | null;
+  onRefresh: () => void;
 }
 
-function PreviewPanel({ preview, loading, error }: PreviewPanelProps) {
+function PreviewPanel({
+  preview,
+  loading,
+  error,
+  isStale,
+  quoteAgeSecs,
+  onRefresh,
+}: PreviewPanelProps) {
   if (loading) {
     return (
       <div
@@ -105,7 +122,40 @@ function PreviewPanel({ preview, loading, error }: PreviewPanelProps) {
       <h4 className="font-semibold text-white flex items-center gap-2">
         <Info className="w-4 h-4 text-indigo-400" />
         Withdrawal Preview
+        {quoteAgeSecs !== null && (
+          <span
+            data-testid="withdraw-quote-age"
+            className="ml-auto flex items-center gap-1 text-xs font-normal text-gray-400"
+          >
+            <Clock className="w-3 h-3" />
+            {quoteAgeSecs}s ago
+          </span>
+        )}
       </h4>
+
+      {/* Stale quote warning (#1308) — blocks submission until refreshed */}
+      {isStale && (
+        <div
+          role="alert"
+          data-testid="withdraw-stale-warning"
+          className="flex items-start gap-2 rounded-lg bg-yellow-500/10 border border-yellow-500/30 p-3 text-xs text-yellow-200/80"
+        >
+          <Clock className="w-4 h-4 shrink-0 text-yellow-400 mt-0.5" />
+          <span className="flex-1">
+            Stale quote — this estimate is over{" "}
+            {Math.round(WITHDRAW_QUOTE_TTL_MS / 1000)} seconds old and may no
+            longer reflect pool liquidity or fees. Refresh before submitting.
+          </span>
+          <button
+            type="button"
+            onClick={onRefresh}
+            data-testid="withdraw-refresh-quote"
+            className="shrink-0 rounded-md border border-yellow-500/40 px-2 py-1 text-yellow-200 hover:bg-yellow-500/20"
+          >
+            Refresh
+          </button>
+        </div>
+      )}
 
       {/* Net output row */}
       <div className="flex items-center justify-between">
@@ -196,6 +246,28 @@ export default function WithdrawPanel({ walletAddress }: WithdrawPanelProps) {
   const [previewLoading, setPreviewLoading] = useState(false);
   const [previewError, setPreviewError] = useState<string | null>(null);
   const previewDebounce = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Stale-quote clock (#1308): ticks every second while a preview is shown.
+  const [quoteNowMs, setQuoteNowMs] = useState(() => Date.now());
+  const [refreshNonce, setRefreshNonce] = useState(0);
+
+  useEffect(() => {
+    if (!preview) return;
+    const id = setInterval(() => setQuoteNowMs(Date.now()), 1000);
+    return () => clearInterval(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [preview]);
+
+  const isStaleQuote = preview
+    ? isWithdrawQuoteStale(preview, quoteNowMs)
+    : false;
+  const quoteAgeSecs = preview
+    ? withdrawQuoteAgeSeconds(preview.quotedAt, quoteNowMs)
+    : null;
+
+  const refreshPreview = useCallback(() => {
+    setQuoteNowMs(Date.now());
+    setRefreshNonce((n) => n + 1);
+  }, []);
 
   const refreshBalance = useCallback(async () => {
     if (!walletAddress) return;
@@ -253,6 +325,7 @@ export default function WithdrawPanel({ walletAddress }: WithdrawPanelProps) {
       const baseUrl = getApiBaseUrlOrNull();
       if (!baseUrl) {
         // No backend — compute client-side fallback so the user still sees a preview
+        const now = new Date();
         const fallbackPreview: WithdrawalPreview = {
           vaultId,
           requestedAmountUsd: amountUsd,
@@ -265,7 +338,11 @@ export default function WithdrawPanel({ walletAddress }: WithdrawPanelProps) {
           conservativeNetUsd: amountUsd,
           priceImpactPct: 0,
           isLowLiquidity: false,
-          quotedAt: new Date().toISOString(),
+          quotedAt: now.toISOString(),
+          expiresAt: new Date(
+            now.getTime() + WITHDRAW_QUOTE_TTL_MS,
+          ).toISOString(),
+          quoteTtlMs: WITHDRAW_QUOTE_TTL_MS,
         };
         setPreview(fallbackPreview);
         setPreviewLoading(false);
@@ -312,7 +389,7 @@ export default function WithdrawPanel({ walletAddress }: WithdrawPanelProps) {
     return () => {
       if (previewDebounce.current) clearTimeout(previewDebounce.current);
     };
-  }, [amount, vaultId, vaultToken.decimals]);
+  }, [amount, vaultId, vaultToken.decimals, refreshNonce]);
 
   const emitPhase = useCallback((p: TxPhase) => {
     setTxPhase(p);
@@ -331,6 +408,11 @@ export default function WithdrawPanel({ walletAddress }: WithdrawPanelProps) {
       setError(
         "Preview data is unavailable. Resolve the issue above before submitting.",
       );
+      return;
+    }
+    // Stale quotes must be refreshed before signing (#1308).
+    if (preview && isWithdrawQuoteStale(preview)) {
+      setError("Quote expired. Refresh the preview and try again.");
       return;
     }
 
@@ -393,6 +475,7 @@ export default function WithdrawPanel({ walletAddress }: WithdrawPanelProps) {
 
   // Preview is required before submission; it blocks when an API error occurred.
   const previewMissing = Boolean(amount && previewError && !preview);
+  const staleBlocked = Boolean(preview && !previewLoading && isStaleQuote);
 
   if (!walletAddress) {
     return (
@@ -472,6 +555,9 @@ export default function WithdrawPanel({ walletAddress }: WithdrawPanelProps) {
           preview={preview}
           loading={previewLoading}
           error={previewError}
+          isStale={isStaleQuote && !previewLoading}
+          quoteAgeSecs={quoteAgeSecs}
+          onRefresh={refreshPreview}
         />
       </div>
 
@@ -498,9 +584,19 @@ export default function WithdrawPanel({ walletAddress }: WithdrawPanelProps) {
       <button
         type="button"
         onClick={() => void handleWithdraw()}
-        disabled={submitting || !amount || previewLoading || previewMissing}
+        disabled={
+          submitting ||
+          !amount ||
+          previewLoading ||
+          previewMissing ||
+          staleBlocked
+        }
         aria-disabled={
-          submitting || !amount || previewLoading || previewMissing
+          submitting ||
+          !amount ||
+          previewLoading ||
+          previewMissing ||
+          staleBlocked
         }
         className="w-full py-3 rounded-xl font-semibold text-white bg-gradient-to-r from-yellow-500 to-orange-500 hover:from-yellow-600 hover:to-orange-600 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
       >
@@ -518,6 +614,11 @@ export default function WithdrawPanel({ walletAddress }: WithdrawPanelProps) {
           <>
             <AlertTriangle className="w-4 h-4" />
             Preview required
+          </>
+        ) : staleBlocked ? (
+          <>
+            <Clock className="w-4 h-4" />
+            Quote stale — refresh
           </>
         ) : (
           <>

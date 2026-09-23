@@ -118,9 +118,33 @@ async function loadPrismaClient(): Promise<IndexerPrismaClient | null> {
 
 /**
  * Known/supported event topic patterns.
+ * Covers the live vault topics (see `contracts/yield_vault/src/lib.rs`
+ * and `server/src/indexer/eventVersionCompat.ts`) plus legacy generics.
  * Extend this set as new event types are added to the contract.
  */
 const KNOWN_EVENT_TOPICS = new Set([
+  "init",
+  "deposit",
+  "dep_for",
+  "withdraw",
+  "withdrawal",
+  "rebal",
+  "tr_sh",
+  "strat_cfg",
+  "harvest",
+  "rescue",
+  "kpr_add",
+  "pause",
+  "unpause",
+  "don_set",
+  "referral",
+  "flash",
+  "zap_init",
+  "zap_dep",
+  "zap_part",
+  "zap_ref",
+  "set_eng",
+  "set_fee",
   "mint",
   "burn",
   "transfer",
@@ -202,6 +226,20 @@ function classifyError(error: unknown): {
   errorMessage: string;
 } {
   const message = error instanceof Error ? error.message : String(error);
+  if (
+    message.includes("UNSUPPORTED_EVENT_VERSION") ||
+    (typeof (error as { code?: unknown }).code === "string" &&
+      (error as { code: string }).code === "UNSUPPORTED_EVENT_VERSION")
+  ) {
+    return { errorClass: "UnsupportedEventVersion", errorMessage: message };
+  }
+  if (
+    message.includes("UNKNOWN_EVENT_TYPE") ||
+    (typeof (error as { code?: unknown }).code === "string" &&
+      (error as { code: string }).code === "UNKNOWN_EVENT_TYPE")
+  ) {
+    return { errorClass: "UnknownTopicError", errorMessage: message };
+  }
   if (message.includes("UnknownTopicError")) {
     return { errorClass: "UnknownTopicError", errorMessage: message };
   }

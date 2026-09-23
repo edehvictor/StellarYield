@@ -76,8 +76,22 @@ pub fn check_event_version(event_type: &str, version: u32) -> EventDecodeStatus 
     match (event_type, version) {
         ("deposit", 1) => EventDecodeStatus::Recognized,
         ("withdrawal", 1) => EventDecodeStatus::Recognized,
+        ("withdraw", 1) => EventDecodeStatus::Recognized,
         ("admin_action", 1) => EventDecodeStatus::Recognized,
         ("harvest", 1) => EventDecodeStatus::Recognized,
+        // Live v1 vault topics (see lib.rs emits) — all schema version 1.
+        ("init", 1) => EventDecodeStatus::Recognized,
+        ("dep_for", 1) => EventDecodeStatus::Recognized,
+        ("rebal", 1) => EventDecodeStatus::Recognized,
+        ("tr_sh", 1) => EventDecodeStatus::Recognized,
+        ("strat_cfg", 1) => EventDecodeStatus::Recognized,
+        ("rescue", 1) => EventDecodeStatus::Recognized,
+        ("kpr_add", 1) => EventDecodeStatus::Recognized,
+        ("pause", 1) => EventDecodeStatus::Recognized,
+        ("unpause", 1) => EventDecodeStatus::Recognized,
+        ("don_set", 1) => EventDecodeStatus::Recognized,
+        ("referral", 1) => EventDecodeStatus::Recognized,
+        ("flash", 1) => EventDecodeStatus::Recognized,
         // Future versions go to dead-letter
         (_, future) if future > VAULT_EVENT_SCHEMA_VERSION => EventDecodeStatus::Unknown,
         _ => EventDecodeStatus::Invalid,

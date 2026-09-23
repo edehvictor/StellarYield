@@ -18,7 +18,7 @@ export interface TransactionRecord {
 }
 
 /** CSV column headers matching the standardized tax format. */
-const CSV_HEADERS = [
+export const CSV_HEADERS = [
   "Date",
   "Action",
   "Asset",
@@ -26,6 +26,252 @@ const CSV_HEADERS = [
   "USD Value",
   "TxHash",
 ];
+
+/** Schema version for the tax CSV format (bump when columns change). */
+export const CSV_SCHEMA_VERSION = 1;
+
+/** Expected header line (exact order, comma-joined). */
+export const CSV_HEADER_LINE = CSV_HEADERS.join(",");
+
+/** Typed validation error codes — never parsed from provider messages. */
+export type CsvSchemaErrorCode =
+  | "INVALID_HEADER"
+  | "WRONG_COLUMN_COUNT"
+  | "INVALID_DATE"
+  | "INVALID_ACTION"
+  | "INVALID_ASSET"
+  | "INVALID_AMOUNT"
+  | "INVALID_USD_VALUE"
+  | "INVALID_TX_HASH"
+  | "INVALID_RECORD";
+
+export interface CsvSchemaIssue {
+  row: number;
+  code: CsvSchemaErrorCode;
+  field: string;
+  message: string;
+}
+
+export class CsvValidationError extends Error {
+  readonly code = "CSV_SCHEMA_VALIDATION_FAILED" as const;
+  readonly issues: CsvSchemaIssue[];
+  constructor(issues: CsvSchemaIssue[]) {
+    super(
+      `Cannot generate CSV — schema validation failed:\n${issues
+        .map((i) => `[row ${i.row}] ${i.code}: ${i.message}`)
+        .join("\n")}`,
+    );
+    this.name = "CsvValidationError";
+    this.issues = issues;
+  }
+}
+
+/**
+ * Validate one transaction record against the deterministic CSV schema.
+ * Returns the list of issues (empty when valid). `row` is 1-based for messages.
+ */
+export function validateTransactionRecord(
+  record: unknown,
+  row = 1,
+): CsvSchemaIssue[] {
+  const issues: CsvSchemaIssue[] = [];
+  const push = (
+    code: CsvSchemaErrorCode,
+    field: string,
+    message: string,
+  ): void => {
+    issues.push({ row, code, field, message });
+  };
+
+  if (!record || typeof record !== "object") {
+    push("INVALID_RECORD", "", "Record must be an object.");
+    return issues;
+  }
+
+  const r = record as Partial<TransactionRecord>;
+
+  if (
+    typeof r.date !== "string" ||
+    r.date.trim().length === 0 ||
+    !Number.isFinite(Date.parse(r.date))
+  ) {
+    push("INVALID_DATE", "date", "date must be a non-empty parseable date string.");
+  }
+  if (typeof r.action !== "string" || r.action.trim().length === 0) {
+    push("INVALID_ACTION", "action", "action must be a non-empty string.");
+  }
+  if (typeof r.asset !== "string" || r.asset.trim().length === 0) {
+    push("INVALID_ASSET", "asset", "asset must be a non-empty string.");
+  }
+  if (
+    typeof r.amount !== "number" ||
+    !Number.isFinite(r.amount) ||
+    r.amount < 0
+  ) {
+    push(
+      "INVALID_AMOUNT",
+      "amount",
+      "amount must be a finite number >= 0.",
+    );
+  }
+  if (
+    typeof r.usdValue !== "number" ||
+    !Number.isFinite(r.usdValue) ||
+    r.usdValue < 0
+  ) {
+    push(
+      "INVALID_USD_VALUE",
+      "usdValue",
+      "usdValue must be a finite number >= 0.",
+    );
+  }
+  if (
+    typeof r.txHash !== "string" ||
+    r.txHash.trim().length === 0
+  ) {
+    push("INVALID_TX_HASH", "txHash", "txHash must be a non-empty string.");
+  }
+  return issues;
+}
+
+/**
+ * Validate a whole dataset. Throws `CsvValidationError` listing every bad row.
+ * Empty datasets are valid (header-only CSV).
+ */
+export function validateTransactionDataset(records: unknown): void {
+  if (!Array.isArray(records)) {
+    throw new CsvValidationError([
+      {
+        row: 0,
+        code: "INVALID_RECORD",
+        field: "",
+        message: "Records must be an array.",
+      },
+    ]);
+  }
+  const issues: CsvSchemaIssue[] = [];
+  records.forEach((record, index) => {
+    issues.push(...validateTransactionRecord(record, index + 1));
+  });
+  if (issues.length > 0) throw new CsvValidationError(issues);
+}
+
+/** Split one CSV line into fields, honouring RFC-4180 double-quote escaping. */
+export function parseCsvLine(line: string): string[] {
+  const fields: string[] = [];
+  let current = "";
+  let inQuotes = false;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (inQuotes) {
+      if (ch === '"') {
+        if (line[i + 1] === '"') {
+          current += '"';
+          i++;
+        } else {
+          inQuotes = false;
+        }
+      } else {
+        current += ch;
+      }
+    } else if (ch === '"') {
+      inQuotes = true;
+    } else if (ch === ",") {
+      fields.push(current);
+      current = "";
+    } else {
+      current += ch;
+    }
+  }
+  fields.push(current);
+  return fields;
+}
+
+/**
+ * Validate rendered CSV text: exact header order plus per-row column count
+ * and field-level checks. Throws `CsvValidationError` on mismatch.
+ */
+export function validateCsvContent(csv: string): void {
+  const lines = csv.split("\n");
+  const header = lines[0] ?? "";
+  if (header !== CSV_HEADER_LINE) {
+    throw new CsvValidationError([
+      {
+        row: 0,
+        code: "INVALID_HEADER",
+        field: "header",
+        message: `Expected header "${CSV_HEADER_LINE}" but got "${header}".`,
+      },
+    ]);
+  }
+  const issues: CsvSchemaIssue[] = [];
+  for (let i = 1; i < lines.length; i++) {
+    const line = lines[i];
+    if (line === "") continue;
+    const fields = parseCsvLine(line);
+    if (fields.length !== CSV_HEADERS.length) {
+      issues.push({
+        row: i,
+        code: "WRONG_COLUMN_COUNT",
+        field: "",
+        message: `Expected ${CSV_HEADERS.length} columns but got ${fields.length}.`,
+      });
+      continue;
+    }
+    const [date, action, asset, amountRaw, usdRaw, txHash] = fields;
+    if (!date || !Number.isFinite(Date.parse(date))) {
+      issues.push({
+        row: i,
+        code: "INVALID_DATE",
+        field: "date",
+        message: "date must be a non-empty parseable date string.",
+      });
+    }
+    if (!action.trim()) {
+      issues.push({
+        row: i,
+        code: "INVALID_ACTION",
+        field: "action",
+        message: "action must be a non-empty string.",
+      });
+    }
+    if (!asset.trim()) {
+      issues.push({
+        row: i,
+        code: "INVALID_ASSET",
+        field: "asset",
+        message: "asset must be a non-empty string.",
+      });
+    }
+    const amount = Number(amountRaw);
+    if (!Number.isFinite(amount) || amount < 0) {
+      issues.push({
+        row: i,
+        code: "INVALID_AMOUNT",
+        field: "amount",
+        message: "amount must be a finite number >= 0.",
+      });
+    }
+    const usdValue = Number(usdRaw);
+    if (!Number.isFinite(usdValue) || usdValue < 0) {
+      issues.push({
+        row: i,
+        code: "INVALID_USD_VALUE",
+        field: "usdValue",
+        message: "usdValue must be a finite number >= 0.",
+      });
+    }
+    if (!txHash.trim()) {
+      issues.push({
+        row: i,
+        code: "INVALID_TX_HASH",
+        field: "txHash",
+        message: "txHash must be a non-empty string.",
+      });
+    }
+  }
+  if (issues.length > 0) throw new CsvValidationError(issues);
+}
 
 /**
  * Escape a CSV field value.
@@ -69,7 +315,8 @@ function recordToCSVRow(record: TransactionRecord): string {
  * @returns Complete CSV string with headers.
  */
 export function generateCSV(records: TransactionRecord[]): string {
-  const rows = [CSV_HEADERS.join(",")];
+  validateTransactionDataset(records);
+  const rows = [CSV_HEADER_LINE];
   for (const record of records) {
     rows.push(recordToCSVRow(record));
   }
@@ -86,13 +333,14 @@ export function generateCSV(records: TransactionRecord[]): string {
  * @returns A readable stream emitting CSV content.
  */
 export function createCSVStream(records: TransactionRecord[]): Readable {
+  validateTransactionDataset(records);
   let index = -1;
   const total = records.length;
 
   return new Readable({
     read() {
       if (index === -1) {
-        this.push(CSV_HEADERS.join(",") + "\n");
+        this.push(CSV_HEADER_LINE + "\n");
         index = 0;
         return;
       }
