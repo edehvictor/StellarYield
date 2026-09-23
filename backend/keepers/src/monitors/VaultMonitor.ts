@@ -3,6 +3,7 @@ import { Queue } from 'bullmq';
 import { config } from '../config';
 import { logger } from '../utils/logger';
 import { LiquidationJobData } from '../queues/types';
+import { ledgerLagMonitor } from './LedgerLagMonitor';
 
 /**
  * Represents the on-chain state of a single CDP fetched from the
@@ -87,6 +88,8 @@ export class VaultMonitor {
       }
 
       logger.info({ scanned: entries.length, flagged }, '[VaultMonitor] Scan complete');
+      // Record a successful ledger read so the lag monitor can track freshness
+      ledgerLagMonitor.recordSuccess();
     } catch (err) {
       logger.error({ err }, '[VaultMonitor] Scan cycle failed');
     }

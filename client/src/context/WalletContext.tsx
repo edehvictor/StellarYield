@@ -4,6 +4,7 @@ import {
   clearStoredSession,
   connectWalletSession,
   loadStoredSession,
+  recoverSession,
 } from "../auth/session";
 import { getAdapter } from "../auth/walletAdapters";
 import type { ConnectWalletOptions, ExtensionWalletProviderId, WalletSession } from "../auth/types";
@@ -23,7 +24,23 @@ export function WalletProvider({ children }: { children: ReactNode }) {
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
   useEffect(() => {
-    setSession(loadStoredSession());
+    // On mount, attempt to recover any persisted session rather than loading
+    // the raw stored value directly. recoverSession() checks TTL, probes
+    // provider availability, and re-verifies smart wallet credentials so the
+    // context starts in an accurate state after a page reload.
+    let cancelled = false;
+
+    recoverSession().then((result) => {
+      if (cancelled) return;
+      if (result.session) {
+        setSession(result.session);
+      }
+    }).catch(() => {
+      // Fallback: load without recovery so the user is not silently logged out
+      if (!cancelled) setSession(loadStoredSession());
+    });
+
+    return () => { cancelled = true; };
   }, []);
 
   useEffect(() => {
