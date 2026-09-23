@@ -9,8 +9,13 @@ import {
   listScenarios,
   deleteScenario,
   assertValidScenarioInput,
+  assertValidCurrentAllocations,
+  buildRebalancingPreview,
+  exportRebalancingPreviewJSON,
+  exportRebalancingPreviewCSV,
   previewImport,
   TreasuryValidationError,
+  RebalancingPreviewError,
 } from "../services/treasurySimulationService";
 import { successEnvelope, errorEnvelope } from "../types/envelope";
 
@@ -146,6 +151,80 @@ router.post("/export-comparison", treasuryMutationLimiter, (req: Request, res: R
     );
   }
 });
+
+/**
+ * POST /api/treasury/rebalancing/preview/export
+ * Deterministically export the rebalancing preview between a target scenario
+ * and an optional current allocation set (JSON or CSV). The export contains no
+ * wall-clock timestamp, so identical inputs produce byte-identical files.
+ */
+router.post(
+  "/rebalancing/preview/export",
+  treasuryMutationLimiter,
+  (req: Request, res: Response) => {
+    try {
+      const scenario = assertValidScenarioInput({
+        ...req.body,
+        id: String(req.body.id ?? "rebalancing-preview")
+          .trim(),
+      });
+      const currentAllocations = assertValidCurrentAllocations(
+        req.body.currentAllocations,
+      );
+      const preview = buildRebalancingPreview(scenario, currentAllocations);
+      const format = String(req.body.format || "json").toLowerCase();
+
+      if (format === "csv") {
+        const csv = exportRebalancingPreviewCSV(preview);
+        res.setHeader("Content-Type", "text/csv");
+        res.setHeader(
+          "Content-Disposition",
+          `attachment; filename="treasury_rebalancing_preview.csv"`,
+        );
+        res.status(200).send(csv);
+        return;
+      }
+
+      const jsonStr = exportRebalancingPreviewJSON(preview);
+      res.setHeader("Content-Type", "application/json");
+      res.setHeader(
+        "Content-Disposition",
+        `attachment; filename="treasury_rebalancing_preview.json"`,
+      );
+      res.status(200).send(jsonStr);
+    } catch (err) {
+      if (err instanceof RebalancingPreviewError) {
+        res.status(err.statusCode).json(
+          errorEnvelope(
+            err.code,
+            err.message,
+            "treasury/rebalancing/preview/export",
+            err.details,
+          ),
+        );
+        return;
+      }
+      if (err instanceof TreasuryValidationError) {
+        res.status(err.statusCode).json(
+          errorEnvelope(
+            err.code,
+            err.message,
+            "treasury/rebalancing/preview/export",
+            err.details,
+          ),
+        );
+        return;
+      }
+      res.status(400).json(
+        errorEnvelope(
+          "INVALID_REQUEST",
+          "Invalid request body",
+          "treasury/rebalancing/preview/export",
+        ),
+      );
+    }
+  },
+);
 
 /**
  * POST /api/treasury/scenarios

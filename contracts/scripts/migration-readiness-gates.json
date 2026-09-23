@@ -1,0 +1,68 @@
+{
+  "schemaVersion": "1.0",
+  "description": "Source-of-truth checklist template for vault migration readiness. The server evaluates each gate against deterministic evidence (registry, yields, share-price history, backend health) and the client renders the result. This file must stay machine-readable and drift-free.",
+  "vaultCoverage": [
+    "usdc",
+    "xlm",
+    "xlm-usdc",
+    "xlm-eth",
+    "index",
+    "bluechip"
+  ],
+  "gates": [
+    {
+      "id": "registry-entry",
+      "title": "Vault contract registered",
+      "description": "The vault contract address is present in contracts/registry.json for the active network.",
+      "targetArea": "contract",
+      "evidenceType": "CONTRACT_ADDRESS",
+      "reference": "contracts/registry.json#vault",
+      "guidance": "Deploy the vault contract and record its 56-character Soroban address under 'vault' for the target network."
+    },
+    {
+      "id": "yield-availability",
+      "title": "Yield feed live",
+      "description": "The yields feed publishes a non-stale APY/TVL entry for the vault's protocol and asset.",
+      "targetArea": "server",
+      "evidenceType": "YIELD_STATS",
+      "reference": "GET /api/yields",
+      "guidance": "Confirm the underlying provider is reachable and that the protocol/asset pair is indexed before migrating capital."
+    },
+    {
+      "id": "share-price-backfill",
+      "title": "Share price history available",
+      "description": "At least one share price snapshot exists so withdrawal pricing can be reproduced after migration.",
+      "targetArea": "server",
+      "evidenceType": "SHARE_PRICE_HISTORY",
+      "reference": "GET /api/vaults/:vaultId/share-price-history",
+      "guidance": "Backfill share-price snapshots from the indexer; the deterministic fixture is not sufficient evidence for a production migration."
+    },
+    {
+      "id": "backend-health",
+      "title": "Backend healthy",
+      "description": "The backend serving vault data reports a healthy readiness state.",
+      "targetArea": "server",
+      "evidenceType": "BACKEND_HEALTH",
+      "reference": "GET /api/health",
+      "guidance": "Resolve any degraded signals before running the migration window."
+    },
+    {
+      "id": "deposit-path",
+      "title": "Deposits available",
+      "description": "The deposit path is not blocked by vault capacity, missing stats, or an unhealthy backend.",
+      "targetArea": "client",
+      "evidenceType": "DEPOSIT_AVAILABLE",
+      "reference": "/vault/:slug (deposit tab)",
+      "guidance": "A migrated vault should accept deposits on day one; unblock any action gating before promoting the new vault."
+    },
+    {
+      "id": "withdraw-path",
+      "title": "Withdrawals priced and available",
+      "description": "The withdraw path can price shares from share-price history and is not gated by an unhealthy backend.",
+      "targetArea": "client",
+      "evidenceType": "WITHDRAW_AVAILABLE",
+      "reference": "/vault/:slug (withdraw tab)",
+      "guidance": "Verify withdrawals can be priced immediately after migration so users are never locked out of positions."
+    }
+  ]
+}

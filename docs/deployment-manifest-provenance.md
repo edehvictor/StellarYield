@@ -33,6 +33,35 @@ node contracts/scripts/verify-manifest.js \
 
 The verifier fails if provenance is missing or malformed before it compares contract IDs with `registry.json`. This ensures incomplete or hand-edited manifests cannot silently pass drift checks.
 
+## Schema conformance (#1296)
+
+`contracts/scripts/manifest-schema.json` is the single source of truth for the
+manifest shape. The verifier checks provenance first, then schema conformance,
+then drift — so a manifest with an unsupported `schemaVersion`, an invalid
+contract ID, or extra fields fails on a typed message:
+
+```bash
+node contracts/scripts/verify-manifest.js \
+  --manifest contracts/scripts/deployment-manifest.json \
+  --registry contracts/registry.json \
+  --network testnet \
+  --schema contracts/scripts/manifest-schema.json
+```
+
+Pass `--schema none` to run provenance + drift only (e.g. for legacy fixtures).
+
+The same staged, deterministic verification is exposed over HTTP for operators:
+
+```text
+GET /api/contracts/deployment-manifest/verify?network=testnet
+```
+
+It returns a typed envelope with an overall status (`verified`,
+`pending_generation`, `invalid`, `drift`), a per-contract status
+(`MATCH` / `MISSING` / `MISMATCH` / `STALE` / `SKIPPED`), and typed issue codes
+(`MANIFEST_MALFORMED`, `SCHEMA_VERSION_UNSUPPORTED`, `PROVENANCE_INVALID`,
+`CONTRACT_ID_INVALID`, `DRIFT`). The panel is mounted on the Transparency page.
+
 ## Recommended review process
 
 1. Confirm `provenance.network.name`, top-level `network`, and the verifier `--network` argument all agree.

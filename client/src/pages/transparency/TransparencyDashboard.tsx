@@ -29,6 +29,7 @@ import { parseSmokeRunResult } from "./smokeResults";
 import VaultReliabilityPanel from "./VaultReliabilityPanel";
 import AuditReplayReportPanel from "./AuditReplayReportPanel";
 import RegistryDiffPage from "./RegistryDiff";
+import DeploymentManifestVerifier from "../../components/DeploymentManifestVerifier";
 
 const getApiBase = () => {
   try {
@@ -393,6 +394,7 @@ export default function TransparencyDashboard() {
             {/* Data Source Reliability */}
             <VaultReliabilityPanel />
             <AuditReplayReportPanel />
+            <DeploymentManifestVerifier />
             <RegistryDiffPage />
         </div>
     );

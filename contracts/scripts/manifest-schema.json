@@ -1,0 +1,182 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://stellaryield.dev/schemas/deployment-manifest/v1.0.json",
+  "title": "StellarYield Deployment Manifest",
+  "description": "Schema for contracts/scripts/deployment-manifest.json produced by generate-manifest.js.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "generatedAt",
+    "network",
+    "provenance",
+    "contracts"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": "1.0"
+    },
+    "generatedAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "network": {
+      "enum": [
+        "testnet",
+        "mainnet",
+        "local"
+      ]
+    },
+    "commitSha": {
+      "type": "string"
+    },
+    "branch": {
+      "type": "string"
+    },
+    "registryNote": {
+      "type": "string"
+    },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "generatedBy",
+        "generatedAt",
+        "sourceInput",
+        "registryInput",
+        "network",
+        "git",
+        "ci"
+      ],
+      "properties": {
+        "generatedBy": {
+          "type": "string",
+          "minLength": 1,
+          "enum": [
+            "contracts/scripts/generate-manifest.js",
+            "contracts/scripts/build-manifest.js"
+          ]
+        },
+        "generatedAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "sourceInput": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "path",
+            "sha256"
+          ],
+          "properties": {
+            "path": {
+              "type": "string",
+              "minLength": 1
+            },
+            "sha256": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            }
+          }
+        },
+        "registryInput": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "path",
+            "sha256"
+          ],
+          "properties": {
+            "path": {
+              "type": "string",
+              "minLength": 1
+            },
+            "sha256": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "pattern": "^[a-f0-9]{64}$"
+            }
+          }
+        },
+        "network": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "name",
+            "rpcUrl",
+            "passphrase"
+          ],
+          "properties": {
+            "name": {
+              "enum": [
+                "testnet",
+                "mainnet",
+                "local"
+              ]
+            },
+            "rpcUrl": {
+              "type": "string"
+            },
+            "passphrase": {
+              "type": "string"
+            }
+          }
+        },
+        "git": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "commitSha",
+            "branch",
+            "remoteUrl"
+          ],
+          "properties": {
+            "commitSha": {
+              "type": "string"
+            },
+            "branch": {
+              "type": "string"
+            },
+            "remoteUrl": {
+              "type": "string"
+            }
+          }
+        },
+        "ci": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "provider",
+            "runId",
+            "workflow",
+            "actor"
+          ],
+          "properties": {
+            "provider": {
+              "type": "string"
+            },
+            "runId": {
+              "type": "string"
+            },
+            "workflow": {
+              "type": "string"
+            },
+            "actor": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    },
+    "contracts": {
+      "type": "object",
+      "minProperties": 0,
+      "additionalProperties": {
+        "type": "string",
+        "pattern": "^[CG][A-Z2-7]{55}$"
+      }
+    }
+  }
+}

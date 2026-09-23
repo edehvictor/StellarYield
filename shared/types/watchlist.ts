@@ -7,8 +7,8 @@ export type YieldOpportunityType = "protocol" | "pool" | "strategy";
 
 export interface ThresholdRule {
   id: string;
-  type: "apy_above" | "apy_below" | "tvl_above" | "tvl_below" | "spread_change_above";
-  value: number; // APY %, TVL USD, or spread % change
+  type: "apy_above" | "apy_below" | "tvl_above" | "tvl_below" | "spread_change_above" | "apy_drop_pct";
+  value: number; // APY %, TVL USD, spread % change, or APY drop percentage-point drop
   triggerOnce?: boolean; // Only trigger once when condition is met
 }
 
@@ -23,6 +23,7 @@ export interface YieldOpportunityWatchItem {
   currentApy: number;
   currentTvl: number;
   currentSpread?: number; // For pool pairs
+  baselineApy?: number; // Baseline used for apy_drop_pct rules
   lastMetricUpdate: Date;
   
   // Threshold rules
@@ -50,6 +51,7 @@ export interface WatchlistItem {
   opportunityName: string;
   currentApy: number;
   currentTvl: number;
+  apyDropPct?: number;
   ruleCount: number;
   alertCount: number;
   lastAlertTime?: Date;
@@ -70,12 +72,28 @@ export interface ThresholdCheckResult {
 }
 
 /**
+ * Compute the percentage drop from a baseline APY to the current APY.
+ * Returns null when the drop is not computable (missing/zero baseline).
+ * A positive result means APY fell below baseline; 0 means unchanged or above.
+ */
+export function computeApyDropPct(baselineApy?: number, currentApy?: number): number | null {
+  if (baselineApy === undefined || currentApy === undefined) return null;
+  if (!Number.isFinite(baselineApy) || !Number.isFinite(currentApy)) return null;
+  if (baselineApy === 0) return null;
+  const dropPct = ((baselineApy - currentApy) / baselineApy) * 100;
+  return dropPct > 0 ? dropPct : 0;
+}
+
+/**
  * Helper to format threshold rule as human-readable text
  */
 export function formatThresholdRule(rule: ThresholdRule): string {
-  const valueStr = ["apy_above", "apy_below"].includes(rule.type)
-    ? `${rule.value.toFixed(2)}%`
-    : `$${rule.value.toLocaleString()}`;
+  const valueStr =
+    rule.type === "apy_drop_pct"
+      ? `${rule.value.toFixed(2)}pp`
+      : ["apy_above", "apy_below"].includes(rule.type)
+        ? `${rule.value.toFixed(2)}%`
+        : `$${rule.value.toLocaleString()}`;
 
   const typeLabels: Record<string, string> = {
     apy_above: "APY above",
@@ -83,6 +101,7 @@ export function formatThresholdRule(rule: ThresholdRule): string {
     tvl_above: "TVL above",
     tvl_below: "TVL below",
     spread_change_above: "Spread change above",
+    apy_drop_pct: "APY drop",
   };
 
   return `${typeLabels[rule.type]} ${valueStr}`;
@@ -90,12 +109,17 @@ export function formatThresholdRule(rule: ThresholdRule): string {
 
 /**
  * Helper to check if a threshold rule is triggered
+ *
+ * `apy_drop_pct` compares the current APY against the opportunity's baseline
+ * APY: it triggers when the current APY has fallen at least `value`
+ * percentage-points below baseline.
  */
 export function checkThresholdTrigger(
   rule: ThresholdRule,
   apy: number,
   tvl: number,
-  spreadChange: number = 0
+  spreadChange: number = 0,
+  baselineApy?: number
 ): boolean {
   switch (rule.type) {
     case "apy_above":
@@ -108,6 +132,10 @@ export function checkThresholdTrigger(
       return tvl < rule.value;
     case "spread_change_above":
       return Math.abs(spreadChange) > rule.value;
+    case "apy_drop_pct": {
+      const dropPct = computeApyDropPct(baselineApy, apy);
+      return dropPct !== null && dropPct >= rule.value;
+    }
     default:
       return false;
   }
@@ -121,7 +149,8 @@ export function generateAlertMessage(
   rule: ThresholdRule,
   currentApy?: number,
   currentTvl?: number,
-  currentSpread?: number
+  currentSpread?: number,
+  baselineApy?: number
 ): string {
   switch (rule.type) {
     case "apy_above":
@@ -134,6 +163,10 @@ export function generateAlertMessage(
       return `${opportunityName}: TVL decreased to $${currentTvl?.toLocaleString()}, below threshold of $${rule.value.toLocaleString()}`;
     case "spread_change_above":
       return `${opportunityName}: Spread changed by ${currentSpread?.toFixed(2)}%, exceeding ${rule.value.toFixed(2)}% threshold`;
+    case "apy_drop_pct": {
+      const dropPct = computeApyDropPct(baselineApy, currentApy);
+      return `${opportunityName}: APY dropped ${dropPct?.toFixed(2) ?? "?"}% from baseline to ${currentApy?.toFixed(2)}%, exceeding the ${rule.value.toFixed(2)}% drop threshold`;
+    }
     default:
       return `Alert triggered for ${opportunityName}`;
   }
