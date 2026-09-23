@@ -19,6 +19,10 @@ import {
   type QuorumStatus,
   type ProviderReadingInput,
 } from "../services/yieldQuorumService";
+import {
+  computeHistoryCoverageDecay,
+  type CoverageDecayResult,
+} from "../services/confidenceService";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -152,6 +156,12 @@ export function predictApy(
   const volatilityPct = Math.round(Math.sqrt(varVal) * 100) / 100;
   const dataCompleteness = Math.min(1, Math.round((historical.length / 30) * 100) / 100);
 
+  // Sparse/gapped/stale coverage decay (#1073) — degrades confidence smoothly
+  // as the history window thins out, independent of raw point count.
+  const coverage: CoverageDecayResult = computeHistoryCoverageDecay(
+    historical.map((d) => d.date),
+  );
+
   if (historical.length < 3) {
     // Not enough data; return flat projection from last known value
     const lastApy = historical[historical.length - 1]?.apy ?? 0;
@@ -161,6 +171,9 @@ export function predictApy(
         p.confidence = Math.max(0.05, Math.round(p.confidence * 0.5 * 100) / 100);
       });
     }
+    flatPredictions.forEach((p) => {
+      p.confidence = Math.max(0.02, Math.round(p.confidence * coverage.decayFactor * 100) / 100);
+    });
     return {
       protocol,
       historical,
@@ -172,6 +185,9 @@ export function predictApy(
         volatilityPct,
         dataCompleteness,
         modelFit: 0,
+        historyCoverage: coverage.historyCoverage,
+        coverageDecay: coverage.decayFactor,
+        coverageReasons: coverage.reasons,
       },
     };
   }
@@ -210,14 +226,20 @@ export function predictApy(
       confidence = Math.max(0.05, confidence * 0.5);
     }
 
+    // Degrade confidence smoothly for sparse, gapped, or stale history (#1073)
+    confidence = Math.max(0.02, confidence * coverage.decayFactor);
+
     const roundConf = Math.round(confidence * 100) / 100;
-    const bandWidth = Math.max(0.2, (1 - roundConf) * 2 + day * 0.15 + volatilityPct * 0.2);
+    const bandWidth = Math.max(
+      0.2,
+      (1 - roundConf) * 2 + day * 0.15 + volatilityPct * 0.2 + (1 - coverage.decayFactor) * 1.5,
+    );
     const lowerApy = Math.max(0, Math.round((predictedApy - bandWidth / 2) * 100) / 100);
     const upperApy = Math.round((predictedApy + bandWidth / 2) * 100) / 100;
 
     predictions.push({
       date: futureDate.toISOString().split("T")[0],
-      predictedApy: Math.round(predictedApy * 100) / 100,
+      predictedApy: Math.round(predictedApy * 1e6) / 1e6,
       confidence: roundConf,
       lowerApy,
       upperApy,
@@ -239,6 +261,9 @@ export function predictApy(
       volatilityPct,
       dataCompleteness,
       modelFit,
+      historyCoverage: coverage.historyCoverage,
+      coverageDecay: coverage.decayFactor,
+      coverageReasons: coverage.reasons,
     },
   };
 }
@@ -254,8 +279,8 @@ function generateFlatPredictions(apy: number, days: number, volatilityPct: numbe
       date: d.toISOString().split("T")[0],
       predictedApy: apy,
       confidence: 0.3,
-      lowerApy: Math.max(0, Math.round((apy - bandWidth / 2) * 100) / 100),
-      upperApy: Math.round((apy + bandWidth / 2) * 100) / 100,
+      lowerApy: Math.max(0, Math.round((apy - bandWidth / 2) * 1e6) / 1e6),
+      upperApy: Math.round((apy + bandWidth / 2) * 1e6) / 1e6,
     });
   }
   return predictions;

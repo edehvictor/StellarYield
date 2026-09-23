@@ -40,6 +40,7 @@ Source: `contracts/yield_vault/src/lib.rs`
 | 11   | `StorageKeyNotFound`    | Required storage key is missing             | Ensure contract is properly initialized and configured |
 | 2001 | `InvalidDonationBps`    | Donation basis points outside 0–10 000      | Pass a value between 0 and 10 000                      |
 | 2002 | `CharityNotWhitelisted` | Charity address not on protocol whitelist   | Use `set_charity_whitelist` to add the address         |
+| 2007 | `DonationBelowMinimum`  | Donation is zero or below the dust minimum  | Increase the yield amount or donation split            |
 
 ---
 

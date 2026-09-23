@@ -116,3 +116,117 @@ export function deriveRunbookProgress(status: EmergencyStatus): RunbookProgress 
 
   return { phase, steps };
 }
+
+// ── Runbook State Persistence ──────────────────────────────────────────
+
+const RUNBOOK_STORAGE_KEY = "stellar_yield_runbook_state";
+
+export interface RunbookPersistedState {
+  acknowledgedSteps: RunbookStepId[];
+  incidentStartedAt: string | null;
+  lastUpdatedAt: string;
+  failedStepAttempts: Record<RunbookStepId, number>;
+}
+
+export function createEmptyPersistedState(): RunbookPersistedState {
+  return {
+    acknowledgedSteps: [],
+    incidentStartedAt: null,
+    lastUpdatedAt: new Date().toISOString(),
+    failedStepAttempts: {} as Record<RunbookStepId, number>,
+  };
+}
+
+export function loadRunbookState(
+  storage: Storage | null,
+): RunbookPersistedState {
+  if (!storage) return createEmptyPersistedState();
+  try {
+    const raw = storage.getItem(RUNBOOK_STORAGE_KEY);
+    if (raw) return JSON.parse(raw) as RunbookPersistedState;
+  } catch {
+    // corrupted storage — reset
+  }
+  return createEmptyPersistedState();
+}
+
+export function saveRunbookState(
+  storage: Storage | null,
+  state: RunbookPersistedState,
+): void {
+  if (!storage) return;
+  try {
+    storage.setItem(RUNBOOK_STORAGE_KEY, JSON.stringify(state));
+  } catch {
+    // storage full or unavailable — silently fail
+  }
+}
+
+export function acknowledgeStep(
+  state: RunbookPersistedState,
+  stepId: RunbookStepId,
+): RunbookPersistedState {
+  if (state.acknowledgedSteps.includes(stepId)) return state;
+  return {
+    ...state,
+    acknowledgedSteps: [...state.acknowledgedSteps, stepId],
+    lastUpdatedAt: new Date().toISOString(),
+  };
+}
+
+export function recordStepFailure(
+  state: RunbookPersistedState,
+  stepId: RunbookStepId,
+): RunbookPersistedState {
+  const attempts = (state.failedStepAttempts[stepId] ?? 0) + 1;
+  return {
+    ...state,
+    failedStepAttempts: { ...state.failedStepAttempts, [stepId]: attempts },
+    lastUpdatedAt: new Date().toISOString(),
+  };
+}
+
+export function startIncident(
+  state: RunbookPersistedState,
+): RunbookPersistedState {
+  return {
+    ...state,
+    incidentStartedAt: state.incidentStartedAt ?? new Date().toISOString(),
+    lastUpdatedAt: new Date().toISOString(),
+  };
+}
+
+export function resetRunbookState(
+  state: RunbookPersistedState,
+): RunbookPersistedState {
+  return {
+    ...createEmptyPersistedState(),
+    lastUpdatedAt: new Date().toISOString(),
+  };
+}
+
+export function deriveRunWithPersistence(
+  status: EmergencyStatus,
+  persisted: RunbookPersistedState,
+): RunbookProgress & { persisted: RunbookPersistedState } {
+  const base = deriveRunbookProgress(status);
+
+  const steps = base.steps.map((step) => {
+    if (persisted.acknowledgedSteps.includes(step.id) && step.state !== "complete") {
+      return { ...step, state: "complete" as RunbookStepState };
+    }
+    return step;
+  });
+
+  let currentAssigned = false;
+  const reconciled = steps.map((step) => {
+    if (step.state === "complete") return step;
+    if (base.phase === "incident" && !currentAssigned) {
+      currentAssigned = true;
+      return { ...step, state: "current" as RunbookStepState };
+    }
+    return { ...step, state: "upcoming" as RunbookStepState };
+  });
+
+  return { phase: base.phase, steps: reconciled, persisted };
+}

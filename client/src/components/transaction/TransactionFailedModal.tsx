@@ -8,6 +8,7 @@ import { useState } from "react";
 import { AlertTriangle, ChevronDown, ChevronUp, Copy, RotateCcw, X } from "lucide-react";
 import type { DecodedError } from "../../utils/errorDecoder";
 import type { TxPhase } from "../../services/transactionPhase";
+import { buildRedactedCopyPayload } from "../../utils/redactClient";
 
 interface TransactionFailedModalProps {
     /** Decoded error object from `decodeTransactionError`. */
@@ -87,16 +88,16 @@ export default function TransactionFailedModal({
     const recoverySteps = recoveryStepsFor(failurePhase, walletConnected, networkHealthy);
 
     async function copyDetails() {
-        const payload = [
-            `title=${error.title}`,
-            `code=${error.code ?? "unknown"}`,
-            `phase=${failurePhase ?? "unknown"}`,
-            `walletConnected=${walletConnected}`,
-            `networkHealthy=${networkHealthy}`,
-            `message=${error.message}`,
-            `suggestion=${error.suggestion}`,
-            `raw=${error.raw}`,
-        ].join("\n");
+        const payload = buildRedactedCopyPayload({
+            title: error.title,
+            code: error.code,
+            phase: failurePhase,
+            message: error.message,
+            suggestion: error.suggestion,
+            raw: error.raw,
+            walletConnected,
+            networkHealthy,
+        });
         try {
             if (navigator.clipboard?.writeText) {
                 await navigator.clipboard.writeText(payload);

@@ -162,3 +162,58 @@ export function getPressureLevel(
 ): PressureLevel {
   return classifyPressure(velocity, thresholds);
 }
+
+function mapPressureLevelToSeverity(level: PressureLevel): import("./driftAnomalyGrouper").AnomalySeverityBand {
+  if (level === "CRITICAL") return "CRITICAL";
+  if (level === "HIGH") return "HIGH";
+  return "MEDIUM";
+}
+
+function createPressureSignal(
+  m: VaultPressureMetrics,
+  direction: "inflow" | "outflow",
+  level: PressureLevel,
+  velocity: number,
+  totalAmount: bigint
+): import("./driftAnomalyGrouper").DriftSignal {
+  return {
+    id: `vault_pressure_${direction}_${m.vaultId}_${m.computedAt}`,
+    source: "vault",
+    subSource: "vault_pressure",
+    asset: m.vaultId,
+    metric: `${direction}_velocity`,
+    currentValue: Math.round(velocity * 100) / 100,
+    expectedValue: 0,
+    deviation: Math.round(velocity * 100) / 100,
+    severity: mapPressureLevelToSeverity(level),
+    timestamp: new Date(m.computedAt).toISOString(),
+    metadata: {
+      pressureLevel: level,
+      windowMs: m.windowMs,
+      totalAmount: totalAmount.toString(),
+      eventCount: m.eventCount,
+    },
+  };
+}
+
+/**
+ * Extract standardized DriftSignals from vault pressure metrics.
+ * Maps elevated, high, and critical velocity readings into drift anomaly signals.
+ */
+export function extractPressureDriftSignals(
+  metrics: VaultPressureMetrics | VaultPressureMetrics[]
+): import("./driftAnomalyGrouper").DriftSignal[] {
+  const list = Array.isArray(metrics) ? metrics : [metrics];
+  const signals: import("./driftAnomalyGrouper").DriftSignal[] = [];
+
+  for (const m of list) {
+    if (m.inflowPressure !== "NORMAL") {
+      signals.push(createPressureSignal(m, "inflow", m.inflowPressure, m.inflowVelocity, m.totalInflowInWindow));
+    }
+    if (m.outflowPressure !== "NORMAL") {
+      signals.push(createPressureSignal(m, "outflow", m.outflowPressure, m.outflowVelocity, m.totalOutflowInWindow));
+    }
+  }
+
+  return signals;
+}

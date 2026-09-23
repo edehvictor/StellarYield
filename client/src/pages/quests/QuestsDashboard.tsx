@@ -202,25 +202,31 @@ export default function QuestsDashboard() {
               <Award size={18} className="text-green-400" /> Minted Badges
             </h3>
             <div className="space-y-2">
-              {achievements.map((a) => (
-                <div
-                  key={a.txHash}
-                  className="glass-card p-4 flex items-center justify-between gap-4"
-                >
-                  <div className="flex items-center gap-3">
-                    <Trophy size={18} className="text-indigo-400 shrink-0" />
-                    <div>
-                      <p className="font-medium text-sm">{a.title}</p>
-                      <p className="text-xs text-gray-500 font-mono truncate max-w-[200px]">
-                        {a.txHash}
-                      </p>
+              {achievements.map((a) => {
+                const dateObj = new Date(a.mintedAt);
+                const formattedDate = isNaN(dateObj.getTime())
+                  ? "Recently"
+                  : dateObj.toLocaleDateString();
+                return (
+                  <div
+                    key={a.txHash || a.questId}
+                    className="glass-card p-4 flex items-center justify-between gap-4"
+                  >
+                    <div className="flex items-center gap-3">
+                      <Trophy size={18} className="text-indigo-400 shrink-0" />
+                      <div>
+                        <p className="font-medium text-sm">{a.title || "Badge"}</p>
+                        <p className="text-xs text-gray-500 font-mono truncate max-w-[200px]">
+                          {a.txHash || "—"}
+                        </p>
+                      </div>
                     </div>
+                    <span className="text-xs text-gray-500 shrink-0">
+                      {formattedDate}
+                    </span>
                   </div>
-                  <span className="text-xs text-gray-500 shrink-0">
-                    {new Date(a.mintedAt).toLocaleDateString()}
-                  </span>
-                </div>
-              ))}
+                );
+              })}
             </div>
           </section>
         )}

@@ -139,7 +139,7 @@ describe("ApyDashboard states", () => {
     render(<ApyDashboard />);
 
     await screen.findByText("USDC");
-    await user.click(screen.getByRole("button", { name: /Table/i }));
+    await user.click(screen.getByRole("button", { name: /^Table$/i }));
 
     const apySort = screen.getByRole("button", {
       name: /APY sorted descending; activate to sort ascending/i,
@@ -220,7 +220,7 @@ describe("ApyDashboard states", () => {
       screen.getByLabelText(/Stale APY data for Blend USDC; last updated/i),
     ).toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: /Table/i }));
+    await user.click(screen.getByRole("button", { name: /^Table$/i }));
 
     expect(screen.getByRole("columnheader", { name: /APY/i })).toHaveAttribute(
       "aria-sort",

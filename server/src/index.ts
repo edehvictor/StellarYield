@@ -5,6 +5,7 @@ import { startHistoricalYieldAggregationJob } from "./jobs/historicalYieldAggreg
 import { startSharePriceSnapshotJob } from "./jobs/sharePriceSnapshot";
 import { startHealthMonitor } from "./monitoring/healthMonitor";
 import { startDriftDetectionJob } from "./jobs/driftDetectionJob";
+import { startScheduledReconciliationJob } from "./jobs/scheduledReconciliationJob";
 import { startStrategyRotationJob } from "./jobs/strategyRotationJob";
 import { PROTOCOLS } from "./config/protocols";
 import { calculateRiskScore } from "./utils/riskScoring";
@@ -51,6 +52,7 @@ startIndexer().catch(console.error);
 startHistoricalYieldAggregationJob();
 startSharePriceSnapshotJob();
 startDriftDetectionJob();
+startScheduledReconciliationJob();
 startHealthMonitor().catch(console.error);
 
 // Autonomous strategy rotation: evaluate every 6h using current protocol

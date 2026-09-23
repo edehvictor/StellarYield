@@ -189,3 +189,59 @@
     overflow-x: auto;
   }
 }
+
+/* ── Cause badges ──────────────────────────────────────────────────────
+   Category, not severity, drives the colour: an operator triages "missing
+   data" and "symbol drift" down different paths, and they must not read as
+   the same kind of problem just because both are warnings. */
+
+.cause-badge {
+  display: inline-flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 2px 8px;
+  border-radius: 4px;
+  border-left: 3px solid transparent;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.3;
+  white-space: nowrap;
+}
+
+.cause-badge .cause-detail {
+  font-weight: 400;
+  font-size: 11px;
+  opacity: 0.8;
+  white-space: normal;
+  max-width: 28ch;
+}
+
+.cause-missing-data {
+  background: rgba(239, 68, 68, 0.12);
+  border-left-color: #ef4444;
+  color: #fca5a5;
+}
+
+.cause-symbol-drift {
+  background: rgba(168, 85, 247, 0.12);
+  border-left-color: #a855f7;
+  color: #d8b4fe;
+}
+
+.cause-stale-source {
+  background: rgba(234, 179, 8, 0.12);
+  border-left-color: #eab308;
+  color: #fde047;
+}
+
+.cause-amount {
+  background: rgba(59, 130, 246, 0.12);
+  border-left-color: #3b82f6;
+  color: #93c5fd;
+}
+
+.cause-integrity {
+  background: rgba(249, 115, 22, 0.12);
+  border-left-color: #f97316;
+  color: #fdba74;
+}

@@ -11,6 +11,15 @@ jest.mock('../utils/logger', () => ({
   logger: { info: jest.fn(), error: jest.fn(), warn: jest.fn() },
 }));
 
+jest.mock('../audit/KeeperAuditLog', () => ({
+  keeperAuditLog: { exportStream: jest.fn().mockReturnValue([]) },
+}));
+
+jest.mock('../monitors/LedgerLagMonitor', () => ({
+  ledgerLagMonitor: { getSnapshot: jest.fn().mockReturnValue({ dataFreshnessMs: null, lagStatus: 'unknown', lastSuccessAt: null }) },
+  DEFAULT_STALE_THRESHOLD_MS: 90_000,
+}));
+
 const mockGetQueueHealth = getQueueHealth as jest.MockedFunction<typeof getQueueHealth>;
 
 function makeQueue(name: string): Queue {
@@ -53,7 +62,6 @@ describe('startKeeperHealthServer', () => {
   it('GET /health returns 200 with status ok and uptime', async () => {
     server = startKeeperHealthServer([], 0);
     const port = await startAndGetPort(server);
-
     const { status, body } = await httpGet(port, '/health');
 
     expect(status).toBe(200);
@@ -63,9 +71,10 @@ describe('startKeeperHealthServer', () => {
 
   it('GET /health/queues returns 200 with queue summary when healthy', async () => {
     const summary = {
-      queues: [{ name: 'liquidation', counts: { waiting: 0, active: 0, completed: 5, failed: 0, delayed: 0 }, status: 'healthy' as const, warnings: [] as string[] }],
+      queues: [{ name: 'liquidation', counts: { pending: 0, waiting: 0, active: 0, completed: 5, failed: 0, delayed: 0, poison: 0 }, status: 'healthy' as const, warnings: [] as string[] }],
       overallStatus: 'healthy' as const,
       timestamp: new Date().toISOString(),
+      redisStatus: 'healthy' as const,
     };
     mockGetQueueHealth.mockResolvedValue(summary);
 
@@ -81,9 +90,10 @@ describe('startKeeperHealthServer', () => {
 
   it('GET /health/queues returns 200 with warning overallStatus when queues are degraded', async () => {
     const summary = {
-      queues: [{ name: 'liquidation', counts: { waiting: 0, active: 0, completed: 0, failed: 15, delayed: 0 }, status: 'warning' as const, warnings: ['failed jobs (15) exceed threshold (10)'] }],
-      overallStatus: 'warning' as const,
+      queues: [{ name: 'liquidation', counts: { pending: 0, waiting: 0, active: 0, completed: 0, failed: 15, delayed: 0, poison: 0 }, status: 'degraded' as const, warnings: ['failed jobs (15) exceed threshold (10)'] }],
+      overallStatus: 'degraded' as const,
       timestamp: new Date().toISOString(),
+      redisStatus: 'healthy' as const,
     };
     mockGetQueueHealth.mockResolvedValue(summary);
 
@@ -93,7 +103,7 @@ describe('startKeeperHealthServer', () => {
     const { status, body } = await httpGet(port, '/health/queues');
 
     expect(status).toBe(200);
-    expect((body as any).overallStatus).toBe('warning');
+    expect((body as any).overallStatus).toBe('degraded');
   });
 
   it('GET /health/queues returns 503 when getQueueHealth throws', async () => {
@@ -153,6 +163,49 @@ describe('startKeeperHealthServer', () => {
 
       expect(status).toBe(500);
       expect((body as any).error).toBeDefined();
+    });
+  });
+
+  // ── #1298: /health/data — ledger lag indicator ──────────────────────────
+
+  describe('GET /health/data', () => {
+    it('returns 200 with lagStatus "unknown" before any ledger read', async () => {
+      const lagMonitor = { getSnapshot: jest.fn().mockReturnValue({ dataFreshnessMs: null, lagStatus: 'unknown', lastSuccessAt: null }) };
+      server = startKeeperHealthServer([], 0, undefined, lagMonitor);
+      const port = await startAndGetPort(server);
+
+      const { status, body } = await httpGet(port, '/health/data');
+
+      expect(status).toBe(200);
+      expect((body as any).lagStatus).toBe('unknown');
+      expect((body as any).dataFreshnessMs).toBeNull();
+      expect((body as any).lastSuccessAt).toBeNull();
+      expect(typeof (body as any).timestamp).toBe('string');
+    });
+
+    it('returns 200 with lagStatus "fresh" when data is recent', async () => {
+      const lagMonitor = { getSnapshot: jest.fn().mockReturnValue({ dataFreshnessMs: 15_000, lagStatus: 'fresh', lastSuccessAt: new Date().toISOString() }) };
+      server = startKeeperHealthServer([], 0, undefined, lagMonitor);
+      const port = await startAndGetPort(server);
+
+      const { status, body } = await httpGet(port, '/health/data');
+
+      expect(status).toBe(200);
+      expect((body as any).lagStatus).toBe('fresh');
+      expect((body as any).dataFreshnessMs).toBe(15_000);
+    });
+
+    it('returns 200 with lagStatus "stale" when data exceeds the threshold', async () => {
+      const lagMonitor = { getSnapshot: jest.fn().mockReturnValue({ dataFreshnessMs: 120_000, lagStatus: 'stale', lastSuccessAt: new Date(Date.now() - 120_000).toISOString() }) };
+      server = startKeeperHealthServer([], 0, undefined, lagMonitor);
+      const port = await startAndGetPort(server);
+
+      const { status, body } = await httpGet(port, '/health/data');
+
+      expect(status).toBe(200);
+      expect((body as any).lagStatus).toBe('stale');
+      expect((body as any).dataFreshnessMs).toBe(120_000);
+      expect(typeof (body as any).lastSuccessAt).toBe('string');
     });
   });
 });

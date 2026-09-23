@@ -2,7 +2,7 @@
 
 This document describes the four major features implemented in this release.
 
-## #149 Fiat Off-Ramp Integration ("Zap-Out to Bank")
+## #149 Fiat Off-Ramp Integration ("Zap-Out to Bank") 
 
 **Location:** `client/src/features/offramp/`
 

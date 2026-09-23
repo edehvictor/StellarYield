@@ -5,7 +5,6 @@
  * future dates, and overly long windows.
  */
 
-import type { BacktestRequest, BacktestResult, DailySnapshot } from "./types";
 import {
   validateDateRange,
   validateNumericRange,
@@ -17,6 +16,71 @@ import {
 // Constants
 const MAX_BACKTEST_WINDOW_DAYS = 730; // 2 years
 const MIN_BACKTEST_WINDOW_DAYS = 1;
+
+export type BacktestInterval =
+  | "1d"
+  | "7d"
+  | "14d"
+  | "30d"
+  | "90d"
+  | "365d"
+  | "daily"
+  | "weekly"
+  | "monthly"
+  | "quarterly"
+  | "yearly";
+
+export const SUPPORTED_BACKTEST_INTERVALS: readonly BacktestInterval[] = [
+  "1d",
+  "7d",
+  "14d",
+  "30d",
+  "90d",
+  "365d",
+  "daily",
+  "weekly",
+  "monthly",
+  "quarterly",
+  "yearly",
+] as const;
+
+export const INTERVAL_DAYS_MAP: Record<BacktestInterval, number> = {
+  "1d": 1,
+  daily: 1,
+  "7d": 7,
+  weekly: 7,
+  "14d": 14,
+  "30d": 30,
+  monthly: 30,
+  "90d": 90,
+  quarterly: 90,
+  "365d": 365,
+  yearly: 365,
+};
+
+export interface BacktestRequest {
+  vaultContractId: string;
+  startDate: string;
+  endDate: string;
+  depositAmount: bigint | number | string;
+  interval?: BacktestInterval | string | number;
+}
+
+export interface DailySnapshot {
+  date: string;
+  apy: number;
+  equityValue: bigint | number | string;
+}
+
+export interface BacktestResult {
+  vaultContractId: string;
+  startDate: string;
+  endDate: string;
+  initialDeposit: bigint | number | string;
+  finalValue: bigint | number | string;
+  totalReturn: number;
+  snapshots: DailySnapshot[];
+}
 
 export interface BacktestValidationResult {
   isValid: boolean;
@@ -93,6 +157,59 @@ export function validateBacktestRequest(
         message: e.message,
       })),
     );
+
+    // Interval validation (if provided)
+    if (request.interval !== undefined && request.interval !== null && request.interval !== "") {
+      let intervalDays: number | null = null;
+
+      if (typeof request.interval === "number") {
+        if (!Number.isFinite(request.interval) || request.interval <= 0 || !Number.isInteger(request.interval)) {
+          errors.push({
+            code: "UNSUPPORTED_INTERVAL",
+            message: `Interval must be a positive integer representing days (got ${request.interval})`,
+            field: "interval",
+          });
+        } else {
+          intervalDays = request.interval;
+        }
+      } else if (typeof request.interval === "string") {
+        const normalized = request.interval.toLowerCase().trim() as BacktestInterval;
+        if (normalized in INTERVAL_DAYS_MAP) {
+          intervalDays = INTERVAL_DAYS_MAP[normalized];
+        } else {
+          const parsed = Number(request.interval);
+          if (Number.isInteger(parsed) && parsed > 0) {
+            intervalDays = parsed;
+          } else {
+            errors.push({
+              code: "UNSUPPORTED_INTERVAL",
+              message: `Interval '${request.interval}' is not supported. Supported intervals: ${SUPPORTED_BACKTEST_INTERVALS.join(", ")} or positive integer days`,
+              field: "interval",
+            });
+          }
+        }
+      } else {
+        errors.push({
+          code: "UNSUPPORTED_INTERVAL",
+          message: "Interval must be a string or number",
+          field: "interval",
+        });
+      }
+
+      // Check if interval is compatible with the date window
+      if (intervalDays !== null && !isNaN(startDate.getTime()) && !isNaN(endDate.getTime()) && startDate < endDate) {
+        const windowDays = Math.ceil(
+          (endDate.getTime() - startDate.getTime()) / (1000 * 60 * 60 * 24),
+        );
+        if (intervalDays > windowDays) {
+          errors.push({
+            code: "UNSUPPORTED_INTERVAL_WINDOW",
+            message: `Interval (${intervalDays} days) cannot exceed the backtest window duration (${windowDays} days)`,
+            field: "interval",
+          });
+        }
+      }
+    }
 
     // Deposit amount validation
     const depositAmount = BigInt(request.depositAmount);

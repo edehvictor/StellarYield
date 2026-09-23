@@ -1,5 +1,18 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { fetchSwapQuote } from "./fetchSwapQuote";
+import { fetchSwapQuote, ZapQuoteError } from "./fetchSwapQuote";
+
+const quoteRequest = {
+  inputTokenContract: "A",
+  vaultTokenContract: "B",
+  amountInStroops: "1",
+  inputDecimals: 7,
+  vaultDecimals: 7,
+};
+import {
+  fetchSwapQuote,
+  isQuoteCancellation,
+  QuoteRequestCancelledError,
+} from "./fetchSwapQuote";
 
 describe("fetchSwapQuote", () => {
   const origFetch = globalThis.fetch;
@@ -60,6 +73,80 @@ describe("fetchSwapQuote", () => {
     ).rejects.toThrow("server error");
   });
 
+  it("preserves the typed server error for recoverable failures", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        Promise.resolve({
+          ok: false,
+          status: 500,
+          json: async () => ({
+            error: "QUOTE_FAILED",
+            message: "Router simulation unavailable.",
+            requestId: "req-1",
+            recoverable: true,
+          }),
+        } as Response),
+      ),
+    );
+
+    const err = await fetchSwapQuote(quoteRequest).catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(ZapQuoteError);
+    expect(err).toMatchObject({
+      name: "ZapQuoteError",
+      message: "Router simulation unavailable.",
+      code: "QUOTE_FAILED",
+      status: 500,
+      requestId: "req-1",
+      recoverable: true,
+    });
+  });
+
+  it("marks validation failures as non-recoverable", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        Promise.resolve({
+          ok: false,
+          status: 400,
+          json: async () => ({
+            error: "INVALID_AMOUNT",
+            message: "amountInStroops must be an integer string.",
+          }),
+        } as Response),
+      ),
+    );
+
+    const err = await fetchSwapQuote(quoteRequest).catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(ZapQuoteError);
+    expect(err).toMatchObject({
+      message: "amountInStroops must be an integer string.",
+      code: "INVALID_AMOUNT",
+      status: 400,
+      recoverable: false,
+    });
+  });
+
+  it("wraps network-level failures as recoverable", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => Promise.reject(new Error("Network error"))),
+    );
+
+    const err = await fetchSwapQuote(quoteRequest).catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(ZapQuoteError);
+    expect(err).toMatchObject({
+      name: "ZapQuoteError",
+      message: "Network error",
+      code: "NETWORK_ERROR",
+      status: 0,
+      recoverable: true,
+    });
+  });
+
   it("uses VITE_API_BASE_URL when set", async () => {
     vi.stubEnv("VITE_API_BASE_URL", "http://127.0.0.1:9999");
     const spy = vi.spyOn(globalThis, "fetch").mockResolvedValue({
@@ -106,5 +193,61 @@ describe("fetchSwapQuote", () => {
         vaultDecimals: 7,
       }),
     ).rejects.toThrow("Quote failed (502)");
+  });
+
+  it("throws QuoteRequestCancelledError when aborted before response", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((_url: string, init?: RequestInit) => {
+        return new Promise((_resolve, reject) => {
+          init?.signal?.addEventListener(
+            "abort",
+            () => {
+              const err = new Error("aborted");
+              err.name = "AbortError";
+              reject(err);
+            },
+            { once: true },
+          );
+        });
+      }),
+    );
+
+    const controller = new AbortController();
+    const promise = fetchSwapQuote(
+      {
+        inputTokenContract: "A",
+        vaultTokenContract: "B",
+        amountInStroops: "1",
+        inputDecimals: 7,
+        vaultDecimals: 7,
+      },
+      { signal: controller.signal },
+    );
+    controller.abort();
+
+    await expect(promise).rejects.toBeInstanceOf(QuoteRequestCancelledError);
+    expect(isQuoteCancellation(await promise.catch((e) => e))).toBe(true);
+  });
+
+  it("rejects immediately when signal is already aborted", async () => {
+    const spy = vi.fn();
+    vi.stubGlobal("fetch", spy);
+    const controller = new AbortController();
+    controller.abort();
+
+    await expect(
+      fetchSwapQuote(
+        {
+          inputTokenContract: "A",
+          vaultTokenContract: "B",
+          amountInStroops: "1",
+          inputDecimals: 7,
+          vaultDecimals: 7,
+        },
+        { signal: controller.signal },
+      ),
+    ).rejects.toBeInstanceOf(QuoteRequestCancelledError);
+    expect(spy).not.toHaveBeenCalled();
   });
 });

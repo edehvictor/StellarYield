@@ -448,6 +448,7 @@ describe("Treasury Route Envelope Contract", () => {
     it("returns success envelope with simulation data", async () => {
       const res = await request(app)
         .post("/api/treasury/simulate")
+        .set("Authorization", "Bearer mock-admin-token")
         .send({ name: "Envelope Test", totalCapitalUsd: 1_000_000, allocations: validAllocations })
         .expect(200);
 
@@ -465,6 +466,7 @@ describe("Treasury Route Envelope Contract", () => {
     it("surfaces concentration warnings in meta.warnings when concentration > 50 %", async () => {
       const res = await request(app)
         .post("/api/treasury/simulate")
+        .set("Authorization", "Bearer mock-admin-token")
         .send({ name: "Concentrate Test", totalCapitalUsd: 1_000_000, allocations: validAllocations })
         .expect(200);
 
@@ -477,6 +479,7 @@ describe("Treasury Route Envelope Contract", () => {
     it("has no meta.warnings when all allocations are ≤ 50 %", async () => {
       const res = await request(app)
         .post("/api/treasury/simulate")
+        .set("Authorization", "Bearer mock-admin-token")
         .send({ name: "Even Test", totalCapitalUsd: 1_000_000, allocations: evenAllocations })
         .expect(200);
 
@@ -487,6 +490,7 @@ describe("Treasury Route Envelope Contract", () => {
     it("returns validation-error envelope for missing name", async () => {
       const res = await request(app)
         .post("/api/treasury/simulate")
+        .set("Authorization", "Bearer mock-admin-token")
         .send({ totalCapitalUsd: 1_000_000, allocations: validAllocations })
         .expect(400);
 
@@ -497,6 +501,7 @@ describe("Treasury Route Envelope Contract", () => {
       const badAllocations = [{ ...validAllocations[0], allocationPct: 30 }, validAllocations[1]];
       const res = await request(app)
         .post("/api/treasury/simulate")
+        .set("Authorization", "Bearer mock-admin-token")
         .send({ name: "Bad Alloc", totalCapitalUsd: 1_000_000, allocations: badAllocations })
         .expect(400);
 
@@ -508,6 +513,7 @@ describe("Treasury Route Envelope Contract", () => {
     it("returns INVALID_REQUEST envelope for a completely invalid body", async () => {
       const res = await request(app)
         .post("/api/treasury/simulate")
+        .set("Authorization", "Bearer mock-admin-token")
         .send("not json")
         .set("Content-Type", "text/plain")
         .expect(400);
@@ -522,6 +528,7 @@ describe("Treasury Route Envelope Contract", () => {
     it("returns 201 success envelope with id, name, createdAt", async () => {
       const res = await request(app)
         .post("/api/treasury/scenarios")
+        .set("Authorization", "Bearer mock-admin-token")
         .send({ name: "Saved Scenario", totalCapitalUsd: 500_000, allocations: evenAllocations })
         .expect(201);
 
@@ -536,6 +543,7 @@ describe("Treasury Route Envelope Contract", () => {
     it("returns validation-error envelope for missing totalCapitalUsd", async () => {
       const res = await request(app)
         .post("/api/treasury/scenarios")
+        .set("Authorization", "Bearer mock-admin-token")
         .send({ name: "Bad Capital", allocations: evenAllocations })
         .expect(400);
 
@@ -571,6 +579,7 @@ describe("Treasury Route Envelope Contract", () => {
       // First save a scenario
       const save = await request(app)
         .post("/api/treasury/scenarios")
+        .set("Authorization", "Bearer mock-admin-token")
         .send({ id: "envelope-get-test", name: "Envelope GET", totalCapitalUsd: 200_000, allocations: evenAllocations })
         .expect(201);
       const { id } = save.body.data as { id: string };
@@ -604,6 +613,7 @@ describe("Treasury Route Envelope Contract", () => {
     it("returns success envelope with preview data for valid rows", async () => {
       const res = await request(app)
         .post("/api/treasury/cashflow/preview")
+        .set("Authorization", "Bearer mock-admin-token")
         .send({ rows: [validRow] })
         .expect(200);
 
@@ -618,6 +628,7 @@ describe("Treasury Route Envelope Contract", () => {
     it("returns 400 VALIDATION_ERROR envelope for non-array body", async () => {
       const res = await request(app)
         .post("/api/treasury/cashflow/preview")
+        .set("Authorization", "Bearer mock-admin-token")
         .send({ rows: "not an array" })
         .expect(400);
 
@@ -640,6 +651,7 @@ describe("Treasury Route Envelope Contract", () => {
     it("returns 201 success envelope for valid import", async () => {
       const res = await request(app)
         .post("/api/treasury/cashflow/import")
+        .set("Authorization", "Bearer mock-admin-token")
         .send({ scenarioId: "s-1", rows: [validRow] })
         .expect(201);
 
@@ -654,6 +666,7 @@ describe("Treasury Route Envelope Contract", () => {
       const badRow = { ...validRow, id: "bad-1", asset: "DOGE" };
       const res = await request(app)
         .post("/api/treasury/cashflow/import")
+        .set("Authorization", "Bearer mock-admin-token")
         .send({ scenarioId: "s-1", rows: [badRow] })
         .expect(422);
 
@@ -666,6 +679,7 @@ describe("Treasury Route Envelope Contract", () => {
     it("returns 400 VALIDATION_ERROR envelope for missing scenarioId", async () => {
       const res = await request(app)
         .post("/api/treasury/cashflow/import")
+        .set("Authorization", "Bearer mock-admin-token")
         .send({ rows: [validRow] })
         .expect(400);
 
@@ -679,6 +693,7 @@ describe("Treasury Route Envelope Contract", () => {
     it("returns success envelope with baseline vs stress comparison payload", async () => {
       const res = await request(app)
         .post("/api/treasury/compare")
+        .set("Authorization", "Bearer mock-admin-token")
         .send({ name: "Compare Test", totalCapitalUsd: 1_000_000, allocations: validAllocations })
         .expect(200);
 
@@ -694,6 +709,7 @@ describe("Treasury Route Envelope Contract", () => {
     it("returns validation error envelope for invalid capital", async () => {
       const res = await request(app)
         .post("/api/treasury/compare")
+        .set("Authorization", "Bearer mock-admin-token")
         .send({ name: "Bad Capital", totalCapitalUsd: -500, allocations: validAllocations })
         .expect(400);
 
@@ -707,6 +723,7 @@ describe("Treasury Route Envelope Contract", () => {
     it("returns downloadable JSON content by default", async () => {
       const res = await request(app)
         .post("/api/treasury/export-comparison")
+        .set("Authorization", "Bearer mock-admin-token")
         .send({ name: "JSON Export Test", totalCapitalUsd: 1_000_000, allocations: validAllocations, format: "json" })
         .expect(200);
 
@@ -720,6 +737,7 @@ describe("Treasury Route Envelope Contract", () => {
     it("returns downloadable CSV content when format=csv", async () => {
       const res = await request(app)
         .post("/api/treasury/export-comparison")
+        .set("Authorization", "Bearer mock-admin-token")
         .send({ name: "CSV Export Test", totalCapitalUsd: 1_000_000, allocations: validAllocations, format: "csv" })
         .expect(200);
 
@@ -734,10 +752,81 @@ describe("Treasury Route Envelope Contract", () => {
       const badAllocations = [{ ...validAllocations[0], allocationPct: 10 }];
       const res = await request(app)
         .post("/api/treasury/export-comparison")
+        .set("Authorization", "Bearer mock-admin-token")
         .send({ name: "Bad Export", totalCapitalUsd: 1_000_000, allocations: badAllocations, format: "csv" })
         .expect(400);
 
       expect(res.body.ok).toBe(false);
+    });
+  });
+
+  // ── Route-level Authorization Checks (#1040) ─────────────────────────────
+
+  describe("Route-level Authorization Checks (#1040)", () => {
+    it("returns 401 UNAUTHORIZED for anonymous calls to POST /api/treasury/simulate", async () => {
+      const res = await request(app)
+        .post("/api/treasury/simulate")
+        .send({ name: "Anon Test", totalCapitalUsd: 1_000_000, allocations: validAllocations })
+        .expect(401);
+
+      expectErrorEnvelope(res.body, "UNAUTHORIZED");
+    });
+
+    it("returns 403 FORBIDDEN for normal user calls to POST /api/treasury/simulate", async () => {
+      const res = await request(app)
+        .post("/api/treasury/simulate")
+        .set("Authorization", "Bearer mock-user-token")
+        .send({ name: "User Test", totalCapitalUsd: 1_000_000, allocations: validAllocations })
+        .expect(403);
+
+      expectErrorEnvelope(res.body, "FORBIDDEN");
+    });
+
+    it("allows admin calls to POST /api/treasury/simulate", async () => {
+      const res = await request(app)
+        .post("/api/treasury/simulate")
+        .set("Authorization", "Bearer mock-admin-token")
+        .send({ name: "Admin Test", totalCapitalUsd: 1_000_000, allocations: validAllocations })
+        .expect(200);
+
+      expectSuccessEnvelope(res.body, "treasury/simulate");
+    });
+
+    it("returns 403 FORBIDDEN for normal user calls to POST /api/treasury/scenarios", async () => {
+      const res = await request(app)
+        .post("/api/treasury/scenarios")
+        .set("Authorization", "Bearer mock-user-token")
+        .send({ name: "User Scenario", totalCapitalUsd: 500_000, allocations: evenAllocations })
+        .expect(403);
+
+      expectErrorEnvelope(res.body, "FORBIDDEN");
+    });
+
+    it("returns 403 FORBIDDEN for normal user calls to DELETE /api/treasury/scenarios/:id", async () => {
+      const res = await request(app)
+        .delete("/api/treasury/scenarios/some-id")
+        .set("Authorization", "Bearer mock-user-token")
+        .expect(403);
+
+      expectErrorEnvelope(res.body, "FORBIDDEN");
+    });
+
+    it("returns 403 FORBIDDEN for normal user calls to POST /api/treasury/cashflow/import", async () => {
+      const res = await request(app)
+        .post("/api/treasury/cashflow/import")
+        .set("Authorization", "Bearer mock-user-token")
+        .send({ scenarioId: "s-1", rows: [] })
+        .expect(403);
+
+      expectErrorEnvelope(res.body, "FORBIDDEN");
+    });
+
+    it("allows public read-only access to GET /api/treasury/scenarios", async () => {
+      const res = await request(app)
+        .get("/api/treasury/scenarios")
+        .expect(200);
+
+      expectSuccessEnvelope(res.body, "treasury/scenarios");
     });
   });
 });

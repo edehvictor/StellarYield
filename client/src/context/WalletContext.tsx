@@ -4,10 +4,16 @@ import {
   clearStoredSession,
   connectWalletSession,
   loadStoredSession,
+  recoverSession,
 } from "../auth/session";
 import { getAdapter } from "../auth/walletAdapters";
 import type { ConnectWalletOptions, ExtensionWalletProviderId, WalletSession } from "../auth/types";
 import { WalletContext } from "./WalletContextObject";
+
+import {
+  clearSensitiveWalletState,
+  clearPendingTransactionDrafts,
+} from "../services/transactionDraft";
 
 export function WalletProvider({ children }: { children: ReactNode }) {
   const [session, setSession] = useState<WalletSession | null>(null);
@@ -18,7 +24,23 @@ export function WalletProvider({ children }: { children: ReactNode }) {
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
   useEffect(() => {
-    setSession(loadStoredSession());
+    // On mount, attempt to recover any persisted session rather than loading
+    // the raw stored value directly. recoverSession() checks TTL, probes
+    // provider availability, and re-verifies smart wallet credentials so the
+    // context starts in an accurate state after a page reload.
+    let cancelled = false;
+
+    recoverSession().then((result) => {
+      if (cancelled) return;
+      if (result.session) {
+        setSession(result.session);
+      }
+    }).catch(() => {
+      // Fallback: load without recovery so the user is not silently logged out
+      if (!cancelled) setSession(loadStoredSession());
+    });
+
+    return () => { cancelled = true; };
   }, []);
 
   useEffect(() => {
@@ -47,6 +69,10 @@ export function WalletProvider({ children }: { children: ReactNode }) {
 
     try {
       const nextSession = await connectWalletSession(options);
+      // Account switch detection: if connecting a different account, clear prior pending draft payloads
+      if (session?.walletAddress && session.walletAddress !== nextSession.walletAddress) {
+        clearPendingTransactionDrafts();
+      }
       setSession(nextSession);
       return true;
     } catch (error) {
@@ -64,15 +90,12 @@ export function WalletProvider({ children }: { children: ReactNode }) {
 
   function disconnectWallet() {
     clearStoredSession();
+    clearSensitiveWalletState();
     setSession(null);
     setErrorMessage(null);
 
     // Clear wallet-specific cached data and session state
     try {
-      window.localStorage.removeItem('authToken');
-      window.localStorage.removeItem('stellar_yield_google_oauth');
-      window.localStorage.removeItem('stellar_yield_google_sheets');
-
       // Clear any in-flight pending transaction state or notifications
       // by resetting browser's fetch/cache for wallet-dependent endpoints
       if ('caches' in window) {

@@ -243,4 +243,134 @@ describe("ZapDepositPanel", () => {
       });
     });
   });
+
+  describe("failed preview recovery actions", () => {
+    it("shows recovery links for recoverable preview failures and retries", async () => {
+      mockFetch.mockResolvedValue({
+        ok: false,
+        status: 500,
+        json: async () => ({
+          error: "QUOTE_FAILED",
+          message: "Router simulation unavailable.",
+          requestId: "req-1",
+          recoverable: true,
+        }),
+      });
+
+      render(<ZapDepositPanel walletAddress="GABCDEF123" />);
+
+      const input = screen.getByPlaceholderText("0.00");
+      await userEvent.type(input, "100");
+
+      await waitFor(() => {
+        expect(screen.getByText("Router simulation unavailable.")).toBeInTheDocument();
+      });
+
+      expect(screen.getByRole("link", { name: /view account on explorer/i })).toHaveAttribute(
+        "href",
+        "https://stellar.expert/explorer/testnet/account/GABCDEF123",
+      );
+      expect(screen.getByRole("link", { name: /contact support/i })).toHaveAttribute(
+        "href",
+        "https://github.com/edehvictor/StellarYield/issues",
+      );
+
+      const callsBeforeRetry = mockFetch.mock.calls.length;
+      mockFetch.mockImplementation(() =>
+        Promise.resolve({
+          ok: true,
+          json: async () => createMockQuote(),
+        }),
+      );
+      fireEvent.click(screen.getByRole("button", { name: /retry quote/i }));
+
+      await waitFor(() => {
+        expect(mockFetch.mock.calls.length).toBeGreaterThan(callsBeforeRetry);
+      });
+      await waitFor(() => {
+        expect(screen.getByText("Simulated")).toBeInTheDocument();
+      });
+    });
+
+    it("hides recovery links for non-recoverable preview failures", async () => {
+      mockFetch.mockResolvedValue({
+        ok: false,
+        status: 400,
+        json: async () => ({
+          error: "INVALID_AMOUNT",
+          message: "amountInStroops must be an integer string.",
+        }),
+      });
+
+      render(<ZapDepositPanel walletAddress="GABCDEF123" />);
+
+      const input = screen.getByPlaceholderText("0.00");
+      await userEvent.type(input, "100");
+
+      await waitFor(() => {
+        expect(
+          screen.getByText("amountInStroops must be an integer string."),
+        ).toBeInTheDocument();
+      });
+
+      expect(screen.queryByRole("link", { name: /view account on explorer/i })).not.toBeInTheDocument();
+      expect(screen.queryByRole("link", { name: /contact support/i })).not.toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: /retry quote/i })).not.toBeInTheDocument();
+  describe("per-vault preferences", () => {
+    beforeEach(() => {
+      localStorage.clear();
+    });
+
+    it("saves custom slippage to localStorage per vault and updates view", async () => {
+      render(<ZapDepositPanel walletAddress="GABCDEF123" />);
+      openSlippageEditor();
+
+      const presetBtn = screen.getByText("2%");
+      fireEvent.click(presetBtn);
+
+      await waitFor(() => {
+        expect(screen.getAllByText("2%").length).toBeGreaterThan(0);
+      });
+
+      const stored = localStorage.getItem("vault_slippage_CVAULT");
+      expect(stored).toBeTruthy();
+      expect(JSON.parse(stored!).slippage).toBe(2);
+    });
+
+    it("loads slippage from localStorage for matching vault contract", async () => {
+      localStorage.setItem("vault_slippage_CVAULT", JSON.stringify({ slippage: 3.5 }));
+      render(<ZapDepositPanel walletAddress="GABCDEF123" />);
+
+      await waitFor(() => {
+        expect(screen.getAllByText("3.5%").length).toBeGreaterThan(0);
+      });
+    });
+
+    it("ignores malformed persisted values and uses default", async () => {
+      localStorage.setItem("vault_slippage_CVAULT", "{bad json}");
+      render(<ZapDepositPanel walletAddress="GABCDEF123" />);
+
+      await waitFor(() => {
+        expect(screen.getAllByText("0.5%").length).toBeGreaterThan(0);
+      });
+    });
+
+    it("resets slippage tolerance to default on Reset click", async () => {
+      localStorage.setItem("vault_slippage_CVAULT", JSON.stringify({ slippage: 4.5 }));
+      render(<ZapDepositPanel walletAddress="GABCDEF123" />);
+
+      await waitFor(() => {
+        expect(screen.getAllByText("4.5%").length).toBeGreaterThan(0);
+      });
+
+      openSlippageEditor();
+      const resetBtn = screen.getByText("Reset");
+      fireEvent.click(resetBtn);
+
+      await waitFor(() => {
+        expect(screen.getAllByText("0.5%").length).toBeGreaterThan(0);
+      });
+      expect(localStorage.getItem("vault_slippage_CVAULT")).toBeNull();
+    });
+  });
 });

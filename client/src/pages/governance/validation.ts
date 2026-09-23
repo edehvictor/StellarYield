@@ -1,5 +1,5 @@
 import * as StellarSdk from "@stellar/stellar-sdk";
-import type { AdminAction, AdminActionOption } from "./types";
+import type { AdminAction, AdminActionOption, SignerRecord } from "./types";
 
 export interface ValidationError {
   field: string;
@@ -12,6 +12,16 @@ export interface ValidationSummary {
   action: string;
   target: string;
   risk: "low" | "medium" | "high" | "critical";
+}
+
+export interface SignerValidationResult {
+  valid: boolean;
+  errors: string[];
+}
+
+export interface ThresholdValidationResult {
+  valid: boolean;
+  errors: string[];
 }
 
 export function getRiskLevel(action: AdminAction): "low" | "medium" | "high" | "critical" {
@@ -158,4 +168,83 @@ export function validateTransactionBuilder(
     target,
     risk: getRiskLevel(action.method),
   };
+}
+
+export function validateSignerSet(
+  signers: string[],
+  threshold: number,
+): SignerValidationResult {
+  const errors: string[] = [];
+
+  if (signers.length === 0) {
+    errors.push("At least one signer is required");
+    return { valid: false, errors };
+  }
+
+  const uniqueSigners = new Set(signers);
+  if (uniqueSigners.size !== signers.length) {
+    errors.push("Duplicate signers detected");
+  }
+
+  for (const signer of signers) {
+    if (!validateAddress(signer)) {
+      errors.push(`Invalid signer address: ${signer.slice(0, 8)}...`);
+    }
+  }
+
+  if (threshold < 1) {
+    errors.push("Threshold must be at least 1");
+  }
+
+  if (threshold > signers.length) {
+    errors.push(
+      `Threshold (${threshold}) exceeds number of signers (${signers.length})`,
+    );
+  }
+
+  return { valid: errors.length === 0, errors };
+}
+
+export function validateThresholdForExecution(
+  signatures: SignerRecord[],
+  threshold: number,
+  signers: string[],
+): ThresholdValidationResult {
+  const errors: string[] = [];
+
+  if (threshold < 1) {
+    errors.push("Threshold must be at least 1");
+    return { valid: false, errors };
+  }
+
+  if (signers.length === 0) {
+    errors.push("No signers configured");
+    return { valid: false, errors };
+  }
+
+  if (threshold > signers.length) {
+    errors.push(
+      `Threshold (${threshold}) exceeds configured signers (${signers.length})`,
+    );
+  }
+
+  const validSignatures = signatures.filter((sig) =>
+    signers.includes(sig.publicKey),
+  );
+
+  if (validSignatures.length < threshold) {
+    errors.push(
+      `Insufficient signatures: ${validSignatures.length}/${threshold} required`,
+    );
+  }
+
+  const seen = new Set<string>();
+  for (const sig of validSignatures) {
+    if (seen.has(sig.publicKey)) {
+      errors.push(`Duplicate signature from ${sig.publicKey.slice(0, 8)}...`);
+    }
+    seen.add(sig.publicKey);
+  }
+
+  return { valid: errors.length === 0, errors };
 }

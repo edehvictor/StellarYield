@@ -3,6 +3,7 @@ import { getZapSupportedAssetsPayload } from "../config/zapAssetsConfig";
 import { getZapQuote, verifyZapQuote, type ZapQuoteBody } from "../services/zapQuote";
 import { sendError } from "../utils/errorResponse";
 import { validateZapQuote } from "../middleware/validation";
+import { recordFailure, resolveNetworkLabel } from "../monitoring/prometheus";
 
 const router = Router();
 
@@ -50,12 +51,19 @@ router.post("/quote", validateZapQuote, async (req: Request, res: Response) => {
       assetConfigVersion: quote.assetConfigVersion,
     });
   } catch (e) {
+    recordFailure({
+      route: "zap/quote",
+      network: resolveNetworkLabel(),
+      failure_category: "quote_failed",
+    });
     sendError(
       res,
       500,
       "QUOTE_FAILED",
       "Quote failed",
-      e instanceof Error ? e.message : undefined
+      e instanceof Error ? e.message : undefined,
+      undefined,
+      true
     );
   }
 });
