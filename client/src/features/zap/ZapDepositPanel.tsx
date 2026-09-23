@@ -25,7 +25,8 @@ import {
   mergeVaultIntoZapSelectableAssets,
   shouldLoadZapMetadataFromApi,
 } from "./assets";
-import type { ZapAssetOption, ZapQuoteResponse } from "./types";
+import type { ZapAssetOption, ZapQuoteResponse, FeeDriftWarning } from "./types";
+import { detectClientFeeDrift } from "./types";
 import { useSettings } from "../settings/SettingsContext";
 import { resolveSlippage } from "../settings/types";
 import DepositRouteMaterialImpactWarning from "./DepositRouteMaterialImpactWarning";
@@ -110,6 +111,7 @@ export default function ZapDepositPanel({ walletAddress }: ZapDepositPanelProps)
   const [quotePath, setQuotePath] = useState<string>("");
   const [quoteSource, setQuoteSource] = useState<string>("");
   const [quoteData, setQuoteData] = useState<ZapQuoteResponse | null>(null);
+  const [feeDriftWarning, setFeeDriftWarning] = useState<FeeDriftWarning | null>(null);
   const [slippageTolerance, setSlippageTolerance] = useState(() =>
     getVaultSlippage(vaultContractId, settingsSlippage)
   );
@@ -178,6 +180,7 @@ export default function ZapDepositPanel({ walletAddress }: ZapDepositPanelProps)
     setQuoteLoading(true);
     setError("");
     setQuoteError(null);
+    setFeeDriftWarning(null);
     const requestSeq = ++quoteRequestSeqRef.current;
     const requestKey = buildZapQuoteRequestKey({
       inputTokenContract: inputAsset.contractId,
@@ -352,6 +355,22 @@ export default function ZapDepositPanel({ walletAddress }: ZapDepositPanelProps)
           setShowFailedModal(true);
           return;
         }
+
+        // Detect fee drift between the quoted min output and the recalculated
+        // execution-time min output. A material divergence indicates the fee
+        // changed between preview and signing.
+        if (minOut !== null && minOut > 0n) {
+          const drift = detectClientFeeDrift(
+            quoteData.minAmountOutStroops,
+            minOut.toString(),
+          );
+          setFeeDriftWarning(drift);
+          if (drift?.severity === "error") {
+            setError(drift.message);
+            setStatus("idle");
+            return;
+          }
+        }
       }
       const result = await zapDeposit(
         walletAddress,
@@ -460,6 +479,52 @@ export default function ZapDepositPanel({ walletAddress }: ZapDepositPanelProps)
             <p className="text-xs text-orange-200/70">
               Quote is over 60 seconds old. Refresh for current rates.
             </p>
+          </div>
+        </div>
+      )}
+
+      {/* Fee drift warning — shown when execution estimate diverges from preview */}
+      {feeDriftWarning && (
+        <div
+          className={`mb-4 flex items-start gap-2 text-sm rounded-lg p-3 border ${
+            feeDriftWarning.severity === "error"
+              ? "bg-red-500/10 border-red-500/30 text-red-200/90"
+              : "bg-amber-500/10 border-amber-500/30 text-amber-200/90"
+          }`}
+          role="alert"
+          aria-live="assertive"
+        >
+          <AlertTriangle
+            className={`w-4 h-4 shrink-0 mt-0.5 ${
+              feeDriftWarning.severity === "error" ? "text-red-400" : "text-amber-400"
+            }`}
+          />
+          <div>
+            <p
+              className={`font-medium ${
+                feeDriftWarning.severity === "error" ? "text-red-300" : "text-amber-300"
+              }`}
+            >
+              {feeDriftWarning.severity === "error" ? "Fee estimate changed" : "Fee drift detected"}
+            </p>
+            <p
+              className={`text-xs ${
+                feeDriftWarning.severity === "error" ? "text-red-200/70" : "text-amber-200/70"
+              }`}
+            >
+              {feeDriftWarning.message}
+            </p>
+            {feeDriftWarning.severity === "error" && (
+              <button
+                type="button"
+                onClick={() => void refreshQuote()}
+                disabled={quoteLoading}
+                className="mt-1.5 inline-flex items-center gap-1 text-xs rounded bg-white/10 px-2 py-0.5 text-red-200 hover:bg-white/20 disabled:opacity-50"
+              >
+                <RefreshCw className={`w-3 h-3 ${quoteLoading ? "animate-spin" : ""}`} />
+                Refresh quote
+              </button>
+            )}
           </div>
         </div>
       )}
@@ -735,7 +800,8 @@ export default function ZapDepositPanel({ walletAddress }: ZapDepositPanelProps)
           status === "loading" ||
           minOut === null ||
           minOut <= 0n ||
-          depositImpact.shouldBlock
+          depositImpact.shouldBlock ||
+          feeDriftWarning?.severity === "error"
         }
         className="w-full py-3 rounded-xl font-semibold text-white bg-gradient-to-r from-blue-500 to-purple-500 hover:from-blue-600 hover:to-purple-600 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
       >
