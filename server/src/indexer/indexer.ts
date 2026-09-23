@@ -99,7 +99,7 @@ type IndexerPrismaClient = {
   };
 };
 
-async function loadPrismaClient(): Promise<IndexerPrismaClient | null> {
+export async function loadPrismaClient(): Promise<IndexerPrismaClient | null> {
   try {
     const prismaModule = (await import("@prisma/client")) as unknown as {
       PrismaClient?: new () => IndexerPrismaClient;
@@ -489,6 +489,21 @@ export async function getUnresolvedDeadLetterCount(
 ): Promise<number> {
   return prisma.deadLetterEvent.count({
     where: { resolved: false },
+  });
+}
+
+/**
+ * List unresolved dead-letter (failed indexer job) entries, oldest first,
+ * for recovery-queue inspection.
+ */
+export async function listUnresolvedDeadLetters(
+  prisma: IndexerPrismaClient,
+  limit: number = 50,
+) {
+  return prisma.deadLetterEvent.findMany({
+    where: { resolved: false },
+    orderBy: { nextRetryAt: "asc" },
+    take: Math.min(Math.max(limit, 1), 200),
   });
 }
 

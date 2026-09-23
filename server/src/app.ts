@@ -37,6 +37,8 @@ import prometheusMetricsRouter from "./routes/prometheusMetrics";
 import alertsRouter from "./routes/alerts";
 import openapiRouter from "./routes/openapi";
 import incidentsRouter from "./routes/incidents";
+import indexerRecoveryRouter from "./routes/indexerRecovery";
+import featureFlagsRouter from "./routes/featureFlags";
 import simulatorRouter from "./routes/simulator";
 import correlationRouter from "./routes/correlation";
 import strategiesRouter from "./routes/strategies";
@@ -154,6 +156,8 @@ export function createApp() {
   app.use("/api/weekly-reports", weeklyReportsRouter);
   app.use("/api/alerts", alertsRouter);
   app.use("/api/incidents", incidentsRouter);
+  app.use("/api/indexer/recovery-queue", indexerRecoveryRouter);
+  app.use("/api/feature-flags", featureFlagsRouter);
   app.use("/api/simulator", simulatorRouter);
   app.use("/api/correlation", correlationRouter);
   app.use("/api/openapi", openapiRouter);
