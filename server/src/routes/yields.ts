@@ -9,6 +9,7 @@ import {
 import { formatParityReport } from "../utils/yieldNormalization";
 import { calculateNetYield } from "../services/netYieldEngine";
 import { yieldReliabilityEngine } from "../services/yieldReliabilityService";
+import { getFeeHistory } from "../services/protocolFeeHistoryService";
 
 const yieldsRouter = Router();
 
@@ -59,6 +60,13 @@ yieldsRouter.get("/", async (_req, res) => {
         entry.totalApy,
         hasCustomAssumptions ? assumptions : undefined,
       );
+      // Recent protocol fee changes (#1147), newest-first. Sourced from
+      // protocolFeeHistoryService, which records a snapshot whenever the
+      // combined management + performance fee for this protocol changes.
+      // Always an array (never null/undefined) so the client can render a
+      // stable empty state without extra null-checks.
+      const feeHistory = getFeeHistory(entry.protocolName);
+
       return {
         ...entry,
         netApy: netYield.netApy,
@@ -69,6 +77,7 @@ yieldsRouter.get("/", async (_req, res) => {
         isStale,
         reliabilityStatus: score.status,
         warnings,
+        feeHistory,
       };
     }));
     res.setHeader(

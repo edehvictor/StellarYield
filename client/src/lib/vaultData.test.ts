@@ -1,7 +1,8 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import {
   validateVaultSlug,
   normalizeVaultMetadata,
+  fetchVaultStats,
   DEFAULT_VAULT_SYMBOL,
   DEFAULT_VAULT_ISSUER,
   DEFAULT_VAULT_DECIMALS,
@@ -163,5 +164,77 @@ describe("normalizeVaultMetadata", () => {
   it("is deterministic for the same malformed input", () => {
     const input = { symbol: "bad symbol", decimals: -5 };
     expect(normalizeVaultMetadata(input)).toEqual(normalizeVaultMetadata(input));
+  });
+});
+
+describe("fetchVaultStats — feeHistory (#1147)", () => {
+  const originalFetch = global.fetch;
+
+  beforeEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  afterEach(() => {
+    global.fetch = originalFetch;
+  });
+
+  it("passes through feeHistory when the matching entry includes it", async () => {
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => [
+        {
+          protocol: "Blend",
+          asset: "USDC",
+          apy: 6.5,
+          tvl: 1_000_000,
+          risk: "Low",
+          feeHistory: [{ feeBps: 1000, changedAt: "2026-01-01T00:00:00.000Z" }],
+        },
+      ],
+    }) as unknown as typeof fetch;
+
+    const stats = await fetchVaultStats("usdc");
+    expect(stats?.feeHistory).toEqual([{ feeBps: 1000, changedAt: "2026-01-01T00:00:00.000Z" }]);
+  });
+
+  it("defaults to an empty array when the matching entry has no feeHistory field", async () => {
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => [{ protocol: "Blend", asset: "USDC", apy: 6.5, tvl: 1_000_000, risk: "Low" }],
+    }) as unknown as typeof fetch;
+
+    const stats = await fetchVaultStats("usdc");
+    expect(stats?.feeHistory).toEqual([]);
+  });
+
+  it("defaults to an empty array when feeHistory is malformed (not an array)", async () => {
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => [
+        { protocol: "Blend", asset: "USDC", apy: 6.5, tvl: 1_000_000, risk: "Low", feeHistory: "oops" },
+      ],
+    }) as unknown as typeof fetch;
+
+    const stats = await fetchVaultStats("usdc");
+    expect(stats?.feeHistory).toEqual([]);
+  });
+
+  it("degrades to an empty feeHistory array (not undefined/crash) when the API call fails", async () => {
+    global.fetch = vi.fn().mockRejectedValue(new Error("network down")) as unknown as typeof fetch;
+
+    const stats = await fetchVaultStats("usdc");
+    expect(stats?.feeHistory).toEqual([]);
+    expect(stats?.live).toBe(false);
+  });
+
+  it("degrades to an empty feeHistory array when no matching entry is found", async () => {
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => [],
+    }) as unknown as typeof fetch;
+
+    const stats = await fetchVaultStats("usdc");
+    expect(stats?.feeHistory).toEqual([]);
+    expect(stats?.live).toBe(false);
   });
 });

@@ -14,6 +14,7 @@ import { RecoveryAdvisor } from "./AIAdvisor/RecoveryAdvisor";
 import { fetchVaultStats, type VaultStats, formatTvl, validateVaultSlug } from "../lib/vaultData";
 import VaultCapacityWarning, { type VaultCapacityStatus } from "./VaultCapacityWarning";
 import VaultMigrationReadinessPanel from "./VaultMigrationReadinessPanel";
+import YieldSourceFeeHistoryPanel from "./YieldSourceFeeHistoryPanel";
 import { VaultRiskBadge } from "./common/VaultRiskBadge";
 
 /**
@@ -274,6 +275,15 @@ export default function Vault() {
       <div className="max-w-3xl w-full text-left">
         <VaultMigrationReadinessPanel vaultSlug={activeSlug} />
       </div>
+
+      {stats && (
+        <div className="max-w-3xl w-full text-left">
+          <YieldSourceFeeHistoryPanel
+            protocolName={stats.protocol}
+            feeHistory={stats.feeHistory}
+          />
+        </div>
+      )}
 
       <div className="glass-panel p-8 mt-8 max-w-3xl w-full text-left">
         <div className="flex items-center justify-center gap-2 mb-6">
