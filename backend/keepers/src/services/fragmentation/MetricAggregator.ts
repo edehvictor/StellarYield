@@ -14,7 +14,6 @@ import {
   DataCompletenessStatus,
   FragmentationError,
 } from './types';
-import { CircuitBreaker, fetchWithRetry } from './resilience';
 
 /**
  * Interface for yield data from external service
@@ -44,22 +43,12 @@ export class MetricAggregator {
   private yieldService: IYieldService;
   private pollingInterval: NodeJS.Timeout | null = null;
   private lastFetchTime: Date | null = null;
-  private readonly circuitBreaker: CircuitBreaker;
-  private readonly fetchMaxRetries: number;
 
   constructor(
     yieldService: IYieldService,
-    cacheTtlSeconds: number = 300, // 5 minutes default
-    resilience: {
-      circuitBreaker?: CircuitBreaker;
-      fetchMaxRetries?: number;
-    } = {}
+    cacheTtlSeconds: number = 300 // 5 minutes default
   ) {
     this.yieldService = yieldService;
-    this.circuitBreaker = resilience.circuitBreaker ?? new CircuitBreaker();
-    // Retries are disabled by default: graceful degradation via cached data
-    // already covers outages, so eager retries would only add latency.
-    this.fetchMaxRetries = resilience.fetchMaxRetries ?? 0;
     this.cache = new NodeCache({
       stdTTL: cacheTtlSeconds,
       checkperiod: 60, // Check for expired keys every 60 seconds
@@ -112,14 +101,8 @@ export class MetricAggregator {
     const cacheKey = 'aggregated_pool_depth';
 
     try {
-      // Fetch fresh data from yield service, protected by the circuit breaker
-      // and optional exponential backoff.
-      const rawYields = await this.circuitBreaker.execute(() =>
-        fetchWithRetry(
-          () => this.yieldService.getYieldData(),
-          this.fetchMaxRetries
-        )
-      );
+      // Fetch fresh data from yield service
+      const rawYields = await this.yieldService.getYieldData();
       
       // Normalize protocol data
       const protocols = this.normalizeProtocolData(rawYields);

@@ -91,9 +91,7 @@ describe('FragmentationCalculator - Unit Tests', () => {
       ];
 
       expect(() => calculator.calculateHHI(protocols)).toThrow(FragmentationError);
-      expect(() => calculator.calculateHHI(protocols)).toThrow(
-        'no protocols with positive liquidity'
-      );
+      expect(() => calculator.calculateHHI(protocols)).toThrow('total TVL is zero');
     });
 
     it('throws error for negative TVL', () => {

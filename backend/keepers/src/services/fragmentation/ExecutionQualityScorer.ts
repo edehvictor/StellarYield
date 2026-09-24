@@ -13,7 +13,6 @@ import {
   ProtocolContribution,
   FragmentationError,
 } from './types';
-import { fetchWithRetry } from './resilience';
 
 /**
  * Interface for slippage estimates
@@ -160,15 +159,7 @@ export class ExecutionQualityScorer {
 
     try {
       const slippageEstimates = await Promise.all(
-        protocols.map((p) =>
-          // Retry transient slippage registry failures with exponential backoff
-          // before falling back to depth-based estimation.
-          fetchWithRetry(
-            () => this.slippageRegistry.getSlippageEstimate(p.protocol, typicalTradeSize),
-            3,
-            1000
-          )
-        )
+        protocols.map((p) => this.slippageRegistry.getSlippageEstimate(p.protocol, typicalTradeSize))
       );
 
       const totalSlippage = slippageEstimates.reduce(

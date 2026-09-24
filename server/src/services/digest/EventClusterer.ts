@@ -58,12 +58,6 @@ export function clusterEvents(
       map.set(compositeKey, {
         eventType: event.eventType,
         clusterKey,
-        // vaultId is applicable for alert / watchlist clusters. Preserving it
-        // through the pipeline lets DigestPayload cluster entries carry it.
-        vaultId:
-          event.eventType === 'recommendation'
-            ? undefined
-            : event.vaultId,
         events: [],
       });
     }
