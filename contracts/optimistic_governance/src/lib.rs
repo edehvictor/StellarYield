@@ -9,7 +9,7 @@ mod storage;
 #[cfg(test)]
 mod test;
 
-use storage::{DataKey, Proposal, ProposalStatus};
+use storage::{DataKey, ExecutionReadiness, Proposal, ProposalStatus};
 
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -192,17 +192,12 @@ impl OptimisticGovernance {
             .get(&DataKey::Proposal(proposal_id))
             .ok_or(Error::ProposalNotFound)?;
 
-        if proposal.status == ProposalStatus::Disputed {
-            return Err(Error::ProposalDisputed);
-        }
-
-        if proposal.status == ProposalStatus::Executed {
-            return Err(Error::ProposalAlreadyExecuted);
-        }
-
-        let current_time = env.ledger().timestamp();
-        if current_time < proposal.execution_time {
-            return Err(Error::ChallengeWindowActive);
+        if let Some(first_blocker) = Self::readiness_blockers(&proposal, env.ledger().timestamp())
+            .into_iter()
+            .flatten()
+            .next()
+        {
+            return Err(first_blocker);
         }
 
         // Execute the payload
@@ -248,6 +243,35 @@ impl OptimisticGovernance {
             .unwrap_or(0)
     }
 
+    /// Read-only aggregate readiness check: reports every specific reason
+    /// (if any) currently blocking `execute()` for this proposal, instead of
+    /// only the first one a caller would hit via a revert.
+    pub fn is_execution_ready(
+        env: Env,
+        proposal_id: u64,
+    ) -> Result<ExecutionReadiness, Error> {
+        Self::require_init(&env)?;
+
+        let proposal: Proposal = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Proposal(proposal_id))
+            .ok_or(Error::ProposalNotFound)?;
+
+        let mut blocking_reasons: Vec<u32> = Vec::new(&env);
+        for error in Self::readiness_blockers(&proposal, env.ledger().timestamp())
+            .into_iter()
+            .flatten()
+        {
+            blocking_reasons.push_back(Self::error_code(error));
+        }
+
+        Ok(ExecutionReadiness {
+            is_ready: blocking_reasons.is_empty(),
+            blocking_reasons,
+        })
+    }
+
     // ── Internal Helpers ──────────────────────────────────────────
 
     fn status_code(status: &ProposalStatus) -> u32 {
@@ -256,6 +280,34 @@ impl OptimisticGovernance {
             ProposalStatus::Disputed => 1,
             ProposalStatus::Executed => 2,
         }
+    }
+
+    fn error_code(error: Error) -> u32 {
+        error as u32
+    }
+
+    /// Every reason (in the same order `execute()` used to check them
+    /// one-at-a-time) currently blocking execution of `proposal`. A fixed
+    /// [Option<Error>; 3] avoids needing a heap allocator in this `no_std`
+    /// contract; at most 3 checks exist today.
+    fn readiness_blockers(proposal: &Proposal, current_time: u64) -> [Option<Error>; 3] {
+        [
+            if proposal.status == ProposalStatus::Disputed {
+                Some(Error::ProposalDisputed)
+            } else {
+                None
+            },
+            if proposal.status == ProposalStatus::Executed {
+                Some(Error::ProposalAlreadyExecuted)
+            } else {
+                None
+            },
+            if current_time < proposal.execution_time {
+                Some(Error::ChallengeWindowActive)
+            } else {
+                None
+            },
+        ]
     }
 
     fn require_init(env: &Env) -> Result<(), Error> {
