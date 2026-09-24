@@ -40,6 +40,10 @@ Source: `contracts/yield_vault/src/lib.rs`
 | 11   | `StorageKeyNotFound`    | Required storage key is missing             | Ensure contract is properly initialized and configured |
 | 2001 | `InvalidDonationBps`    | Donation basis points outside 0–10 000      | Pass a value between 0 and 10 000                      |
 | 2002 | `CharityNotWhitelisted` | Charity address not on protocol whitelist   | Use `set_charity_whitelist` to add the address         |
+| 2003 | `OperationExpired`      | Admin operation expired before execution    | Create a new operation and execute it in time          |
+| 2004 | `OperationReplayed`     | Admin operation was already executed        | No action needed                                       |
+| 2005 | `UnauthorizedContract`  | Cross-contract call from a disallowed caller | Use the contracts registered for this network          |
+| 2006 | `InvalidRecipient`      | Fee recipient is invalid                    | Pass a valid, non-self recipient address               |
 | 2007 | `DonationBelowMinimum`  | Donation is zero or below the dust minimum  | Increase the yield amount or donation split            |
 
 ---
@@ -167,7 +171,7 @@ Source: `contracts/zap/src/lib.rs`
 
 | Code | Name                 | Meaning                      | Remediation                              |
 | ---- | -------------------- | ---------------------------- | ---------------------------------------- |
-| 1    | `NotInitialized`     | Contract not initialized     | Call `initialize()`                      |
+| 1    | `NotInitialized`     | Contract not initialized, or its admin/router config is missing | Call `initialize()`                      |
 | 2    | `AlreadyInitialized` | Contract already initialized | No action needed                         |
 | 3    | `ZeroAmount`         | Input amount is zero         | Pass a positive amount                   |
 | 4    | `Unauthorized`       | Caller is not admin          | Use the admin address                    |
@@ -203,3 +207,20 @@ In addition to typed errors, contracts may call `panic_with_error!` or `panic!` 
 - Integer overflow in unchecked arithmetic (rare; most paths use checked math).
 
 When you see an untyped panic, check the function's precondition guards at the top of the call.
+
+### Decoding for user-facing errors
+
+Clients never parse the RPC error string. Both the server (`server/src/services/sorobanReader.ts`) and the client (`client/src/services/soroban.ts`) read the structured `ScError` from the simulation's diagnostic events with `shared/types/contractPanic.ts`:
+
+| `ScError`                                   | Decoded code              |
+| ------------------------------------------- | ------------------------- |
+| `Contract(code)` catalogued for the contract | `CONTRACT_ERROR`          |
+| `Contract(code)` not catalogued              | `UNKNOWN_CONTRACT_ERROR`  |
+| `WasmVm` (untyped `panic!` / `unwrap()` trap) | `CONTRACT_TRAPPED`        |
+| `Budget`                                     | `RESOURCE_LIMIT_EXCEEDED` |
+| `Auth`                                       | `AUTHORIZATION_FAILED`    |
+| `Storage, MissingValue`                      | `LEDGER_ENTRY_MISSING`    |
+| any other host error                         | `HOST_ERROR`              |
+| no structured error in the events            | `UNDECODABLE`             |
+
+Contract codes are looked up per contract (`vault`, `zap`), so keep the catalog in `shared/types/contractPanic.ts` in sync when adding a variant to `VaultError` or `ZapError`; `server/src/__tests__/contractPanicDecoding.test.ts` fails on drift. Prefer returning a typed error over `unwrap()` so failures decode to a specific message instead of `CONTRACT_TRAPPED`.

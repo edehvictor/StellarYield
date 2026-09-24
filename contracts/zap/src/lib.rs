@@ -118,7 +118,11 @@ impl Zap {
         }
 
         let zap_addr = env.current_contract_address();
-        let dex_router: Address = env.storage().instance().get(&DataKey::DexRouter).unwrap();
+        let dex_router: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::DexRouter)
+            .ok_or(ZapError::NotInitialized)?;
 
         // Step 1: Transfer input tokens from user to this contract
         let input_client = token::Client::new(&env, &input_token);
@@ -219,7 +223,11 @@ impl Zap {
         Self::require_init(&env)?;
         admin.require_auth();
 
-        let stored_admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(ZapError::NotInitialized)?;
         if admin != stored_admin {
             return Err(ZapError::Unauthorized);
         }
@@ -476,6 +484,39 @@ mod tests {
 
         let result = client.try_set_dex_router(&attacker, &new_router);
         assert_eq!(result, Err(Ok(ZapError::Unauthorized)));
+    }
+
+    #[test]
+    fn test_set_dex_router_missing_admin_returns_typed_error() {
+        let t = setup_zap_env();
+        t.env.as_contract(&t.zap_id, || {
+            t.env.storage().instance().remove(&DataKey::Admin);
+        });
+
+        let new_router = Address::generate(&t.env);
+        let result = t.zap.try_set_dex_router(&t.user, &new_router);
+        assert_eq!(result, Err(Ok(ZapError::NotInitialized)));
+    }
+
+    #[test]
+    fn test_zap_deposit_missing_router_returns_typed_error() {
+        let t = setup_zap_env();
+        t.env.as_contract(&t.zap_id, || {
+            t.env.storage().instance().remove(&DataKey::DexRouter);
+        });
+
+        let result = t.zap.try_zap_deposit(
+            &t.user,
+            &t.input_token,
+            &t.vault_token,
+            &t.vault_id,
+            &1_000,
+            &500,
+            &1,
+            &900,
+            &false,
+        );
+        assert_eq!(result, Err(Ok(ZapError::NotInitialized)));
     }
 
     // ── Event assertion tests (#1045) ──────────────────────────────────

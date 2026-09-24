@@ -17,7 +17,7 @@ const SPEC_PATH = path.join(__dirname, "../../openapi.yaml");
 const EXPECTED_COMPONENTS_SCHEMA_HASH =
     "e5d31ade4da548c69b9a61e26229f14faf1899d61c102550321e7fc1601d6769";
 const EXPECTED_PATHS_SCHEMA_HASH =
-    "77a47ba8d94b43472e4a59238df6522b69a53cf0485644ef0e98b1cb56d14194";
+    "12b325c086c7b58d7dd8f1fadc4628148d012bef157e225290f423c1201ddeac";
 
 function readSection(spec: string, startMarker: string, endMarker?: string): string {
     const startIdx = spec.indexOf(startMarker);

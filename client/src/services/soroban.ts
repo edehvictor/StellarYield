@@ -23,6 +23,11 @@ import { resolveDeadlineSeconds, type TxSettings } from "../features/settings/ty
 import { getContractId, validateContractRegistryEntry } from "./contractRegistry";
 import { apiFetch } from "../lib/api";
 import { getNetworkPassphrase, getRpcUrl } from "../lib/networkEnv";
+import {
+  decodeContractPanic,
+  type ContractErrorNamespace,
+  type DecodedContractPanic,
+} from "../../../shared/types/contractPanic";
 
 // ── Configuration ───────────────────────────────────────────────────────
 
@@ -44,6 +49,27 @@ export interface TxResult {
   success: boolean;
   hash?: string;
   error?: string;
+  /**
+   * Contract failure decoded from the simulation's structured diagnostic
+   * events (#1339). Prefer it over parsing `error` when rendering a failure.
+   */
+  panic?: DecodedContractPanic;
+}
+
+/**
+ * Thrown when simulation fails. Carries the panic decoded from the structured
+ * diagnostic events together with the SDK error whose message callers display.
+ */
+export class ContractSimulationError extends Error {
+  readonly panic: DecodedContractPanic;
+  readonly sdkError: Error;
+
+  constructor(panic: DecodedContractPanic, sdkError: Error) {
+    super(sdkError.message);
+    this.name = "ContractSimulationError";
+    this.panic = panic;
+    this.sdkError = sdkError;
+  }
 }
 
 /** Lifecycle phases for Soroban flows (timeline + callbacks). */
@@ -126,6 +152,18 @@ export function getZapContract(): StellarSdk.Contract {
   return new StellarSdk.Contract(contractId);
 }
 
+/** The failed `TxResult` for a thrown error, keeping any decoded contract panic. */
+function failedTxResult(err: unknown): TxResult {
+  if (err instanceof ContractSimulationError) {
+    return { success: false, error: err.sdkError.message, panic: err.panic };
+  }
+  const parsed = parseContractError(err);
+  return {
+    success: false,
+    error: parsed.message,
+  };
+}
+
 async function buildContractCallOn(
   contract: StellarSdk.Contract,
   sourcePublicKey: string,
@@ -133,6 +171,7 @@ async function buildContractCallOn(
   args: StellarSdk.xdr.ScVal[],
   onPhase?: TxPhaseCallback,
   txSettings?: TxSettings,
+  errorNamespace?: ContractErrorNamespace,
 ): Promise<string> {
   onPhase?.("building");
   const server = getServer();
@@ -153,7 +192,10 @@ async function buildContractCallOn(
 
   if (StellarSdk.rpc.Api.isSimulationError(simulated)) {
     const errResp = simulated as StellarSdk.rpc.Api.SimulateTransactionErrorResponse;
-    throw parseContractError(errResp.error);
+    throw new ContractSimulationError(
+      decodeContractPanic(errResp.events, errorNamespace),
+      parseContractError(errResp.error),
+    );
   }
 
   const assembled = StellarSdk.rpc.assembleTransaction(
@@ -244,7 +286,7 @@ export async function executeContractCall(
   txSettings?: TxSettings,
 ): Promise<TxResult> {
   try {
-    const xdr = await buildContractCallOn(getContract(), sourcePublicKey, method, args, onPhase, txSettings);
+    const xdr = await buildContractCallOn(getContract(), sourcePublicKey, method, args, onPhase, txSettings, "vault");
 
     onPhase?.("waiting_for_wallet");
     const signer = signTx ?? ((x: string, p: string) => signWithFreighter(x, p));
@@ -267,11 +309,7 @@ export async function executeContractCall(
     return result;
   } catch (err) {
     onPhase?.("failure");
-    const parsed = parseContractError(err);
-    return {
-      success: false,
-      error: parsed.message,
-    };
+    return failedTxResult(err);
   }
 }
 
@@ -310,11 +348,7 @@ export async function executeContractCallOn(
     return result;
   } catch (err) {
     onPhase?.("failure");
-    const parsed = parseContractError(err);
-    return {
-      success: false,
-      error: parsed.message,
-    };
+    return failedTxResult(err);
   }
 }
 
@@ -327,7 +361,7 @@ export async function executeZapContractCall(
   txSettings?: TxSettings,
 ): Promise<TxResult> {
   try {
-    const xdr = await buildContractCallOn(getZapContract(), sourcePublicKey, method, args, onPhase, txSettings);
+    const xdr = await buildContractCallOn(getZapContract(), sourcePublicKey, method, args, onPhase, txSettings, "zap");
 
     onPhase?.("waiting_for_wallet");
     const signedXdr = await signWithFreighter(xdr, NETWORK_PASSPHRASE);
@@ -349,11 +383,7 @@ export async function executeZapContractCall(
     return result;
   } catch (err) {
     onPhase?.("failure");
-    const parsed = parseContractError(err);
-    return {
-      success: false,
-      error: parsed.message,
-    };
+    return failedTxResult(err);
   }
 }
 

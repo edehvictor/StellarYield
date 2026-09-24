@@ -4,6 +4,7 @@ import TxStatusTimeline from "../../components/transaction/TxStatusTimeline";
 import TransactionFailedModal from "../../components/transaction/TransactionFailedModal";
 import { decodeTransactionError } from "../../utils/errorDecoder";
 import { zapDeposit } from "../../services/soroban";
+import type { DecodedContractPanic } from "../../../../shared/types/contractPanic";
 import type { TxPhase } from "../../services/transactionPhase";
 import { TX_PHASE_PIPELINE } from "../../services/transactionPhase";
 import { fetchSwapQuote, verifySwapQuote, ZapQuoteError } from "./fetchSwapQuote";
@@ -98,6 +99,7 @@ export default function ZapDepositPanel({ walletAddress }: ZapDepositPanelProps)
   const [lastProgressPhase, setLastProgressPhase] = useState<TxPhase>("idle");
   const [txHash, setTxHash] = useState<string | null>(null);
   const [error, setError] = useState("");
+  const [failurePanic, setFailurePanic] = useState<DecodedContractPanic | undefined>(undefined);
   const [quoteError, setQuoteError] = useState<ZapQuoteError | null>(null);
   const [showFailedModal, setShowFailedModal] = useState(false);
   const [quoteLoading, setQuoteLoading] = useState(false);
@@ -340,6 +342,7 @@ export default function ZapDepositPanel({ walletAddress }: ZapDepositPanelProps)
     setTxHash(null);
     setStatus("loading");
     setError("");
+    setFailurePanic(undefined);
     setShowFailedModal(false);
     try {
       if (quoteData) {
@@ -381,6 +384,7 @@ export default function ZapDepositPanel({ walletAddress }: ZapDepositPanelProps)
         settings,
       );
       if (!result.success) {
+        setFailurePanic(result.panic);
         throw new Error(result.error || "Transaction failed");
       }
       setTxHash(result.hash ?? null);
@@ -741,7 +745,7 @@ export default function ZapDepositPanel({ walletAddress }: ZapDepositPanelProps)
 
       {showFailedModal && txPhase === "failure" && error && (
         <TransactionFailedModal
-          error={decodeTransactionError(error)}
+          error={decodeTransactionError(error, failurePanic)}
           onClose={() => setShowFailedModal(false)}
           onRetry={() => {
             setShowFailedModal(false);

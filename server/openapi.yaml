@@ -288,6 +288,64 @@ paths:
               schema:
                 $ref: '#/components/schemas/HealthStatus'
 
+  /api/health/digest:
+    get:
+      summary: Latest scheduled integration health digest
+      description: Returns the most recent scheduled digest of backend integration health (database, Horizon, Soroban RPC, indexer, cache). Each integration carries its stable error code; raw provider messages are never included.
+      tags:
+        - Health
+      responses:
+        '200':
+          description: The latest digest
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  generatedAt:
+                    type: string
+                    format: date-time
+                  overallStatus:
+                    type: string
+                    enum: [healthy, degraded, outage]
+                  summary:
+                    type: object
+                    properties:
+                      total:
+                        type: integer
+                      up:
+                        type: integer
+                      warning:
+                        type: integer
+                      down:
+                        type: integer
+                  integrations:
+                    type: array
+                    description: Sorted by severity (down, warning, up), then by name
+                    items:
+                      type: object
+                      properties:
+                        name:
+                          type: string
+                          example: horizon
+                        status:
+                          type: string
+                          enum: [up, warning, down]
+                        errorCode:
+                          type: string
+                          nullable: true
+                          example: HORIZON_UNREACHABLE
+                        retryable:
+                          type: boolean
+                        latencyMs:
+                          type: integer
+                          nullable: true
+                        checkedAt:
+                          type: string
+                          format: date-time
+        '404':
+          description: No digest has been generated yet (`HEALTH_DIGEST_NOT_READY`)
+
   /api/yields:
     get:
       summary: Get current yield data
@@ -2756,6 +2814,83 @@ paths:
                     type: array
                     items:
                       $ref: '#/components/schemas/ReconcileCauseDescriptor'
+
+  /api/portfolio/import/validate:
+    post:
+      summary: Validate an external portfolio CSV before import
+      description: Checks a holdings CSV (columns protocol, asset, depositedUsd, currentValueUsd; header matching ignores case and punctuation) without importing anything. File-level problems fail with a stable code; row-level problems are listed per row so valid rows can still be previewed.
+      tags:
+        - Portfolio
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [csv]
+              properties:
+                csv:
+                  type: string
+                  description: Raw CSV file contents (at most 64 KB and 1,000 rows)
+                  example: "protocol,asset,depositedUsd,currentValueUsd\nBlend,USDC,1000,1012.5"
+      responses:
+        '200':
+          description: The file is structurally valid; the preview lists valid holdings and any row issues
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  holdings:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        row:
+                          type: integer
+                        protocol:
+                          type: string
+                        asset:
+                          type: string
+                        depositedUsd:
+                          type: number
+                        currentValueUsd:
+                          type: number
+                  issues:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        row:
+                          type: integer
+                          description: Row number in the file, counting the header as row 1
+                        column:
+                          type: string
+                          nullable: true
+                        code:
+                          type: string
+                          enum: [ROW_COLUMN_COUNT, ROW_MISSING_VALUE, ROW_INVALID_AMOUNT, ROW_NEGATIVE_AMOUNT, ROW_DUPLICATE_HOLDING]
+                        message:
+                          type: string
+                  summary:
+                    type: object
+                    properties:
+                      totalRows:
+                        type: integer
+                      validRows:
+                        type: integer
+                      invalidRows:
+                        type: integer
+                      totalDepositedUsd:
+                        type: number
+                      totalCurrentValueUsd:
+                        type: number
+        '400':
+          description: IMPORT_INVALID_REQUEST, IMPORT_EMPTY_FILE, or IMPORT_MALFORMED_CSV
+        '413':
+          description: IMPORT_FILE_TOO_LARGE or IMPORT_TOO_MANY_ROWS
+        '422':
+          description: IMPORT_MISSING_COLUMNS, IMPORT_DUPLICATE_COLUMNS, or IMPORT_NO_DATA_ROWS
 
   /api/incidents:
     get:

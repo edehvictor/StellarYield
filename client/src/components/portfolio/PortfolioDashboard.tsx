@@ -15,6 +15,7 @@ import { DailyMovementPanel } from "../../portfolio/DailyMovementPanel";
 import PresetsPanel from "../../features/presets/PresetsPanel";
 import UnifiedActivityTimeline from "./UnifiedActivityTimeline";
 import PortfolioExport from "./PortfolioExport";
+import PortfolioImport from "./PortfolioImport";
 import RiskScoreBreakdownPanel from "./RiskScoreBreakdownPanel";
 import FreshnessBadge from "./FreshnessBadge";
 import { computeHoldingFreshness } from "./holdingFreshness";
@@ -213,6 +214,7 @@ export default function PortfolioDashboard({
           </p>
         </div>
         <div className="flex items-center gap-3">
+          <PortfolioImport />
           <PortfolioExport walletAddress={walletAddress} />
           <button
             onClick={() => {

@@ -8,6 +8,8 @@
  * @module errorDecoder
  */
 
+import type { DecodedContractPanic } from "../../../shared/types/contractPanic";
+
 // ── Error Dictionary ────────────────────────────────────────────────────
 
 /**
@@ -205,11 +207,27 @@ export function extractErrorCode(raw: string): number | undefined {
  *
  * Always returns a non-throwing result regardless of input format.
  *
+ * When a `panic` decoded from the structured diagnostic events is available
+ * (see `TxResult.panic`), it is used instead of parsing `raw`, so the copy is
+ * deterministic and per-contract (#1339).
+ *
  * @param raw - The raw error string from Horizon or Soroban RPC.
+ * @param panic - Structured contract failure, when the caller has one.
  * @returns A `DecodedError` with user-friendly copy and the original raw string.
  */
-export function decodeTransactionError(raw: string): DecodedError {
+export function decodeTransactionError(raw: string, panic?: DecodedContractPanic): DecodedError {
     const safeRaw = typeof raw === "string" ? raw : JSON.stringify(raw);
+
+    if (panic && panic.code !== "UNDECODABLE") {
+        return {
+            title: panic.title,
+            message: panic.message,
+            suggestion: panic.remediation,
+            raw: safeRaw,
+            code: panic.contractCode,
+        };
+    }
+
     const code = extractErrorCode(safeRaw);
 
     if (code !== undefined && code in CONTRACT_ERROR_MAP) {
