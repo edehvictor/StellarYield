@@ -781,3 +781,24 @@ model CriticalActionAuditLog {
   @@index([userId, timestamp])
   @@index([action, timestamp])
 }
+
+// ── Treasury Rebalance Simulation Snapshots (Issue #1419) ───────────────────
+//
+// `treasurySimulationService`'s scenarioStore only persists simulation
+// *inputs* (and only in-memory). This model persists a point-in-time
+// snapshot of a simulation *result*, so "what did we predict for this
+// allocation on this date" survives a restart and can be compared against
+// what actually happened later.
+
+model RebalanceSimulationSnapshot {
+  id            String   @id @default(uuid())
+  scenarioId    String?  // links back to a saved TreasuryScenario, if the run was saved
+  scenarioLabel String?
+  inputs        Json     // the TreasuryScenario the snapshot was computed from
+  result        Json     // the full SimulationResult at the time of the run
+  createdBy     String?
+  createdAt     DateTime @default(now())
+
+  @@index([scenarioId, createdAt])
+  @@index([createdAt])
+}

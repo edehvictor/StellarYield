@@ -25,6 +25,12 @@ import {
   TreasuryWithdrawalError,
   treasuryWithdrawalCooldownService,
 } from "../services/treasuryWithdrawalCooldownService";
+import {
+  saveSimulationSnapshot,
+  listSimulationSnapshots,
+  getSimulationSnapshot,
+  SimulationSnapshotError,
+} from "../services/rebalanceSimulationSnapshotService";
 
 const router = Router();
 
@@ -88,7 +94,7 @@ function validateAllocations(allocations: unknown): allocations is AllocationPos
  * POST /api/treasury/simulate
  * Run a treasury simulation. Optionally saves the scenario.
  */
-router.post("/simulate", requireAdmin, (req: Request, res: Response) => {
+router.post("/simulate", requireAdmin, async (req: Request, res: Response) => {
   try {
     const scenario = assertValidScenarioInput({
       ...req.body,
@@ -104,7 +110,21 @@ router.post("/simulate", requireAdmin, (req: Request, res: Response) => {
       ? result.concentrationWarnings
       : undefined;
 
-    res.json(successEnvelope(result, "treasury/simulate", warnings));
+    // #1419: persist a point-in-time snapshot of this result on request.
+    // Best-effort — a snapshot-persistence failure never fails the
+    // simulation itself, since the (already-computed) result is still
+    // valid and useful without history.
+    let snapshotId: string | undefined;
+    if (req.body.snapshot) {
+      try {
+        const snapshot = await saveSimulationSnapshot(scenario, result, { saved: !!req.body.save });
+        snapshotId = snapshot.id;
+      } catch {
+        // Swallowed intentionally — see comment above.
+      }
+    }
+
+    res.json(successEnvelope({ ...result, snapshotId }, "treasury/simulate", warnings));
   } catch (err) {
     if (err instanceof TreasuryValidationError) {
       res.status(err.statusCode).json(
@@ -470,5 +490,53 @@ router.post(
     }
   },
 );
+
+function sendSnapshotError(res: Response, err: unknown, route: string): void {
+  if (err instanceof SimulationSnapshotError) {
+    res.status(err.statusCode).json(errorEnvelope(err.code, err.message, route));
+    return;
+  }
+  res.status(503).json(
+    errorEnvelope("SNAPSHOT_UNAVAILABLE", "Simulation snapshot storage is unavailable.", route),
+  );
+}
+
+/**
+ * GET /api/treasury/simulation-snapshots
+ *
+ * #1419 — Lists persisted rebalance-simulation result snapshots,
+ * newest first. Optionally scoped to one scenario via `?scenarioId=`.
+ * Cursor-paginated via `?cursor=` (a snapshot id) and `?limit=`.
+ */
+router.get("/simulation-snapshots", requireAdmin, async (req: Request, res: Response) => {
+  try {
+    const { scenarioId, cursor } = req.query;
+    const limit = req.query.limit ? Number(req.query.limit) : undefined;
+
+    const page = await listSimulationSnapshots({
+      scenarioId: typeof scenarioId === "string" ? scenarioId : undefined,
+      cursor: typeof cursor === "string" ? cursor : undefined,
+      limit: Number.isFinite(limit) ? limit : undefined,
+    });
+
+    res.json(successEnvelope(page, "treasury/simulation-snapshots"));
+  } catch (err) {
+    sendSnapshotError(res, err, "treasury/simulation-snapshots");
+  }
+});
+
+/**
+ * GET /api/treasury/simulation-snapshots/:id
+ *
+ * #1419 — Fetches one persisted simulation snapshot by id.
+ */
+router.get("/simulation-snapshots/:id", requireAdmin, async (req: Request, res: Response) => {
+  try {
+    const snapshot = await getSimulationSnapshot(req.params.id);
+    res.json(successEnvelope(snapshot, "treasury/simulation-snapshots"));
+  } catch (err) {
+    sendSnapshotError(res, err, "treasury/simulation-snapshots");
+  }
+});
 
 export default router;
