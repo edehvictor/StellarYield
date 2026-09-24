@@ -18,6 +18,19 @@ vi.mock("../zap/assets", () => ({
   }),
 }));
 
+// WithdrawPanel is wallet-address-prop-driven, but the #1152 session-expiry
+// recovery hook reads live session state via useWallet(). In production
+// WalletProvider always wraps the app (see main.tsx); tests mock the hook
+// directly to keep this file's render calls context-free.
+vi.mock("../../context/useWallet", () => ({
+  useWallet: () => ({
+    isConnected: true,
+    isSessionExpired: false,
+    connectWallet: vi.fn().mockResolvedValue(true),
+    providerId: "freighter",
+  }),
+}));
+
 const mockWithdraw = vi.mocked(withdraw);
 const mockGetUserShares = vi.mocked(getUserShares);
 

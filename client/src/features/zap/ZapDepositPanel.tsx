@@ -34,6 +34,8 @@ import { useDepositImpact } from "./useDepositImpact";
 import type { QuoteSnapshot } from "./useDepositImpact";
 import { getVaultSlippage, setVaultSlippage, resetVaultSlippage } from "../../lib/preferences";
 import { explorerAccountUrl } from "../../lib/networkEnv";
+import { useProtectedWalletAction } from "../../hooks/useProtectedWalletAction";
+import SessionExpiredRecovery from "../../components/wallet/SessionExpiredRecovery";
 
 export interface ZapDepositPanelProps {
   walletAddress: string | null;
@@ -336,7 +338,7 @@ export default function ZapDepositPanel({ walletAddress }: ZapDepositPanelProps)
     }
   }, [vaultContractId, settingsSlippage]);
 
-  const handleZap = useCallback(async () => {
+  const executeZap = useCallback(async () => {
     if (!walletAddress || !inputAsset || !vaultContractId || !vaultToken.contractId) return;
     let amountIn: bigint;
     try {
@@ -425,6 +427,24 @@ export default function ZapDepositPanel({ walletAddress }: ZapDepositPanelProps)
     settings,
     quoteData,
   ]);
+
+  // Issue #1152: wallet sessions can expire mid-flow. Rather than letting
+  // executeZap throw deep inside zapDeposit's signing step (or fail
+  // silently), the session is checked immediately before submission; an
+  // expired session captures executeZap as a resumable action and surfaces
+  // a typed recovery state (reconnect / cancel / retry) instead.
+  const {
+    pendingRecovery,
+    runProtected,
+    reconnectAndResume,
+    retryPending,
+    cancelPending,
+    isReconnecting,
+  } = useProtectedWalletAction();
+
+  const handleZap = useCallback(async () => {
+    await runProtected("Zap deposit", executeZap);
+  }, [runProtected, executeZap]);
 
   const retryZap = useCallback(() => {
     setError("");
@@ -720,6 +740,16 @@ export default function ZapDepositPanel({ walletAddress }: ZapDepositPanelProps)
             blockStaleQuotes={true}
           />
         </div>
+      )}
+
+      {pendingRecovery && (
+        <SessionExpiredRecovery
+          actionLabel={pendingRecovery.label}
+          onReconnect={() => void reconnectAndResume()}
+          onRetry={() => void retryPending()}
+          onCancel={cancelPending}
+          isReconnecting={isReconnecting}
+        />
       )}
 
       {error && txPhase !== "failure" && (
