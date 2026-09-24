@@ -3,12 +3,14 @@
  *
  * Backend route for the Yield for Good / Auto-Donate feature.
  *
- * GET  /api/donations/config/:address — fetch user donation config
- * POST /api/donations/set             — update user donation config
- * POST /api/donations/preview         — preview donation amount (rejects zero/dust)
- * GET  /api/donations/total           — protocol-wide total donated
- * GET  /api/donations/summary         — aggregate donation metrics
- * POST /api/donations/preview         — structured contract execution preview
+ * GET  /api/donations/config/:address  — fetch user donation config
+ * POST /api/donations/set              — update user donation config
+ * POST /api/donations/preview          — preview donation amount (rejects zero/dust)
+ * GET  /api/donations/total            — protocol-wide total donated
+ * GET  /api/donations/summary          — aggregate donation metrics
+ * POST /api/donations/preview/contract — structured contract execution preview
+ *                                         (senderAddress/recipientAddress/memo; #1106
+ *                                         adds memo length + charset validation here)
  */
 import { Router, Request, Response } from "express";
 import { buildDonationPreview } from "../services/donationsService";
@@ -199,21 +201,29 @@ donationsRouter.get("/summary", (_req: Request, res: Response): void => {
 });
 
 /**
- * POST /api/donations/preview
+ * POST /api/donations/preview/contract
  *
  * Generates a structured donation preview that details the recipient address,
  * fee breakdown (gross amount, donation amount, net amount), and memo that will
  * be submitted to the contract upon signing.  Invalid previews are rejected
  * with HTTP 422 so callers know not to proceed to submission.
  *
+ * Registered on a distinct path from POST /preview above (#1106 fix): both
+ * routes previously shared the literal path "/preview", which meant Express
+ * always matched the first-registered handler and this structured-preview
+ * handler — including its memo length/charset validation — was unreachable
+ * dead code. Renaming to /preview/contract keeps the original /preview
+ * behavior unchanged while making this handler reachable.
+ *
  * Body:
  *   senderAddress      string   — donor wallet (Stellar public key)
  *   recipientAddress   string   — charity wallet (Stellar public key)
  *   grossAmountStroops number   — total yield amount in stroops
  *   bps                number   — donation rate in basis points (0–10 000)
- *   memo               string?  — optional transaction memo (≤ 28 bytes)
+ *   memo               string?  — optional transaction memo (≤ 28 bytes,
+ *                                 no control characters — see donationsService.ts)
  */
-donationsRouter.post("/preview", (req: Request, res: Response): void => {
+donationsRouter.post("/preview/contract", (req: Request, res: Response): void => {
     const {
         senderAddress,
         recipientAddress,
