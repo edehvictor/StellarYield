@@ -9,6 +9,102 @@ import { validateDepositAmount } from "../utils/depositAmountValidation";
 
 const router = Router();
 
+// ── Deposit status lookup (#1146) ─────────────────────────────────────────
+// Backs client-side reconciliation of a locally-persisted "I submitted a
+// deposit" draft against indexed on-chain state after a page reload.
+
+const TX_HASH_PATTERN = /^[A-Fa-f0-9]{64}$/;
+
+export type DepositStatus = "pending" | "confirmed";
+
+export interface DepositStatusResponse {
+  txHash: string;
+  status: DepositStatus;
+  amount?: number;
+  shares?: number;
+  vaultId?: string;
+  confirmedAt?: string;
+}
+
+type DepositStatusPrismaClient = {
+  userTransaction: {
+    findUnique(args: {
+      where: { txHash: string };
+    }): Promise<{
+      txHash: string;
+      vaultId: string;
+      amount: number;
+      shares: number;
+      action: string;
+      timestamp: Date;
+    } | null>;
+  };
+};
+
+async function loadDepositStatusPrismaClient(): Promise<DepositStatusPrismaClient | null> {
+  try {
+    const prismaModule = (await import("@prisma/client")) as unknown as {
+      PrismaClient?: new () => DepositStatusPrismaClient;
+    };
+    if (!prismaModule.PrismaClient) return null;
+    return new prismaModule.PrismaClient();
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * GET /api/deposits/status/:txHash
+ *
+ * Looks up whether a submitted deposit transaction has been indexed
+ * (confirmed on-chain) yet. Backs the client's reload-reconciliation flow
+ * (#1146): a deposit draft persisted at submission time is checked against
+ * this endpoint on app load to decide whether to show a pending or
+ * confirmed state.
+ *
+ * Returns `{ status: "confirmed", ... }` once the indexer has recorded a
+ * matching `UserTransaction` row, or `{ status: "pending" }` while it has
+ * not (the transaction may still be propagating, or may never land — the
+ * client is responsible for treating a sufficiently old pending draft as
+ * stale and discarding it).
+ */
+router.get("/status/:txHash", async (req: Request, res: Response) => {
+  const { txHash } = req.params;
+  if (!txHash || !TX_HASH_PATTERN.test(txHash)) {
+    return sendError(res, 400, "INVALID_TX_HASH", "txHash must be a 64-character hex string.");
+  }
+
+  const prisma = await loadDepositStatusPrismaClient();
+  if (!prisma) {
+    return sendError(res, 503, "DB_UNAVAILABLE", "Deposit status lookup is unavailable.");
+  }
+
+  try {
+    const tx = await prisma.userTransaction.findUnique({ where: { txHash } });
+    if (!tx) {
+      const pending: DepositStatusResponse = { txHash, status: "pending" };
+      return res.json(pending);
+    }
+    const confirmed: DepositStatusResponse = {
+      txHash: tx.txHash,
+      status: "confirmed",
+      amount: tx.amount,
+      shares: tx.shares,
+      vaultId: tx.vaultId,
+      confirmedAt: tx.timestamp.toISOString(),
+    };
+    res.json(confirmed);
+  } catch (error) {
+    sendError(
+      res,
+      500,
+      "DEPOSIT_STATUS_LOOKUP_FAILED",
+      "Failed to look up deposit status.",
+      error instanceof Error ? error.message : undefined
+    );
+  }
+});
+
 /**
  * Maximum fraction of the route liquidity depth a single deposit may consume.
  * Exceeding this is blocked with INSUFFICIENT_LIQUIDITY_DEPTH (#1312).
