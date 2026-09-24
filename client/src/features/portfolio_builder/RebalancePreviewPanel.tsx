@@ -15,6 +15,8 @@ import {
   buildRebalanceRequest,
   summarizeApyDelta,
   hasWarnings,
+  isSnapshotStale,
+  formatSnapshotAge,
   type RebalancePreview as RebalancePreviewData,
 } from "./rebalancePreview";
 
@@ -106,6 +108,20 @@ export default function RebalancePreview({
         <div className="flex items-center gap-2 p-3 bg-red-500/10 border border-red-500/30 rounded-lg">
           <AlertTriangle className="w-4 h-4 text-red-500" />
           <span className="text-sm text-red-400">{error}</span>
+        </div>
+      )}
+
+      {preview && isSnapshotStale(preview) && (
+        <div
+          data-testid="snapshot-stale-warning"
+          className="flex items-start gap-2 p-3 bg-orange-500/10 border border-orange-500/30 rounded-lg"
+        >
+          <AlertTriangle className="w-4 h-4 text-orange-500 mt-0.5 shrink-0" />
+          <span className="text-sm text-orange-400">
+            {formatSnapshotAge(preview)
+              ? `This preview is based on a market snapshot that is ${formatSnapshotAge(preview)}. Refresh before relying on these numbers.`
+              : "This preview's market snapshot age could not be confirmed. Treat these numbers as potentially stale until refreshed."}
+          </span>
         </div>
       )}
 

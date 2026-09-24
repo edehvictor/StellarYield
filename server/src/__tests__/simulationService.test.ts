@@ -540,5 +540,86 @@ describe("Rebalance Simulation Sandbox", () => {
       simulateRebalance({ totalValueUsd: -1, allocations: [] }),
     ).toThrow(/Invalid rebalance parameters/);
   });
+
+  describe("Snapshot freshness metadata (#1149)", () => {
+    it("reports a fresh, recent snapshotTimestamp as not stale", () => {
+      const recent = new Date(Date.now() - 60_000).toISOString(); // 1 minute old
+      const preview = simulateRebalance({
+        ...evenToConcentrated,
+        snapshotTimestamp: recent,
+      });
+
+      expect(preview.snapshotFreshness.isStale).toBe(false);
+      expect(preview.snapshotFreshness.snapshotAgeMs).toBeGreaterThanOrEqual(60_000);
+      expect(preview.snapshotFreshness.snapshotAgeMs).toBeLessThan(120_000);
+      expect(preview.warnings.some((w) => w.code === "STALE_DATA")).toBe(false);
+      expect(preview.warnings.some((w) => w.code === "SNAPSHOT_MISSING")).toBe(false);
+    });
+
+    it("reports a snapshotTimestamp older than the freshness window as stale", () => {
+      const old = new Date(
+        Date.now() - (REBALANCE_THRESHOLDS.staleDataSeconds + 3600) * 1000,
+      ).toISOString();
+      const preview = simulateRebalance({
+        ...evenToConcentrated,
+        snapshotTimestamp: old,
+      });
+
+      expect(preview.snapshotFreshness.isStale).toBe(true);
+      expect(preview.snapshotFreshness.snapshotAgeMs).toBeGreaterThan(
+        REBALANCE_THRESHOLDS.staleDataSeconds * 1000,
+      );
+      expect(preview.warnings.some((w) => w.code === "STALE_DATA")).toBe(true);
+    });
+
+    it("falls back to dataAgeSeconds when no snapshotTimestamp is given", () => {
+      const preview = simulateRebalance({
+        ...evenToConcentrated,
+        dataAgeSeconds: REBALANCE_THRESHOLDS.staleDataSeconds + 60,
+      });
+
+      expect(preview.snapshotFreshness.isStale).toBe(true);
+      expect(preview.snapshotFreshness.snapshotAgeMs).toBe(
+        (REBALANCE_THRESHOLDS.staleDataSeconds + 60) * 1000,
+      );
+    });
+
+    it("treats a missing snapshot timestamp AND missing dataAgeSeconds as stale (safe fallback)", () => {
+      const preview = simulateRebalance(evenToConcentrated);
+
+      expect(preview.snapshotFreshness.isStale).toBe(true);
+      expect(preview.snapshotFreshness.snapshotAgeMs).toBeNull();
+      expect(preview.warnings.some((w) => w.code === "SNAPSHOT_MISSING")).toBe(true);
+      expect(preview.warnings.some((w) => w.code === "STALE_DATA")).toBe(false);
+    });
+
+    it("treats an unparseable snapshotTimestamp as stale rather than throwing or assuming fresh", () => {
+      const preview = simulateRebalance({
+        ...evenToConcentrated,
+        snapshotTimestamp: "not-a-real-date",
+      });
+
+      expect(preview.snapshotFreshness.isStale).toBe(true);
+      expect(preview.snapshotFreshness.snapshotAgeMs).toBeNull();
+      expect(preview.warnings.some((w) => w.code === "SNAPSHOT_MISSING")).toBe(true);
+    });
+
+    it("treats an explicit null snapshotTimestamp as stale", () => {
+      const preview = simulateRebalance({
+        ...evenToConcentrated,
+        snapshotTimestamp: null,
+      });
+
+      expect(preview.snapshotFreshness.isStale).toBe(true);
+      expect(preview.snapshotFreshness.snapshotAgeMs).toBeNull();
+    });
+
+    it("echoes the configured threshold on every response", () => {
+      const preview = simulateRebalance(evenToConcentrated);
+      expect(preview.snapshotFreshness.staleSnapshotThresholdMs).toBe(
+        REBALANCE_THRESHOLDS.staleDataSeconds * 1000,
+      );
+    });
+  });
 });
 });

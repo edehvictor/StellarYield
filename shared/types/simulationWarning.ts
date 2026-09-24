@@ -18,6 +18,7 @@
 export type SimulationWarningCode =
   // Data quality
   | "STALE_DATA"               // Market / price data is older than the freshness threshold.
+  | "SNAPSHOT_MISSING"         // No market snapshot timestamp/age was supplied; treated as stale.
   | "INCOMPLETE_HISTORY"       // Historical data is too sparse to produce a reliable backtest.
   | "UNSUPPORTED_INTERVAL"     // Requested date range or rebalance interval is not supported.
   // Market conditions

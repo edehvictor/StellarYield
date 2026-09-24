@@ -32,6 +32,19 @@ export interface RebalanceLeg {
   deltaUsd: number;
 }
 
+/**
+ * Freshness metadata for the market snapshot a preview was computed from
+ * (issue #1149). `snapshotAgeMs` is `null` when the server could not
+ * determine an age (no timestamp/dataAgeSeconds supplied, or an
+ * unparseable timestamp) — that case is always reported as stale, never
+ * silently treated as fresh.
+ */
+export interface SnapshotFreshness {
+  snapshotAgeMs: number | null;
+  isStale: boolean;
+  staleSnapshotThresholdMs: number;
+}
+
 export interface RebalancePreview {
   isSimulationOnly: true;
   legs: RebalanceLeg[];
@@ -41,7 +54,27 @@ export interface RebalancePreview {
   totalTurnoverUsd: number;
   estimatedFeeUsd: number;
   maxDriftPct: number;
+  snapshotFreshness?: SnapshotFreshness;
   warnings: string[];
+}
+
+/** True when the preview's snapshot is stale or its freshness is unknown. */
+export function isSnapshotStale(preview: RebalancePreview): boolean {
+  return preview.snapshotFreshness?.isStale ?? false;
+}
+
+/** Human-readable snapshot age, or `null` when the age could not be determined. */
+export function formatSnapshotAge(preview: RebalancePreview): string | null {
+  const ageMs = preview.snapshotFreshness?.snapshotAgeMs;
+  if (ageMs === null || ageMs === undefined) {
+    return null;
+  }
+  const minutes = Math.round(ageMs / 60000);
+  if (minutes < 1) return "less than a minute old";
+  if (minutes === 1) return "1 minute old";
+  if (minutes < 60) return `${minutes} minutes old`;
+  const hours = Math.round(minutes / 60);
+  return hours === 1 ? "1 hour old" : `${hours} hours old`;
 }
 
 /**
