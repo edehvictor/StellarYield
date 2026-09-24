@@ -8,6 +8,7 @@ import { startDriftDetectionJob } from "./jobs/driftDetectionJob";
 import { startScheduledReconciliationJob } from "./jobs/scheduledReconciliationJob";
 import { startIntegrationHealthDigestJob } from "./jobs/integrationHealthDigestJob";
 import { startStrategyRotationJob } from "./jobs/strategyRotationJob";
+import { startExpiredIntentCleanupJob } from "./jobs/expiredIntentCleanupJob";
 import { PROTOCOLS } from "./config/protocols";
 import { calculateRiskScore } from "./utils/riskScoring";
 import { computeRiskAdjustedYield } from "./services/riskAdjustedYieldService";
@@ -55,6 +56,7 @@ startSharePriceSnapshotJob();
 startDriftDetectionJob();
 startScheduledReconciliationJob();
 startIntegrationHealthDigestJob();
+startExpiredIntentCleanupJob();
 startHealthMonitor().catch(console.error);
 
 // Autonomous strategy rotation: evaluate every 6h using current protocol
