@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from "react";
 import { Trophy, Medal, TrendingUp, Filter, AlertCircle, RefreshCw, BarChart3, RotateCcw } from "lucide-react";
 import { apiUrl } from "../../lib/api";
+import { formatRewardRate } from "../../lib/apyFormat";
 import { ConfidenceBadge } from "../../components/AIAdvisor/ConfidenceBadge";
 import {
   useLeaderboardFilters,
@@ -236,7 +237,7 @@ const StrategyLeaderboard: React.FC = () => {
                       {s.strategyType}
                     </span>
                   </td>
-                  <td className="px-6 py-4 text-green-400 font-bold">{s.apy.toFixed(2)}%</td>
+                  <td className="px-6 py-4 text-green-400 font-bold">{formatRewardRate(s.apy)}</td>
                   <td className="px-6 py-4">
                     <span
                       className={`font-semibold ${

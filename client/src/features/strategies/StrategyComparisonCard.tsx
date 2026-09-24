@@ -14,6 +14,7 @@
 import type { ReactNode } from "react";
 import { AlertTriangle, Clock, Activity, Droplets, ShieldCheck, ShieldAlert, HelpCircle, type LucideIcon } from "lucide-react";
 import type { StrategyComparison, StrategyRiskData, RiskLabel, DataFreshness } from "./types";
+import { formatRewardRate } from "../../lib/apyFormat";
 
 // ── Helpers ───────────────────────────────────────────────────────────────
 
@@ -184,7 +185,7 @@ export default function StrategyComparisonCard({
         </div>
         <div className="shrink-0 text-right">
           <p className="text-lg font-bold text-green-400 tabular-nums">
-            {apy.toFixed(2)}%
+            {formatRewardRate(apy)}
           </p>
           <p className="text-xs text-gray-500">APY</p>
         </div>

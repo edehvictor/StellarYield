@@ -34,6 +34,7 @@ import { VaultRiskBadge } from "../common/VaultRiskBadge";
 import { useDensity } from "../../context/DensityContext";
 import type { DensityMode } from "../../context/DensityContext";
 import { cachedFetch } from "../../lib/cachedFetch";
+import { formatRewardRate } from "../../lib/apyFormat";
 
 // ── Types ───────────────────────────────────────────────────────────────
 
@@ -582,7 +583,7 @@ export default function ApyDashboard() {
               <Flame size={14} /> Best APY
             </div>
             <p className="text-2xl font-bold text-[#3EAC75]">
-              {bestApy.toFixed(2)}%
+              {formatRewardRate(bestApy)}
             </p>
             <p className="text-xs text-gray-500 mt-1">
               Net after fees/slippage
@@ -592,7 +593,7 @@ export default function ApyDashboard() {
             <div className="flex items-center gap-2 text-gray-400 text-xs font-semibold uppercase tracking-wider mb-2">
               <TrendingUp size={14} /> Avg APY
             </div>
-            <p className="text-2xl font-bold">{avgApy.toFixed(2)}%</p>
+            <p className="text-2xl font-bold">{formatRewardRate(avgApy)}</p>
             <p className="text-xs text-gray-500 mt-1">
               Portfolio net APY average
             </p>
@@ -651,26 +652,26 @@ export default function ApyDashboard() {
                   <tr key={row.id} className="border-t border-white/10">
                     <td className="py-2">{row.vault}</td>
                     <td className="py-2 text-right text-red-300">
-                      {row.totalFeeDragApy.toFixed(2)}%
+                      {formatRewardRate(row.totalFeeDragApy)}
                     </td>
                     <td className="py-2 text-right">
-                      {row.managementFeeApy.toFixed(2)}%
+                      {formatRewardRate(row.managementFeeApy)}
                     </td>
                     <td className="py-2 text-right">
-                      {row.protocolFeeApy.toFixed(2)}%
+                      {formatRewardRate(row.protocolFeeApy)}
                     </td>
                     <td className="py-2 text-right">
-                      {row.slippageApy.toFixed(2)}%
+                      {formatRewardRate(row.slippageApy)}
                     </td>
                     <td className="py-2 text-right">
-                      {row.networkFeeApy.toFixed(2)}%
+                      {formatRewardRate(row.networkFeeApy)}
                     </td>
                     <td className="py-2 text-right text-green-300">
-                      -{row.rewardOffsetApy.toFixed(2)}%
+                      -{formatRewardRate(row.rewardOffsetApy)}
                     </td>
                     <td className="py-2 text-right">
                       {row.unknownFeeApy > 0
-                        ? `${row.unknownFeeApy.toFixed(2)}%`
+                        ? formatRewardRate(row.unknownFeeApy)
                         : "Unknown / None"}
                     </td>
                   </tr>
@@ -850,7 +851,7 @@ export default function ApyDashboard() {
                       {/* APY */}
                       <div className="flex items-baseline gap-2 mb-1">
                         <span className="text-3xl font-extrabold text-white">
-                          {(entry.netApy ?? entry.apy).toFixed(2)}
+                          {formatRewardRate(entry.netApy ?? entry.apy, { suffix: false })}
                         </span>
                         <span className="text-lg font-bold text-gray-400">
                           % APY
@@ -858,8 +859,8 @@ export default function ApyDashboard() {
                       </div>
                       <p className="text-xs text-gray-500 flex items-center gap-1.5">
                         <span>
-                          Gross {(entry.totalApy ?? entry.apy).toFixed(2)}% |
-                          Drag {(entry.feeDragApy ?? 0).toFixed(2)}%
+                          Gross {formatRewardRate(entry.totalApy ?? entry.apy)} |
+                          Drag {formatRewardRate(entry.feeDragApy ?? 0)}
                         </span>
                         <button
                           onClick={() => setIsFeeModalOpen(true)}
@@ -880,8 +881,7 @@ export default function ApyDashboard() {
                           ) : (
                             <ArrowDownRight size={12} />
                           )}
-                          {isPositive ? "+" : ""}
-                          {entry.change24h.toFixed(2)}% 24h
+                          {formatRewardRate(entry.change24h, { showPositiveSign: true })} 24h
                         </span>
                         <span className="text-gray-500">
                           TVL {formatTvl(entry.tvl)}
@@ -914,7 +914,7 @@ export default function ApyDashboard() {
                           {entry.netYieldSensitivity
                             .map(
                               (s) =>
-                                `${s.environment[0].toUpperCase()}:${s.netApy.toFixed(1)}%`,
+                                `${s.environment[0].toUpperCase()}:${formatRewardRate(s.netApy)}`,
                             )
                             .join(" ")}
                         </div>
@@ -1101,10 +1101,10 @@ export default function ApyDashboard() {
                           </td>
                           <td className="px-6 py-5">
                             <span className="text-green-400 font-extrabold text-lg">
-                              {(entry.netApy ?? entry.apy).toFixed(2)}%
+                              {formatRewardRate(entry.netApy ?? entry.apy)}
                             </span>
                             <p className="text-[10px] text-gray-500">
-                              Gross {(entry.totalApy ?? entry.apy).toFixed(2)}%
+                              Gross {formatRewardRate(entry.totalApy ?? entry.apy)}
                             </p>
                           </td>
                           <td className="px-6 py-5">
@@ -1116,8 +1116,7 @@ export default function ApyDashboard() {
                               ) : (
                                 <ArrowDownRight size={14} />
                               )}
-                              {isPositive ? "+" : ""}
-                              {entry.change24h.toFixed(2)}%
+                              {formatRewardRate(entry.change24h, { showPositiveSign: true })}
                             </span>
                           </td>
                           <td className="px-6 py-5 text-gray-300 font-medium">
