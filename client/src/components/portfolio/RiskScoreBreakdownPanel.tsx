@@ -1,4 +1,5 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
+import { RefreshCw } from "lucide-react";
 import { getApiBaseUrl } from "../../lib/api";
 
 export interface RiskScoreBreakdownSnapshot {
@@ -51,24 +52,28 @@ export default function RiskScoreBreakdownPanel() {
   const [snapshots, setSnapshots] = useState<RiskScoreBreakdownSnapshot[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [retryCount, setRetryCount] = useState(0);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const res = await fetch(`${getApiBase()}/api/risk/breakdown-snapshots`);
+      if (!res.ok) throw new Error(`Server returned ${res.status}`);
+      const json = (await res.json()) as { snapshots: RiskScoreBreakdownSnapshot[] };
+      setSnapshots(json.snapshots ?? []);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Unable to load risk breakdown");
+    } finally {
+      setLoading(false);
+    }
+  }, []);
 
   useEffect(() => {
-    async function load() {
-      setLoading(true);
-      setError(null);
-      try {
-        const res = await fetch(`${getApiBase()}/api/risk/breakdown-snapshots`);
-        if (!res.ok) throw new Error(`Server returned ${res.status}`);
-        const json = (await res.json()) as { snapshots: RiskScoreBreakdownSnapshot[] };
-        setSnapshots(json.snapshots ?? []);
-      } catch (err) {
-        setError(err instanceof Error ? err.message : "Unable to load risk breakdown");
-      } finally {
-        setLoading(false);
-      }
-    }
     void load();
-  }, []);
+    // `retryCount` intentionally re-triggers this effect on manual retry;
+    // `load` itself is stable (no deps) so it can't cause a refetch loop.
+  }, [load, retryCount]);
 
   if (loading) {
     return (
@@ -80,8 +85,15 @@ export default function RiskScoreBreakdownPanel() {
 
   if (error) {
     return (
-      <div className="glass-panel p-6">
-        <p className="text-sm text-red-300">{error}</p>
+      <div className="glass-panel p-6" data-testid="risk-breakdown-error">
+        <p className="text-sm text-red-300 mb-3">{error}</p>
+        <button
+          type="button"
+          onClick={() => setRetryCount((c) => c + 1)}
+          className="btn-secondary flex items-center gap-2 text-sm"
+        >
+          <RefreshCw size={14} /> Retry
+        </button>
       </div>
     );
   }

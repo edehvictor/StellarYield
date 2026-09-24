@@ -183,26 +183,14 @@ export default function PortfolioDashboard({
     [exposure],
   );
 
-  if (isLoading) {
-    return (
-      <div className="flex items-center justify-center py-20">
-        <RefreshCw size={32} className="animate-spin text-[#6C5DD3]" />
-      </div>
-    );
-  }
-
-  if (positions.length === 0) {
-    return (
-      <div className="glass-panel p-12 text-center">
-        <Wallet className="mx-auto mb-4 text-gray-400" size={48} />
-        <h2 className="text-xl font-bold mb-2">No Active Positions</h2>
-        <p className="text-gray-400 mb-6">
-          Start investing to build your portfolio and earn yield.
-        </p>
-        <button className="btn-primary">Make Your First Deposit</button>
-      </div>
-    );
-  }
+  // Issue #1151: positions/transactions loading is scoped to the sections
+  // that actually depend on it (stats cards, exposure map, positions table,
+  // transaction history) rather than gating the entire dashboard behind a
+  // single full-page spinner. Independently-fetching widgets below —
+  // RiskScoreBreakdownPanel, UnifiedActivityTimeline, the daily movement
+  // panel — manage their own loading/error/retry state and render
+  // immediately, regardless of this fetch's outcome.
+  const showEmptyState = !isLoading && positions.length === 0;
 
   return (
     <div className="space-y-8">
@@ -229,176 +217,256 @@ export default function PortfolioDashboard({
         </div>
       </div>
 
-      {/* Stats Cards */}
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-4">
-        <div className="glass-card p-5">
-          <div className="flex items-center gap-2 text-gray-400 text-xs font-semibold uppercase tracking-wider mb-2">
-            <Wallet size={14} /> Total Deposited
-          </div>
-          <p className="text-2xl font-bold">{formatCurrency(totalDeposited)}</p>
-        </div>
-
-        <div className="glass-card p-5">
-          <div className="flex items-center gap-2 text-gray-400 text-xs font-semibold uppercase tracking-wider mb-2">
-            <TrendingUp size={14} /> Current Value
-          </div>
-          <p className="text-2xl font-bold">{formatCurrency(totalValue)}</p>
-        </div>
-
-        <div className="glass-card p-5">
-          <div className="flex items-center gap-2 text-gray-400 text-xs font-semibold uppercase tracking-wider mb-2">
-            <ArrowUpFromLine size={14} /> Yield Earned
-          </div>
-          <p className="text-2xl font-bold text-[#3EAC75]">
-            +{formatCurrency(totalYield)}
-          </p>
-        </div>
-
-        <div className="glass-card p-5">
-          <div className="flex items-center gap-2 text-gray-400 text-xs font-semibold uppercase tracking-wider mb-2">
-            <TrendingUp size={14} /> Avg APY
-          </div>
-          <p className="text-2xl font-bold">{avgApy.toFixed(1)}%</p>
-        </div>
-
-        <div className="glass-card p-5">
-          <div className="flex items-center gap-2 text-gray-400 text-xs font-semibold uppercase tracking-wider mb-2">
-            <AlertTriangle size={14} /> Top Exposure
-          </div>
-          <p
-            className={`text-2xl font-bold ${
-              concentration.severity === "critical"
-                ? "text-[#FF5E5E]"
-                : concentration.severity === "warning"
-                  ? "text-yellow-500"
-                  : ""
-            }`}
-          >
-            {formatSharePct(
-              Math.max(
-                concentration.topAssetShare,
-                concentration.topProtocolShare,
-              ),
-            )}
-          </p>
-          <p className="text-xs text-gray-500 mt-1">
-            {concentration.warnings.length > 0
-              ? `${concentration.warnings.length} concentration warning${concentration.warnings.length > 1 ? "s" : ""}`
-              : "Well diversified"}
-          </p>
-        </div>
-      </div>
-
-      {/* Concentration summary */}
-      {concentration.warnings.length > 0 && (
+      {/* Position-dependent section (issue #1151): scoped loading/empty
+          states so a slow or failed position fetch never blocks the
+          independently-fetching widgets rendered below it. */}
+      {isLoading ? (
         <div
-          className={`glass-panel p-5 border-l-4 ${
-            concentration.severity === "critical"
-              ? "border-[#FF5E5E]"
-              : "border-yellow-500"
-          }`}
-          role="alert"
+          className="glass-panel flex items-center justify-center py-16"
+          data-testid="positions-section-loading"
         >
-          <div className="flex items-center gap-2 mb-2">
-            <AlertTriangle
-              size={16}
-              className={
-                concentration.severity === "critical"
-                  ? "text-[#FF5E5E]"
-                  : "text-yellow-500"
-              }
-            />
-            <h3 className="font-bold">
-              Your portfolio is less diversified than it looks
-            </h3>
+          <RefreshCw size={28} className="animate-spin text-[#6C5DD3]" />
+          <span className="ml-3 text-sm text-gray-400">Loading portfolio positions…</span>
+        </div>
+      ) : showEmptyState ? (
+        <div className="glass-panel p-12 text-center" data-testid="positions-section-empty">
+          <Wallet className="mx-auto mb-4 text-gray-400" size={48} />
+          <h2 className="text-xl font-bold mb-2">No Active Positions</h2>
+          <p className="text-gray-400 mb-6">
+            Start investing to build your portfolio and earn yield.
+          </p>
+          <button className="btn-primary">Make Your First Deposit</button>
+        </div>
+      ) : (
+        <div className="space-y-8" data-testid="positions-section">
+          {/* Stats Cards */}
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-4">
+            <div className="glass-card p-5">
+              <div className="flex items-center gap-2 text-gray-400 text-xs font-semibold uppercase tracking-wider mb-2">
+                <Wallet size={14} /> Total Deposited
+              </div>
+              <p className="text-2xl font-bold">{formatCurrency(totalDeposited)}</p>
+            </div>
+
+            <div className="glass-card p-5">
+              <div className="flex items-center gap-2 text-gray-400 text-xs font-semibold uppercase tracking-wider mb-2">
+                <TrendingUp size={14} /> Current Value
+              </div>
+              <p className="text-2xl font-bold">{formatCurrency(totalValue)}</p>
+            </div>
+
+            <div className="glass-card p-5">
+              <div className="flex items-center gap-2 text-gray-400 text-xs font-semibold uppercase tracking-wider mb-2">
+                <ArrowUpFromLine size={14} /> Yield Earned
+              </div>
+              <p className="text-2xl font-bold text-[#3EAC75]">
+                +{formatCurrency(totalYield)}
+              </p>
+            </div>
+
+            <div className="glass-card p-5">
+              <div className="flex items-center gap-2 text-gray-400 text-xs font-semibold uppercase tracking-wider mb-2">
+                <TrendingUp size={14} /> Avg APY
+              </div>
+              <p className="text-2xl font-bold">{avgApy.toFixed(1)}%</p>
+            </div>
+
+            <div className="glass-card p-5">
+              <div className="flex items-center gap-2 text-gray-400 text-xs font-semibold uppercase tracking-wider mb-2">
+                <AlertTriangle size={14} /> Top Exposure
+              </div>
+              <p
+                className={`text-2xl font-bold ${
+                  concentration.severity === "critical"
+                    ? "text-[#FF5E5E]"
+                    : concentration.severity === "warning"
+                      ? "text-yellow-500"
+                      : ""
+                }`}
+              >
+                {formatSharePct(
+                  Math.max(
+                    concentration.topAssetShare,
+                    concentration.topProtocolShare,
+                  ),
+                )}
+              </p>
+              <p className="text-xs text-gray-500 mt-1">
+                {concentration.warnings.length > 0
+                  ? `${concentration.warnings.length} concentration warning${concentration.warnings.length > 1 ? "s" : ""}`
+                  : "Well diversified"}
+              </p>
+            </div>
           </div>
-          <ul className="list-disc list-inside space-y-1 text-sm text-gray-300">
-            {concentration.warnings.map((warning) => (
-              <li key={`${warning.dimension}-${warning.name}`}>
-                {warning.message}
-              </li>
-            ))}
-          </ul>
+
+          {/* Concentration summary */}
+          {concentration.warnings.length > 0 && (
+            <div
+              className={`glass-panel p-5 border-l-4 ${
+                concentration.severity === "critical"
+                  ? "border-[#FF5E5E]"
+                  : "border-yellow-500"
+              }`}
+              role="alert"
+            >
+              <div className="flex items-center gap-2 mb-2">
+                <AlertTriangle
+                  size={16}
+                  className={
+                    concentration.severity === "critical"
+                      ? "text-[#FF5E5E]"
+                      : "text-yellow-500"
+                  }
+                />
+                <h3 className="font-bold">
+                  Your portfolio is less diversified than it looks
+                </h3>
+              </div>
+              <ul className="list-disc list-inside space-y-1 text-sm text-gray-300">
+                {concentration.warnings.map((warning) => (
+                  <li key={`${warning.dimension}-${warning.name}`}>
+                    {warning.message}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+
+          {/* Daily Movement Panel */}
+          {movement && <DailyMovementPanel movement={movement} />}
+
+          <Suspense
+            fallback={
+              <div className="glass-card animate-pulse" style={{ height: 400 }} />
+            }
+          >
+            <YieldFlowCanvas scene="portfolio" positions={positions} />
+          </Suspense>
+
+          {/* Exposure Map */}
+          <ExposureMap
+            data={{
+              byAsset: exposure.byAsset,
+              byProtocol: exposure.byProtocol,
+              totalValue: exposure.totalValueUsd,
+            }}
+          />
+
+          {/* 3D Visualizer Integration */}
+          <PortfolioVisualizer />
+
+          {/* Positions Table */}
+          <div className="glass-panel p-6">
+            <h3 className="text-lg font-bold mb-4">Active Positions</h3>
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="text-gray-400 text-xs uppercase tracking-wider border-b border-white/10">
+                    <th className="pb-3 text-left font-semibold">Protocol</th>
+                    <th className="pb-3 text-left font-semibold">Asset</th>
+                    <th className="pb-3 text-right font-semibold">Deposited</th>
+                    <th className="pb-3 text-right font-semibold">Current Value</th>
+                    <th className="pb-3 text-right font-semibold">APY</th>
+                    <th className="pb-3 text-right font-semibold">P&L</th>
+                    <th className="pb-3 text-right font-semibold">Source</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {positions.map((pos, i) => {
+                    const pnl = pos.currentValue - pos.deposited;
+                    const freshness = computeHoldingFreshness(pos.fetchedAt);
+                    return (
+                      <tr
+                        key={i}
+                        className="border-b border-white/5 hover:bg-white/5 transition-colors"
+                      >
+                        <td className="py-4 font-medium">{pos.protocol}</td>
+                        <td className="py-4 text-gray-300">{pos.asset}</td>
+                        <td className="py-4 text-right">
+                          {formatCurrency(pos.deposited)}
+                        </td>
+                        <td className="py-4 text-right font-medium">
+                          {formatCurrency(pos.currentValue)}
+                        </td>
+                        <td className="py-4 text-right text-[#3EAC75]">
+                          {pos.apy}%
+                        </td>
+                        <td
+                          className={`py-4 text-right font-medium ${pnl >= 0 ? "text-[#3EAC75]" : "text-[#FF5E5E]"}`}
+                        >
+                          {pnl >= 0 ? "+" : ""}
+                          {formatCurrency(pnl)}
+                        </td>
+                        <td className="py-4 text-right">
+                          <FreshnessBadge status={freshness.status} ageSeconds={freshness.ageSeconds} />
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          {/* Transaction History */}
+          <div className="glass-panel p-6">
+            <h3 className="text-lg font-bold mb-4">Transaction History</h3>
+            {transactions.length === 0 ? (
+              <p className="text-gray-400 text-center py-6">
+                No transactions yet. Start by making your first deposit.
+              </p>
+            ) : (
+              <div className="space-y-3">
+                {transactions.map((tx) => (
+                  <div
+                    key={tx.id}
+                    className="flex items-center justify-between py-3 border-b border-white/5 last:border-0"
+                  >
+                    <div className="flex items-center gap-3">
+                      <div
+                        className={`w-8 h-8 rounded-full flex items-center justify-center ${
+                          tx.type === "deposit"
+                            ? "bg-[#3EAC75]/20 text-[#3EAC75]"
+                            : "bg-[#F5A623]/20 text-[#F5A623]"
+                        }`}
+                      >
+                        {tx.type === "deposit" ? (
+                          <ArrowDownToLine size={14} />
+                        ) : (
+                          <ArrowUpFromLine size={14} />
+                        )}
+                      </div>
+                      <div>
+                        <p className="font-medium capitalize">{tx.type}</p>
+                        <p className="text-xs text-gray-500 font-mono">
+                          {tx.txHash}
+                        </p>
+                      </div>
+                    </div>
+
+                    <div className="text-right">
+                      <p
+                        className={`font-medium ${tx.type === "deposit" ? "text-[#3EAC75]" : "text-[#F5A623]"}`}
+                      >
+                        {tx.type === "deposit" ? "+" : "-"}
+                        {formatCurrency(tx.amount)}
+                      </p>
+                      <p className="text-xs text-gray-500 flex items-center gap-1 justify-end">
+                        <Clock size={10} /> {formatDate(tx.timestamp)}
+                      </p>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
         </div>
       )}
 
-      {/* Daily Movement Panel */}
-      {movement && <DailyMovementPanel movement={movement} />}
-
-      <Suspense
-        fallback={
-          <div className="glass-card animate-pulse" style={{ height: 400 }} />
-        }
-      >
-        <YieldFlowCanvas scene="portfolio" positions={positions} />
-      </Suspense>
-
-      {/* Exposure Map */}
-      <ExposureMap
-        data={{
-          byAsset: exposure.byAsset,
-          byProtocol: exposure.byProtocol,
-          totalValue: exposure.totalValueUsd,
-        }}
-      />
-
+      {/* Independently-fetching widgets: each manages its own loading,
+          error, and retry state, and must render regardless of whether the
+          position fetch above is pending, empty, or failed (issue #1151). */}
       <RiskScoreBreakdownPanel />
-
-      {/* 3D Visualizer Integration */}
-      <PortfolioVisualizer />
-
-      {/* Positions Table */}
-      <div className="glass-panel p-6">
-        <h3 className="text-lg font-bold mb-4">Active Positions</h3>
-        <div className="overflow-x-auto">
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="text-gray-400 text-xs uppercase tracking-wider border-b border-white/10">
-                <th className="pb-3 text-left font-semibold">Protocol</th>
-                <th className="pb-3 text-left font-semibold">Asset</th>
-                <th className="pb-3 text-right font-semibold">Deposited</th>
-                <th className="pb-3 text-right font-semibold">Current Value</th>
-                <th className="pb-3 text-right font-semibold">APY</th>
-                <th className="pb-3 text-right font-semibold">P&L</th>
-                <th className="pb-3 text-right font-semibold">Source</th>
-              </tr>
-            </thead>
-            <tbody>
-              {positions.map((pos, i) => {
-                const pnl = pos.currentValue - pos.deposited;
-                const freshness = computeHoldingFreshness(pos.fetchedAt);
-                return (
-                  <tr
-                    key={i}
-                    className="border-b border-white/5 hover:bg-white/5 transition-colors"
-                  >
-                    <td className="py-4 font-medium">{pos.protocol}</td>
-                    <td className="py-4 text-gray-300">{pos.asset}</td>
-                    <td className="py-4 text-right">
-                      {formatCurrency(pos.deposited)}
-                    </td>
-                    <td className="py-4 text-right font-medium">
-                      {formatCurrency(pos.currentValue)}
-                    </td>
-                    <td className="py-4 text-right text-[#3EAC75]">
-                      {pos.apy}%
-                    </td>
-                    <td
-                      className={`py-4 text-right font-medium ${pnl >= 0 ? "text-[#3EAC75]" : "text-[#FF5E5E]"}`}
-                    >
-                      {pnl >= 0 ? "+" : ""}
-                      {formatCurrency(pnl)}
-                    </td>
-                    <td className="py-4 text-right">
-                      <FreshnessBadge status={freshness.status} ageSeconds={freshness.ageSeconds} />
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
-      </div>
 
       {/* Allocation Presets */}
       <div className="glass-panel p-6">
@@ -406,59 +474,6 @@ export default function PortfolioDashboard({
       </div>
 
       <UnifiedActivityTimeline walletAddress={walletAddress} />
-
-      {/* Transaction History */}
-      <div className="glass-panel p-6">
-        <h3 className="text-lg font-bold mb-4">Transaction History</h3>
-        {transactions.length === 0 ? (
-          <p className="text-gray-400 text-center py-6">
-            No transactions yet. Start by making your first deposit.
-          </p>
-        ) : (
-          <div className="space-y-3">
-            {transactions.map((tx) => (
-              <div
-                key={tx.id}
-                className="flex items-center justify-between py-3 border-b border-white/5 last:border-0"
-              >
-                <div className="flex items-center gap-3">
-                  <div
-                    className={`w-8 h-8 rounded-full flex items-center justify-center ${
-                      tx.type === "deposit"
-                        ? "bg-[#3EAC75]/20 text-[#3EAC75]"
-                        : "bg-[#F5A623]/20 text-[#F5A623]"
-                    }`}
-                  >
-                    {tx.type === "deposit" ? (
-                      <ArrowDownToLine size={14} />
-                    ) : (
-                      <ArrowUpFromLine size={14} />
-                    )}
-                  </div>
-                  <div>
-                    <p className="font-medium capitalize">{tx.type}</p>
-                    <p className="text-xs text-gray-500 font-mono">
-                      {tx.txHash}
-                    </p>
-                  </div>
-                </div>
-
-                <div className="text-right">
-                  <p
-                    className={`font-medium ${tx.type === "deposit" ? "text-[#3EAC75]" : "text-[#F5A623]"}`}
-                  >
-                    {tx.type === "deposit" ? "+" : "-"}
-                    {formatCurrency(tx.amount)}
-                  </p>
-                  <p className="text-xs text-gray-500 flex items-center gap-1 justify-end">
-                    <Clock size={10} /> {formatDate(tx.timestamp)}
-                  </p>
-                </div>
-              </div>
-            ))}
-          </div>
-        )}
-      </div>
     </div>
   );
 }
