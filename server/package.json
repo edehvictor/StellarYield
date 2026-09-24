@@ -11,7 +11,8 @@
     "test": "jest",
     "check:metrics-token": "node scripts/check-metrics-token.js",
     "seed": "ts-node scripts/seed.ts",
-    "check:openapi": "ts-node scripts/check-openapi-drift.ts"
+    "check:openapi": "ts-node scripts/check-openapi-drift.ts",
+    "check:env-drift": "ts-node scripts/check-env-drift.ts"
   },
   "dependencies": {
     "@prisma/client": "^5.22.0",
