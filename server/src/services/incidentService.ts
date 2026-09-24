@@ -8,6 +8,12 @@ import {
     encodeTimelineCursor,
 } from "../types/pagination";
 import { normalizeSeverity } from "../utils/alertSeverity";
+import {
+    buildMergedIncidentTimeline,
+    DEFAULT_DUPLICATE_WINDOW_MS,
+    IncidentTimelineRecord,
+    MergedIncidentTimelineEntry,
+} from "./incidentTimelineMerge";
 
 const prisma = new PrismaClient();
 
@@ -217,6 +223,25 @@ export class IncidentService {
             where: { id },
             data: { postmortemUrl },
         });
+    }
+
+    /**
+     * Merges duplicate incident notifications from different sources (#1110)
+     * into a single timeline entry per real-world incident.
+     *
+     * Callers pass the raw, source-tagged notifications they've collected
+     * (e.g. from an on-chain monitor adapter and a manual/ops-report
+     * adapter) rather than this reading from a single `source` column,
+     * since `Incident` records persisted via `createIncident` don't carry
+     * per-notification source provenance today. See
+     * `incidentTimelineMerge.ts` for the exact duplicate-detection window
+     * and per-field tie-break rules used during the merge.
+     */
+    mergeTimelineNotifications(
+        records: IncidentTimelineRecord[],
+        windowMs: number = DEFAULT_DUPLICATE_WINDOW_MS,
+    ): MergedIncidentTimelineEntry[] {
+        return buildMergedIncidentTimeline(records, windowMs);
     }
 }
 
