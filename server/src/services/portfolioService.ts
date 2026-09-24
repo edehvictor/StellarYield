@@ -159,49 +159,14 @@ export class PortfolioService {
     );
     return [headers.join(","), ...rows].join("\n");
   }
-  public static readonly SUPPORTED_ASSET_CLASSES = ["stablecoin", "crypto"];
 
-  public static getAssetClass(asset: string): string {
-    const normalized = asset.toUpperCase();
-    if (normalized === "USDC") {
-      return "stablecoin";
-    }
-    return "crypto";
-  }
-
-  public static filterPositionsByAssetClass(
-    positions: VaultPosition[],
-    filters: Record<string, any>
-  ): VaultPosition[] {
-    const assetClassParam = filters.assetClass ?? filters.assetClasses;
-
-    let classes: string[] = [];
-    if (typeof assetClassParam === "string") {
-      classes = assetClassParam.split(",").map(c => c.trim().toLowerCase()).filter(Boolean);
-    } else if (Array.isArray(assetClassParam)) {
-      classes = assetClassParam.map(c => String(c).trim().toLowerCase()).filter(Boolean);
-    }
-
-    if (classes.length === 0) {
-      throw new Error("Export filters cannot be empty. Please select at least one asset class.");
-    }
-
-    for (const c of classes) {
-      if (!this.SUPPORTED_ASSET_CLASSES.includes(c)) {
-        throw new Error(`Unsupported asset class: "${c}". Supported classes are: ${this.SUPPORTED_ASSET_CLASSES.join(", ")}.`);
-      }
-    }
-
-    const filtered = positions.filter(pos => {
-      const cls = this.getAssetClass(pos.asset);
-      return classes.includes(cls);
-    });
-
-    if (filtered.length === 0) {
-      throw new Error("No portfolio data matches the selected filters.");
-    }
-
-    return filtered;
+  private static getStrategyForProtocol(protocol: string): string {
+    const mapping: Record<string, string> = {
+      Blend: "Lending",
+      Soroswap: "Liquidity Provision",
+      DeFindex: "Yield Aggregation",
+    };
+    return mapping[protocol] || "Other";
   }
 }
 
@@ -214,16 +179,6 @@ function escapeCsvField(value: string): string {
 }
 
 export type { ConcentrationAnalysis, ConcentrationWarning };
-
-  private static getStrategyForProtocol(protocol: string): string {
-    const mapping: Record<string, string> = {
-      Blend: "Lending",
-      Soroswap: "Liquidity Provision",
-      DeFindex: "Yield Aggregation",
-    };
-    return mapping[protocol] || "Other";
-  }
-}
 
 function escapeCsvField(value: string): string {
   if (/[",\n]/.test(value)) {
