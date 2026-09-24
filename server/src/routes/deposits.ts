@@ -5,6 +5,7 @@ import {
 } from "../services/depositRoutingService";
 import { getZapSupportedAssetsPayload } from "../config/zapAssetsConfig";
 import { sendError } from "../utils/errorResponse";
+import { validateDepositAmount } from "../utils/depositAmountValidation";
 
 const router = Router();
 
@@ -78,6 +79,20 @@ router.post("/recommend", async (req: Request, res: Response) => {
           `Asset "${symbol}" requires a positive integer \`amountInStroops\` string.`
         );
       }
+
+      // Deposit minimum/maximum validation (#1317): reject amounts outside
+      // the allowed range with a typed, deterministic error before the
+      // request reaches routing/quoting.
+      const amountError = validateDepositAmount(amountInStroops);
+      if (amountError) {
+        return sendError(
+          res,
+          400,
+          amountError.code,
+          `Asset "${symbol}": ${amountError.message}`
+        );
+      }
+
       inputs.push({ symbol, amountInStroops });
     }
 
