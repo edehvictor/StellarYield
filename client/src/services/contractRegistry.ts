@@ -34,6 +34,44 @@ export type ContractName =
 
 export type NetworkName = "testnet" | "mainnet" | "local";
 
+/** The only network ids this app knows how to resolve contract addresses for. */
+export const SUPPORTED_NETWORKS: readonly NetworkName[] = ["testnet", "mainnet", "local"];
+
+/**
+ * Typed error raised when a network id falls outside {@link SUPPORTED_NETWORKS}
+ * (#1109). Every flow that derives a network id (wallet connection via
+ * `checkNetworkDiagnostics`, chart/registry status via
+ * `checkRegistryDiagnostics`, and deposit/withdraw simulation's contract
+ * lookups via `getContractId`) goes through {@link detectNetwork}, so
+ * centralizing the check there gives all three the same typed failure
+ * instead of each silently falling back to a default network.
+ *
+ * Same shape (`code`, `network`, `supportedNetworks`) as the SDK's
+ * `UnsupportedNetworkError` (`packages/sdk/src/errors.ts`) so callers that
+ * see either one can handle them the same way; kept as a separate class
+ * here since the client does not depend on `@stellaryield/sdk` for pure
+ * validation logic (the SDK dependency is a built package used only for
+ * transaction lifecycle/signing).
+ */
+export class UnsupportedNetworkError extends Error {
+  public readonly code = "unsupported_network" as const;
+  public readonly network: string;
+  public readonly supportedNetworks: readonly string[];
+
+  constructor(network: string, supportedNetworks: readonly string[] = SUPPORTED_NETWORKS) {
+    super(
+      `Unsupported network id: '${network}'. Supported networks are: ${supportedNetworks.join(", ")}.`,
+    );
+    this.name = "UnsupportedNetworkError";
+    this.network = network;
+    this.supportedNetworks = supportedNetworks;
+  }
+}
+
+export function isSupportedNetwork(network: string): network is NetworkName {
+  return (SUPPORTED_NETWORKS as readonly string[]).includes(network);
+}
+
 type Registry = Record<NetworkName, Record<ContractName, string>>;
 
 const registry = registryJson as Registry;
@@ -166,6 +204,21 @@ export function getContractRegistryCacheInfo(): {
   };
 }
 
+/**
+ * Validates an explicitly-provided network id against {@link SUPPORTED_NETWORKS}
+ * (#1109). `network` is typed as `NetworkName` for callers within this
+ * codebase, but wallet/chart/simulation flows can also receive a network id
+ * from outside the type system (a wallet adapter callback, a query param, a
+ * value cast through `as`), so every entry point that accepts an explicit
+ * `network` re-validates it at runtime rather than trusting the type.
+ * Throws {@link UnsupportedNetworkError} before any contract lookup happens.
+ */
+function assertSupportedNetwork(network: NetworkName): void {
+  if (!isSupportedNetwork(network)) {
+    throw new UnsupportedNetworkError(network);
+  }
+}
+
 export function getContractId(
   name: ContractName,
   network?: NetworkName,
@@ -174,6 +227,7 @@ export function getContractId(
   if (envOverride) return envOverride;
 
   const net = network ?? detectNetwork();
+  assertSupportedNetwork(net);
 
   if (registryCache && isCacheValid(registryCache, net)) {
     return registryCache.contractIds[name] ?? "";
@@ -185,6 +239,7 @@ export function getContractId(
 
 export function getAllContractIds(network?: NetworkName): Record<ContractName, string> {
   const net = network ?? detectNetwork();
+  assertSupportedNetwork(net);
 
   if (registryCache && isCacheValid(registryCache, net)) {
     return { ...registryCache.contractIds };
@@ -200,6 +255,7 @@ export function validateContractRegistryEntry(
   network?: NetworkName,
 ): void {
   const activeNetwork = network ?? detectNetwork();
+  assertSupportedNetwork(activeNetwork);
 
   const supportedNames: string[] = [
     "vault",
