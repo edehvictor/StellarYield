@@ -32,6 +32,12 @@ router.post("/quote", validateZapQuote, async (req: Request, res: Response) => {
       inputDecimals: Number(b.inputDecimals ?? 7),
       vaultDecimals: Number(b.vaultDecimals ?? 7),
       slippageTolerance: b.slippageTolerance !== undefined ? Number(b.slippageTolerance) : undefined,
+      // Reserve check (#1148) is opt-in: only run when the caller supplies a
+      // wallet address to check against.
+      walletAddress:
+        typeof b.walletAddress === "string" && b.walletAddress.trim() !== ""
+          ? b.walletAddress.trim()
+          : undefined,
     };
 
     const quote = await getZapQuote(body);
@@ -49,6 +55,7 @@ router.post("/quote", validateZapQuote, async (req: Request, res: Response) => {
       expiresAt: quote.expiresAt,
       routeHash: quote.routeHash,
       assetConfigVersion: quote.assetConfigVersion,
+      ...(quote.reserveCheck ? { reserveCheck: quote.reserveCheck } : {}),
     });
   } catch (e) {
     recordFailure({

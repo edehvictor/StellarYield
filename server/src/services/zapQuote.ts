@@ -5,6 +5,12 @@ import { getYieldData } from "./yieldService";
 import { freezeService } from "./freezeService";
 import { getZapSupportedAssetsPayload } from "../config/zapAssetsConfig";
 import { recordFailure, resolveNetworkLabel } from "../monitoring/prometheus";
+import { getFeeOracleEstimate } from "./feeOracleService";
+import {
+  evaluateZapReserveSafety,
+  fetchWalletReserveSnapshot,
+  type ZapReserveCheckResult,
+} from "./stellarReserveService";
 
 export interface ZapQuoteBody {
   inputTokenContract: string;
@@ -14,7 +20,18 @@ export interface ZapQuoteBody {
   vaultDecimals: number;
   slippageTolerance?: number;
   protocol?: string;
+  /**
+   * Depositing wallet address (#1148). Optional — when supplied, the quote
+   * includes a minimum-balance reserve check (`reserveCheck`) so the client
+   * can block signing before the wallet would be left below its required
+   * Stellar reserve. Omitted entirely when absent, preserving the existing
+   * quote response shape for callers that don't pass it.
+   */
+  walletAddress?: string;
 }
+
+/** Stroops per XLM (7 decimal places), matching the native asset's fixed precision. */
+const STROOPS_PER_XLM = 10_000_000;
 
 export interface ZapQuoteResult {
   path: { contractId: string; label?: string }[];
@@ -30,6 +47,13 @@ export interface ZapQuoteResult {
   expiresAt: string;
   routeHash: string;
   assetConfigVersion: string;
+  /**
+   * Minimum-balance reserve check result (#1148), present only when the
+   * request included `walletAddress`. `safe: false` means executing this
+   * zap would leave the wallet below its required Stellar reserve — the
+   * client should block signing and surface `message`/`blockReason`.
+   */
+  reserveCheck?: ZapReserveCheckResult;
 }
 
 /**
@@ -318,6 +342,8 @@ export async function getZapQuote(body: ZapQuoteBody): Promise<ZapQuoteResult> {
   const issuedAt = quotedAt;
   const expiresAt = new Date(quotedAtMs + 60 * 1000).toISOString();
 
+  const reserveCheck = await computeReserveCheck(body);
+
   return {
     ...sim,
     slippageApplied: effectiveSlippage,
@@ -330,7 +356,55 @@ export async function getZapQuote(body: ZapQuoteBody): Promise<ZapQuoteResult> {
     expiresAt,
     routeHash,
     assetConfigVersion,
+    ...(reserveCheck ? { reserveCheck } : {}),
   };
+}
+
+/**
+ * Runs the minimum-balance reserve check (#1148) for a zap quote when a
+ * wallet address was supplied. Returns `undefined` (rather than throwing or
+ * blocking the whole quote) when the wallet snapshot or fee estimate can't
+ * be fetched — the client simply won't receive a reserve verdict, matching
+ * the existing degrade-gracefully convention used elsewhere in this file
+ * (e.g. router simulation falling back to `quoteFallback`).
+ */
+async function computeReserveCheck(
+  body: ZapQuoteBody,
+): Promise<ZapReserveCheckResult | undefined> {
+  if (!body.walletAddress) return undefined;
+
+  const snapshot = await fetchWalletReserveSnapshot(
+    body.walletAddress,
+    body.vaultTokenContract,
+  );
+  if (!snapshot) return undefined;
+
+  let estimatedNetworkFeeXlm: number;
+  try {
+    const feeEstimate = await getFeeOracleEstimate();
+    estimatedNetworkFeeXlm = feeEstimate.bufferedFees.average / STROOPS_PER_XLM;
+  } catch {
+    return undefined;
+  }
+
+  // XLM only leaves the account's native balance when XLM itself is the
+  // asset being deposited; depositing another SAC asset doesn't touch the
+  // native balance beyond the network fee already accounted for above.
+  const xlmAsset = getZapSupportedAssetsPayload().assets.find(
+    (a) => a.symbol.toUpperCase() === "XLM",
+  );
+  const isNativeInput = Boolean(xlmAsset) && body.inputTokenContract === xlmAsset!.contractId;
+  const xlmLeavingAccount = isNativeInput
+    ? Number(BigInt(body.amountInStroops)) / STROOPS_PER_XLM
+    : 0;
+
+  return evaluateZapReserveSafety({
+    xlmBalance: snapshot.xlmBalance,
+    subentryCount: snapshot.subentryCount,
+    needsNewVaultTrustline: snapshot.needsNewVaultTrustline,
+    estimatedNetworkFeeXlm,
+    xlmLeavingAccount,
+  });
 }
 
 export function verifyZapQuote(quote: any): { valid: boolean; reason?: string; errorCode?: string } {
