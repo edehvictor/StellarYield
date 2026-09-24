@@ -1,4 +1,8 @@
-import { evaluateCampaignBudget, RewardCampaignBudget } from "../campaignBudgetService";
+import {
+  evaluateCampaignBudget,
+  RewardCampaignBudget,
+  validateCampaignFundingReserve,
+} from "../campaignBudgetService";
 
 const NOW = new Date("2026-06-15T00:00:00.000Z");
 
@@ -79,5 +83,28 @@ describe("campaignBudgetService.evaluateCampaignBudget (#1160)", () => {
 
     expect(result.status).toBe("low");
     expect(result.estimatedDaysRemaining).toBeNull();
+  });
+
+  it("reports a campaign reserve shortfall against its unclaimed budget", () => {
+    const result = evaluateCampaignBudget({
+      campaignId: "underfunded",
+      totalBudget: 1000,
+      fundedReserve: 600,
+      claims: [{ amount: 100, claimedAt: daysAgo(1) }],
+    }, NOW);
+
+    expect(result.fundingReserve).toEqual({
+      requiredReserve: 900,
+      availableReserve: 600,
+      shortfall: 300,
+      funded: false,
+    });
+  });
+
+  it("accepts a fully funded reserve and rejects invalid reserve amounts", () => {
+    expect(validateCampaignFundingReserve(900, 900).funded).toBe(true);
+    expect(validateCampaignFundingReserve(900, 1200).shortfall).toBe(0);
+    expect(() => validateCampaignFundingReserve(-1, 0)).toThrow(RangeError);
+    expect(() => validateCampaignFundingReserve(1, Number.NaN)).toThrow(RangeError);
   });
 });
