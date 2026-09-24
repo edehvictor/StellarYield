@@ -10,6 +10,11 @@ import {
   type ContractErrorNamespace,
   type DecodedContractPanic,
 } from "../../../shared/types/contractPanic";
+import {
+  markContractCallTimeout,
+  ContractCallTimeoutError,
+  type ContractCallErrorClassification,
+} from "../utils/contractCallClassification";
 
 const rpcUrl = process.env.SOROBAN_RPC_URL ?? "https://soroban-testnet.stellar.org";
 
@@ -21,6 +26,8 @@ export type ReadOnlyCallOutcome<T> =
    * events; branch on it rather than on the raw provider `message`.
    */
   | { ok: false; reason: "contract_error"; message?: string; panic?: DecodedContractPanic }
+  /** The RPC request exceeded the configured deadline (#1292). */
+  | { ok: false; reason: "timeout"; classification: ContractCallErrorClassification }
   /** RPC/network/config unavailable — never distinguishable from a contract_error by callers that don't need to. */
   | { ok: false; reason: "unreachable" };
 
@@ -61,12 +68,10 @@ export async function simulateReadOnlyCall<T>(
       .build();
 
     const timeoutMs = opts?.timeoutMs ?? parseInt(process.env.SOROBAN_RPC_TIMEOUT_MS ?? "10000", 10);
-    const simulated = await Promise.race([
+    const simulated = await markContractCallTimeout<StellarSdk.rpc.Api.SimulateTransactionResponse>(
       server.simulateTransaction(tx),
-      new Promise<never>((_, reject) =>
-        setTimeout(() => reject(new Error("Timeout")), timeoutMs)
-      ),
-    ]);
+      timeoutMs,
+    );
 
     if (StellarSdk.rpc.Api.isSimulationError(simulated)) {
       const errorResponse = simulated as StellarSdk.rpc.Api.SimulateTransactionErrorResponse;
@@ -85,7 +90,19 @@ export async function simulateReadOnlyCall<T>(
     }
 
     return { ok: true, value: StellarSdk.scValToNative(retval) as T };
-  } catch {
+  } catch (error) {
+    if (error instanceof ContractCallTimeoutError) {
+      return {
+        ok: false,
+        reason: "timeout",
+        classification: {
+          kind: error.kind,
+          code: error.code,
+          retryable: error.retryable,
+          message: `Soroban ${method} call timed out`,
+        },
+      };
+    }
     return { ok: false, reason: "unreachable" };
   }
 }

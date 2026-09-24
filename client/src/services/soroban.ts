@@ -24,6 +24,10 @@ import { getContractId, validateContractRegistryEntry } from "./contractRegistry
 import { apiFetch } from "../lib/api";
 import { getNetworkPassphrase, getRpcUrl } from "../lib/networkEnv";
 import {
+  buildDepositSimulationDiff,
+  type TransactionSimulationDiff,
+} from "./simulationDiff";
+import {
   decodeContractPanic,
   type ContractErrorNamespace,
   type DecodedContractPanic,
@@ -101,6 +105,16 @@ function getVaultClient(contractId?: string): VaultClient {
 export async function getUserShares(userAddress: string): Promise<bigint> {
   const vaultClient = getVaultClient();
   return vaultClient.getShares(userAddress);
+}
+
+/** Best-effort share balance; returns null when unavailable so diff building can degrade gracefully. */
+async function getSharesQuietly(userAddress: string): Promise<number | null> {
+  try {
+    const shares = await getUserShares(userAddress);
+    return typeof shares === "bigint" ? Number(shares) : null;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -432,15 +446,32 @@ export async function deposit(
   useFeeBump: boolean = true,
   signTx?: (xdr: string, networkPassphrase: string) => Promise<string>,
   txSettings?: TxSettings,
+  onSimulationDiff?: (diff: TransactionSimulationDiff) => void,
 ): Promise<TxResult> {
   try {
     onPhase?.("simulating");
     const vaultClient = getVaultClient();
+    const sharesBefore = await getSharesQuietly(userAddress);
     const prepared = await vaultClient.deposit.prepare({
       from: userAddress,
       amount,
       min_shares_out: minSharesOut,
     });
+
+    // Surface the before/after simulation diff before any signing happens.
+    if (onSimulationDiff) {
+      const simulatedShares =
+        typeof prepared.meta.simulationResult === "bigint"
+          ? Number(prepared.meta.simulationResult)
+          : null;
+      onSimulationDiff(
+        buildDepositSimulationDiff({
+          amountUsd: Number(amount),
+          expectedShares: simulatedShares,
+          sharesBefore,
+        }),
+      );
+    }
 
     onPhase?.("waiting_for_wallet");
     const signer = new CustomSigner(
