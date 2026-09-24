@@ -8,6 +8,7 @@
  */
 
 import * as StellarSdk from "@stellar/stellar-sdk";
+import { eventDedupTracker } from "./eventDedup";
 import type {
   HealthSnapshot,
   IndexerHealthSnapshot,
@@ -45,6 +46,8 @@ export interface IndexerStatusInput {
   /** ISO timestamp of the last successful commit, when known. */
   lastIndexedAt: string | null;
   recentErrors: IndexerReplayError[];
+  /** Re-deliveries suppressed by ingestion dedup (#1361). */
+  duplicatesSkipped?: number;
   now?: number;
 }
 
@@ -61,6 +64,11 @@ export interface IndexerStatus {
   deadLetterCount: number;
   /** Oldest unresolved dead-letter event timestamp (ISO string), if any. */
   oldestDeadLetterAt: string | null;
+  /**
+   * Repeated-ledger re-deliveries suppressed by contract event dedup (#1361).
+   * Cumulative for the current indexer process lifetime.
+   */
+  duplicatesSkipped: number;
   generatedAt: string;
 }
 
@@ -123,6 +131,7 @@ export function classifyIndexerStatus(input: IndexerStatusInput): IndexerStatus 
     recentErrors: input.recentErrors,
     deadLetterCount: 0,
     oldestDeadLetterAt: null,
+    duplicatesSkipped: input.duplicatesSkipped ?? 0,
     generatedAt: new Date(now).toISOString(),
   };
 }
@@ -231,6 +240,7 @@ export async function getIndexerStatusSnapshot(): Promise<IndexerStatus> {
     horizonLedger,
     lastIndexedAt: null, // not persisted by the current indexer schema
     recentErrors: getRecentReplayErrors(),
+    duplicatesSkipped: eventDedupTracker.stats().duplicatesSkipped,
   });
 }
 

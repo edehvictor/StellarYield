@@ -24,6 +24,41 @@ export type ContractName =
 
 export type NetworkName = "testnet" | "mainnet" | "local";
 
+/** The only network ids this service knows how to resolve contract addresses for. */
+export const SUPPORTED_NETWORKS: readonly NetworkName[] = ["testnet", "mainnet", "local"];
+
+/**
+ * Typed error raised when a network id falls outside {@link SUPPORTED_NETWORKS}
+ * (#1109). Same shape (`code`, `network`, `supportedNetworks`) as the
+ * client's and SDK's `UnsupportedNetworkError` so any flow that surfaces
+ * this error (directly, or via an API response) can be handled the same
+ * way regardless of which layer raised it.
+ */
+export class UnsupportedNetworkError extends Error {
+  public readonly code = "unsupported_network" as const;
+  public readonly network: string;
+  public readonly supportedNetworks: readonly string[];
+
+  constructor(network: string, supportedNetworks: readonly string[] = SUPPORTED_NETWORKS) {
+    super(
+      `Unsupported network id: '${network}'. Supported networks are: ${supportedNetworks.join(", ")}.`,
+    );
+    this.name = "UnsupportedNetworkError";
+    this.network = network;
+    this.supportedNetworks = supportedNetworks;
+  }
+}
+
+export function isSupportedNetwork(network: string): network is NetworkName {
+  return (SUPPORTED_NETWORKS as readonly string[]).includes(network);
+}
+
+function assertSupportedNetwork(network: NetworkName): void {
+  if (!isSupportedNetwork(network)) {
+    throw new UnsupportedNetworkError(network);
+  }
+}
+
 type Registry = Record<NetworkName, Record<ContractName, string>>;
 
 // ── Safe Fallback Registry ────────────────────────────────────────────────
@@ -179,6 +214,7 @@ export function getContractId(
   if (envOverride) return envOverride;
 
   const net = network ?? detectNetwork();
+  assertSupportedNetwork(net);
   return registry[net]?.[name] ?? "";
 }
 
@@ -186,6 +222,7 @@ export function getAllContractIds(
   network?: NetworkName,
 ): Record<ContractName, string> {
   const net = network ?? detectNetwork();
+  assertSupportedNetwork(net);
   const names: ContractName[] = [
     "vault", "zap", "token", "governance", "strategy",
     "emissionController", "liquidStaking", "stableswap",

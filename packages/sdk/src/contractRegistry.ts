@@ -18,6 +18,10 @@
  * can surface targeted messages without blocking contract views.
  */
 
+import { validateNetworkName, type NetworkName } from "./network";
+
+export type { NetworkName };
+
 export type ContractName =
   | "vault"
   | "zap"
@@ -28,8 +32,6 @@ export type ContractName =
   | "liquidStaking"
   | "stableswap"
   | "vesting";
-
-export type NetworkName = "testnet" | "mainnet" | "local";
 
 export type ContractRegistry = Record<NetworkName, Partial<Record<ContractName, string>>>;
 
@@ -191,8 +193,15 @@ export class ContractRegistryLoader {
   /**
    * Resolves a single contract's ID for the given network, applying
    * overrides first and the network fallback chain second.
+   *
+   * Validates `network` against {@link SUPPORTED_NETWORKS} first (#1109) and
+   * throws {@link UnsupportedNetworkError} for anything else — callers that
+   * received a network id from outside the type system (env vars, a wallet
+   * adapter, user input) get a clear, typed failure here rather than a
+   * silent empty-registry lookup.
    */
   resolve(name: ContractName, network: NetworkName): ResolvedContractId {
+    validateNetworkName(network);
     const override = this.overrides[name];
     if (override && override.trim() !== "") {
       return {

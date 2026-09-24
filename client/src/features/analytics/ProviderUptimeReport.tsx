@@ -1,8 +1,11 @@
-import { useCallback, useEffect, useState } from "react";
+import { useState } from "react";
 import { Activity, AlertTriangle, RefreshCw } from "lucide-react";
 import EmptyState from "../../components/common/EmptyState";
 import { EMPTY_STATE_PROVIDER_UPTIME } from "../../utils/emptyStateCopy";
 import { apiUrl } from "../../lib/api";
+import { stableSort } from "../../lib/stableSort";
+import { useCachedFetch } from "../../hooks/useCachedFetch";
+import { FreshnessBanner } from "../dashboard/FreshnessBanner";
 
 interface OutageWindow {
   startedAt: string;
@@ -53,7 +56,11 @@ function OutageList({ outages }: { outages: OutageWindow[] }) {
   }
   return (
     <ul className="space-y-1">
-      {outages.map((o, i) => (
+      {stableSort(
+        outages,
+        (a, b) => new Date(a.startedAt).getTime() - new Date(b.startedAt).getTime(),
+        (o) => `${o.startedAt}|${o.endedAt ?? "ongoing"}`,
+      ).map((o, i) => (
         <li key={i} className="text-xs text-gray-400">
           {new Date(o.startedAt).toLocaleDateString()} —{" "}
           {o.endedAt ? new Date(o.endedAt).toLocaleDateString() : "ongoing"},{" "}
@@ -68,31 +75,21 @@ function OutageList({ outages }: { outages: OutageWindow[] }) {
 }
 
 export default function ProviderUptimeReport() {
-  const [reports, setReports] = useState<ProviderUptimeReport[]>([]);
-  const [isLoading, setIsLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-  const [generatedAt, setGeneratedAt] = useState<string | null>(null);
   const [expanded, setExpanded] = useState<string | null>(null);
+  const {
+    data: body,
+    isLoading,
+    error,
+    isOffline,
+    isFromCache,
+    fetchedAt,
+    refresh: fetchReports,
+  } = useCachedFetch<UptimeResponse>(apiUrl("/api/analytics/providers/uptime"), {
+    select: (json) => json as UptimeResponse,
+  });
 
-  const fetchReports = useCallback(async () => {
-    try {
-      setIsLoading(true);
-      setError(null);
-      const res = await fetch(apiUrl("/api/analytics/providers/uptime"));
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const body = (await res.json()) as UptimeResponse;
-      setReports(body.data);
-      setGeneratedAt(body.generatedAt);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to load uptime report");
-    } finally {
-      setIsLoading(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    void fetchReports();
-  }, [fetchReports]);
+  const reports = body?.data ?? [];
+  const generatedAt = body?.generatedAt ?? null;
 
   const hasOutages = reports.some((r) => r.outageWindowCount > 0);
 
@@ -105,7 +102,7 @@ export default function ProviderUptimeReport() {
         </div>
         <button
           type="button"
-          onClick={() => void fetchReports()}
+          onClick={() => fetchReports()}
           disabled={isLoading}
           aria-label="Refresh uptime report"
           className="flex items-center gap-2 text-sm text-gray-300 hover:text-white disabled:opacity-50"
@@ -115,7 +112,20 @@ export default function ProviderUptimeReport() {
         </button>
       </div>
 
-      {error && (
+      {(isOffline || isFromCache) && (
+        <FreshnessBanner
+          lastUpdated={
+            fetchedAt != null
+              ? new Date(fetchedAt).toISOString()
+              : generatedAt ?? undefined
+          }
+          source="cache"
+          isOffline={isOffline}
+          onRefresh={fetchReports}
+        />
+      )}
+
+      {error && reports.length === 0 && (
         <div className="flex items-center gap-2 p-3 bg-red-500/10 border border-red-500/30 rounded-lg">
           <AlertTriangle className="w-5 h-5 text-red-500" />
           <span className="text-sm text-red-400">{error}</span>
@@ -137,7 +147,11 @@ export default function ProviderUptimeReport() {
 
       {reports.length > 0 && (
         <div className="space-y-2">
-          {reports.map((r) => (
+          {stableSort(
+            reports,
+            (a, b) => b.uptimePct - a.uptimePct,
+            (r) => r.providerId,
+          ).map((r) => (
             <div
               key={r.providerId}
               className="bg-white/5 rounded-xl p-4 space-y-2"

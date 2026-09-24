@@ -7,6 +7,13 @@ import {
     decodeTimelineCursor,
     encodeTimelineCursor,
 } from "../types/pagination";
+import { normalizeSeverity } from "../utils/alertSeverity";
+import {
+    buildMergedIncidentTimeline,
+    DEFAULT_DUPLICATE_WINDOW_MS,
+    IncidentTimelineRecord,
+    MergedIncidentTimelineEntry,
+} from "./incidentTimelineMerge";
 
 const prisma = new PrismaClient();
 
@@ -60,8 +67,17 @@ export class IncidentService {
         affectedVaults: string[];
         startedAt: Date;
     }): Promise<Incident> {
+        // Normalize severity (#1318) so callers passing inconsistent labels
+        // (e.g. "critical", "Error", "sev1") converge on the same LOW/MEDIUM/
+        // HIGH/CRITICAL levels used everywhere severity is read downstream —
+        // including the `incident.severity as ShockEvent["severity"]` cast in
+        // getRecommendationsForIncident, which otherwise assumes (unchecked)
+        // that severity is already one of those four values.
         return prisma.incident.create({
-            data,
+            data: {
+                ...data,
+                severity: normalizeSeverity(data.severity),
+            },
         });
     }
 
@@ -207,6 +223,25 @@ export class IncidentService {
             where: { id },
             data: { postmortemUrl },
         });
+    }
+
+    /**
+     * Merges duplicate incident notifications from different sources (#1110)
+     * into a single timeline entry per real-world incident.
+     *
+     * Callers pass the raw, source-tagged notifications they've collected
+     * (e.g. from an on-chain monitor adapter and a manual/ops-report
+     * adapter) rather than this reading from a single `source` column,
+     * since `Incident` records persisted via `createIncident` don't carry
+     * per-notification source provenance today. See
+     * `incidentTimelineMerge.ts` for the exact duplicate-detection window
+     * and per-field tie-break rules used during the merge.
+     */
+    mergeTimelineNotifications(
+        records: IncidentTimelineRecord[],
+        windowMs: number = DEFAULT_DUPLICATE_WINDOW_MS,
+    ): MergedIncidentTimelineEntry[] {
+        return buildMergedIncidentTimeline(records, windowMs);
     }
 }
 

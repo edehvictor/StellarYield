@@ -17,6 +17,24 @@ const STELLAR_ADDRESS_MIN_LEN = 10;
 /** Maximum memo byte length enforced by the Stellar protocol. */
 export const STELLAR_MEMO_MAX_BYTES = 28;
 
+/**
+ * Control characters rejected from memo text (#1106).
+ *
+ * Stellar's `MEMO_TEXT` type stores up to 28 raw bytes and does not itself
+ * restrict which bytes those are — the protocol only enforces the length
+ * limit (verified against this codebase's other memo byte-length check
+ * above, and against `client/src/features/offramp/offRampService.ts`'s
+ * self-generated, ASCII-only memos, neither of which do charset
+ * filtering). Submitting C0 control characters (0x00–0x1F) or DEL (0x7F)
+ * in a memo is still rejected here as "malformed": a null byte, newline,
+ * or other control character in a memo does not fail on-chain but breaks
+ * rendering in UIs/explorers/logs and has no legitimate use in a
+ * human-readable donation note, so it's treated as an unsupported memo
+ * format rather than a valid-but-unusual one.
+ */
+// eslint-disable-next-line no-control-regex
+const MEMO_CONTROL_CHAR_PATTERN = /[\x00-\x1F\x7F]/;
+
 // ── Types ────────────────────────────────────────────────────────────────────
 
 export interface DonationPreviewInput {
@@ -71,6 +89,10 @@ export interface DonationPreview {
  *  3. `bps` must be an integer in [0, MAX_BPS].
  *  4. `grossAmountStroops` must be a positive integer.
  *  5. `memo` (if provided) must not exceed STELLAR_MEMO_MAX_BYTES bytes.
+ *  6. `memo` (if provided) must not contain control characters (see
+ *     {@link MEMO_CONTROL_CHAR_PATTERN}) — an empty string or an omitted/
+ *     null memo is valid (treated as "no memo"), only actual control-byte
+ *     content is rejected as malformed.
  *
  * @returns Array of human-readable error messages. Empty if all rules pass.
  */
@@ -120,12 +142,17 @@ export function validateDonationPreviewInput(
         errors.push("grossAmountStroops must be a positive integer");
     }
 
-    // Memo byte length (Stellar protocol limit)
+    // Memo byte length (Stellar protocol limit) and charset (#1106)
     if (input.memo !== undefined && input.memo !== null) {
         const memoBytes = Buffer.byteLength(input.memo, "utf8");
         if (memoBytes > STELLAR_MEMO_MAX_BYTES) {
             errors.push(
                 `memo exceeds maximum allowed byte length of ${STELLAR_MEMO_MAX_BYTES} bytes (got ${memoBytes})`,
+            );
+        }
+        if (MEMO_CONTROL_CHAR_PATTERN.test(input.memo)) {
+            errors.push(
+                "memo contains unsupported control characters; memo must be human-readable text",
             );
         }
     }

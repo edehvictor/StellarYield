@@ -1,5 +1,9 @@
 import { useEffect, useState } from "react";
 import type { DailyMovement } from "../../../shared/types/dailyMovement";
+import {
+  DailyMovementError,
+  describeDailyMovementFailure,
+} from "../portfolio/dailyMovementErrors";
 
 interface UseDailyMovementOptions {
   walletAddress?: string;
@@ -28,7 +32,15 @@ export function useDailyMovement({ walletAddress, enabled = true }: UseDailyMove
         );
 
         if (!response.ok) {
-          throw new Error(`Failed to fetch daily movement: ${response.statusText}`);
+          let errorBody: unknown = null;
+          try {
+            errorBody = await response.json();
+          } catch {
+            errorBody = null;
+          }
+          throw new DailyMovementError(
+            describeDailyMovementFailure(response.status, errorBody),
+          );
         }
 
         const data = await response.json();

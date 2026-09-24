@@ -72,6 +72,13 @@ describe("classifyIndexerStatus", () => {
     expect(status.status).toBe("degraded");
     expect(status.reason).toMatch(/replay error/i);
   });
+
+  it("reports duplicatesSkipped as 0 when absent and passes it through (#1361)", () => {
+    expect(classifyIndexerStatus(baseInput).duplicatesSkipped).toBe(0);
+    const status = classifyIndexerStatus({ ...baseInput, duplicatesSkipped: 9 });
+    expect(status.duplicatesSkipped).toBe(9);
+    expect(status.status).toBe("healthy");
+  });
 });
 
 describe("GET /api/indexer/status", () => {
@@ -86,5 +93,7 @@ describe("GET /api/indexer/status", () => {
     expect("lagLedgers" in data).toBe(true);
     expect(Array.isArray(data.recentErrors)).toBe(true);
     expect(typeof data.generatedAt).toBe("string");
+    expect(typeof data.duplicatesSkipped).toBe("number");
+    expect(data.duplicatesSkipped).toBeGreaterThanOrEqual(0);
   });
 });

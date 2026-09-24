@@ -51,6 +51,9 @@ const DeltaNeutralUnwind = lazy(
 const StrategyLeaderboard = lazy(
   () => import("./pages/leaderboard/StrategyLeaderboard"),
 );
+const FeatureFlagDiagnosticsPanel = lazy(
+  () => import("./pages/admin/FeatureFlagDiagnosticsPanel"),
+);
 const TreasurySimulation = lazy(
   () => import("./pages/treasury/TreasurySimulation"),
 );
@@ -553,6 +556,14 @@ const router = createBrowserRouter([
             <RequireOnboarding require="wallet">
               <TreasurySimulation />
             </RequireOnboarding>
+          </RouteBoundary>
+        ),
+      },
+      {
+        path: "/admin/feature-flags",
+        element: (
+          <RouteBoundary routeName="feature-flags">
+            <FeatureFlagDiagnosticsPanel />
           </RouteBoundary>
         ),
       },

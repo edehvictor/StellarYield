@@ -34,6 +34,7 @@ import {
   Zap,
 } from "lucide-react";
 import { apiUrl } from "../../lib/api";
+import { stableSort } from "../../lib/stableSort";
 
 export type ServiceId =
   | "database"
@@ -284,12 +285,20 @@ export default function DependencyGraphPanel({
   const isDegraded = summary.overallStatus === "degraded";
   const isOutage = summary.overallStatus === "outage";
 
-  const filteredNodes = graph.nodes.filter((node) => {
-    if (activeFilter === "degraded") return node.isDegraded || node.status !== "up";
-    if (activeFilter === "infrastructure") return ["datastore", "cache", "network"].includes(node.category);
-    if (activeFilter === "processing") return ["indexer", "workers", "gateway"].includes(node.category);
-    return true;
-  });
+  const filteredNodes = stableSort(
+    graph.nodes.filter((node) => {
+      if (activeFilter === "degraded") return node.isDegraded || node.status !== "up";
+      if (activeFilter === "infrastructure") return ["datastore", "cache", "network"].includes(node.category);
+      if (activeFilter === "processing") return ["indexer", "workers", "gateway"].includes(node.category);
+      return true;
+    }),
+    (a, b) => {
+      // Degraded services surface first; ties break on node id (#1118).
+      const severity = { down: 0, warning: 1, up: 2 } as const;
+      return severity[a.status] - severity[b.status];
+    },
+    (node) => node.id,
+  );
 
   return (
     <div

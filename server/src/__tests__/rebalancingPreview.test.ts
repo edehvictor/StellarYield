@@ -6,7 +6,6 @@
  */
 
 import request from "supertest";
-import { Router } from "express";
 import {
   buildRebalancingPreview,
   exportRebalancingPreviewJSON,
@@ -17,7 +16,9 @@ import {
   type AllocationPosition,
 } from "../services/treasurySimulationService";
 
-import treasuryRouter from "../routes/treasury";
+jest.mock("../services/yieldSourceRegistryService", () => ({
+  getSourceHealthRegistry: jest.fn().mockResolvedValue([]),
+}));
 
 const targetAllocations: AllocationPosition[] = [
   { vaultId: "soroswap", vaultName: "Soroswap", allocationPct: 40, apy: 11.2, tvlUsd: 4_500_000, riskScore: 6, rotationCostPct: 0.2 },
@@ -113,10 +114,9 @@ describe("assertValidCurrentAllocations", () => {
 describe("POST /api/treasury/rebalancing/preview/export", () => {
   let app: import("express").Express;
 
-  beforeAll(() => {
-    const router = Router();
-    router.use("/api/treasury", treasuryRouter);
-    app = router as unknown as import("express").Express;
+  beforeAll(async () => {
+    const { createApp } = await import("../app");
+    app = createApp();
   });
 
   const body = {

@@ -20,8 +20,49 @@ describe("ExitImpactService", () => {
 
   it("should provide optimistic and conservative ranges", () => {
     const result = ExitImpactService.estimateImpact(10_000, 1_000_000);
-    
+
     expect(result.optimisticAmountUsd).toBeGreaterThan(result.estimatedReceivedUsd);
     expect(result.conservativeAmountUsd).toBeLessThan(result.estimatedReceivedUsd);
+  });
+
+  describe("previewReserveImpact", () => {
+    it("computes the current and projected reserve ratios", () => {
+      const result = ExitImpactService.previewReserveImpact(50_000, 500_000, 10_000);
+
+      expect(result.currentReserveRatioPct).toBeCloseTo(10, 5);
+      // reserve: 50k -> 40k, tvl: 500k -> 490k => 8.16%
+      expect(result.projectedReserveRatioPct).toBeCloseTo(8.163, 2);
+      expect(result.projectedReserveUsd).toBe(40_000);
+    });
+
+    it("defaults minBufferPct to 8 when not supplied", () => {
+      const result = ExitImpactService.previewReserveImpact(50_000, 500_000, 1_000);
+      expect(result.minBufferPct).toBe(8);
+    });
+
+    it("flags a breach when the projected ratio falls below minBufferPct", () => {
+      const result = ExitImpactService.previewReserveImpact(100_000, 500_000, 90_000, 10);
+      expect(result.breachesMinBuffer).toBe(true);
+    });
+
+    it("does not flag a breach when the projected ratio is at or above minBufferPct", () => {
+      const result = ExitImpactService.previewReserveImpact(100_000, 500_000, 1_000, 10);
+      expect(result.breachesMinBuffer).toBe(false);
+    });
+
+    it("never returns a negative projected reserve even when withdrawing more than the reserve", () => {
+      const result = ExitImpactService.previewReserveImpact(1_000, 500_000, 5_000);
+      expect(result.projectedReserveUsd).toBe(0);
+    });
+
+    it("returns a zero ratio when the projected TVL would be zero or negative", () => {
+      const result = ExitImpactService.previewReserveImpact(10_000, 10_000, 10_000);
+      expect(result.projectedReserveRatioPct).toBe(0);
+    });
+
+    it("returns a zero current ratio when vaultTvlUsd is zero", () => {
+      const result = ExitImpactService.previewReserveImpact(0, 0, 100);
+      expect(result.currentReserveRatioPct).toBe(0);
+    });
   });
 });

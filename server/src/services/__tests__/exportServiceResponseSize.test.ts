@@ -2,8 +2,8 @@ import {
   assertWithinExportSizeLimit,
   ExportSizeLimitExceededError,
   exportService,
-} from "../services/exportService";
-import { type VaultPosition } from "../services/portfolioService";
+} from "../exportService";
+import { type VaultPosition } from "../portfolioService";
 
 describe("export response-size guardrails", () => {
   const positions: VaultPosition[] = [

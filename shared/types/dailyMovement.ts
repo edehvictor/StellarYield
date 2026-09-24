@@ -21,6 +21,24 @@ export interface ProtocolMovement {
   percentChange: number;
 }
 
+/**
+ * Freshness metadata for the valuation snapshot backing a daily movement
+ * response (#1362). Absent on older payloads; when present, lets clients
+ * surface staleness even when the API does not reject the request.
+ */
+export interface ValuationFreshness {
+  /** When the server evaluated freshness (ISO timestamp). */
+  evaluatedAt: string;
+  /** When the backing snapshot was last written (ISO timestamp), if any. */
+  snapshotValuedAt: string | null;
+  /** Age of the snapshot at evaluation time, in milliseconds (null if none). */
+  ageMs: number | null;
+  /** Maximum age considered fresh for this evaluation, in milliseconds. */
+  maxAgeMs: number;
+  /** True when the snapshot is missing or older than `maxAgeMs`. */
+  isStale: boolean;
+}
+
 export interface DailyMovement {
   walletAddress: string;
   snapshotDate: string; // ISO date
@@ -44,6 +62,12 @@ export interface DailyMovement {
   // State indicators
   hasPreviousSnapshot: boolean;
   isNegativeMovement: boolean;
+
+  /**
+   * Freshness of the valuation snapshot (#1362). Attached by the server;
+   * optional so payloads from older servers remain valid.
+   */
+  freshness?: ValuationFreshness;
 }
 
 /**

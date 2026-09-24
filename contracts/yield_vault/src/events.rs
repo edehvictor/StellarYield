@@ -76,10 +76,65 @@ pub fn check_event_version(event_type: &str, version: u32) -> EventDecodeStatus 
     match (event_type, version) {
         ("deposit", 1) => EventDecodeStatus::Recognized,
         ("withdrawal", 1) => EventDecodeStatus::Recognized,
+        ("withdraw", 1) => EventDecodeStatus::Recognized,
         ("admin_action", 1) => EventDecodeStatus::Recognized,
         ("harvest", 1) => EventDecodeStatus::Recognized,
+        // Live v1 vault topics (see lib.rs emits) — all schema version 1.
+        ("init", 1) => EventDecodeStatus::Recognized,
+        ("dep_for", 1) => EventDecodeStatus::Recognized,
+        ("rebal", 1) => EventDecodeStatus::Recognized,
+        ("tr_sh", 1) => EventDecodeStatus::Recognized,
+        ("strat_cfg", 1) => EventDecodeStatus::Recognized,
+        ("rescue", 1) => EventDecodeStatus::Recognized,
+        ("kpr_add", 1) => EventDecodeStatus::Recognized,
+        ("pause", 1) => EventDecodeStatus::Recognized,
+        ("unpause", 1) => EventDecodeStatus::Recognized,
+        ("don_set", 1) => EventDecodeStatus::Recognized,
+        ("referral", 1) => EventDecodeStatus::Recognized,
+        ("flash", 1) => EventDecodeStatus::Recognized,
         // Future versions go to dead-letter
         (_, future) if future > VAULT_EVENT_SCHEMA_VERSION => EventDecodeStatus::Unknown,
         _ => EventDecodeStatus::Invalid,
+    }
+}
+
+/// Deterministic off-chain ingestion identity for one contract event (#1361).
+///
+/// Off-chain indexers re-fetch overlapping ledger ranges on every poll (the
+/// RPC cursor is inclusive of the last committed ledger), so the same event
+/// can be delivered many times. The server derives this same key in
+/// `server/src/indexer/eventDedup.ts` and skips deliveries already seen
+/// inside a suppression window — before any decode or database write.
+///
+/// Format: `contract_id:ledger:tx_hash:topic:data`. Any difference in the
+/// contract, ledger, transaction, topic, or payload yields a different key.
+pub fn event_dedup_key(
+    contract_id: &str,
+    ledger: u32,
+    tx_hash: &str,
+    topic: &str,
+    data: &str,
+) -> String {
+    format!("{}:{}:{}:{}:{}", contract_id, ledger, tx_hash, topic, data)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::event_dedup_key;
+
+    #[test]
+    fn event_dedup_key_is_deterministic_and_distinguishes_event_parts() {
+        let key = event_dedup_key("CVAULT", 42, "txhash", "dep", "AAAA");
+
+        // Same inputs always produce the same identity.
+        assert_eq!(key, event_dedup_key("CVAULT", 42, "txhash", "dep", "AAAA"));
+        assert_eq!(key, "CVAULT:42:txhash:dep:AAAA");
+
+        // Every component participates in the identity so re-deliveries of
+        // different events are never collapsed together.
+        assert_ne!(key, event_dedup_key("CVAULT", 43, "txhash", "dep", "AAAA"));
+        assert_ne!(key, event_dedup_key("CVAULT", 42, "txhash2", "dep", "AAAA"));
+        assert_ne!(key, event_dedup_key("CVAULT", 42, "txhash", "with", "AAAA"));
+        assert_ne!(key, event_dedup_key("CVAULT", 42, "txhash", "dep", "BBBB"));
     }
 }

@@ -11,6 +11,10 @@ import {
 import { uploadVaultMetadata } from "../services/ipfs/vaultMetadataService";
 import { freezeService } from "../services/freezeService";
 import {
+  vaultRegistryService,
+  VaultRegistryValidationError,
+} from "../services/vaultRegistryService";
+import {
   parsePaginationLimit,
   type PaginatedResponse,
 } from "../types/pagination";
@@ -71,6 +75,64 @@ adminRouter.post(
           error instanceof Error
             ? error.message
             : "Failed to update vault parameters",
+      });
+    }
+  },
+);
+
+/**
+ * List all vaults in the registry
+ * GET /api/admin/vaults/registry
+ */
+adminRouter.get(
+  "/vaults/registry",
+  requireAdmin,
+  (_req: Request, res: Response): void => {
+    res.json({ vaults: vaultRegistryService.listVaults() });
+  },
+);
+
+/**
+ * Admin-only vault registry update workflow: updates a vault's registry
+ * metadata (name, strategy, status, cap). Distinct from the parameters
+ * placeholder above, this actually persists (in-memory) and is captured by
+ * the audit trail via setAuditContext.
+ * POST /api/admin/vaults/:vaultId/registry
+ */
+adminRouter.post(
+  "/vaults/:vaultId/registry",
+  requireAdmin,
+  async (req: Request, res: Response): Promise<void> => {
+    try {
+      const { vaultId } = req.params;
+      const { name, strategy, status, capUsd } = req.body ?? {};
+      const actor =
+        (req as unknown as { user?: { id?: string } }).user?.id ?? "unknown";
+
+      setAuditContext(req, {
+        action: "UPDATE_VAULT_REGISTRY",
+        resource: "VAULT_REGISTRY",
+        resourceId: vaultId,
+        changes: { name, strategy, status, capUsd },
+      });
+
+      const updated = vaultRegistryService.updateVault(
+        vaultId,
+        { name, strategy, status, capUsd },
+        actor,
+      );
+
+      res.json({ success: true, vault: updated });
+    } catch (error) {
+      if (error instanceof VaultRegistryValidationError) {
+        res.status(400).json({ error: error.message });
+        return;
+      }
+      res.status(500).json({
+        error:
+          error instanceof Error
+            ? error.message
+            : "Failed to update vault registry",
       });
     }
   },

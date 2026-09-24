@@ -4,6 +4,73 @@ import fs from "fs/promises";
 import path from "path";
 
 /**
+ * Best-effort Prisma client for durable audit persistence (#1329). Loaded
+ * dynamically and cached, mirroring app.ts's loadPrismaClient(): if
+ * @prisma/client isn't generated/available (e.g. in unit tests without a
+ * DATABASE_URL), audit writes silently fall back to the existing in-memory
+ * array + JSONL file, which remain the source of truth for
+ * verifyAuditTrailIntegrity().
+ */
+type CriticalActionAuditLogPrismaClient = {
+  criticalActionAuditLog: {
+    create: (args: { data: Record<string, unknown> }) => Promise<unknown>;
+  };
+};
+
+let cachedPrismaClient: CriticalActionAuditLogPrismaClient | null | undefined;
+
+async function loadAuditPrismaClient(): Promise<CriticalActionAuditLogPrismaClient | null> {
+  if (cachedPrismaClient !== undefined) {
+    return cachedPrismaClient;
+  }
+  try {
+    const prismaModule = (await import("@prisma/client")) as unknown as {
+      PrismaClient?: new () => CriticalActionAuditLogPrismaClient;
+    };
+    cachedPrismaClient = prismaModule.PrismaClient
+      ? new prismaModule.PrismaClient()
+      : null;
+  } catch {
+    cachedPrismaClient = null;
+  }
+  return cachedPrismaClient;
+}
+
+/** Persist an audit entry to Postgres. Best-effort: never throws. */
+async function persistAuditEntryToDatabase(entry: AuditLogEntry): Promise<void> {
+  try {
+    const client = await loadAuditPrismaClient();
+    if (!client) return;
+    await client.criticalActionAuditLog.create({
+      data: {
+        id: entry.id,
+        timestamp: new Date(entry.timestamp),
+        userId: entry.userId,
+        userEmail: entry.userEmail,
+        action: entry.action,
+        resource: entry.resource,
+        resourceId: entry.resourceId,
+        method: entry.method,
+        endpoint: entry.endpoint,
+        status: entry.status,
+        changes: entry.changes ?? undefined,
+        ipAddress: entry.ipAddress,
+        userAgent: entry.userAgent,
+        previousHash: entry.previousHash,
+        hash: entry.hash,
+        signature: entry.signature,
+        confirmationText: entry.confirmationText,
+        cancelled: entry.cancelled ?? false,
+      },
+    });
+  } catch (error) {
+    console.error("Failed to persist audit log entry to database:", error);
+    // Don't throw - matches the existing file-persistence contract: an
+    // audit write must never block the operation it's auditing.
+  }
+}
+
+/**
  * Audit Trail System for Admin Dashboard
  * Provides immutable, cryptographically signed logging of all admin actions
  */
@@ -231,6 +298,9 @@ export async function createAuditEntry(
     // Don't throw - log should not block operations
   }
 
+  // Persist to database (best-effort; see persistAuditEntryToDatabase)
+  await persistAuditEntryToDatabase(entry);
+
   return entry;
 }
 
@@ -365,6 +435,58 @@ export function verifyAuditTrailIntegrity(entries: AuditLogEntry[]): {
     isValid: invalidEntries.length === 0,
     invalidEntries,
   };
+}
+
+/**
+ * Loads persisted audit entries from the database, ordered the same way
+ * the ordering contract documented above requires (see the in-memory
+ * getAuditLogs' ordering notes), and re-runs verifyAuditTrailIntegrity
+ * against them. This lets a DB restore or migration be checked
+ * independently of the in-memory/file state, which verifyAuditTrailIntegrity
+ * alone cannot do since it only ever sees whatever array it's handed.
+ * Returns null if the database is unavailable (see loadAuditPrismaClient).
+ */
+export async function verifyPersistedAuditTrailIntegrity(): Promise<{
+  isValid: boolean;
+  invalidEntries: string[];
+} | null> {
+  const client = (await loadAuditPrismaClient()) as unknown as
+    | (CriticalActionAuditLogPrismaClient & {
+        criticalActionAuditLog: {
+          findMany: (args: {
+            orderBy: { timestamp: "asc" };
+          }) => Promise<Array<Record<string, unknown>>>;
+        };
+      })
+    | null;
+  if (!client) return null;
+
+  const rows = await client.criticalActionAuditLog.findMany({
+    orderBy: { timestamp: "asc" },
+  });
+
+  const entries: AuditLogEntry[] = rows.map((row) => ({
+    id: row.id as string,
+    timestamp: (row.timestamp as Date).toISOString(),
+    userId: row.userId as string,
+    userEmail: (row.userEmail as string) ?? undefined,
+    action: row.action as string,
+    resource: row.resource as string,
+    resourceId: (row.resourceId as string) ?? undefined,
+    method: row.method as string,
+    endpoint: row.endpoint as string,
+    status: row.status as number,
+    changes: (row.changes as Record<string, unknown>) ?? undefined,
+    ipAddress: row.ipAddress as string,
+    userAgent: row.userAgent as string,
+    previousHash: row.previousHash as string,
+    hash: row.hash as string,
+    signature: (row.signature as string) ?? undefined,
+    confirmationText: (row.confirmationText as string) ?? undefined,
+    cancelled: (row.cancelled as boolean) ?? undefined,
+  }));
+
+  return verifyAuditTrailIntegrity(entries);
 }
 
 /**
@@ -540,6 +662,8 @@ export async function recordAdminConfirmation(
     console.error("Failed to persist admin confirmation audit entry:", err);
   }
 
+  await persistAuditEntryToDatabase(entry);
+
   return entry;
 }
 
@@ -601,6 +725,8 @@ export async function recordCancelledAction(input: {
   } catch (err) {
     console.error("Failed to persist cancelled action audit entry:", err);
   }
+
+  await persistAuditEntryToDatabase(entry);
 
   return entry;
 }

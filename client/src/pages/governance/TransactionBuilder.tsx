@@ -10,6 +10,7 @@ import TxStatusTimeline from "../../components/transaction/TxStatusTimeline";
 import TransactionFailedModal from "../../components/transaction/TransactionFailedModal";
 import { decodeTransactionError } from "../../utils/errorDecoder";
 import type { TxPhase } from "../../services/transactionPhase";
+import { getNetworkPassphrase, getRpcUrl } from "../../lib/networkEnv";
 
 const BUILD_PHASE_STEPS: readonly TxPhase[] = ["building", "simulating"];
 
@@ -19,10 +20,8 @@ interface TransactionBuilderProps {
   onTransactionCreated: (tx: PendingTransaction) => void;
 }
 
-const RPC_URL =
-  import.meta.env.VITE_SOROBAN_RPC_URL ?? "https://soroban-testnet.stellar.org";
-const NETWORK_PASSPHRASE =
-  import.meta.env.VITE_NETWORK_PASSPHRASE ?? "Test SDF Network ; September 2015";
+const RPC_URL = getRpcUrl();
+const NETWORK_PASSPHRASE = getNetworkPassphrase();
 
 async function getRecommendedBaseFee(): Promise<string> {
   try {

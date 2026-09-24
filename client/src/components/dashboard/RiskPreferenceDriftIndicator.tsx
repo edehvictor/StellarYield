@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import { AlertTriangle, ShieldCheck, TrendingUp, Activity, Droplets, RefreshCw } from 'lucide-react';
+import { stableSort } from '../../lib/stableSort';
 
 interface DriftDimension {
   dimension: string;
@@ -110,7 +111,15 @@ export default function RiskPreferenceDriftIndicator({ walletAddress }: { wallet
       </div>
 
       <div className="space-y-2">
-        {driftResult.dimensions.map((dim) => {
+        {stableSort(
+          driftResult.dimensions,
+          (a, b) => {
+            // Drifting dimensions surface first, largest deviation next (#1118).
+            if (a.isDrifting !== b.isDrifting) return a.isDrifting ? -1 : 1;
+            return Math.abs(b.deviationPct) - Math.abs(a.deviationPct);
+          },
+          (dim) => dim.dimension,
+        ).map((dim) => {
           const Icon = DIMENSION_ICONS[dim.dimension] ?? Activity;
           return (
             <div

@@ -10,6 +10,7 @@ import {
   AlertTriangle,
 } from "lucide-react";
 import { getApiBaseUrl } from "../../lib/api";
+import { stableSort } from "../../lib/stableSort";
 
 const getApiBase = () => {
   try {
@@ -263,7 +264,13 @@ export default function RelayerStatusPage() {
                 </tr>
               </thead>
               <tbody>
-                {status.recentEvents.map((event) => (
+                {stableSort(
+                  status.recentEvents,
+                  (a, b) =>
+                    new Date(b.timestamp).getTime() -
+                    new Date(a.timestamp).getTime(),
+                  (event) => event.id,
+                ).map((event) => (
                   <tr
                     key={event.id}
                     className="border-b border-gray-800/50 hover:bg-gray-800/30"

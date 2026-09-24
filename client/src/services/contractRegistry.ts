@@ -20,6 +20,10 @@
 
 import * as StellarSdk from "@stellar/stellar-sdk";
 import registryJson from "../../../contracts/registry.json";
+import {
+  detectNetworkFromPassphrase,
+  getContractEnvOverrides,
+} from "../lib/networkEnv";
 
 export type ContractName =
   | "vault"
@@ -33,6 +37,44 @@ export type ContractName =
   | "vesting";
 
 export type NetworkName = "testnet" | "mainnet" | "local";
+
+/** The only network ids this app knows how to resolve contract addresses for. */
+export const SUPPORTED_NETWORKS: readonly NetworkName[] = ["testnet", "mainnet", "local"];
+
+/**
+ * Typed error raised when a network id falls outside {@link SUPPORTED_NETWORKS}
+ * (#1109). Every flow that derives a network id (wallet connection via
+ * `checkNetworkDiagnostics`, chart/registry status via
+ * `checkRegistryDiagnostics`, and deposit/withdraw simulation's contract
+ * lookups via `getContractId`) goes through {@link detectNetwork}, so
+ * centralizing the check there gives all three the same typed failure
+ * instead of each silently falling back to a default network.
+ *
+ * Same shape (`code`, `network`, `supportedNetworks`) as the SDK's
+ * `UnsupportedNetworkError` (`packages/sdk/src/errors.ts`) so callers that
+ * see either one can handle them the same way; kept as a separate class
+ * here since the client does not depend on `@stellaryield/sdk` for pure
+ * validation logic (the SDK dependency is a built package used only for
+ * transaction lifecycle/signing).
+ */
+export class UnsupportedNetworkError extends Error {
+  public readonly code = "unsupported_network" as const;
+  public readonly network: string;
+  public readonly supportedNetworks: readonly string[];
+
+  constructor(network: string, supportedNetworks: readonly string[] = SUPPORTED_NETWORKS) {
+    super(
+      `Unsupported network id: '${network}'. Supported networks are: ${supportedNetworks.join(", ")}.`,
+    );
+    this.name = "UnsupportedNetworkError";
+    this.network = network;
+    this.supportedNetworks = supportedNetworks;
+  }
+}
+
+export function isSupportedNetwork(network: string): network is NetworkName {
+  return (SUPPORTED_NETWORKS as readonly string[]).includes(network);
+}
 
 type Registry = Record<NetworkName, Record<ContractName, string>>;
 
@@ -53,28 +95,13 @@ let cacheVersionCounter = 0;
 let lastInvalidatedAt = Date.now();
 
 export function detectNetwork(): NetworkName {
-  const passphrase =
-    import.meta.env.VITE_NETWORK_PASSPHRASE ?? "";
-  if (passphrase.includes("mainnet") || passphrase.includes("Public Global")) {
-    return "mainnet";
-  }
-  if (passphrase === "" || passphrase.includes("local") || passphrase.includes("standalone")) {
-    return "local";
-  }
-  return "testnet";
+  return detectNetworkFromPassphrase(import.meta.env.VITE_NETWORK_PASSPHRASE ?? "");
 }
 
-const ENV_OVERRIDES: Partial<Record<ContractName, string | undefined>> = {
-  vault: import.meta.env.VITE_CONTRACT_ID,
-  zap: import.meta.env.VITE_ZAP_CONTRACT_ID,
-  token: import.meta.env.VITE_TOKEN_CONTRACT_ID,
-  governance: import.meta.env.VITE_GOVERNANCE_CONTRACT_ID,
-  strategy: import.meta.env.VITE_STRATEGY_CONTRACT_ID,
-  emissionController: import.meta.env.VITE_EMISSION_CONTROLLER_CONTRACT_ID,
-  liquidStaking: import.meta.env.VITE_LIQUID_STAKING_CONTRACT_ID,
-  stableswap: import.meta.env.VITE_STABLESWAP_CONTRACT_ID,
-  vesting: import.meta.env.VITE_VESTING_CONTRACT_ID,
-};
+/** Read at call time so `vi.stubEnv` and runtime env views stay live. */
+function getEnvOverrides(): Partial<Record<ContractName, string | undefined>> {
+  return getContractEnvOverrides();
+}
 
 function isCacheValid(entry: RegistryCacheEntry, network: NetworkName): boolean {
   const age = Date.now() - entry.generatedAt;
@@ -92,7 +119,7 @@ function isCacheValid(entry: RegistryCacheEntry, network: NetworkName): boolean 
   ];
 
   for (const name of contractNames) {
-    const envOverride = ENV_OVERRIDES[name];
+    const envOverride = getEnvOverrides()[name];
     const currentId = envOverride || registry[network]?.[name] || "";
     const cachedId = entry.knownContractIds.get(name);
 
@@ -114,7 +141,7 @@ function buildCacheEntry(network: NetworkName): RegistryCacheEntry {
   const knownContractIds = new Map<ContractName, string>();
 
   for (const name of contractNames) {
-    const envOverride = ENV_OVERRIDES[name];
+    const envOverride = getEnvOverrides()[name];
     const id = envOverride || registry[network]?.[name] || "";
     contractIds[name] = id;
     knownContractIds.set(name, id);
@@ -166,14 +193,30 @@ export function getContractRegistryCacheInfo(): {
   };
 }
 
+/**
+ * Validates an explicitly-provided network id against {@link SUPPORTED_NETWORKS}
+ * (#1109). `network` is typed as `NetworkName` for callers within this
+ * codebase, but wallet/chart/simulation flows can also receive a network id
+ * from outside the type system (a wallet adapter callback, a query param, a
+ * value cast through `as`), so every entry point that accepts an explicit
+ * `network` re-validates it at runtime rather than trusting the type.
+ * Throws {@link UnsupportedNetworkError} before any contract lookup happens.
+ */
+function assertSupportedNetwork(network: NetworkName): void {
+  if (!isSupportedNetwork(network)) {
+    throw new UnsupportedNetworkError(network);
+  }
+}
+
 export function getContractId(
   name: ContractName,
   network?: NetworkName,
 ): string {
-  const envOverride = ENV_OVERRIDES[name];
+  const envOverride = getEnvOverrides()[name];
   if (envOverride) return envOverride;
 
   const net = network ?? detectNetwork();
+  assertSupportedNetwork(net);
 
   if (registryCache && isCacheValid(registryCache, net)) {
     return registryCache.contractIds[name] ?? "";
@@ -185,6 +228,7 @@ export function getContractId(
 
 export function getAllContractIds(network?: NetworkName): Record<ContractName, string> {
   const net = network ?? detectNetwork();
+  assertSupportedNetwork(net);
 
   if (registryCache && isCacheValid(registryCache, net)) {
     return { ...registryCache.contractIds };
@@ -200,6 +244,7 @@ export function validateContractRegistryEntry(
   network?: NetworkName,
 ): void {
   const activeNetwork = network ?? detectNetwork();
+  assertSupportedNetwork(activeNetwork);
 
   const supportedNames: string[] = [
     "vault",

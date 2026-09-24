@@ -79,6 +79,8 @@ tags:
     description: User preference audit trail (digest, notifications, schedule)
   - name: Governance
     description: Governance proposals, forecasts, and multi-sig quorum progress
+  - name: Vault
+    description: Vault-level read-only previews (withdrawal quotes, allocation rollback)
 
 paths:
   /api/drift/group:
@@ -291,6 +293,64 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/HealthStatus'
+
+  /api/health/digest:
+    get:
+      summary: Latest scheduled integration health digest
+      description: Returns the most recent scheduled digest of backend integration health (database, Horizon, Soroban RPC, indexer, cache). Each integration carries its stable error code; raw provider messages are never included.
+      tags:
+        - Health
+      responses:
+        '200':
+          description: The latest digest
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  generatedAt:
+                    type: string
+                    format: date-time
+                  overallStatus:
+                    type: string
+                    enum: [healthy, degraded, outage]
+                  summary:
+                    type: object
+                    properties:
+                      total:
+                        type: integer
+                      up:
+                        type: integer
+                      warning:
+                        type: integer
+                      down:
+                        type: integer
+                  integrations:
+                    type: array
+                    description: Sorted by severity (down, warning, up), then by name
+                    items:
+                      type: object
+                      properties:
+                        name:
+                          type: string
+                          example: horizon
+                        status:
+                          type: string
+                          enum: [up, warning, down]
+                        errorCode:
+                          type: string
+                          nullable: true
+                          example: HORIZON_UNREACHABLE
+                        retryable:
+                          type: boolean
+                        latencyMs:
+                          type: integer
+                          nullable: true
+                        checkedAt:
+                          type: string
+                          format: date-time
+        '404':
+          description: No digest has been generated yet (`HEALTH_DIGEST_NOT_READY`)
 
   /api/yields:
     get:
@@ -1859,6 +1919,181 @@ paths:
         '500':
           description: Failed to delete scenario
 
+  /api/treasury/withdrawals:
+    get:
+      summary: List treasury withdrawals
+      description: >
+        Lists treasury withdrawal requests (admin only), newest first.
+        Optional `vaultId` query filters to a single vault.
+      tags:
+        - Treasury
+      parameters:
+        - name: vaultId
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Restrict results to one vault
+      responses:
+        '200':
+          description: Withdrawals retrieved successfully (success envelope; data is an array of TreasuryWithdrawal)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                    enum: [true]
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/TreasuryWithdrawal'
+                  meta:
+                    type: object
+        '401':
+          description: UNAUTHORIZED — authentication required
+        '403':
+          description: FORBIDDEN — admin access required
+    post:
+      summary: Submit a treasury withdrawal (cooldown enforced)
+      description: >
+        Creates a pending treasury withdrawal for a vault (admin only, #1343).
+        The per-vault cooldown (default 4h) is enforced: while a recent
+        pending withdrawal consumes the cooldown, further submissions fail
+        with 409 COOLDOWN_ACTIVE and stable error.details (remainingMs,
+        availableAt, blockingWithdrawalId). Cancelling the pending withdrawal
+        frees the cooldown immediately.
+      tags:
+        - Treasury
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - vaultId
+                - amountUsd
+              properties:
+                vaultId:
+                  type: string
+                  description: Vault identifier the withdrawal targets
+                amountUsd:
+                  type: number
+                  format: double
+                  exclusiveMinimum: 0
+                  description: Withdrawal amount in USD (must be > 0)
+                requestedBy:
+                  type: string
+                  description: Optional operator id; defaults to the authenticated user
+                memo:
+                  type: string
+                  maxLength: 500
+                  description: Optional operator note
+      responses:
+        '201':
+          description: Withdrawal accepted (success envelope; data is a TreasuryWithdrawal)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                    enum: [true]
+                  data:
+                    $ref: '#/components/schemas/TreasuryWithdrawal'
+                  meta:
+                    type: object
+        '400':
+          description: INVALID_REQUEST — missing or invalid vaultId / amountUsd / requestedBy / memo
+        '401':
+          description: UNAUTHORIZED — authentication required
+        '403':
+          description: FORBIDDEN — admin access required
+        '409':
+          description: COOLDOWN_ACTIVE — vault still inside its withdrawal cooldown window
+        '429':
+          description: Rate limit exceeded for treasury mutation endpoints
+
+  /api/treasury/withdrawals/cooldown:
+    get:
+      summary: Get withdrawal cooldown status for a vault
+      description: >
+        Reports whether a new withdrawal submission for the vault would be
+        blocked by the cooldown, plus remaining time and the blocking pending
+        withdrawal (admin only).
+      tags:
+        - Treasury
+      parameters:
+        - name: vaultId
+          in: query
+          required: true
+          schema:
+            type: string
+          description: Vault identifier to inspect
+      responses:
+        '200':
+          description: Cooldown status (success envelope; data is TreasuryWithdrawalCooldownStatus)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                    enum: [true]
+                  data:
+                    $ref: '#/components/schemas/TreasuryWithdrawalCooldownStatus'
+                  meta:
+                    type: object
+        '400':
+          description: INVALID_REQUEST — vaultId query parameter is required
+        '401':
+          description: UNAUTHORIZED — authentication required
+        '403':
+          description: FORBIDDEN — admin access required
+
+  /api/treasury/withdrawals/{id}/cancel:
+    post:
+      summary: Cancel a pending treasury withdrawal
+      description: >
+        Cancels a pending withdrawal (admin only), freeing the vault's
+        cooldown immediately (#1343).
+      tags:
+        - Treasury
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Withdrawal id
+      responses:
+        '200':
+          description: Withdrawal cancelled (success envelope; data is a TreasuryWithdrawal with status CANCELLED)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                    enum: [true]
+                  data:
+                    $ref: '#/components/schemas/TreasuryWithdrawal'
+                  meta:
+                    type: object
+        '401':
+          description: UNAUTHORIZED — authentication required
+        '403':
+          description: FORBIDDEN — admin access required
+        '404':
+          description: NOT_FOUND — unknown withdrawal id
+        '409':
+          description: INVALID_STATE — withdrawal is not pending (already cancelled)
+
   /api/alerts:
     post:
       summary: Create APY alert
@@ -2829,6 +3064,223 @@ paths:
                     items:
                       $ref: '#/components/schemas/ReconcileCauseDescriptor'
 
+  /api/portfolio/import/validate:
+    post:
+      summary: Validate an external portfolio CSV before import
+      description: Checks a holdings CSV (columns protocol, asset, depositedUsd, currentValueUsd; header matching ignores case and punctuation) without importing anything. File-level problems fail with a stable code; row-level problems are listed per row so valid rows can still be previewed.
+      tags:
+        - Portfolio
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [csv]
+              properties:
+                csv:
+                  type: string
+                  description: Raw CSV file contents (at most 64 KB and 1,000 rows)
+                  example: "protocol,asset,depositedUsd,currentValueUsd\nBlend,USDC,1000,1012.5"
+      responses:
+        '200':
+          description: The file is structurally valid; the preview lists valid holdings and any row issues
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  holdings:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        row:
+                          type: integer
+                        protocol:
+                          type: string
+                        asset:
+                          type: string
+                        depositedUsd:
+                          type: number
+                        currentValueUsd:
+                          type: number
+                  issues:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        row:
+                          type: integer
+                          description: Row number in the file, counting the header as row 1
+                        column:
+                          type: string
+                          nullable: true
+                        code:
+                          type: string
+                          enum: [ROW_COLUMN_COUNT, ROW_MISSING_VALUE, ROW_INVALID_AMOUNT, ROW_NEGATIVE_AMOUNT, ROW_DUPLICATE_HOLDING]
+                        message:
+                          type: string
+                  summary:
+                    type: object
+                    properties:
+                      totalRows:
+                        type: integer
+                      validRows:
+                        type: integer
+                      invalidRows:
+                        type: integer
+                      totalDepositedUsd:
+                        type: number
+                      totalCurrentValueUsd:
+                        type: number
+        '400':
+          description: IMPORT_INVALID_REQUEST, IMPORT_EMPTY_FILE, or IMPORT_MALFORMED_CSV
+        '413':
+          description: IMPORT_FILE_TOO_LARGE or IMPORT_TOO_MANY_ROWS
+        '422':
+          description: IMPORT_MISSING_COLUMNS, IMPORT_DUPLICATE_COLUMNS, or IMPORT_NO_DATA_ROWS
+
+  /api/portfolio/{walletAddress}/daily-movement:
+    get:
+      summary: Get daily portfolio movement
+      description: >
+        Compares today's valuation snapshot with yesterday's (#1362). Responses
+        include an additive `freshness` annotation derived from the snapshot's
+        updatedAt. Opt-in guardrails: `requireFresh=true` returns 409
+        STALE_VALUATION_SNAPSHOT when the snapshot is older than the threshold
+        (default 36h, overridable via `maxAgeMs`) and 404 SNAPSHOT_NOT_FOUND
+        when no current snapshot exists. Requests without `requireFresh` keep
+        the historical 200 behavior.
+      tags:
+        - Portfolio
+      parameters:
+        - name: walletAddress
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Stellar wallet address (G...)
+        - name: requireFresh
+          in: query
+          required: false
+          schema:
+            type: boolean
+          description: When true, stale or missing snapshots fail with 409/404 instead of returning 200
+        - name: maxAgeMs
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 604800000
+          description: Freshness threshold in milliseconds (default 129600000 = 36h)
+      responses:
+        '200':
+          description: Daily movement payload (raw DailyMovement with optional freshness annotation)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DailyMovement'
+        '400':
+          description: INVALID_ADDRESS (bad wallet) or INVALID_QUERY (malformed requireFresh / maxAgeMs)
+        '404':
+          description: SNAPSHOT_NOT_FOUND — requireFresh=true and no current snapshot exists
+        '409':
+          description: STALE_VALUATION_SNAPSHOT — requireFresh=true and snapshot older than maxAgeMs (recoverable; retry after refresh)
+        '500':
+          description: DAILY_MOVEMENT_FAILED
+
+  /api/vaults/{vaultId}/allocation-rollback-preview:
+    get:
+      summary: Preview rollback of the vault's pending rebalance
+      description: >
+        Deterministic, read-only preview (#1360) diffing the vault's latest
+        pending rebalance queue entry target weights against the weights a
+        rollback would restore. Identical inputs always produce a
+        byte-identical preview (fixed 4-decimal rounding, byte-wise sorted
+        keys, stable inputHash) — no wall-clock time is embedded. 404
+        NO_PENDING_REBALANCE when there is nothing to roll back.
+      tags:
+        - Vault
+      parameters:
+        - name: vaultId
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Vault identifier
+        - name: reason
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Optional rollback reason included in the preview inputHash
+      responses:
+        '200':
+          description: Rollback preview (AllocationRollbackPreview)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AllocationRollbackPreview'
+        '400':
+          description: INVALID_REQUEST / INVALID_VAULT_ID / INVALID_ALLOCATIONS / ALLOCATIONS_MUST_SUM_100 / ALLOCATION_SCALE_MISMATCH
+        '404':
+          description: NO_PENDING_REBALANCE — no active rebalance queue entry for the vault
+        '500':
+          description: ROLLBACK_PREVIEW_FAILED
+    post:
+      summary: Preview an ad-hoc allocation rollback
+      description: >
+        Deterministic, read-only preview from explicit allocation maps (#1360):
+        `rollbackAllocations` is required; `currentAllocations` is optional
+        (falls back to the pending queue entry when omitted). Same
+        determinism and error contract as GET.
+      tags:
+        - Vault
+      parameters:
+        - name: vaultId
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Vault identifier
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - rollbackAllocations
+              properties:
+                currentAllocations:
+                  type: object
+                  additionalProperties:
+                    type: number
+                  description: Current weights (percent or fraction scale); required when no pending rebalance exists
+                rollbackAllocations:
+                  type: object
+                  additionalProperties:
+                    type: number
+                  description: Weights the rollback would restore (same scale as current)
+                rollbackReason:
+                  type: string
+                  description: Optional rollback reason included in the preview inputHash
+      responses:
+        '200':
+          description: Rollback preview (AllocationRollbackPreview)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AllocationRollbackPreview'
+        '400':
+          description: INVALID_REQUEST / INVALID_VAULT_ID / INVALID_ALLOCATIONS / ALLOCATIONS_MUST_SUM_100 / ALLOCATION_SCALE_MISMATCH
+        '404':
+          description: NO_PENDING_REBALANCE — currentAllocations omitted and no active queue entry exists
+        '500':
+          description: ROLLBACK_PREVIEW_FAILED
+
   /api/incidents:
     get:
       summary: List incidents
@@ -3274,6 +3726,179 @@ paths:
 
 components:
   schemas:
+    ValuationFreshness:
+      type: object
+      description: Freshness annotation for a valuation snapshot (#1362)
+      properties:
+        evaluatedAt:
+          type: string
+          format: date-time
+          description: When the server evaluated freshness
+        snapshotValuedAt:
+          type: string
+          format: date-time
+          nullable: true
+          description: When the backing snapshot was last written, if any
+        ageMs:
+          type: integer
+          nullable: true
+          description: Snapshot age at evaluation time in milliseconds (null if no snapshot)
+        maxAgeMs:
+          type: integer
+          description: Maximum age considered fresh for this evaluation
+        isStale:
+          type: boolean
+          description: True when the snapshot is missing or older than maxAgeMs
+    DailyMovement:
+      type: object
+      description: Daily portfolio movement comparison payload
+      properties:
+        walletAddress:
+          type: string
+        snapshotDate:
+          type: string
+          description: ISO date of the current snapshot
+        previousSnapshotDate:
+          type: string
+          nullable: true
+        previousTotalValue:
+          type: number
+          format: double
+        currentTotalValue:
+          type: number
+          format: double
+        totalAbsoluteChange:
+          type: number
+          format: double
+        totalPercentChange:
+          type: number
+          format: double
+        assetMovements:
+          type: array
+          items:
+            type: object
+        protocolMovements:
+          type: array
+          items:
+            type: object
+        depositedToday:
+          type: number
+          format: double
+        withdrawnToday:
+          type: number
+          format: double
+        priceMovementOnly:
+          type: number
+          format: double
+        hasPreviousSnapshot:
+          type: boolean
+        isNegativeMovement:
+          type: boolean
+        freshness:
+          $ref: '#/components/schemas/ValuationFreshness'
+    AllocationRollbackChange:
+      type: object
+      description: Single per-vault weight difference in a rollback preview (#1360)
+      properties:
+        vaultId:
+          type: string
+        currentWeight:
+          type: number
+        rollbackWeight:
+          type: number
+        deltaWeight:
+          type: number
+          description: rollbackWeight - currentWeight (fixed 4-decimal rounding)
+    AllocationRollbackPreview:
+      type: object
+      description: >
+        Deterministic, read-only rollback preview (#1360). Identical inputs
+        always produce an identical preview including `inputHash`.
+      properties:
+        vaultId:
+          type: string
+        source:
+          type: string
+          enum: [explicit, pending-rebalance]
+        currentAllocations:
+          type: object
+          additionalProperties:
+            type: number
+        rollbackAllocations:
+          type: object
+          additionalProperties:
+            type: number
+        changes:
+          type: array
+          items:
+            $ref: '#/components/schemas/AllocationRollbackChange'
+        totalDeltaWeight:
+          type: number
+        noOp:
+          type: boolean
+        conflictingQueueEntryIds:
+          type: array
+          items:
+            type: string
+        safe:
+          type: boolean
+        rollbackReason:
+          type: string
+        inputHash:
+          type: string
+          description: SHA-256 over the canonical inputs
+    TreasuryWithdrawal:
+      type: object
+      description: Treasury withdrawal request (#1343)
+      properties:
+        id:
+          type: string
+        vaultId:
+          type: string
+        amountUsd:
+          type: number
+          format: double
+        status:
+          type: string
+          enum: [PENDING, CANCELLED]
+        requestedBy:
+          type: string
+          nullable: true
+        memo:
+          type: string
+          nullable: true
+        submittedAt:
+          type: string
+          format: date-time
+        cooldownUntil:
+          type: string
+          format: date-time
+        cancelledAt:
+          type: string
+          format: date-time
+          nullable: true
+    TreasuryWithdrawalCooldownStatus:
+      type: object
+      description: Per-vault withdrawal cooldown status (#1343)
+      properties:
+        vaultId:
+          type: string
+        cooldownActive:
+          type: boolean
+        cooldownMs:
+          type: integer
+        remainingMs:
+          type: integer
+        availableAt:
+          type: string
+          format: date-time
+          nullable: true
+        blockingWithdrawalId:
+          type: string
+          nullable: true
+        evaluatedAt:
+          type: string
+          format: date-time
     PortfolioPosition:
       type: object
       required: [assetId, amount]

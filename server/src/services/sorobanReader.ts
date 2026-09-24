@@ -5,13 +5,22 @@
  * rpc.Server/TransactionBuilder/simulateTransaction plumbing.
  */
 import * as StellarSdk from "@stellar/stellar-sdk";
+import {
+  decodeContractPanic,
+  type ContractErrorNamespace,
+  type DecodedContractPanic,
+} from "../../../shared/types/contractPanic";
 
 const rpcUrl = process.env.SOROBAN_RPC_URL ?? "https://soroban-testnet.stellar.org";
 
 export type ReadOnlyCallOutcome<T> =
   | { ok: true; value: T }
-  /** Contract call reached the network but the contract itself returned Err(...) or panicked. */
-  | { ok: false; reason: "contract_error"; message?: string }
+  /**
+   * Contract call reached the network but the contract itself returned Err(...) or panicked.
+   * `panic` is decoded from the structured error in the simulation's diagnostic
+   * events; branch on it rather than on the raw provider `message`.
+   */
+  | { ok: false; reason: "contract_error"; message?: string; panic?: DecodedContractPanic }
   /** RPC/network/config unavailable — never distinguishable from a contract_error by callers that don't need to. */
   | { ok: false; reason: "unreachable" };
 
@@ -25,7 +34,11 @@ export async function simulateReadOnlyCall<T>(
   contractId: string,
   method: string,
   args: StellarSdk.xdr.ScVal[] = [],
-  opts?: { timeoutMs?: number },
+  opts?: {
+    timeoutMs?: number;
+    /** Contract error catalog used to decode typed contract errors (#1339). */
+    errorNamespace?: ContractErrorNamespace;
+  },
 ): Promise<ReadOnlyCallOutcome<T>> {
   const simSource = process.env.ZAP_QUOTE_SIM_SOURCE_ACCOUNT;
   if (!simSource) {
@@ -57,7 +70,12 @@ export async function simulateReadOnlyCall<T>(
 
     if (StellarSdk.rpc.Api.isSimulationError(simulated)) {
       const errorResponse = simulated as StellarSdk.rpc.Api.SimulateTransactionErrorResponse;
-      return { ok: false, reason: "contract_error", message: errorResponse.error };
+      return {
+        ok: false,
+        reason: "contract_error",
+        message: errorResponse.error,
+        panic: decodeContractPanic(errorResponse.events, opts?.errorNamespace),
+      };
     }
 
     const success = simulated as StellarSdk.rpc.Api.SimulateTransactionSuccessResponse;

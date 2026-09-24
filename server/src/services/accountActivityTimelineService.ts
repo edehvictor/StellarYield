@@ -2,6 +2,14 @@ import {
   getRecommendationTimeline,
   type RecommendationTimelineEntry,
 } from "./recommendationTimelineService";
+import {
+  decodeTimelineCursor,
+  encodeTimelineCursor,
+  isBeforeTimelineCursor,
+  PAGINATION_DEFAULT_LIMIT,
+  PAGINATION_MAX_LIMIT,
+  type PaginatedResponse,
+} from "../types/pagination";
 
 export type AccountActivityEventType =
   | "deposit"
@@ -267,5 +275,55 @@ export function buildUnifiedAccountTimeline(
     if (filters.status && event.status !== filters.status) return false;
     return true;
   });
+}
+
+export interface AccountActivityPaginationOptions {
+  cursor?: string;
+  limit?: number;
+}
+
+/**
+ * Cursor-paginated account activity timeline (#1305).
+ *
+ * Follows the shared `PaginatedResponse` contract (`cursor`/`limit` query
+ * params, `{data, pagination: {nextCursor, hasMore, limit}}` response).
+ * Sort is newest-first with an `(timestamp, id)` compound cursor so pages
+ * are stable under timestamp collisions and mid-pagination inserts.
+ * A missing or malformed cursor starts from the first page.
+ */
+export function getAccountActivityPaginated(
+  walletAddress: string,
+  filters?: AccountActivityFilters,
+  options: AccountActivityPaginationOptions = {},
+): PaginatedResponse<AccountActivityEvent> {
+  const rawLimit = options.limit ?? PAGINATION_DEFAULT_LIMIT;
+  const limit = Number.isFinite(rawLimit)
+    ? Math.min(Math.max(1, Math.floor(rawLimit)), PAGINATION_MAX_LIMIT)
+    : PAGINATION_DEFAULT_LIMIT;
+
+  const all = buildUnifiedAccountTimeline(walletAddress, filters);
+  const cursor = decodeTimelineCursor(options.cursor ?? null);
+
+  const eligible = cursor
+    ? all.filter((event) =>
+        isBeforeTimelineCursor(
+          { ts: new Date(event.timestamp).getTime(), id: event.id },
+          cursor,
+        ),
+      )
+    : all;
+
+  const hasMore = eligible.length > limit;
+  const data = hasMore ? eligible.slice(0, limit) : eligible;
+  const last = data[data.length - 1];
+  const nextCursor =
+    hasMore && last
+      ? encodeTimelineCursor({
+          ts: new Date(last.timestamp).getTime(),
+          id: last.id,
+        })
+      : null;
+
+  return { data, pagination: { nextCursor, hasMore, limit } };
 }
 

@@ -91,6 +91,7 @@ mod keeper;
 mod oracle;
 mod referrals;
 mod verification; // Versioned event schemas (#904)
+mod withdrawal_queue;
 
 // ── Errors ──────────────────────────────────────────────────────────────
 

@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import ApyDashboard from "../ApyDashboard";
@@ -17,6 +17,7 @@ function createDeferredResponse() {
 describe("ApyDashboard states", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    window.localStorage.clear();
     window.matchMedia = vi.fn().mockImplementation((query) => ({
       matches: false,
       media: query,
@@ -162,11 +163,11 @@ describe("ApyDashboard states", () => {
     const riskBadge = screen.getByText("Low");
     expect(riskBadge.parentElement).toHaveAttribute(
       "aria-describedby",
-      "risk-tip-table-blend-usdc",
+      "vault-risk-tip-table-blend-usdc",
     );
     expect(screen.getByRole("tooltip")).toHaveAttribute(
       "id",
-      "risk-tip-table-blend-usdc",
+      "vault-risk-tip-table-blend-usdc",
     );
   });
 
@@ -214,7 +215,7 @@ describe("ApyDashboard states", () => {
     render(<ApyDashboard />);
 
     expect(
-      await screen.findByRole("button", { name: /Blend USDC risk: Low/i }),
+      await screen.findByRole("button", { name: /Vault risk: Low\./i }),
     ).toBeInTheDocument();
     expect(
       screen.getByLabelText(/Stale APY data for Blend USDC; last updated/i),
@@ -243,5 +244,189 @@ describe("ApyDashboard states", () => {
         name: /TVL sorted descending; activate to sort ascending/i,
       }),
     ).toHaveAttribute("aria-pressed", "true");
+  });
+
+  it("shows cached rates with an offline banner and refreshes on reconnect", async () => {
+    const user = userEvent.setup();
+    const rows = [
+      {
+        protocol: "Blend",
+        asset: "USDC",
+        apy: 8.42,
+        tvl: 2450000,
+        risk: "Low",
+        change24h: 0.32,
+        rewardTokens: ["BLND"],
+        category: "Lending",
+      },
+    ];
+
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => rows,
+    });
+
+    render(<ApyDashboard />);
+    await screen.findByText("USDC");
+
+    // Subsequent refresh fails (offline) — cached rows keep rendering.
+    mockFetch.mockRejectedValueOnce(new TypeError("fetch failed"));
+    await user.click(screen.getByRole("button", { name: /Refresh Rates/i }));
+
+    const banner = await screen.findByTestId("offline-cache-banner");
+    expect(banner).toHaveTextContent("Offline — Showing Cached Data");
+    expect(screen.getAllByText("Blend").length).toBeGreaterThan(0);
+    expect(
+      screen.queryByText(/Failed to Load APY Data/i),
+    ).not.toBeInTheDocument();
+
+    // Reconnect: fresh response replaces the cache and clears the banner.
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => [
+        {
+          protocol: "Soroswap",
+          asset: "XLM-USDC",
+          apy: 14.75,
+          tvl: 3100000,
+          risk: "Medium",
+        },
+      ],
+    });
+    act(() => {
+      window.dispatchEvent(new Event("online"));
+    });
+
+    expect((await screen.findAllByText("Soroswap")).length).toBeGreaterThan(0);
+    await waitFor(() => {
+      expect(screen.queryByTestId("offline-cache-banner")).not.toBeInTheDocument();
+    });
+  });
+});
+
+// ── Deterministic ordering (#1118) ───────────────────────────────────────────
+
+describe("ApyDashboard deterministic row ordering (#1118)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    window.matchMedia = vi.fn().mockImplementation((query) => ({
+      matches: false,
+      media: query,
+      onchange: null,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      dispatchEvent: vi.fn(),
+    }));
+  });
+
+  const fetchedAt = new Date().toISOString();
+
+  function makeRow(protocol: string, asset: string) {
+    return {
+      protocol,
+      asset,
+      apy: 5,
+      tvl: 1_000_000,
+      risk: "Low",
+      change24h: 0,
+      rewardTokens: ["BLND"],
+      category: "Lending",
+      fetchedAt,
+    };
+  }
+
+  /** Render, switch to table view, and return the table row ids in DOM order. */
+  async function getTableRowOrder(rows: unknown[]): Promise<string[]> {
+    mockFetch.mockResolvedValueOnce({ ok: true, json: async () => rows });
+    const user = userEvent.setup();
+    const view = render(<ApyDashboard />);
+
+    const tableToggle = await screen.findByRole("button", { name: /^Table$/i });
+    await user.click(tableToggle);
+
+    await waitFor(() => {
+      expect(
+        document.querySelectorAll('[id^="vault-risk-tip-table-"]').length,
+      ).toBe(rows.length);
+    });
+
+    const order = Array.from(
+      document.querySelectorAll('[id^="vault-risk-tip-table-"]'),
+    ).map((el) => el.id.replace(/^vault-risk-tip-table-/, ""));
+
+    view.unmount();
+    return order;
+  }
+
+  it("keeps the same row order for equal-APY rows regardless of backend order", async () => {
+    const alpha = makeRow("Alpha", "USDC");
+    const mid = makeRow("Mid", "XLM");
+    const zeta = makeRow("Zeta", "USDC");
+
+    const firstRefresh = await getTableRowOrder([zeta, alpha, mid]);
+    const secondRefresh = await getTableRowOrder([mid, zeta, alpha]);
+
+    // All values tie (apy, tvl, risk) → final tiebreak is the ascending
+    // protocol-asset row id, independent of backend response order.
+    expect(firstRefresh).toEqual(["alpha-usdc", "mid-xlm", "zeta-usdc"]);
+    expect(secondRefresh).toEqual(firstRefresh);
+  });
+
+  it("breaks protocol-name ties deterministically by row id when sorting by protocol", async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => [
+        makeRow("Blend", "XLM"),
+        makeRow("Blend", "USDC"),
+        makeRow("Alpha", "USDC"),
+      ],
+    });
+    const user = userEvent.setup();
+    render(<ApyDashboard />);
+
+    await user.click(await screen.findByRole("button", { name: /^Table$/i }));
+    await waitFor(() => {
+      expect(
+        document.querySelectorAll('[id^="vault-risk-tip-table-"]').length,
+      ).toBe(3);
+    });
+
+    await user.click(
+      screen.getByRole("button", { name: /^Sort by Protocol descending$/i }),
+    );
+
+    const order = Array.from(
+      document.querySelectorAll('[id^="vault-risk-tip-table-"]'),
+    ).map((el) => el.id.replace(/^vault-risk-tip-table-/, ""));
+
+    // Primary key: protocol descending → Blend rows before Alpha.
+    // Equal protocol → ascending row id tiebreak → blend-usdc before blend-xlm.
+    expect(order).toEqual(["blend-usdc", "blend-xlm", "alpha-usdc"]);
+  });
+
+  it("sorts fee attribution rows alphabetically by vault", async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => [makeRow("Zeta", "USDC"), makeRow("Alpha", "USDC")],
+    });
+    render(<ApyDashboard />);
+
+    await screen.findByRole("button", { name: /^Table$/i });
+
+    await waitFor(() => {
+      const feeHeading = screen.getByText(/Cross-Vault Fee Attribution/i);
+      expect(feeHeading).toBeInTheDocument();
+    });
+
+    const feeTable = Array.from(document.querySelectorAll("table")).find(
+      (table) => table.textContent?.includes("Total Drag"),
+    );
+    expect(feeTable).toBeTruthy();
+    const feeVaultCells = Array.from(
+      feeTable!.querySelectorAll("tbody tr td:first-child"),
+    ).map((cell) => cell.textContent?.trim());
+    expect(feeVaultCells).toEqual(["Alpha", "Zeta"]);
   });
 });

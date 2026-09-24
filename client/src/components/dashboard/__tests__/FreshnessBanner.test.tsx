@@ -45,4 +45,26 @@ describe("FreshnessBanner", () => {
     render(<FreshnessBanner lastUpdated="invalid-date-string" />);
     expect(screen.getByText("Invalid timestamp provided for data freshness check.")).toBeInTheDocument();
   });
+
+  it("renders cached-data banner for source=cache", () => {
+    const oneMinAgo = new Date(Date.now() - 60 * 1000).toISOString();
+    render(<FreshnessBanner lastUpdated={oneMinAgo} source="cache" />);
+
+    expect(screen.getByTestId("cache-banner")).toBeInTheDocument();
+    expect(screen.getByText("Showing Cached Data")).toBeInTheDocument();
+    expect(screen.getByText("Cached")).toBeInTheDocument();
+  });
+
+  it("renders explicit offline indicator when isOffline is set", () => {
+    const fiveMinAgo = new Date(Date.now() - 5 * 60 * 1000).toISOString();
+    render(
+      <FreshnessBanner lastUpdated={fiveMinAgo} source="cache" isOffline />,
+    );
+
+    const banner = screen.getByTestId("offline-cache-banner");
+    expect(banner).toBeInTheDocument();
+    expect(banner).toHaveTextContent("Offline — Showing Cached Data");
+    expect(banner).toHaveTextContent("Offline");
+    expect(screen.queryByText("Showing Cached Data")).not.toBeInTheDocument();
+  });
 });

@@ -12,9 +12,9 @@ import type { PendingTransaction } from "./types";
 import type { GovernanceConfig } from "./types";
 import SignerQuorumProgress from "./SignerQuorumProgress";
 import { computeSignerQuorumProgress } from "./signerQuorum";
+import { getNetworkPassphrase } from "../../lib/networkEnv";
 
-const NETWORK_PASSPHRASE =
-  import.meta.env.VITE_NETWORK_PASSPHRASE ?? "Test SDF Network ; September 2015";
+const NETWORK_PASSPHRASE = getNetworkPassphrase();
 
 interface PendingTransactionCardProps {
   transaction: PendingTransaction;

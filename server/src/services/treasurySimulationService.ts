@@ -178,7 +178,7 @@ export function assertValidScenarioInput(body: unknown): TreasuryScenario {
     throw new TreasuryValidationError(
       'allocation_validation_failed',
       'Allocation validation failed.',
-      422,
+      400,
       { fieldErrors: validation.errors },
     );
   }

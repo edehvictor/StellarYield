@@ -56,6 +56,7 @@ function mockFetchFail() {
 describe("ApyDashboard — accessibility (grid view)", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    window.localStorage.clear();
   });
 
   it("renders the main heading at an accessible level", async () => {
@@ -131,6 +132,7 @@ describe("ApyDashboard — accessibility (grid view)", () => {
 describe("ApyDashboard — accessibility (table view)", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    window.localStorage.clear();
     mockFetchOk();
   });
 

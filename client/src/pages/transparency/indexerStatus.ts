@@ -24,6 +24,11 @@ export interface IndexerStatus {
   lastIndexedAt: string | null;
   heartbeatAgeSeconds: number | null;
   recentErrors: IndexerReplayError[];
+  /**
+   * Repeated-ledger re-deliveries suppressed by contract event dedup (#1361).
+   * Absent on older server responses that predate the field.
+   */
+  duplicatesSkipped?: number;
   generatedAt: string;
 }
 
@@ -62,4 +67,24 @@ export function formatLag(lagLedgers: number | null): string {
 /** True when the indexer is degraded or unavailable and needs operator attention. */
 export function isIndexerDegraded(status: IndexerStatus): boolean {
   return status.status !== "healthy";
+}
+
+/**
+ * Human-friendly "duplicates suppressed" label for the checkpoint panel (#1361).
+ * Returns `null` when the server did not report a usable count so the panel
+ * can simply omit the metric instead of rendering a misleading zero.
+ */
+export function formatDuplicatesSuppressed(
+  duplicatesSkipped: number | undefined | null,
+): string | null {
+  if (
+    duplicatesSkipped === undefined ||
+    duplicatesSkipped === null ||
+    !Number.isFinite(duplicatesSkipped) ||
+    duplicatesSkipped < 0
+  ) {
+    return null;
+  }
+  const rounded = Math.floor(duplicatesSkipped);
+  return `${rounded} duplicate${rounded === 1 ? "" : "s"} suppressed`;
 }
