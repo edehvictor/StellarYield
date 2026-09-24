@@ -53,6 +53,8 @@ interface UseDepositImpactInput {
   routeImpactThreshold?: number;
   /** Whether to enforce stale quote blocking */
   blockStaleQuotes?: boolean;
+  /** Observed route liquidity depth in USD (unknown when omitted). #1312 */
+  routeLiquidityDepthUsd?: number;
 }
 
 const WARNING_SLIPPAGE_PCT = 3;
@@ -63,6 +65,10 @@ const LOW_EXECUTION_QUALITY = 70;
 const CRITICAL_EXECUTION_QUALITY = 50;
 const DEFAULT_ROUTE_IMPACT_THRESHOLD = 75;
 const MAX_QUOTE_AGE_MS = 60_000;
+/** Fraction of route liquidity depth a single deposit may consume (#1312). */
+const MAX_DEPTH_UTILIZATION = 0.25;
+/** Warning when deposit exceeds this fraction of depth. */
+const WARN_DEPTH_UTILIZATION = 0.15;
 /** route.length - 1 = hop count. >=3 hops means more than one intermediate pool. */
 const WARNING_HOP_COUNT = 3;
 const CRITICAL_HOP_COUNT = 5;
@@ -116,6 +122,30 @@ export function useDepositImpact(input: UseDepositImpactInput): DepositImpactRes
     } else if (input.amountUsd >= WARNING_AMOUNT_USD) {
       reasons.push(`Moderate deposit size ($${(input.amountUsd / 1000).toFixed(0)}k) could affect routing quality`);
       impactScore += 20;
+    }
+
+    // Route liquidity depth signal (#1312) — skipped when depth or amount unknown.
+    let depthExceeded = false;
+    const depth = input.routeLiquidityDepthUsd;
+    if (
+      typeof depth === "number" &&
+      Number.isFinite(depth) &&
+      depth > 0 &&
+      input.amountUsd > 0
+    ) {
+      const utilization = input.amountUsd / depth;
+      if (utilization > MAX_DEPTH_UTILIZATION) {
+        depthExceeded = true;
+        reasons.push(
+          `Deposit exceeds ${Math.round(MAX_DEPTH_UTILIZATION * 100)}% of route liquidity depth ($${input.amountUsd.toFixed(0)} of $${depth.toFixed(0)}) — insufficient route depth for this size`,
+        );
+        impactScore += 50;
+      } else if (utilization > WARN_DEPTH_UTILIZATION) {
+        reasons.push(
+          `Deposit consumes ${Math.round(utilization * 100)}% of route liquidity depth — near the ${Math.round(MAX_DEPTH_UTILIZATION * 100)}% safety cap`,
+        );
+        impactScore += 25;
+      }
     }
 
     // Quote quality signals
@@ -197,7 +227,7 @@ export function useDepositImpact(input: UseDepositImpactInput): DepositImpactRes
     const clampedScore = Math.min(100, impactScore);
 
     let severity: ImpactSeverity = "none";
-    if (clampedScore >= 60) {
+    if (clampedScore >= 60 || depthExceeded) {
       severity = "critical";
     } else if (clampedScore >= 25) {
       severity = "warning";
@@ -211,6 +241,10 @@ export function useDepositImpact(input: UseDepositImpactInput): DepositImpactRes
     if (blockStale && input.isStale) {
       shouldBlock = true;
       blockReason = "Quote is stale. Refresh to get current rates before submitting.";
+    } else if (depthExceeded) {
+      shouldBlock = true;
+      blockReason =
+        "Deposit exceeds available route liquidity depth. Split the deposit or wait for deeper liquidity.";
     } else if (severity === "critical" && clampedScore >= (input.routeImpactThreshold ?? DEFAULT_ROUTE_IMPACT_THRESHOLD)) {
       shouldBlock = true;
       blockReason = "Route impact exceeds safety threshold. Reduce amount or adjust slippage.";

@@ -7,6 +7,7 @@ import {
   saveWatchlistDigestPreference,
   type WatchlistDigestPreference,
 } from "../services/digest";
+import { recordUserPreferenceChange } from "../services/userPreferenceAuditService";
 
 const router = Router();
 const prisma = new PrismaClient();
@@ -64,17 +65,32 @@ router.put(
         )
       : [];
 
-    res.json(
-      saveWatchlistDigestPreference(walletAddress, {
-        enabled: body.enabled,
-        scheduleMode,
-        eventThreshold: Number(body.eventThreshold ?? 2),
-        watchedVaultIds,
-        minApyDeltaPct: Number(body.minApyDeltaPct ?? 0.5),
-        minRiskDelta: Number(body.minRiskDelta ?? 5),
-        maxFreshnessHours: Number(body.maxFreshnessHours ?? 12),
-      }),
-    );
+    const before = getWatchlistDigestPreference(walletAddress);
+    const after = saveWatchlistDigestPreference(walletAddress, {
+      enabled: body.enabled,
+      scheduleMode,
+      eventThreshold: Number(body.eventThreshold ?? 2),
+      watchedVaultIds,
+      minApyDeltaPct: Number(body.minApyDeltaPct ?? 0.5),
+      minRiskDelta: Number(body.minRiskDelta ?? 5),
+      maxFreshnessHours: Number(body.maxFreshnessHours ?? 12),
+    });
+
+    const actor =
+      ((req as unknown as { user?: { id?: string } }).user?.id as string) ||
+      walletAddress;
+    recordUserPreferenceChange({
+      walletAddress,
+      category: "digest_preference",
+      actor,
+      source: "api",
+      before,
+      after,
+      reason:
+        typeof body.reason === "string" ? body.reason : undefined,
+    });
+
+    res.json(after);
   },
 );
 

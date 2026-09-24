@@ -15,6 +15,7 @@ import {
   getAllValidTimezones,
   getCommonTimezones,
 } from "../utils/timezoneValidator";
+import { recordUserPreferenceChange } from "../services/userPreferenceAuditService";
 
 const redis = new Redis(process.env.REDIS_URL || "redis://localhost:6379");
 const digestQueue = new Queue(QUEUE_NAMES.DIGEST_GENERATION, {
@@ -122,6 +123,8 @@ digestScheduleRouter.post(
 
       const schedule = validationResult.schedule;
 
+      const beforeConfig = await scheduler.getConfig(walletAddress);
+
       // Save to scheduler (this also registers the BullMQ job)
       const saveResult = await scheduler.configure(walletAddress, {
         mode: "weekly",
@@ -138,6 +141,19 @@ digestScheduleRouter.post(
           error: saveResult.error,
         });
       }
+
+      const afterConfig = await scheduler.getConfig(walletAddress);
+      const actor =
+        ((req as unknown as { user?: { id?: string } }).user?.id as string) ||
+        walletAddress;
+      recordUserPreferenceChange({
+        walletAddress,
+        category: "digest_schedule",
+        actor,
+        source: "api",
+        before: beforeConfig,
+        after: afterConfig ?? schedule,
+      });
 
       res.json({
         success: true,
@@ -256,6 +272,18 @@ digestScheduleRouter.delete(
       // Delete from Redis
       const scheduleKey = `digest:schedule:${walletAddress}`;
       await redis.del(scheduleKey);
+
+      const actor =
+        ((req as unknown as { user?: { id?: string } }).user?.id as string) ||
+        walletAddress;
+      recordUserPreferenceChange({
+        walletAddress,
+        category: "digest_schedule",
+        actor,
+        source: "api",
+        before: config,
+        after: null,
+      });
 
       res.json({
         success: true,

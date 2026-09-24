@@ -21,6 +21,11 @@ import {
 } from "../services/treasurySimulationService";
 import { successEnvelope, errorEnvelope } from "../types/envelope";
 import { requireAdmin } from "../middleware/authz";
+import {
+  validatePolicy,
+  evaluatePolicy,
+  type PolicyEvaluationContext,
+} from "../services/allocationPolicyDsl";
 
 const router = Router();
 
@@ -299,6 +304,83 @@ router.delete("/scenarios/:id", requireAdmin, (req: Request, res: Response) => {
     return;
   }
   res.status(204).send();
+});
+
+/**
+ * POST /api/treasury/policy/dry-run
+ * Validate (and optionally evaluate) an allocation policy without persisting it.
+ *
+ * Never calls storePolicy — the policy store is left untouched. Optional
+ * `contexts` run evaluatePolicy against each provided vault context so callers
+ * can preview rule matches before committing a policy.
+ */
+router.post("/policy/dry-run", requireAdmin, (req: Request, res: Response) => {
+  try {
+    const body = (req.body ?? {}) as {
+      policy?: unknown;
+      contexts?: unknown;
+    };
+
+    if (body.policy === undefined) {
+      res.status(400).json(
+        errorEnvelope(
+          "INVALID_POLICY",
+          "Request body must include a `policy` object.",
+          "treasury/policy/dry-run",
+        ),
+      );
+      return;
+    }
+
+    const validation = validatePolicy(body.policy);
+    if (!validation.ok) {
+      res.status(422).json(
+        errorEnvelope(
+          "INVALID_POLICY",
+          "Policy failed validation.",
+          "treasury/policy/dry-run",
+          { errors: validation.errors },
+        ),
+      );
+      return;
+    }
+
+    let evaluations: ReturnType<typeof evaluatePolicy>[] | undefined;
+    if (body.contexts !== undefined) {
+      if (!Array.isArray(body.contexts)) {
+        res.status(400).json(
+          errorEnvelope(
+            "INVALID_POLICY",
+            "`contexts` must be an array of evaluation contexts when provided.",
+            "treasury/policy/dry-run",
+          ),
+        );
+        return;
+      }
+      evaluations = body.contexts.map((raw) =>
+        evaluatePolicy(validation.policy, raw as PolicyEvaluationContext),
+      );
+    }
+
+    res.json(
+      successEnvelope(
+        {
+          policy: validation.policy,
+          persisted: false,
+          evaluations,
+        },
+        "treasury/policy/dry-run",
+      ),
+    );
+  } catch {
+    res.status(400).json(
+      errorEnvelope(
+        "INVALID_POLICY",
+        "Invalid request body",
+        "treasury/policy/dry-run",
+      ),
+    );
+  }
 });
 
 /**

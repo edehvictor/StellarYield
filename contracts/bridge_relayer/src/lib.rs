@@ -151,6 +151,36 @@ pub struct ValidatorInfo {
     pub added_at: u64,
 }
 
+/// Per-signer status within a multi-sig quorum (#1310).
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[contracttype]
+pub struct QuorumSignerStatus {
+    /// Validator (signer) address
+    pub address: Address,
+    /// Whether this signer has already signed the payload
+    pub signed: bool,
+    /// Validator weight (0 when inactive)
+    pub weight: u32,
+}
+
+/// Signer quorum progress snapshot for a multi-sig operation (#1310).
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[contracttype]
+pub struct QuorumProgress {
+    /// Number of signatures collected so far
+    pub signed: u32,
+    /// Configured minimum signatures required (quorum threshold)
+    pub required: u32,
+    /// Remaining signatures still needed (saturating at 0)
+    pub remaining: u32,
+    /// Progress toward quorum in basis points (0–10_000 = 0–100%)
+    pub progress_bp: u32,
+    /// Whether the quorum threshold has been met
+    pub met: bool,
+    /// Per-signer status for every active validator
+    pub per_signer: Vec<QuorumSignerStatus>,
+}
+
 // ========== ERRORS ==========
 
 #[contracterror]
@@ -456,6 +486,106 @@ impl BridgeRelayer {
     /// * `u64` - Current nonce value
     pub fn get_nonce(env: Env) -> u64 {
         env.storage().instance().get(&NONCE_KEY).unwrap_or(0)
+    }
+
+    /// Compute signer quorum progress for a multi-sig payload (#1310).
+    ///
+    /// Returns how many signatures have been collected relative to the
+    /// configured `min_validators` threshold, how many remain, overall
+    /// progress in basis points, whether the quorum is met, and a per-signer
+    /// status for every active validator.
+    ///
+    /// # Arguments
+    /// * `multi_sig` - Multi-signature structure whose validators/signatures
+    ///   represent signatures collected so far for the payload.
+    ///
+    /// # Returns
+    /// * `QuorumProgress` - Deterministic progress snapshot
+    ///
+    /// # Notes
+    /// * `signed` counts unique addresses present in `multi_sig.validators`
+    ///   that also appear in the active validator set.
+    /// * `progress_bp` is `signed * 10_000 / required` (capped at 10_000).
+    pub fn get_quorum_progress(env: Env, multi_sig: MultiSignature) -> QuorumProgress {
+        let config: BridgeConfig =
+            env.storage()
+                .instance()
+                .get(&CONFIG_KEY)
+                .unwrap_or(BridgeConfig {
+                    min_validators: DEFAULT_MIN_VALIDATORS,
+                    queue_threshold: DEFAULT_QUEUE_THRESHOLD,
+                    time_lock: DEFAULT_TIME_LOCK,
+                    max_queue_size: MAX_QUEUE_SIZE,
+                    paused: false,
+                });
+
+        let required = config.min_validators;
+
+        // Active validators from the VALS map.
+        let validators_key = symbol_short!("VALS");
+        let validators: Map<Address, ValidatorInfo> = env
+            .storage()
+            .instance()
+            .get(&validators_key)
+            .unwrap_or_else(|| Map::new(&env));
+
+        // Unique signers that are also known active validators.
+        let mut signed_set: Map<Address, bool> = Map::new(&env);
+        let signer_count = multi_sig.validators.len();
+        let mut i: u32 = 0;
+        while i < signer_count {
+            let addr = multi_sig.validators.get(i).unwrap();
+            if validators.contains_key(addr.clone()) {
+                let info = validators.get(addr.clone()).unwrap();
+                if info.active {
+                    signed_set.set(addr, true);
+                }
+            }
+            i += 1;
+        }
+        let signed = signed_set.len();
+        let remaining = required.saturating_sub(signed);
+
+        let progress_bp = if required == 0 {
+            10_000
+        } else {
+            let bp = (signed as u64 * 10_000u64) / (required as u64);
+            if bp > 10_000 {
+                10_000
+            } else {
+                bp as u32
+            }
+        };
+
+        let met = signed >= required;
+
+        // Per-signer status for every address in the active validator map.
+        let mut per_signer: Vec<QuorumSignerStatus> = Vec::new(&env);
+        let val_iter = validators.keys();
+        let mut vi: u32 = 0;
+        let val_count = val_iter.len();
+        while vi < val_count {
+            let addr = val_iter.get(vi).unwrap();
+            let info = validators.get(addr.clone()).unwrap();
+            if info.active {
+                let has_signed = signed_set.get(addr.clone()).unwrap_or(false);
+                per_signer.push_back(QuorumSignerStatus {
+                    address: addr.clone(),
+                    signed: has_signed,
+                    weight: info.weight,
+                });
+            }
+            vi += 1;
+        }
+
+        QuorumProgress {
+            signed,
+            required,
+            remaining,
+            progress_bp,
+            met,
+            per_signer,
+        }
     }
 
     /// Get queued transfer by ID

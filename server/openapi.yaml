@@ -75,6 +75,10 @@ tags:
     description: Multi-asset deposit routing recommendations
   - name: Drift
     description: Drift detection and anomaly grouping across portfolio, vault, and strategy services
+  - name: Preferences
+    description: User preference audit trail (digest, notifications, schedule)
+  - name: Governance
+    description: Governance proposals, forecasts, and multi-sig quorum progress
 
 paths:
   /api/drift/group:
@@ -1586,6 +1590,74 @@ paths:
         '500':
           description: Failed to compare recommendation stability
 
+  /api/treasury/policy/dry-run:
+    post:
+      summary: Dry-run an allocation policy without persisting it
+      description: |
+        Validates an allocation policy (and optionally evaluates it against
+        zero or more vault contexts) without writing to the policy store.
+        Returns `INVALID_POLICY` with field-level errors when validation fails.
+      tags:
+        - Treasury
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - policy
+              properties:
+                policy:
+                  type: object
+                  description: Allocation policy definition to validate
+                contexts:
+                  type: array
+                  description: Optional evaluation contexts for preview matching
+                  items:
+                    type: object
+                    properties:
+                      vaultId:
+                        type: string
+                      tvlUsd:
+                        type: number
+                      apyPct:
+                        type: number
+                      volatilityPct:
+                        type: number
+                      currentAllocationPct:
+                        type: number
+      responses:
+        '200':
+          description: Policy validated (never persisted)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  data:
+                    type: object
+                    properties:
+                      policy:
+                        type: object
+                      persisted:
+                        type: boolean
+                        enum: [false]
+                      evaluations:
+                        type: array
+                        items:
+                          type: object
+        '400':
+          description: Missing policy or invalid contexts
+        '422':
+          description: Policy failed validation (INVALID_POLICY with details.errors)
+        '401':
+          description: Unauthorized (admin required)
+        '403':
+          description: Forbidden (non-admin)
+
   /api/treasury/simulate:
     post:
       summary: Run treasury simulation
@@ -3018,6 +3090,11 @@ paths:
         Returns a routing recommendation for a multi-asset deposit: per-asset
         conversion/allocation path, expected vault-token output, estimated
         network fees, and warnings for unsupported assets.
+
+        When `routeLiquidityDepthUsd` (or `DEPOSIT_ROUTE_LIQUIDITY_DEPTH_USD`)
+        and `amountUsd` are provided, oversized deposits are rejected with
+        `INSUFFICIENT_LIQUIDITY_DEPTH` (#1312). The check is skipped when depth
+        or amount is unknown.
       tags:
         - Deposits
       requestBody:
@@ -3044,6 +3121,12 @@ paths:
                       amountInStroops:
                         type: string
                         description: Positive integer amount in stroops as a decimal string
+                amountUsd:
+                  type: number
+                  description: Approximate deposit size in USD for the depth check
+                routeLiquidityDepthUsd:
+                  type: number
+                  description: Observed route liquidity depth in USD (falls back to env)
       responses:
         '200':
           description: Routing recommendation
@@ -3062,8 +3145,128 @@ paths:
                     type: string
                   code:
                     type: string
+        '422':
+          description: INSUFFICIENT_LIQUIDITY_DEPTH — deposit exceeds route liquidity depth cap
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string
+                    enum: [INSUFFICIENT_LIQUIDITY_DEPTH]
+                  message:
+                    type: string
+                  details:
+                    type: object
         '500':
           description: Failed to compute recommendation
+
+  /api/governance/quorum-progress:
+    post:
+      summary: Compute multi-sig signer quorum progress
+      description: |
+        Deterministic quorum progress for a multi-sig operation: signed count,
+        required threshold, remaining signatures, progress percentage, met flag,
+        and per-signer status. Read-only (#1310).
+      tags:
+        - Governance
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - signers
+                - signatures
+                - threshold
+              properties:
+                signers:
+                  type: array
+                  items:
+                    type: string
+                  description: Expected signer public keys
+                signatures:
+                  type: array
+                  items:
+                    type: string
+                  description: Public keys that have signed so far
+                threshold:
+                  type: number
+                  description: Required signature threshold
+      responses:
+        '200':
+          description: Quorum progress
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  signed:
+                    type: integer
+                  required:
+                    type: integer
+                  remaining:
+                    type: integer
+                  progressPct:
+                    type: integer
+                  met:
+                    type: boolean
+                  perSigner:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        address:
+                          type: string
+                        signed:
+                          type: boolean
+        '400':
+          description: Invalid request body
+
+  /api/preferences/audit/{walletAddress}:
+    get:
+      summary: Preference change audit history for a wallet
+      description: |
+        Backend audit trail of non-alert user preference changes (digest
+        preferences, digest schedule, notification preferences). Optional
+        `category` query filters by preference category (#1311).
+      tags:
+        - Preferences
+      parameters:
+        - name: walletAddress
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Stellar public key (G…)
+        - name: category
+          in: query
+          required: false
+          schema:
+            type: string
+            enum:
+              - digest_preference
+              - digest_schedule
+              - notification_preference
+              - other
+      responses:
+        '200':
+          description: Audit history (newest first)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  walletAddress:
+                    type: string
+                  history:
+                    type: array
+                    items:
+                      type: object
+        '400':
+          description: Invalid wallet address or category
 
   # Intentionally excluded routes:
   # - Internal debugging and profiling endpoints under /internal/* are intentionally omitted from this public spec.
@@ -3935,7 +4138,7 @@ components:
         riskScore: 8.2
         rotationCostPct: 0.15
 
-     TreasurySimulationResult:
+    TreasurySimulationResult:
       type: object
       properties:
         scenarioId:
@@ -3998,7 +4201,7 @@ components:
             rotationCostPct: 0.25
         simulatedAt: "2026-06-26T12:00:00Z"
 
-     TreasuryScenario:
+    TreasuryScenario:
       type: object
       properties:
         id:
@@ -4036,7 +4239,7 @@ components:
             rotationCostPct: 0.25
         createdAt: "2026-06-26T11:45:00Z"
 
-     Alert:
+    Alert:
       type: object
       properties:
         id:
@@ -4063,7 +4266,7 @@ components:
           type: string
           format: date-time
 
-     FragmentationMetrics:
+    FragmentationMetrics:
       type: object
       properties:
         fragmentationScore:
@@ -4129,7 +4332,7 @@ components:
           type: string
           format: date-time
 
-     AuditAlert:
+    AuditAlert:
       type: object
       properties:
         id:
@@ -4156,7 +4359,7 @@ components:
           actionCount: 12
         createdAt: "2026-06-26T12:05:00Z"
 
-     MonitoringStatus:
+    MonitoringStatus:
       type: object
       properties:
         running:
@@ -4184,7 +4387,7 @@ components:
           - "slack-webhook-alerts"
           - "admin-email-alerts"
 
-     MonitoringReport:
+    MonitoringReport:
       type: object
       properties:
         generatedAt:

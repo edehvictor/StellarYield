@@ -189,6 +189,7 @@ export default function GovernanceDashboard() {
               transaction={tx}
               onSign={addSignature}
               onExecute={markExecuted}
+              config={config}
             />
           ))}
         </div>
@@ -204,6 +205,7 @@ export default function GovernanceDashboard() {
               transaction={tx}
               onSign={addSignature}
               onExecute={markExecuted}
+              config={config}
             />
           ))}
         </div>
@@ -221,6 +223,7 @@ export default function GovernanceDashboard() {
               transaction={tx}
               onSign={addSignature}
               onExecute={markExecuted}
+              config={config}
             />
           ))}
         </div>

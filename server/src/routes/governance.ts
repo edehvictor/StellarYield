@@ -10,6 +10,11 @@ import {
   validateProposalAttachments,
   type ProposalAttachmentInput,
 } from "../../../shared/types/governanceProposalAttachment";
+import {
+  computeSignerQuorumProgress,
+  type SignerQuorumInput,
+} from "../services/signerQuorumService";
+import { sendError } from "../utils/errorResponse";
 
 const router = Router();
 
@@ -71,6 +76,37 @@ router.post("/forecast", forecastLimiter, (req: Request, res: Response) => {
 });
 
 const MAX_ATTACHMENTS_PER_PROPOSAL = 20;
+
+/**
+ * POST /api/governance/quorum-progress
+ * Body: { signers: string[], signatures: string[], threshold: number }
+ *
+ * Computes multi-sig signer quorum progress (signed/required/remaining,
+ * progressPct, met, perSigner) without touching the chain. Read-only (#1310).
+ */
+router.post("/quorum-progress", (req: Request, res: Response) => {
+  const body = (req.body ?? {}) as Partial<SignerQuorumInput>;
+
+  if (!Array.isArray(body.signers)) {
+    sendError(res, 400, "INVALID_REQUEST", "signers must be an array of public keys.");
+    return;
+  }
+  if (!Array.isArray(body.signatures)) {
+    sendError(res, 400, "INVALID_REQUEST", "signatures must be an array of public keys.");
+    return;
+  }
+  if (typeof body.threshold !== "number" || !Number.isFinite(body.threshold)) {
+    sendError(res, 400, "INVALID_REQUEST", "threshold must be a number.");
+    return;
+  }
+
+  const progress = computeSignerQuorumProgress({
+    signers: body.signers.filter((s): s is string => typeof s === "string"),
+    signatures: body.signatures.filter((s): s is string => typeof s === "string"),
+    threshold: body.threshold,
+  });
+  res.json(progress);
+});
 
 /**
  * POST /api/governance/proposals/attachments/validate

@@ -284,13 +284,36 @@ export default function ZapDepositPanel({ walletAddress }: ZapDepositPanelProps)
     };
   }, [quoteData, expectedOut, slippageTolerance, isFallback, isStale]);
 
+  // Approximate USD size for depth checks: 1:1 for USD-pegged assets and the
+  // vault token; 0 for assets with unknown price (skips size/depth signals).
+  const depositAmountUsd = useMemo(() => {
+    if (!amount || !inputAsset) return 0;
+    const n = parseFloat(amount);
+    if (!Number.isFinite(n) || n <= 0) return 0;
+    const sym = (inputAsset.symbol || "").toUpperCase();
+    const stable =
+      sym === "USDC" ||
+      sym === "USDT" ||
+      sym === "USD" ||
+      sym === (vaultToken?.symbol || "").toUpperCase();
+    return stable ? n : 0;
+  }, [amount, inputAsset, vaultToken]);
+
+  const routeLiquidityDepthUsd = useMemo(() => {
+    const raw = import.meta.env.VITE_ROUTE_LIQUIDITY_DEPTH_USD;
+    if (raw === undefined || String(raw).trim() === "") return undefined;
+    const n = Number(raw);
+    return Number.isFinite(n) && n > 0 ? n : undefined;
+  }, []);
+
   const depositImpact = useDepositImpact({
-    amountUsd: 0,
+    amountUsd: depositAmountUsd,
     slippageTolerance,
     isFallback,
     isStale,
     quote: quoteSnapshot,
     blockStaleQuotes: true,
+    routeLiquidityDepthUsd: routeLiquidityDepthUsd,
   });
 
   const emitPhase = useCallback((p: TxPhase) => {
