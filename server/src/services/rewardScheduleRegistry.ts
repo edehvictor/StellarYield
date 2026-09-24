@@ -6,14 +6,96 @@ import {
   type RewardScheduleMonitorInput,
 } from "./rewardScheduleHealth";
 
+/** Error code carried by {@link RewardScheduleOverlapError}. */
+export type RewardScheduleOverlapErrorCode = "reward_schedule_overlap";
+
+/** Minimal shape needed to compare two schedule windows for overlap. */
+export interface RewardScheduleWindow {
+  protocolName: string;
+  tokenSymbol: string;
+  startDate: Date;
+  endDate: Date;
+}
+
+/**
+ * Typed error raised when publishing a reward schedule would overlap an
+ * existing active schedule window for the same protocol + token.
+ */
+export class RewardScheduleOverlapError extends Error {
+  constructor(
+    public readonly code: RewardScheduleOverlapErrorCode,
+    /** The schedule being published. */
+    public readonly candidate: RewardScheduleWindow,
+    /** The existing active schedule it conflicts with. */
+    public readonly conflictsWith: RewardScheduleWindow,
+  ) {
+    super(
+      `Reward schedule overlap for ${candidate.protocolName}/${candidate.tokenSymbol}: ` +
+        `window [${candidate.startDate.toISOString()}, ${candidate.endDate.toISOString()}] overlaps ` +
+        `existing active window [${conflictsWith.startDate.toISOString()}, ${conflictsWith.endDate.toISOString()}]. ` +
+        `Publishing is blocked until the conflict is resolved.`,
+    );
+    this.name = "RewardScheduleOverlapError";
+  }
+}
+
+/**
+ * Determines whether two reward schedule windows overlap.
+ *
+ * Windows are treated as half-open intervals `[startDate, endDate)` for the
+ * purpose of conflict detection: two windows that merely touch at a shared
+ * boundary point (e.g. `[1, 10]` and `[10, 20]`) are NOT considered a
+ * conflict, since the first window's eligibility ends exactly when the
+ * second begins and there is no instant where both are simultaneously
+ * eligible. Any real overlap of the ranges (including one window fully
+ * nested inside another) IS a conflict.
+ *
+ * This mirrors `calculateEmissionAt`'s inclusive `endDate` for emission
+ * purposes while keeping publish-time conflict detection strict, so
+ * back-to-back campaigns can still be scheduled without a gap.
+ */
+export function schedulesOverlap(a: RewardScheduleWindow, b: RewardScheduleWindow): boolean {
+  const aStart = a.startDate.getTime();
+  const aEnd = a.endDate.getTime();
+  const bStart = b.startDate.getTime();
+  const bEnd = b.endDate.getTime();
+
+  return aStart < bEnd && bStart < aEnd;
+}
+
+/**
+ * Finds the first existing active schedule (same protocol + token) whose
+ * window overlaps the candidate window, or `undefined` if there is no
+ * conflict.
+ */
+export function findOverlappingSchedule(
+  candidate: RewardScheduleWindow,
+  existingSchedules: RewardScheduleWindow[],
+): RewardScheduleWindow | undefined {
+  return existingSchedules.find(
+    (existing) =>
+      existing.protocolName === candidate.protocolName &&
+      existing.tokenSymbol === candidate.tokenSymbol &&
+      schedulesOverlap(candidate, existing),
+  );
+}
+
 export class RewardScheduleRegistry {
   /**
    * Registers or updates a reward schedule.
    * Unknown or incomplete schedules are marked as low confidence by default.
+   *
+   * Before publishing (creating, or updating the window of, an active
+   * schedule), the candidate window is checked against other active
+   * schedules for the same protocol + token. Overlapping windows are
+   * rejected with a {@link RewardScheduleOverlapError} so duplicate
+   * eligibility windows and confusing claim behavior can't reach
+   * publication. Windows that only touch at a shared boundary point are
+   * allowed — see {@link schedulesOverlap} for the exact rule.
    */
-  static async registerSchedule(schedule: Partial<RewardSchedule> & { 
-    protocolName: string; 
-    tokenSymbol: string; 
+  static async registerSchedule(schedule: Partial<RewardSchedule> & {
+    protocolName: string;
+    tokenSymbol: string;
     sourceProvenance: string;
     dailyEmission: number;
     startDate: Date;
@@ -24,6 +106,43 @@ export class RewardScheduleRegistry {
       tokenSymbol: schedule.tokenSymbol,
       isActive: true
     });
+
+    const otherActiveScheduleDocs = await RewardScheduleModel.find({
+      protocolName: schedule.protocolName,
+      tokenSymbol: schedule.tokenSymbol,
+      isActive: true,
+      ...(existing ? { _id: { $ne: existing._id } } : {}),
+    }).lean();
+
+    const otherActiveSchedules: RewardScheduleWindow[] = (otherActiveScheduleDocs || []).map((doc: any) => ({
+      protocolName: doc.protocolName,
+      tokenSymbol: doc.tokenSymbol,
+      startDate: new Date(doc.startDate),
+      endDate: new Date(doc.endDate),
+    }));
+
+    const conflict = findOverlappingSchedule(
+      {
+        protocolName: schedule.protocolName,
+        tokenSymbol: schedule.tokenSymbol,
+        startDate: schedule.startDate,
+        endDate: schedule.endDate,
+      },
+      otherActiveSchedules,
+    );
+
+    if (conflict) {
+      throw new RewardScheduleOverlapError(
+        "reward_schedule_overlap",
+        {
+          protocolName: schedule.protocolName,
+          tokenSymbol: schedule.tokenSymbol,
+          startDate: schedule.startDate,
+          endDate: schedule.endDate,
+        },
+        conflict,
+      );
+    }
 
     if (existing) {
       Object.assign(existing, schedule);
