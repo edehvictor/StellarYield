@@ -332,6 +332,25 @@ describe('DigestFormatter', () => {
     expect(payload.clusters[0].vaultId).toBe('vault-99');
   });
 
+  test('vaultId survives the full cluster → dedup → rank → format pipeline', () => {
+    const now = new Date().toISOString();
+    const events: NotificationEvent[] = [
+      makeAlert({ eventId: 'a1', vaultId: 'vault-77', triggeredAt: now }),
+      makeAlert({ eventId: 'a2', vaultId: 'vault-77', condition: 'TVL_DROP', triggeredAt: now }),
+      makeWatchlist({ eventId: 'w1', vaultId: 'vault-7', triggeredAt: now }),
+    ];
+
+    const clusters = clusterEvents(events);
+    const ranked = rankClusters(clusters.map(deduplicateCluster));
+    const payload = formatDigest('0xABC', 'daily', ranked);
+
+    expect(payload.clusters).toHaveLength(2);
+    const alertEntry = payload.clusters.find((c) => c.eventType === 'alert');
+    const watchlistEntry = payload.clusters.find((c) => c.eventType === 'watchlist');
+    expect(alertEntry?.vaultId).toBe('vault-77');
+    expect(watchlistEntry?.vaultId).toBe('vault-7');
+  });
+
   test('JSON round-trip: JSON.parse(JSON.stringify(payload)) deep-equals payload', () => {
     const now = new Date().toISOString();
     const rankedCluster: RankedCluster = {

@@ -62,6 +62,7 @@ export function deduplicateCluster(cluster: Cluster): Cluster {
   return {
     eventType: cluster.eventType,
     clusterKey: cluster.clusterKey,
+    vaultId: cluster.vaultId,
     events: Array.from(latest.values()),
   };
 }
