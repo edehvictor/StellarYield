@@ -53,6 +53,44 @@ describe("IncidentService", () => {
     expect(incident.resolved).toBe(false);
   });
 
+  it("normalizes an inconsistent severity label before persisting (#1318)", async () => {
+    const { PrismaClient } = require("@prisma/client");
+    const prisma = new PrismaClient();
+
+    await service.createIncident({
+      protocol: "TestProtocol",
+      severity: "critical", // lowercase alias -> should normalize to "CRITICAL"
+      type: "PAUSE",
+      title: "Lowercase severity incident",
+      description: "Severity provided in an inconsistent casing",
+      affectedVaults: ["Vault1"],
+      startedAt: new Date(),
+    });
+
+    expect(prisma.incident.create).toHaveBeenLastCalledWith({
+      data: expect.objectContaining({ severity: "CRITICAL" }),
+    });
+  });
+
+  it("normalizes an unknown severity label to the default (#1318)", async () => {
+    const { PrismaClient } = require("@prisma/client");
+    const prisma = new PrismaClient();
+
+    await service.createIncident({
+      protocol: "TestProtocol",
+      severity: "sev1", // unrecognized -> falls back to default (MEDIUM)
+      type: "PAUSE",
+      title: "Unknown severity incident",
+      description: "Severity provided as an unrecognized label",
+      affectedVaults: ["Vault1"],
+      startedAt: new Date(),
+    });
+
+    expect(prisma.incident.create).toHaveBeenLastCalledWith({
+      data: expect.objectContaining({ severity: "MEDIUM" }),
+    });
+  });
+
   it("should fetch incidents with filters", async () => {
     const incidents = await service.getIncidents({ protocol: "TestProtocol" });
     expect(incidents.length).toBeGreaterThan(0);

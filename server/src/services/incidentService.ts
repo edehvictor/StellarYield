@@ -7,6 +7,7 @@ import {
     decodeTimelineCursor,
     encodeTimelineCursor,
 } from "../types/pagination";
+import { normalizeSeverity } from "../utils/alertSeverity";
 
 const prisma = new PrismaClient();
 
@@ -60,8 +61,17 @@ export class IncidentService {
         affectedVaults: string[];
         startedAt: Date;
     }): Promise<Incident> {
+        // Normalize severity (#1318) so callers passing inconsistent labels
+        // (e.g. "critical", "Error", "sev1") converge on the same LOW/MEDIUM/
+        // HIGH/CRITICAL levels used everywhere severity is read downstream —
+        // including the `incident.severity as ShockEvent["severity"]` cast in
+        // getRecommendationsForIncident, which otherwise assumes (unchecked)
+        // that severity is already one of those four values.
         return prisma.incident.create({
-            data,
+            data: {
+                ...data,
+                severity: normalizeSeverity(data.severity),
+            },
         });
     }
 
