@@ -751,3 +751,33 @@ model ProjectionAuditLog {
   @@index([vaultId, auditType, auditedAt])
   @@index([hasDrift, auditedAt])
 }
+
+/// Durable, hash-chained record of admin/critical actions (#1329). Mirrors
+/// AuditLogEntry (server/src/middleware/audit.ts), which already computes
+/// the hash chain and HMAC signature; this model is a persistence layer for
+/// it, since that file previously only wrote to an in-memory array and a
+/// local JSONL file (lost on redeploy).
+model CriticalActionAuditLog {
+  id             String   @id
+  timestamp      DateTime
+  userId         String
+  userEmail      String?
+  action         String
+  resource       String
+  resourceId     String?
+  method         String
+  endpoint       String
+  status         Int
+  changes        Json?
+  ipAddress      String
+  userAgent      String
+  previousHash   String
+  hash           String   @unique
+  signature      String?
+  confirmationText String?
+  cancelled      Boolean  @default(false)
+
+  @@index([timestamp])
+  @@index([userId, timestamp])
+  @@index([action, timestamp])
+}
