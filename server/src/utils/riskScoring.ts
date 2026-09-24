@@ -154,6 +154,115 @@ export function calculateRiskScore(input: RiskInput): RiskResult {
   };
 }
 
+// ── #1416: Risk score explanation metadata ─────────────────────────────
+
+/** Which direction a factor pushed the overall score. */
+export type RiskFactorImpact = "driver" | "neutral" | "mitigant";
+
+export interface RiskFactorExplanation {
+  factor: "tvl" | "volatility" | "age";
+  /** Raw input value this sub-score was computed from. */
+  value: number;
+  /** Normalised 0–10 sub-score (same values as `RiskResult.breakdown`). */
+  subScore: number;
+  /** Share of the final score this factor contributes, 0–1. */
+  weight: number;
+  /** "driver" pushes risk up (low sub-score), "mitigant" pushes it down (high sub-score). */
+  impact: RiskFactorImpact;
+  /** One-sentence, human-readable reason — safe to render directly in the UI. */
+  reason: string;
+}
+
+export interface RiskScoreExplanation {
+  score: number;
+  label: RiskResult["label"];
+  summary: string;
+  factors: RiskFactorExplanation[];
+}
+
+const IMPACT_THRESHOLD = { driver: 4, mitigant: 7 } as const;
+
+function impactFor(subScore: number): RiskFactorImpact {
+  if (subScore < IMPACT_THRESHOLD.driver) return "driver";
+  if (subScore >= IMPACT_THRESHOLD.mitigant) return "mitigant";
+  return "neutral";
+}
+
+/**
+ * Turns a `RiskResult` into a human-readable explanation: which factors
+ * are driving the score up or down, and why, in plain language a
+ * non-technical user can read next to the number.
+ *
+ * Pure function over an already-computed `RiskResult` + the original
+ * `RiskInput` (needed for the raw values, which the breakdown alone
+ * doesn't carry) — never re-derives the score, so it can't disagree with
+ * `calculateRiskScore`'s own math.
+ */
+export function explainRiskScore(result: RiskResult, input: RiskInput): RiskScoreExplanation {
+  const factors: RiskFactorExplanation[] = [
+    {
+      factor: "tvl",
+      value: input.tvlUsd,
+      subScore: result.breakdown.tvl,
+      weight: WEIGHT_TVL,
+      impact: impactFor(result.breakdown.tvl),
+      reason:
+        result.breakdown.tvl >= IMPACT_THRESHOLD.mitigant
+          ? `Total value locked ($${formatUsd(input.tvlUsd)}) is high enough to signal strong market confidence.`
+          : result.breakdown.tvl < IMPACT_THRESHOLD.driver
+            ? `Total value locked ($${formatUsd(input.tvlUsd)}) is low, offering less depth and a thinner track record.`
+            : `Total value locked ($${formatUsd(input.tvlUsd)}) is moderate — neither a strong signal nor a red flag.`,
+    },
+    {
+      factor: "volatility",
+      value: input.ilVolatilityPct,
+      subScore: result.breakdown.volatility,
+      weight: WEIGHT_VOLATILITY,
+      impact: impactFor(result.breakdown.volatility),
+      reason:
+        result.breakdown.volatility >= IMPACT_THRESHOLD.mitigant
+          ? `Historical impermanent-loss volatility (${input.ilVolatilityPct}%) is low, so returns have been relatively stable.`
+          : result.breakdown.volatility < IMPACT_THRESHOLD.driver
+            ? `Historical impermanent-loss volatility (${input.ilVolatilityPct}%) is high, which can erode returns unpredictably.`
+            : `Historical impermanent-loss volatility (${input.ilVolatilityPct}%) is moderate.`,
+    },
+    {
+      factor: "age",
+      value: input.protocolAgeDays,
+      subScore: result.breakdown.age,
+      weight: WEIGHT_AGE,
+      impact: impactFor(result.breakdown.age),
+      reason:
+        result.breakdown.age >= IMPACT_THRESHOLD.mitigant
+          ? `The protocol has ${input.protocolAgeDays} days of live history, a meaningful track record.`
+          : result.breakdown.age < IMPACT_THRESHOLD.driver
+            ? `The protocol has only ${input.protocolAgeDays} days of live history, so it's largely untested.`
+            : `The protocol has ${input.protocolAgeDays} days of live history — some track record, but still maturing.`,
+    },
+  ];
+
+  const drivers = factors.filter((f) => f.impact === "driver").map((f) => f.factor);
+  const mitigants = factors.filter((f) => f.impact === "mitigant").map((f) => f.factor);
+
+  const summary =
+    drivers.length === 0
+      ? `${result.label} risk (${result.score}/10) — no single factor stands out as a major concern.`
+      : `${result.label} risk (${result.score}/10), driven mainly by ${listJoin(drivers)}` +
+        (mitigants.length > 0 ? `, partially offset by ${listJoin(mitigants)}.` : ".");
+
+  return { score: result.score, label: result.label, summary, factors };
+}
+
+function listJoin(items: string[]): string {
+  if (items.length === 1) return items[0]!;
+  if (items.length === 2) return `${items[0]} and ${items[1]}`;
+  return `${items.slice(0, -1).join(", ")}, and ${items[items.length - 1]}`;
+}
+
+function formatUsd(value: number): string {
+  return new Intl.NumberFormat("en-US", { maximumFractionDigits: 0 }).format(Math.max(0, value));
+}
+
 /**
  * Enhance risk result with oracle metadata for transparency.
  * 
