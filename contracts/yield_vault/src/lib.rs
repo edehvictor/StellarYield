@@ -1529,7 +1529,7 @@ mod tests {
         let (_contract, _topics, data) = events.last().unwrap();
         let decoded: (Address, bool) = data.into_val(&env);
         assert_eq!(decoded.0, charity);
-        assert_eq!(decoded.1, true);
+        assert!(decoded.1);
     }
 
     #[test]
@@ -1543,11 +1543,17 @@ mod tests {
 
         // Valid boundary 0 bps
         client.set_donation_split(&user, &0, &charity);
-        assert_eq!(client.get_donation_config(&user), (0, Some(charity.clone())));
+        assert_eq!(
+            client.get_donation_config(&user),
+            (0, Some(charity.clone()))
+        );
 
         // Valid boundary 10_000 bps
         client.set_donation_split(&user, &10_000, &charity);
-        assert_eq!(client.get_donation_config(&user), (10_000, Some(charity.clone())));
+        assert_eq!(
+            client.get_donation_config(&user),
+            (10_000, Some(charity.clone()))
+        );
 
         // Over-limit bps (> 10_000) fails deterministically
         let res_over = client.try_set_donation_split(&user, &10_001, &charity);
@@ -1586,18 +1592,18 @@ mod tests {
             YieldVault::apply_donation(&env, &user, gross_yield, &token_addr)
         });
 
-        assert_eq!(net, 800);
-        let token_client = token::Client::new(&env, &token_addr);
-        assert_eq!(token_client.balance(&charity), 200);
-        assert_eq!(client.get_total_donated(), 200);
-
-        // Assert donated event
+        // Capture donated event before subsequent view/token calls clear it.
         let events = env.events().all();
         let (_contract, _topics, data) = events.last().unwrap();
         let decoded: (Address, Address, i128) = data.into_val(&env);
         assert_eq!(decoded.0, user);
         assert_eq!(decoded.1, charity);
         assert_eq!(decoded.2, 200);
+
+        assert_eq!(net, 800);
+        let token_client = token::Client::new(&env, &token_addr);
+        assert_eq!(token_client.balance(&charity), 200);
+        assert_eq!(client.get_total_donated(), 200);
     }
 }
 

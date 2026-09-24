@@ -62,6 +62,11 @@ jobs:
     defaults:
       run:
         working-directory: client
+    env:
+      VITE_SOROBAN_RPC_URL: https://soroban-testnet.stellar.org
+      VITE_NETWORK_PASSPHRASE: "Test SDF Network ; September 2015"
+      VITE_CONTRACT_ID: CVLTFAKECONTRACTIDFORLOCALBUILDONLY
+      VITE_ZAP_CONTRACT_ID: ZAPFAKECONTRACTIDFORLOCALBUILDONLY
 
     steps:
       - name: Checkout

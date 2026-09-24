@@ -66,6 +66,13 @@ import queueRouter from "./routes/queue";
 import vaultActivityRouter from "./routes/vaultActivity";
 import watchlistRouter from "./routes/watchlist";
 import migrationReadinessRouter from "./routes/migrationReadiness";
+import reconciliationRouter from "./routes/reconciliation";
+import driftRouter from "./routes/drift";
+import portfolioMovementRouter from "./routes/portfolioMovement";
+import digestScheduleRouter from "./routes/digestScheduleSettings";
+import stablecoinBasketRouter from "./routes/stablecoinBasket";
+import deltaNeutralRouter from "./routes/deltaNeutral";
+import integrationsRouter from "./routes/integrations";
 
 import { createAuthChallenge, verifyAuthChallenge } from "./utils/stellarAuth";
 import {

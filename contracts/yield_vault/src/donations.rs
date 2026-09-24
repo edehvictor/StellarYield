@@ -15,7 +15,7 @@
 //!   *before* it is credited to the user, always within checked arithmetic.
 //! - Overflow on `TotalDonated` is absorbed gracefully by saturating add.
 
-use crate::{VaultError, YieldVault};
+use crate::{VaultError, YieldVault, YieldVaultArgs, YieldVaultClient};
 use soroban_sdk::{contractimpl, contracttype, symbol_short, token, Address, Env};
 
 // ── Storage Keys ────────────────────────────────────────────────────────
@@ -229,9 +229,13 @@ impl YieldVault {
 
         Ok(donation)
     }
+}
 
-    // ── Internal ────────────────────────────────────────────────────────
-
+// Internal helper (not part of the contract interface): routes the donation
+// slice out of `yield_amount` to the configured charity and returns the net
+// amount remaining for the user. Reference parameters are fine here because
+// this is not exported via `#[contractimpl]`.
+impl YieldVault {
     /// Routes the donation slice out of `yield_amount` to the configured
     /// charity and returns the net amount remaining for the user.
     ///
@@ -343,8 +347,6 @@ impl YieldVault {
 mod tests {
     use super::*;
     use crate::{YieldVault, YieldVaultClient};
-    use soroban_sdk::testutils::Address as _;
-    use soroban_sdk::Env;
     use soroban_sdk::testutils::{Address as _, Events};
     use soroban_sdk::{Env, IntoVal};
 
@@ -484,7 +486,7 @@ mod tests {
         let (_contract, _topics, data) = events.last().unwrap();
         let decoded: (Address, bool) = data.into_val(&env);
         assert_eq!(decoded.0, charity);
-        assert_eq!(decoded.1, true);
+        assert!(decoded.1);
 
         // De-whitelist charity
         client.set_charity_whitelist(&admin, &charity, &false);
@@ -492,7 +494,7 @@ mod tests {
         let (_contract, _topics, data2) = events2.last().unwrap();
         let decoded2: (Address, bool) = data2.into_val(&env);
         assert_eq!(decoded2.0, charity);
-        assert_eq!(decoded2.1, false);
+        assert!(!decoded2.1);
     }
 
     #[test]
@@ -536,18 +538,19 @@ mod tests {
         assert_eq!(bps50, 5000);
         assert_eq!(c50, Some(charity.clone()));
 
-        // 10000 bps (100% - maximum allowed)
+        // 10000 bps (100% - maximum allowed). Capture the event before any
+        // subsequent view call, because env.events().all() only surfaces the
+        // most recent invocation's events.
         client.set_donation_split(&user, &10_000, &charity);
-        let (bps100, c100) = client.get_donation_config(&user);
-        assert_eq!(bps100, 10_000);
-        assert_eq!(c100, Some(charity.clone()));
-
-        // Assert event emitted
         let events = env.events().all();
         let (_contract, _topics, data) = events.last().unwrap();
         let decoded: (Address, i128) = data.into_val(&env);
         assert_eq!(decoded.0, user);
         assert_eq!(decoded.1, 10_000);
+
+        let (bps100, c100) = client.get_donation_config(&user);
+        assert_eq!(bps100, 10_000);
+        assert_eq!(c100, Some(charity.clone()));
     }
 
     #[test]
@@ -660,19 +663,19 @@ mod tests {
             YieldVault::apply_donation(&env, &user, gross_yield, &token_addr)
         });
 
-        // 25% of 1000 = 250 donated, 750 net
-        assert_eq!(net, 750);
-        let token_client = soroban_sdk::token::Client::new(&env, &token_addr);
-        assert_eq!(token_client.balance(&charity), 250);
-        assert_eq!(client.get_total_donated(), 250);
-
-        // Verify donated event
+        // Capture donated event before subsequent view/token calls clear it.
         let events = env.events().all();
         let (_contract, _topics, data) = events.last().unwrap();
         let decoded: (Address, Address, i128) = data.into_val(&env);
         assert_eq!(decoded.0, user);
         assert_eq!(decoded.1, charity);
         assert_eq!(decoded.2, 250);
+
+        // 25% of 1000 = 250 donated, 750 net
+        assert_eq!(net, 750);
+        let token_client = soroban_sdk::token::Client::new(&env, &token_addr);
+        assert_eq!(token_client.balance(&charity), 250);
+        assert_eq!(client.get_total_donated(), 250);
     }
 
     #[test]

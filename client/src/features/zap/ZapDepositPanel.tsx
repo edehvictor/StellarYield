@@ -6,8 +6,7 @@ import { decodeTransactionError } from "../../utils/errorDecoder";
 import { zapDeposit } from "../../services/soroban";
 import type { TxPhase } from "../../services/transactionPhase";
 import { TX_PHASE_PIPELINE } from "../../services/transactionPhase";
-import { fetchSwapQuote, verifySwapQuote, ZapQuoteError } from "./fetchSwapQuote";
-import { fetchSwapQuote, isQuoteCancellation, verifySwapQuote } from "./fetchSwapQuote";
+import { fetchSwapQuote, verifySwapQuote, ZapQuoteError, isQuoteCancellation } from "./fetchSwapQuote";
 import { minAmountAfterSlippage } from "./slippage";
 import {
   buildZapQuoteRequestKey,
@@ -42,10 +41,6 @@ const MIN_SLIPPAGE = 0.1;
 const MAX_SLIPPAGE = 15;
 const FALLBACK_SOURCE = "fallback_rate";
 const SUPPORT_URL = "https://github.com/edehvictor/StellarYield/issues";
-
-function quoteAgeSeconds(quotedAt: string): number {
-  return Math.floor((Date.now() - new Date(quotedAt).getTime()) / 1000);
-}
 
 function explorerAccountUrl(walletAddress: string | null): string {
   const passphrase = import.meta.env.VITE_NETWORK_PASSPHRASE ?? "";

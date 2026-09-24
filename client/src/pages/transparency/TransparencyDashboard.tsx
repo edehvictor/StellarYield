@@ -30,6 +30,19 @@ import VaultReliabilityPanel from "./VaultReliabilityPanel";
 import AuditReplayReportPanel from "./AuditReplayReportPanel";
 import RegistryDiffPage from "./RegistryDiff";
 import DeploymentManifestVerifier from "../../components/DeploymentManifestVerifier";
+import registryJson from "../../../../contracts/registry.json";
+import prevRegistryJson from "../../../../contracts/registry.previous.json";
+import {
+    assessRegistryFromRecords,
+    getStateLabel,
+    getSubsystemLabel,
+    mapIndexerStatus,
+    mapRelayerStatus,
+    mapSmokeTestStatus,
+    summarizeTransparencyHealth,
+    type SubsystemState,
+    type TransparencyHealthSummary,
+} from "./transparencyServiceHealth";
 
 const getApiBase = () => {
   try {

@@ -72,6 +72,8 @@ async function toZapQuoteError(res: Response): Promise<ZapQuoteError> {
     requestId: asString(body.requestId),
     recoverable: body.recoverable === true,
   });
+}
+
 export interface FetchSwapQuoteOptions {
   signal?: AbortSignal;
 }
@@ -121,20 +123,17 @@ export async function fetchSwapQuote(
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(req),
+      signal: options?.signal,
     });
   } catch (e) {
+    if (options?.signal?.aborted || (e instanceof Error && e.name === "AbortError")) {
+      throw new QuoteRequestCancelledError();
+    }
     throw new ZapQuoteError(e instanceof Error ? e.message : "Network request failed", {
       code: "NETWORK_ERROR",
       status: 0,
       recoverable: true,
     });
-      signal: options?.signal,
-    });
-  } catch (err) {
-    if (options?.signal?.aborted || (err instanceof Error && err.name === "AbortError")) {
-      throw new QuoteRequestCancelledError();
-    }
-    throw err;
   }
 
   if (!res.ok) {

@@ -191,10 +191,13 @@ export function useNotifications() {
  * Hook to get only the unread count
  * Useful for header badge components
  */
-export function useUndeadCount() {
+export function useUnreadCount() {
   const { state } = useNotifications();
   return state.unreadCount;
 }
+
+/** @deprecated Typo alias for {@link useUnreadCount}. */
+export const useUndeadCount = useUnreadCount;
 
 /**
  * Hook to get only notifications

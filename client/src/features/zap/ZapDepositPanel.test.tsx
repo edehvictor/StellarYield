@@ -316,6 +316,9 @@ describe("ZapDepositPanel", () => {
       expect(screen.queryByRole("link", { name: /view account on explorer/i })).not.toBeInTheDocument();
       expect(screen.queryByRole("link", { name: /contact support/i })).not.toBeInTheDocument();
       expect(screen.queryByRole("button", { name: /retry quote/i })).not.toBeInTheDocument();
+    });
+  });
+
   describe("per-vault preferences", () => {
     beforeEach(() => {
       localStorage.clear();

@@ -11,7 +11,8 @@
  * prominent notice so users understand why some numbers are absent.
  */
 
-import { AlertTriangle, Clock, Activity, Droplets, ShieldCheck, ShieldAlert, HelpCircle } from "lucide-react";
+import type { ReactNode } from "react";
+import { AlertTriangle, Clock, Activity, Droplets, ShieldCheck, ShieldAlert, HelpCircle, type LucideIcon } from "lucide-react";
 import type { StrategyComparison, StrategyRiskData, RiskLabel, DataFreshness } from "./types";
 
 // ── Helpers ───────────────────────────────────────────────────────────────
@@ -45,8 +46,8 @@ function MetricCell({
   className = "",
 }: {
   label: string;
-  value: React.ReactNode;
-  icon: React.ElementType;
+  value: ReactNode;
+  icon: LucideIcon;
   missing?: boolean;
   className?: string;
 }) {

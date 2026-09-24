@@ -14,6 +14,7 @@ import { RecoveryAdvisor } from "./AIAdvisor/RecoveryAdvisor";
 import { fetchVaultStats, type VaultStats, formatTvl, validateVaultSlug } from "../lib/vaultData";
 import VaultCapacityWarning, { type VaultCapacityStatus } from "./VaultCapacityWarning";
 import VaultMigrationReadinessPanel from "./VaultMigrationReadinessPanel";
+import { VaultRiskBadge } from "./common/VaultRiskBadge";
 
 /**
  * Injects or updates a <meta> tag in document.head.

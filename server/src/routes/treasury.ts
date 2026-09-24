@@ -17,6 +17,7 @@ import {
   previewImport,
   TreasuryValidationError,
   RebalancingPreviewError,
+  type AllocationPosition,
 } from "../services/treasurySimulationService";
 import { successEnvelope, errorEnvelope } from "../types/envelope";
 import { requireAdmin } from "../middleware/authz";

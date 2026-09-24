@@ -37,12 +37,6 @@ export interface IndexerBootStatusSnapshot {
   };
 }
 
-export interface IndexerReplayError {
-  ledger: number | null;
-  message: string;
-  at: string; // ISO timestamp
-}
-
 export interface IndexerStatusInput {
   /** Last ledger the indexer durably committed (replay checkpoint). */
   indexedLedger: number | null;

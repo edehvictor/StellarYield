@@ -51,24 +51,20 @@ function buildRunner(
     }
 
     let cachedTvl: number;
-    try {
-      const balance = await prisma.vaultBalance.findUnique({
-        where: { walletAddress },
-      });
-      // A configured expectation with no backing record is a data gap.
-      if (!balance) {
-        return {
-          status: "failed",
-          changeCount: 0,
-          mismatchCount: 1,
-          driftPct: 1,
-          error: "No cached vault balance found for wallet.",
-        };
-      }
-      cachedTvl = balance.tvl ?? 0;
-    } catch (error) {
-      throw error;
+    const balance = await prisma.vaultBalance.findUnique({
+      where: { walletAddress },
+    });
+    // A configured expectation with no backing record is a data gap.
+    if (!balance) {
+      return {
+        status: "failed",
+        changeCount: 0,
+        mismatchCount: 1,
+        driftPct: 1,
+        error: "No cached vault balance found for wallet.",
+      };
     }
+    cachedTvl = balance.tvl ?? 0;
 
     if (expected === 0) {
       return { status: "success", changeCount: 0, mismatchCount: 0, driftPct: 0 };
