@@ -1,6 +1,21 @@
 import { PrismaClient } from "@prisma/client";
 import { calculateDailyMovement, type DailyMovement } from "../../../shared/types/dailyMovement";
+import {
+  compareSnapshots,
+  type SnapshotComparisonResult,
+} from "../../../shared/types/snapshotComparison";
 import type { UserTransaction } from "@prisma/client";
+
+/** Raised when a snapshot comparison is requested for a date with no stored snapshot. */
+export class SnapshotNotFoundError extends Error {
+  constructor(
+    public readonly walletAddress: string,
+    public readonly snapshotDate: string,
+  ) {
+    super(`No portfolio snapshot found for ${walletAddress} on ${snapshotDate}.`);
+    this.name = "SnapshotNotFoundError";
+  }
+}
 
 export class PortfolioMovementService {
   constructor(private prisma: PrismaClient) {}
@@ -198,6 +213,64 @@ export class PortfolioMovementService {
     }
 
     return movements;
+  }
+
+  /**
+   * Compares two arbitrary portfolio snapshots for a wallet, identified by
+   * date, and returns a structured per-asset diff.
+   *
+   * Unlike `getDailyMovement`/`getMovementHistory`, which are fixed to
+   * consecutive days, this accepts any two dates so a caller can compare,
+   * e.g., "start of month" against "today". Throws `SnapshotNotFoundError`
+   * (a typed error, not a generic one) when either date has no stored
+   * snapshot, so the route layer can turn it into a 404 rather than a 500.
+   */
+  async compareSnapshotsByDate(
+    walletAddress: string,
+    fromDate: Date,
+    toDate: Date,
+  ): Promise<SnapshotComparisonResult> {
+    const fromKey = this.getDateKey(fromDate);
+    const toKey = this.getDateKey(toDate);
+
+    const [fromSnapshot, toSnapshot] = await Promise.all([
+      this.prisma.dailyPortfolioSnapshot.findUnique({
+        where: { walletAddress_snapshotDate: { walletAddress, snapshotDate: fromKey } },
+      }),
+      this.prisma.dailyPortfolioSnapshot.findUnique({
+        where: { walletAddress_snapshotDate: { walletAddress, snapshotDate: toKey } },
+      }),
+    ]);
+
+    if (!fromSnapshot) {
+      throw new SnapshotNotFoundError(walletAddress, fromKey.toISOString().split("T")[0]);
+    }
+    if (!toSnapshot) {
+      throw new SnapshotNotFoundError(walletAddress, toKey.toISOString().split("T")[0]);
+    }
+
+    return compareSnapshots(
+      {
+        walletAddress,
+        snapshotDate: fromKey.toISOString().split("T")[0],
+        totalValueUsd: fromSnapshot.totalValueUsd,
+        assetBreakdown:
+          (fromSnapshot.assetBreakdown as Record<
+            string,
+            { valueUsd: number; quantity: number }
+          >) || {},
+      },
+      {
+        walletAddress,
+        snapshotDate: toKey.toISOString().split("T")[0],
+        totalValueUsd: toSnapshot.totalValueUsd,
+        assetBreakdown:
+          (toSnapshot.assetBreakdown as Record<
+            string,
+            { valueUsd: number; quantity: number }
+          >) || {},
+      },
+    );
   }
 
   /**
