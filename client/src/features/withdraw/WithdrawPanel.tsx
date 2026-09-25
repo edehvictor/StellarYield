@@ -32,6 +32,14 @@ export interface WithdrawPanelProps {
 
 // ── Withdrawal preview types ────────────────────────────────────────────────
 
+interface ReserveImpactPreview {
+  currentReserveRatioPct: number;
+  projectedReserveRatioPct: number;
+  projectedReserveUsd: number;
+  breachesMinBuffer: boolean;
+  minBufferPct: number;
+}
+
 interface WithdrawalPreview {
   vaultId: string;
   requestedAmountUsd: number;
@@ -47,6 +55,7 @@ interface WithdrawalPreview {
   quotedAt: string;
   expiresAt?: string;
   quoteTtlMs?: number;
+  reserveImpact?: ReserveImpactPreview;
 }
 
 // Fallback USD rate — in production this would come from a price oracle.
@@ -220,6 +229,21 @@ function PreviewPanel({
           <AlertTriangle className="w-4 h-4 shrink-0 text-yellow-400 mt-0.5" />
           Low liquidity detected. Consider withdrawing in smaller batches to
           reduce price impact.
+        </div>
+      )}
+
+      {/* Low-reserve warning */}
+      {preview.reserveImpact?.breachesMinBuffer && (
+        <div
+          role="alert"
+          className="flex items-start gap-2 rounded-lg bg-amber-500/10 border border-amber-500/30 p-3 text-xs text-amber-200/80"
+        >
+          <AlertTriangle className="w-4 h-4 shrink-0 text-amber-400 mt-0.5" />
+          <span>
+            <span className="font-medium text-amber-100">Low reserve detected.</span>{" "}
+            This withdrawal would leave the vault below its minimum reserve
+            buffer. Projected reserve ratio: {preview.reserveImpact.projectedReserveRatioPct.toFixed(1)}% vs {preview.reserveImpact.minBufferPct}% minimum.
+          </span>
         </div>
       )}
     </div>
