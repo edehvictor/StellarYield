@@ -164,19 +164,53 @@ describe("On-ramp API Routes", () => {
     it("cancels pending transaction", async () => {
       const res = await request(app)
         .post("/api/onramp/cancel")
-        .send({ txId: "tx_12345" });
+        .send({
+          txId: "tx_12345",
+          walletAddress: mockTransaction.walletAddress,
+        });
 
       expect(res.status).toBe(200);
       expect(res.body.success).toBe(true);
-      expect(res.body.transaction.status).toBe("FAILED");
+      expect(res.body.transaction.status).toBe("CANCELLED");
     });
 
     it("returns 404 for unknown transaction", async () => {
       const res = await request(app)
         .post("/api/onramp/cancel")
-        .send({ txId: "tx_unknown" });
+        .send({
+          txId: "tx_unknown",
+          walletAddress: mockTransaction.walletAddress,
+        });
 
       expect(res.status).toBe(404);
+      expect(res.body.error).toBe("INTENT_NOT_FOUND");
+    });
+
+    it("rejects cancellation from a different client", async () => {
+      const res = await request(app)
+        .post("/api/onramp/cancel")
+        .send({ txId: "tx_12345", walletAddress: "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHG" });
+
+      expect(res.status).toBe(403);
+      expect(res.body.error).toBe("UNAUTHORIZED_INTENT");
+    });
+
+    it("rejects an already processed intent", async () => {
+      mockTransactionsDb.set("tx_12345", { ...mockTransaction, status: "COMPLETED" });
+
+      const res = await request(app)
+        .post("/api/onramp/cancel")
+        .send({ txId: "tx_12345", walletAddress: mockTransaction.walletAddress });
+
+      expect(res.status).toBe(409);
+      expect(res.body.error).toBe("INVALID_INTENT_STATE");
+    });
+
+    it("rejects missing intent fields with a typed error", async () => {
+      const res = await request(app).post("/api/onramp/cancel").send({ txId: "tx_12345" });
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toBe("INVALID_REQUEST");
     });
   });
 });
