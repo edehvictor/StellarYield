@@ -11,6 +11,7 @@ import {
   WeeklyReportHealthCheck,
 } from "../services/weeklyYieldReportService";
 import { sendBatchEmails } from "../services/emailService";
+import { toExportFailure, lookupExportFailure } from "../types/exportFailure";
 
 /**
  * Weekly Yield Report Job
@@ -172,7 +173,12 @@ export async function runWeeklyYieldReportJob(config: JobConfig): Promise<{
 
     return result;
   } catch (error) {
+    const failure = toExportFailure(error);
+    const descriptor = lookupExportFailure(failure.code);
     console.error("Weekly yield report job error:", error);
+    if (descriptor?.recoveryNote) {
+      console.error("Recovery note:", descriptor.recoveryNote);
+    }
     throw error;
   }
 }

@@ -48,6 +48,8 @@ export interface ExportFailureDescriptor {
   retryable: boolean;
   /** Human-readable fallback message. */
   defaultMessage: string;
+  /** Suggested recovery actions for operators. */
+  recoveryNote?: string;
 }
 
 // ── Catalog ───────────────────────────────────────────────────────────────
@@ -60,6 +62,7 @@ export const EXPORT_FAILURES: Record<ExportFailureCode, ExportFailureDescriptor>
     httpStatus: 400,
     retryable: false,
     defaultMessage: "The export request failed validation.",
+    recoveryNote: "Verify that the requested filters are valid and supported.",
   },
   EXPORT_NO_DATA: {
     code: "EXPORT_NO_DATA",
@@ -67,6 +70,7 @@ export const EXPORT_FAILURES: Record<ExportFailureCode, ExportFailureDescriptor>
     httpStatus: 404,
     retryable: false,
     defaultMessage: "No portfolio data matches the selected filters.",
+    recoveryNote: "Try broadening the selection filters.",
   },
   EXPORT_SIZE_LIMIT_EXCEEDED: {
     code: "EXPORT_SIZE_LIMIT_EXCEEDED",
@@ -74,6 +78,7 @@ export const EXPORT_FAILURES: Record<ExportFailureCode, ExportFailureDescriptor>
     httpStatus: 413,
     retryable: false,
     defaultMessage: "The export exceeds the configured response-size limit.",
+    recoveryNote: "Try narrowing the time range or asset classes.",
   },
   NO_TRANSACTIONS: {
     code: "NO_TRANSACTIONS",
@@ -81,6 +86,7 @@ export const EXPORT_FAILURES: Record<ExportFailureCode, ExportFailureDescriptor>
     httpStatus: 404,
     retryable: false,
     defaultMessage: "No transactions found for this address.",
+    recoveryNote: "Verify the wallet address and ensure it has transaction history.",
   },
   PREVIEW_WARNINGS_PRESENT: {
     code: "PREVIEW_WARNINGS_PRESENT",
@@ -88,6 +94,7 @@ export const EXPORT_FAILURES: Record<ExportFailureCode, ExportFailureDescriptor>
     httpStatus: 409,
     retryable: false,
     defaultMessage: "The export preview has blocking warnings that must be resolved first.",
+    recoveryNote: "Review the export preview for warnings and resolve them.",
   },
   IDEMPOTENCY_KEY_MISMATCH: {
     code: "IDEMPOTENCY_KEY_MISMATCH",
@@ -95,6 +102,7 @@ export const EXPORT_FAILURES: Record<ExportFailureCode, ExportFailureDescriptor>
     httpStatus: 422,
     retryable: false,
     defaultMessage: "The idempotency key has already been used with different parameters.",
+    recoveryNote: "Use a unique idempotency key for each unique request.",
   },
 
   // Timeout
@@ -104,6 +112,7 @@ export const EXPORT_FAILURES: Record<ExportFailureCode, ExportFailureDescriptor>
     httpStatus: 504,
     retryable: true,
     defaultMessage: "The export took too long and was cancelled. Please retry.",
+    recoveryNote: "The system is under high load. Retry after a few minutes.",
   },
 
   // Service failures
@@ -113,6 +122,7 @@ export const EXPORT_FAILURES: Record<ExportFailureCode, ExportFailureDescriptor>
     httpStatus: 503,
     retryable: true,
     defaultMessage: "A dependency required for this export is temporarily unavailable.",
+    recoveryNote: "Check if the required dependent services are running and accessible.",
   },
   EXPORT_SERVICE_FAILURE: {
     code: "EXPORT_SERVICE_FAILURE",
@@ -120,6 +130,7 @@ export const EXPORT_FAILURES: Record<ExportFailureCode, ExportFailureDescriptor>
     httpStatus: 500,
     retryable: true,
     defaultMessage: "Failed to generate export.",
+    recoveryNote: "Investigate server logs for underlying service exceptions.",
   },
   EXPORT_FAILED: {
     code: "EXPORT_FAILED",
@@ -127,6 +138,7 @@ export const EXPORT_FAILURES: Record<ExportFailureCode, ExportFailureDescriptor>
     httpStatus: 500,
     retryable: true,
     defaultMessage: "Failed to generate export.",
+    recoveryNote: "Investigate server logs for underlying service exceptions.",
   },
   EXPORT_PREVIEW_FAILED: {
     code: "EXPORT_PREVIEW_FAILED",
@@ -134,6 +146,7 @@ export const EXPORT_FAILURES: Record<ExportFailureCode, ExportFailureDescriptor>
     httpStatus: 500,
     retryable: true,
     defaultMessage: "Failed to build export preview.",
+    recoveryNote: "Investigate server logs for underlying preview generation exceptions.",
   },
   DB_UNAVAILABLE: {
     code: "DB_UNAVAILABLE",
@@ -141,6 +154,7 @@ export const EXPORT_FAILURES: Record<ExportFailureCode, ExportFailureDescriptor>
     httpStatus: 503,
     retryable: true,
     defaultMessage: "Export database is unavailable.",
+    recoveryNote: "Check if the database is reachable and accepting connections.",
   },
 };
 
