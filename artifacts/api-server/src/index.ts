@@ -1,5 +1,13 @@
-import app from "./app";
+import { createApp } from "./app";
 import { logger } from "./lib/logger";
+import { CancelTransactionIntentService } from "./services/transactionIntents/cancelTransactionIntentService";
+import { DrizzleTransactionIntentRepository } from "./services/transactionIntents/drizzleTransactionIntentRepository";
+
+const app = createApp({
+  cancelTransactionIntent: new CancelTransactionIntentService(
+    new DrizzleTransactionIntentRepository(),
+  ),
+});
 
 const rawPort = process.env["PORT"];
 

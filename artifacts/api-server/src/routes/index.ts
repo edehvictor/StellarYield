@@ -1,8 +1,19 @@
 import { Router, type IRouter } from "express";
 import healthRouter from "./health";
+import { createIntentsRouter, type IntentsRouterDependencies } from "./intents";
 
-const router: IRouter = Router();
+export type RouterDependencies = IntentsRouterDependencies;
 
-router.use(healthRouter);
+/**
+ * Builds the `/api` router with every feature router mounted. Dependencies
+ * are injected so tests can exercise the full HTTP stack against in-memory
+ * implementations without touching the database.
+ */
+export function createRouter(dependencies: RouterDependencies): IRouter {
+  const router: IRouter = Router();
 
-export default router;
+  router.use(healthRouter);
+  router.use(createIntentsRouter(dependencies));
+
+  return router;
+}

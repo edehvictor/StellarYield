@@ -10,6 +10,8 @@ servers:
 tags:
   - name: health
     description: Health operations
+  - name: intents
+    description: Transaction intent operations
 paths:
   /healthz:
     get:
@@ -24,6 +26,78 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/HealthStatus"
+  /intents/cancel:
+    post:
+      operationId: cancelTransactionIntent
+      tags: [intents]
+      summary: Cancel a pending transaction intent
+      description: >
+        Marks a pending transaction intent as cancelled on behalf of the
+        authenticated client. The request is rejected with a typed error
+        payload when the intent does not exist, has already been processed,
+        or belongs to a different client identifier.
+      parameters:
+        - in: header
+          name: x-client-id
+          required: true
+          description: >
+            Client identifier that owns the transaction intent. Requests
+            without a valid identifier are rejected before any intent state
+            is read or written.
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 128
+            pattern: "^[A-Za-z0-9._-]+$"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CancelTransactionIntentRequest"
+      responses:
+        "200":
+          description: Transaction intent cancelled
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TransactionIntentCancelled"
+        "400":
+          description: Invalid request payload
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "401":
+          description: Missing or invalid client identifier
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "403":
+          description: Transaction intent belongs to a different client
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "404":
+          description: Transaction intent not found or already cleared
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "409":
+          description: Transaction intent already processed or cancelled
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "503":
+          description: Intent storage temporarily unavailable
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
 components:
   schemas:
     HealthStatus:
@@ -33,4 +107,79 @@ components:
           type: string
       required:
         - status
-
+    ApiError:
+      type: object
+      description: Stable typed error payload returned by every failure path.
+      properties:
+        error:
+          type: object
+          properties:
+            code:
+              type: string
+              enum:
+                - INVALID_REQUEST
+                - MISSING_CLIENT_IDENTIFIER
+                - INVALID_CLIENT_IDENTIFIER
+                - INTENT_NOT_FOUND
+                - INTENT_CLIENT_MISMATCH
+                - INTENT_ALREADY_PROCESSED
+                - INTENT_SERVICE_UNAVAILABLE
+                - INTERNAL_SERVER_ERROR
+            message:
+              type: string
+            details:
+              type: array
+              description: Per-field validation details, when applicable.
+              items:
+                type: object
+                properties:
+                  path:
+                    type: string
+                  message:
+                    type: string
+                required:
+                  - path
+                  - message
+          required:
+            - code
+            - message
+      required:
+        - error
+    CancelTransactionIntentRequest:
+      type: object
+      properties:
+        intentId:
+          type: string
+          format: uuid
+          description: Identifier of the transaction intent to cancel.
+      required:
+        - intentId
+    TransactionIntentCancelled:
+      type: object
+      description: Payload returned when a transaction intent was cancelled.
+      properties:
+        intent:
+          type: object
+          properties:
+            id:
+              type: string
+            clientId:
+              type: string
+            status:
+              type: string
+              enum:
+                - cancelled
+            cancelledAt:
+              type: string
+              format: date-time
+            updatedAt:
+              type: string
+              format: date-time
+          required:
+            - id
+            - clientId
+            - status
+            - cancelledAt
+            - updatedAt
+      required:
+        - intent
