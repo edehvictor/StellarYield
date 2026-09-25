@@ -1,8 +1,9 @@
 import React, { useEffect, useState } from "react";
-import { Trophy, Medal, TrendingUp, Filter, AlertCircle, RefreshCw, BarChart3, RotateCcw } from "lucide-react";
+import { Trophy, Medal, TrendingUp, Filter, BarChart3, RotateCcw } from "lucide-react";
 import { apiUrl } from "../../lib/api";
 import { formatRewardRate } from "../../lib/apyFormat";
 import { ConfidenceBadge } from "../../components/AIAdvisor/ConfidenceBadge";
+import { BackendUnavailable } from "../../components/BackendUnavailable";
 import {
   useLeaderboardFilters,
   TIME_WINDOWS,
@@ -177,20 +178,11 @@ const StrategyLeaderboard: React.FC = () => {
           <p className="text-gray-400 text-sm">Loading strategy rankings...</p>
         </div>
       ) : error ? (
-        <div className="glass-panel p-12 flex flex-col items-center justify-center space-y-4 border border-red-500/30">
-          <AlertCircle className="text-red-400" size={48} />
-          <div className="text-center space-y-2">
-            <h3 className="text-xl font-bold text-white">Failed to Load Strategies</h3>
-            <p className="text-gray-400 text-sm max-w-md">{error}</p>
-          </div>
-          <button
-            onClick={fetchLeaderboard}
-            className="flex items-center gap-2 px-6 py-3 bg-indigo-500 hover:bg-indigo-600 text-white font-semibold rounded-lg transition-colors"
-          >
-            <RefreshCw size={16} />
-            Retry
-          </button>
-        </div>
+        <BackendUnavailable
+          featureName="Strategy Leaderboard"
+          reason="The backend service is currently disconnected or unavailable. Please try again later."
+          onRetry={fetchLeaderboard}
+        />
       ) : (data?.items ?? []).length === 0 ? (
         <div className="glass-panel p-12 flex flex-col items-center justify-center space-y-4">
           <BarChart3 className="text-gray-500" size={64} />

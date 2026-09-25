@@ -1,7 +1,8 @@
 import React, { useEffect, useState } from "react";
-import { Trophy, Medal, Star, Wallet, AlertCircle, RefreshCw, Users } from "lucide-react";
+import { Trophy, Medal, Star, Wallet, Users } from "lucide-react";
 import { apiUrl } from "../../lib/api";
 import { useDensity } from "../../context/DensityContext";
+import { BackendUnavailable } from "../../components/BackendUnavailable";
 
 interface LeaderboardEntry {
   rank: number;
@@ -78,20 +79,11 @@ const Leaderboard: React.FC = () => {
             Compete with the whales to earn exclusive badges and protocol rewards.
           </p>
         </div>
-        <div className="glass-panel p-12 flex flex-col items-center justify-center space-y-4 border border-red-500/30">
-          <AlertCircle className="text-red-400" size={48} />
-          <div className="text-center space-y-2">
-            <h3 className="text-xl font-bold text-white">Failed to Load Leaderboard</h3>
-            <p className="text-gray-400 text-sm max-w-md">{error}</p>
-          </div>
-          <button
-            onClick={fetchLeaderboard}
-            className="flex items-center gap-2 px-6 py-3 bg-indigo-500 hover:bg-indigo-600 text-white font-semibold rounded-lg transition-colors"
-          >
-            <RefreshCw size={16} />
-            Retry
-          </button>
-        </div>
+        <BackendUnavailable
+          featureName="Leaderboard"
+          reason="The backend service is currently disconnected or unavailable. Please try again later."
+          onRetry={fetchLeaderboard}
+        />
       </div>
     );
   }

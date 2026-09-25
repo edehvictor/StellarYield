@@ -108,7 +108,7 @@ describe("ApyDashboard states", () => {
     render(<ApyDashboard />);
 
     expect(
-      await screen.findByText(/Failed to Load APY Data/i),
+      await screen.findByText(/APY Data Temporarily Unavailable/i),
     ).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: /Retry/i }));
 
@@ -277,7 +277,7 @@ describe("ApyDashboard states", () => {
     expect(banner).toHaveTextContent("Offline — Showing Cached Data");
     expect(screen.getAllByText("Blend").length).toBeGreaterThan(0);
     expect(
-      screen.queryByText(/Failed to Load APY Data/i),
+      screen.queryByText(/APY Data Temporarily Unavailable/i),
     ).not.toBeInTheDocument();
 
     // Reconnect: fresh response replaces the cache and clears the banner.

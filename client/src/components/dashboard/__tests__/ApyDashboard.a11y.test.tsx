@@ -117,7 +117,7 @@ describe("ApyDashboard — accessibility (grid view)", () => {
     mockFetchFail();
     render(<ApyDashboard />);
     expect(
-      await screen.findByText(/Failed to Load APY Data|Unable to fetch/i),
+      await screen.findByText(/APY Data Temporarily Unavailable|Unable to fetch/i),
     ).toBeInTheDocument();
   });
 

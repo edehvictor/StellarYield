@@ -23,6 +23,7 @@ import {
   Maximize2,
 } from "lucide-react";
 import { apiUrl } from "../../lib/api";
+import { BackendUnavailable } from "../BackendUnavailable";
 import { stableSort } from "../../lib/stableSort";
 import EmptyState from "../common/EmptyState";
 import { EMPTY_STATE_APY } from "../../utils/emptyStateCopy";
@@ -176,13 +177,7 @@ function normalizeApyEntry(entry: ApiApyEntry): ApyEntry {
 }
 
 function getErrorMessage(error: unknown): string {
-  if (error instanceof Error && error.message) {
-    if (error.message.startsWith("HTTP")) {
-      return `Yield API request failed (${error.message})`;
-    }
-    return error.message;
-  }
-  return "Unable to fetch live APY data right now";
+  return "Unable to fetch live APY data right now. The backend service may be disconnected.";
 }
 
 function getSortButtonLabel(
@@ -478,21 +473,11 @@ export default function ApyDashboard() {
             Compare yields across Stellar DeFi protocols
           </p>
         </header>
-        <div className="glass-panel p-12 text-center">
-          <div className="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-red-500/10 mb-6">
-            <AlertTriangle size={32} className="text-[#FF5E5E]" />
-          </div>
-          <h3 className="text-xl font-bold mb-2">Failed to Load APY Data</h3>
-          <p className="text-gray-400 max-w-md mx-auto mb-6">
-            {error}. Please try again.
-          </p>
-          <button
-            onClick={handleRefresh}
-            className="btn-primary inline-flex items-center gap-2"
-          >
-            <RefreshCw size={16} /> Retry
-          </button>
-        </div>
+        <BackendUnavailable
+          featureName="APY Data"
+          reason="The backend service is currently disconnected or unavailable. Please try again later."
+          onRetry={handleRefresh}
+        />
       </div>
     );
   }
