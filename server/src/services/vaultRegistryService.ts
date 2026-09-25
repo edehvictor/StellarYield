@@ -80,7 +80,12 @@ function validateUpdate(update: VaultRegistryUpdate): void {
 }
 
 export const vaultRegistryService = {
-  /** Returns every known vault's current registry entry. */
+  /**
+   * Returns every known vault's current registry entry in stable display
+   * order: ascending by `vaultId` (`localeCompare`, case-insensitive
+   * primary with case-sensitive tiebreak) so registry consumers render
+   * deterministically regardless of cache insertion order.
+   */
   listVaults(): VaultRegistryEntry[] {
     const seenIds = new Set(Object.keys(DEFAULT_REGISTRY));
     for (const key of cache.keys()) {
@@ -90,7 +95,14 @@ export const vaultRegistryService = {
     }
     return Array.from(seenIds)
       .map((id) => getEntry(id))
-      .filter((entry): entry is VaultRegistryEntry => entry !== undefined);
+      .filter((entry): entry is VaultRegistryEntry => entry !== undefined)
+      .sort((a, b) => {
+        const primary = a.vaultId.toLowerCase().localeCompare(b.vaultId.toLowerCase());
+        if (primary !== 0) return primary;
+        if (a.vaultId < b.vaultId) return -1;
+        if (a.vaultId > b.vaultId) return 1;
+        return 0;
+      });
   },
 
   getVault(vaultId: string): VaultRegistryEntry | undefined {
