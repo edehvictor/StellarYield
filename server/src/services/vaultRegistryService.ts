@@ -21,13 +21,46 @@ export interface VaultRegistryEntry {
 
 // Seeded from the pre-existing hardcoded VAULT_REGISTRY in
 // vaultMigrationReadinessService.ts so existing vault IDs keep working.
-const DEFAULT_REGISTRY: Record<string, Omit<VaultRegistryEntry, "vaultId" | "updatedBy" | "updatedAt">> = {
-  usdc: { name: "USDC Yield Vault", asset: "USDC", protocol: "Blend", status: "ACTIVE" },
-  xlm: { name: "XLM Yield Vault", asset: "XLM", protocol: "Blend", status: "ACTIVE" },
-  "xlm-usdc": { name: "XLM-USDC LP Vault", asset: "XLM-USDC", protocol: "Soroswap", status: "ACTIVE" },
-  "xlm-eth": { name: "XLM-ETH LP Vault", asset: "XLM-ETH", protocol: "Soroswap", status: "ACTIVE" },
-  index: { name: "Yield Index Vault", asset: "Yield Index", protocol: "DeFindex", status: "ACTIVE" },
-  bluechip: { name: "Blue Chip Vault", asset: "Blue Chip", protocol: "DeFindex", status: "ACTIVE" },
+const DEFAULT_REGISTRY: Record<
+  string,
+  Omit<VaultRegistryEntry, "vaultId" | "updatedBy" | "updatedAt">
+> = {
+  usdc: {
+    name: "USDC Yield Vault",
+    asset: "USDC",
+    protocol: "Blend",
+    status: "ACTIVE",
+  },
+  xlm: {
+    name: "XLM Yield Vault",
+    asset: "XLM",
+    protocol: "Blend",
+    status: "ACTIVE",
+  },
+  "xlm-usdc": {
+    name: "XLM-USDC LP Vault",
+    asset: "XLM-USDC",
+    protocol: "Soroswap",
+    status: "ACTIVE",
+  },
+  "xlm-eth": {
+    name: "XLM-ETH LP Vault",
+    asset: "XLM-ETH",
+    protocol: "Soroswap",
+    status: "ACTIVE",
+  },
+  index: {
+    name: "Yield Index Vault",
+    asset: "Yield Index",
+    protocol: "DeFindex",
+    status: "ACTIVE",
+  },
+  bluechip: {
+    name: "Blue Chip Vault",
+    asset: "Blue Chip",
+    protocol: "DeFindex",
+    status: "ACTIVE",
+  },
 };
 
 export class VaultRegistryValidationError extends Error {
@@ -74,8 +107,13 @@ function validateUpdate(update: VaultRegistryUpdate): void {
       `status must be one of: ${VALID_STATUSES.join(", ")}`,
     );
   }
-  if (update.capUsd !== undefined && (!Number.isFinite(update.capUsd) || update.capUsd < 0)) {
-    throw new VaultRegistryValidationError("capUsd must be a non-negative finite number");
+  if (
+    update.capUsd !== undefined &&
+    (!Number.isFinite(update.capUsd) || update.capUsd < 0)
+  ) {
+    throw new VaultRegistryValidationError(
+      "capUsd must be a non-negative finite number",
+    );
   }
 }
 
@@ -86,7 +124,7 @@ export const vaultRegistryService = {
    * primary with case-sensitive tiebreak) so registry consumers render
    * deterministically regardless of cache insertion order.
    */
-  listVaults(): VaultRegistryEntry[] {
+  listVaults(status?: VaultStatus): VaultRegistryEntry[] {
     const seenIds = new Set(Object.keys(DEFAULT_REGISTRY));
     for (const key of cache.keys()) {
       if (key.startsWith(REGISTRY_PREFIX)) {
@@ -96,8 +134,11 @@ export const vaultRegistryService = {
     return Array.from(seenIds)
       .map((id) => getEntry(id))
       .filter((entry): entry is VaultRegistryEntry => entry !== undefined)
+      .filter((entry) => status === undefined || entry.status === status)
       .sort((a, b) => {
-        const primary = a.vaultId.toLowerCase().localeCompare(b.vaultId.toLowerCase());
+        const primary = a.vaultId
+          .toLowerCase()
+          .localeCompare(b.vaultId.toLowerCase());
         if (primary !== 0) return primary;
         if (a.vaultId < b.vaultId) return -1;
         if (a.vaultId > b.vaultId) return 1;
