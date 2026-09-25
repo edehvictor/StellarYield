@@ -4,6 +4,7 @@ import express, { Request, Response } from "express";
 import rateLimit from "express-rate-limit";
 import { createYoga } from "graphql-yoga";
 import { predictApy, HistoricalDataPoint } from "./analytics/apyPredictor";
+import { buildApyConfidenceExplanation } from "./services/apyConfidenceExplanationService";
 import { signFeeBump } from "./relayer/relayer";
 import { context } from "./graphql/context";
 import { graphqlSchema } from "./graphql/schema";
@@ -360,7 +361,16 @@ export function createApp() {
     }
 
     const prediction = predictApy(protocol, historical);
-    res.json(prediction);
+    // Source-level confidence explanation (#1386): additive structured
+    // summary derived from the prediction's own quorum + confidence inputs.
+    const explanation = buildApyConfidenceExplanation({
+      protocol,
+      confidenceInputs: prediction.confidenceInputs,
+      quorumStatus: prediction.quorumStatus,
+      confidence: prediction.predictions[0]?.confidence ?? null,
+      forecastApy: prediction.predictions[0]?.predictedApy ?? null,
+    });
+    res.json({ ...prediction, explanation });
   });
 
   app.post("/api/auth/challenge", (req: Request, res: Response) => {
