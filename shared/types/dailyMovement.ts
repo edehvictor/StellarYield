@@ -77,11 +77,13 @@ export interface DailyMovement {
 export function calculateDailyMovement(
   current: {
     walletAddress: string;
+    snapshotDate?: string;
     totalValueUsd: number;
     assetBreakdown: Record<string, { valueUsd: number; quantity: number }>;
     protocolBreakdown: Record<string, { valueUsd: number }>;
   },
   previous?: {
+    snapshotDate?: string;
     totalValueUsd: number;
     assetBreakdown: Record<string, { valueUsd: number; quantity: number }>;
     protocolBreakdown: Record<string, { valueUsd: number }>;
@@ -91,8 +93,7 @@ export function calculateDailyMovement(
     withdrawn: number;
   },
 ): DailyMovement {
-  const now = new Date();
-  const snapshotDate = now.toISOString().split('T')[0];
+  const snapshotDate = current.snapshotDate ?? new Date().toISOString().split('T')[0];
 
   if (!previous) {
     // Neutral state: no previous snapshot
@@ -196,7 +197,7 @@ export function calculateDailyMovement(
   return {
     walletAddress: current.walletAddress,
     snapshotDate,
-    previousSnapshotDate: previous ? now.toISOString().split('T')[0] : undefined,
+    previousSnapshotDate: previous?.snapshotDate ?? undefined,
     previousTotalValue: previous.totalValueUsd,
     currentTotalValue: current.totalValueUsd,
     totalAbsoluteChange,

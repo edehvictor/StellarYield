@@ -55,6 +55,31 @@ describe("calculateDailyMovement", () => {
       },
     };
 
+    it("should preserve the actual snapshot dates for comparison context", () => {
+      const current = {
+        walletAddress,
+        snapshotDate: "2026-06-15",
+        totalValueUsd: 11000,
+        assetBreakdown: {
+          USDC: { valueUsd: 5500, quantity: 5500 },
+          XLM: { valueUsd: 5500, quantity: 2750 },
+        },
+        protocolBreakdown: {
+          Blend: { valueUsd: 5500 },
+          Soroswap: { valueUsd: 5500 },
+        },
+      };
+      const previousSnapshot = {
+        ...previous,
+        snapshotDate: "2026-06-14",
+      };
+
+      const result = calculateDailyMovement(current, previousSnapshot);
+
+      expect(result.snapshotDate).toBe("2026-06-15");
+      expect(result.previousSnapshotDate).toBe("2026-06-14");
+    });
+
     it("should calculate positive movement correctly", () => {
       const current = {
         walletAddress,

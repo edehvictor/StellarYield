@@ -98,6 +98,7 @@ export class PortfolioMovementService {
     const movement = calculateDailyMovement(
       {
         walletAddress,
+        snapshotDate: today.toISOString().split("T")[0],
         totalValueUsd: currentSnapshot.totalValueUsd,
         assetBreakdown:
           (currentSnapshot.assetBreakdown as Record<
@@ -112,6 +113,7 @@ export class PortfolioMovementService {
       },
       previousSnapshot
         ? {
+            snapshotDate: yesterday.toISOString().split("T")[0],
             totalValueUsd: previousSnapshot.totalValueUsd,
             assetBreakdown:
               (previousSnapshot.assetBreakdown as Record<
