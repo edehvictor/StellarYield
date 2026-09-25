@@ -11,6 +11,7 @@ import { useBackendStatus } from "../hooks/useBackendStatus";
 import { useVaultActionAvailability } from "../hooks/useVaultActionAvailability";
 import type { VaultActionAvailabilityMap } from "../hooks/useVaultActionAvailability";
 import { RecoveryAdvisor } from "./AIAdvisor/RecoveryAdvisor";
+import { TransactionErrorBoundary } from "./transaction/TransactionErrorBoundary";
 import { fetchVaultStats, type VaultStats, formatTvl, validateVaultSlug } from "../lib/vaultData";
 import VaultCapacityWarning, { type VaultCapacityStatus } from "./VaultCapacityWarning";
 import VaultMigrationReadinessPanel from "./VaultMigrationReadinessPanel";
@@ -292,16 +293,16 @@ export default function Vault() {
         </div>
 
         {vaultAction === "deposit" ? (
-          <>
+          <TransactionErrorBoundary workflowName="deposit">
             <ActionDisabledBanner action="deposit" />
             <VaultCapacityWarning capacity={capacity} />
             <ZapDepositPanel walletAddress={walletAddress} />
-          </>
+          </TransactionErrorBoundary>
         ) : (
-          <>
+          <TransactionErrorBoundary workflowName="withdraw">
             <ActionDisabledBanner action="withdraw" />
             <WithdrawPanel walletAddress={walletAddress} />
-          </>
+          </TransactionErrorBoundary>
         )}
       </div>
     </div>
