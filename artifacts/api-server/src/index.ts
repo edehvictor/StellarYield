@@ -1,5 +1,13 @@
-import app from "./app";
+import { createApp } from "./app";
 import { logger } from "./lib/logger";
+import { LinkStellarAccountService } from "./services/stellarAccounts/linkStellarAccountService";
+import { DrizzleStellarAccountRepository } from "./services/stellarAccounts/drizzleStellarAccountRepository";
+
+const app = createApp({
+  linkStellarAccount: new LinkStellarAccountService(
+    new DrizzleStellarAccountRepository(),
+  ),
+});
 
 const rawPort = process.env["PORT"];
 

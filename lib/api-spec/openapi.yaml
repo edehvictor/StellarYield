@@ -10,6 +10,8 @@ servers:
 tags:
   - name: health
     description: Health operations
+  - name: accounts
+    description: Stellar account operations
 paths:
   /healthz:
     get:
@@ -24,6 +26,47 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/HealthStatus"
+  /accounts/link:
+    post:
+      operationId: linkStellarAccount
+      tags: [accounts]
+      summary: Link a Stellar account to a client
+      description: >
+        Links a user-supplied Stellar public key to a client. The public key
+        is strictly validated with StrKey decoding before any downstream
+        application or database processing occurs; malformed, empty, or null
+        keys are rejected with a typed validation error payload.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LinkStellarAccountRequest"
+      responses:
+        "200":
+          description: Stellar account linked
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StellarAccountLinked"
+        "400":
+          description: Validation failed for the supplied public key or payload
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AccountLinkError"
+        "500":
+          description: Unexpected server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AccountLinkError"
+        "503":
+          description: Account storage temporarily unavailable
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AccountLinkError"
 components:
   schemas:
     HealthStatus:
@@ -33,4 +76,79 @@ components:
           type: string
       required:
         - status
-
+    AccountLinkError:
+      type: object
+      description: Stable typed error payload returned by every failure path.
+      properties:
+        error:
+          type: object
+          properties:
+            code:
+              type: string
+              enum:
+                - INVALID_REQUEST
+                - MISSING_PUBLIC_KEY
+                - INVALID_PUBLIC_KEY
+                - ACCOUNT_SERVICE_UNAVAILABLE
+                - INTERNAL_SERVER_ERROR
+            message:
+              type: string
+            details:
+              type: array
+              description: Per-field validation details, when applicable.
+              items:
+                type: object
+                properties:
+                  path:
+                    type: string
+                  message:
+                    type: string
+                required:
+                  - path
+                  - message
+          required:
+            - code
+            - message
+      required:
+        - error
+    LinkStellarAccountRequest:
+      type: object
+      properties:
+        clientId:
+          type: string
+          minLength: 1
+          maxLength: 128
+          description: Client identifier the account is linked to.
+        publicKey:
+          type: string
+          description: >
+            Standard Stellar public key: a 56-character, G-prefixed
+            base32 string. Format is enforced server-side with StrKey
+            decoding before any database processing.
+      required:
+        - clientId
+        - publicKey
+    StellarAccountLinked:
+      type: object
+      description: Payload returned when a Stellar account was linked.
+      properties:
+        account:
+          type: object
+          properties:
+            id:
+              type: string
+              format: uuid
+            clientId:
+              type: string
+            publicKey:
+              type: string
+            linkedAt:
+              type: string
+              format: date-time
+          required:
+            - id
+            - clientId
+            - publicKey
+            - linkedAt
+      required:
+        - account
