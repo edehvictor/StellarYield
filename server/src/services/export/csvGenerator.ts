@@ -1,4 +1,5 @@
 import { Readable } from "stream";
+import { computeObjectChecksum } from "../../utils/checksum";
 
 /**
  * CSV Export Engine — Tax & Accounting Data Transformer
@@ -404,4 +405,31 @@ export function createExportFilename(
   const date = new Date().toISOString().split("T")[0];
   const shortAddr = sanitizeFilenameSegment(address.slice(0, 8));
   return `stellaryield-${reportType}-${env}-${shortAddr}-${date}.${extension}`;
+}
+
+export interface CsvAuditResult {
+  checksum: string;
+  rowCount: number;
+  schemaVersion: number;
+  isValid: boolean;
+}
+
+/**
+ * Computes a backend checksum audit for generated CSV rows.
+ * This guarantees integrity and provides an audit trail for generated records.
+ */
+export function auditCsvRows(records: TransactionRecord[]): CsvAuditResult {
+  let isValid = true;
+  try {
+    validateTransactionDataset(records);
+  } catch (err) {
+    isValid = false;
+  }
+  
+  return {
+    checksum: computeObjectChecksum(records),
+    rowCount: Array.isArray(records) ? records.length : 0,
+    schemaVersion: CSV_SCHEMA_VERSION,
+    isValid
+  };
 }
