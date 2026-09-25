@@ -1,62 +1,49 @@
-﻿node_modules/
-client/node_modules/
-server/node_modules/
-frontend/node_modules/
-emergency-ui/node_modules/
-contracts/target/
-**/target/
-**/test_snapshots/
-**/__snapshots__/
-dist/
-.env
-.env.*
-!.env.example
-.claude/
-.agents/
-issue.md
-pr.md
-backend/matching_engine/target
+# See https://docs.github.com/en/get-started/getting-started-with-git/ignoring-files for more about ignoring files.
 
-# ── Build outputs ────────────────────────────────────────────────────────────
-.next/
+# compiled output
+dist
+tmp
+out-tsc
 *.tsbuildinfo
-build/
-out/
+.expo
+.expo-shared
 
-# ── Coverage reports ─────────────────────────────────────────────────────────
-coverage/
-*.lcov
-lcov.info
+# dependencies
+node_modules
 
-# ── CI log artifacts ─────────────────────────────────────────────────────────
-frontend-test.log
-frontend-build.log
-*.log
+# IDEs and editors
+/.idea
+.project
+.classpath
+.c9/
+*.launch
+.settings/
+*.sublime-workspace
 
-# ── Runtime data ─────────────────────────────────────────────────────────────
-server/audit-logs/
-backend/keepers/audit-logs/
+# IDE - VSCode
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
 
-# ── Local env overrides ───────────────────────────────────────────────────────
-.env.local
-.env.*.local
+# misc
+/.sass-cache
+/connect.lock
+/coverage
+/libpeerconnection.log
+npm-debug.log
+yarn-error.log
+testem.log
+/typings
 
-# ── Editor and OS artifacts ───────────────────────────────────────────────────
+# System Files
 .DS_Store
 Thumbs.db
-*.swp
-*.swo
 
-# ── Test output ───────────────────────────────────────────────────────────────
-junit.xml
-test-results/
-*.snap
+.cursor/rules/nx-rules.mdc
+.github/instructions/nx.instructions.md
 
-# ── Misc generated / temporary files ─────────────────────────────────────────
-*.tmp
-*.temp
-.turbo/
+# Replit
 .cache/
-*.lock.bak
-server/dist/
-client/dist/
+.local/

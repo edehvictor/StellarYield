@@ -1,21 +1,19 @@
 {
-  "name": "stellaryield",
-  "private": true,
+  "name": "workspace",
+  "version": "0.0.0",
+  "license": "MIT",
   "scripts": {
-    "test": "node ./client/node_modules/vitest/vitest.mjs run",
-    "smoke-test": "bash scripts/smoke-test.sh",
-    "smoke-test:node": "node scripts/smoke-test.js",
-    "smoke-test:portable": "node scripts/smoke-test.js",
-    "validate-workspace": "node scripts/validate-workspace.js",
-    "test:provenance": "vitest run tests/services/provenance.test.ts --coverage",
-    "setup:doctor": "node scripts/setup-doctor.js"
+    "preinstall": "sh -c 'rm -f package-lock.json yarn.lock; case \"$npm_config_user_agent\" in pnpm/*) ;; *) echo \"Use pnpm instead\" >&2; exit 1 ;; esac'",
+    "build": "pnpm run typecheck && pnpm -r --if-present run build",
+    "typecheck:libs": "tsc --build",
+    "typecheck": "pnpm run typecheck:libs && pnpm -r --filter \"./artifacts/**\" --filter \"./scripts\" --if-present run typecheck"
   },
+  "private": true,
   "dependencies": {
-    "@tailwindcss/vite": "^4.2.1",
-    "tailwindcss": "^4.2.1",
-    "typescript": "^7.0.2"
+    "@replit/connectors-sdk": "^0.4.3"
   },
-  "optionalDependencies": {
-    "@rolldown/binding-win32-x64-msvc": "^1.0.0-rc.17"
+  "devDependencies": {
+    "prettier": "^3.9.6",
+    "typescript": "~5.9.3"
   }
 }

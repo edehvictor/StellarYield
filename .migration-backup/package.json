@@ -1,0 +1,21 @@
+{
+  "name": "stellaryield",
+  "private": true,
+  "scripts": {
+    "test": "node ./client/node_modules/vitest/vitest.mjs run",
+    "smoke-test": "bash scripts/smoke-test.sh",
+    "smoke-test:node": "node scripts/smoke-test.js",
+    "smoke-test:portable": "node scripts/smoke-test.js",
+    "validate-workspace": "node scripts/validate-workspace.js",
+    "test:provenance": "vitest run tests/services/provenance.test.ts --coverage",
+    "setup:doctor": "node scripts/setup-doctor.js"
+  },
+  "dependencies": {
+    "@tailwindcss/vite": "^4.2.1",
+    "tailwindcss": "^4.2.1",
+    "typescript": "^7.0.2"
+  },
+  "optionalDependencies": {
+    "@rolldown/binding-win32-x64-msvc": "^1.0.0-rc.17"
+  }
+}
