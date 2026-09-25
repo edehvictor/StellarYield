@@ -10,7 +10,7 @@ import { EMPTY_STATE_COMPATIBILITY } from '../../utils/emptyStateCopy';
 import { RISK_CHART_COLORS } from "../../components/charts/darkModeContrast";
 import { stableSort } from "../../lib/stableSort";
 import { useCachedFetch } from "../../hooks/useCachedFetch";
-import { FreshnessBanner } from "../dashboard/FreshnessBanner";
+import { FreshnessBanner } from "../../components/dashboard/FreshnessBanner";
 
 // ── Types ───────────────────────────────────────────────────────────────
 
