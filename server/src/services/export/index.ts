@@ -2,6 +2,8 @@ export {
   generateCSV,
   createCSVStream,
   createExportFilename,
+  createScheduledReportFilename,
+  parseScheduledReportFilename,
   validateTransactionRecord,
   validateTransactionDataset,
   validateCsvContent,
