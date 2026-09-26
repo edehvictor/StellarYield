@@ -45,6 +45,9 @@ Source: `contracts/yield_vault/src/lib.rs`
 | 2005 | `UnauthorizedContract`  | Cross-contract call from a disallowed caller | Use the contracts registered for this network          |
 | 2006 | `InvalidRecipient`      | Fee recipient is invalid                    | Pass a valid, non-self recipient address               |
 | 2007 | `DonationBelowMinimum`  | Donation is zero or below the dust minimum  | Increase the yield amount or donation split            |
+| 2008 | `InsufficientLiquidityDepth` | Deposit exceeds the route liquidity depth limit | Reduce deposit size or raise the limit via `set_liquidity_depth_limit` |
+| 2009 | `AlreadyMigrated`       | Storage is already at the requested version | No action needed; migration is idempotent              |
+| 2010 | `StorageVersionMismatch` | Target version is below current on-chain version | Use `CURRENT_STORAGE_VERSION` or a higher version     |
 
 ---
 

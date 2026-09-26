@@ -78,9 +78,13 @@ enum DataKey {
     // Max single-deposit amount (route liquidity depth limit, #1312).
     // 0 / unset means unlimited.
     LiquidityDepthLimit,
+    /// On-chain storage schema version.  Written by `migrate()`.
+    /// Absent (unwrap_or 0) on contracts deployed before versioning was introduced.
+    StorageVersion,
 }
 
 mod admin;
+mod migration;
 mod donations;
 mod emergency;
 pub mod events;
@@ -127,6 +131,10 @@ pub enum VaultError {
     DonationBelowMinimum = 2007,
     /// Deposit amount exceeds the configured route liquidity depth limit (maps to error code 2008).
     InsufficientLiquidityDepth = 2008,
+    /// Storage is already at the requested version — migration is a no-op (maps to error code 2009).
+    AlreadyMigrated = 2009,
+    /// Storage schema version mismatch — contract state is ahead of the expected version (maps to error code 2010).
+    StorageVersionMismatch = 2010,
 }
 
 // ── Contract ────────────────────────────────────────────────────────────
