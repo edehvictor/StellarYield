@@ -11,6 +11,15 @@
   ],
   "gates": [
     {
+      "id": "storage-version-migrated",
+      "title": "Storage schema migrated to current version",
+      "description": "The vault contract's on-chain StorageVersion key equals CURRENT_STORAGE_VERSION (1). Call migrate(admin, 1) after upgrading the WASM binary.",
+      "targetArea": "contract",
+      "evidenceType": "CONTRACT_ADDRESS",
+      "reference": "contracts/yield_vault/src/migration.rs#CURRENT_STORAGE_VERSION",
+      "guidance": "Invoke YieldVault.migrate(admin, 1) on the deployed contract. The function is idempotent and safe to call again if already at version 1."
+    },
+    {
       "id": "registry-entry",
       "title": "Vault contract registered",
       "description": "The vault contract address is present in contracts/registry.json for the active network.",

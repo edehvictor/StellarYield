@@ -21,6 +21,24 @@ export interface ProtocolMovement {
   percentChange: number;
 }
 
+/**
+ * Freshness metadata for the valuation snapshot backing a daily movement
+ * response (#1362). Absent on older payloads; when present, lets clients
+ * surface staleness even when the API does not reject the request.
+ */
+export interface ValuationFreshness {
+  /** When the server evaluated freshness (ISO timestamp). */
+  evaluatedAt: string;
+  /** When the backing snapshot was last written (ISO timestamp), if any. */
+  snapshotValuedAt: string | null;
+  /** Age of the snapshot at evaluation time, in milliseconds (null if none). */
+  ageMs: number | null;
+  /** Maximum age considered fresh for this evaluation, in milliseconds. */
+  maxAgeMs: number;
+  /** True when the snapshot is missing or older than `maxAgeMs`. */
+  isStale: boolean;
+}
+
 export interface DailyMovement {
   walletAddress: string;
   snapshotDate: string; // ISO date
@@ -44,6 +62,12 @@ export interface DailyMovement {
   // State indicators
   hasPreviousSnapshot: boolean;
   isNegativeMovement: boolean;
+
+  /**
+   * Freshness of the valuation snapshot (#1362). Attached by the server;
+   * optional so payloads from older servers remain valid.
+   */
+  freshness?: ValuationFreshness;
 }
 
 /**
@@ -53,11 +77,13 @@ export interface DailyMovement {
 export function calculateDailyMovement(
   current: {
     walletAddress: string;
+    snapshotDate?: string;
     totalValueUsd: number;
     assetBreakdown: Record<string, { valueUsd: number; quantity: number }>;
     protocolBreakdown: Record<string, { valueUsd: number }>;
   },
   previous?: {
+    snapshotDate?: string;
     totalValueUsd: number;
     assetBreakdown: Record<string, { valueUsd: number; quantity: number }>;
     protocolBreakdown: Record<string, { valueUsd: number }>;
@@ -67,8 +93,7 @@ export function calculateDailyMovement(
     withdrawn: number;
   },
 ): DailyMovement {
-  const now = new Date();
-  const snapshotDate = now.toISOString().split('T')[0];
+  const snapshotDate = current.snapshotDate ?? new Date().toISOString().split('T')[0];
 
   if (!previous) {
     // Neutral state: no previous snapshot
@@ -172,7 +197,7 @@ export function calculateDailyMovement(
   return {
     walletAddress: current.walletAddress,
     snapshotDate,
-    previousSnapshotDate: previous ? now.toISOString().split('T')[0] : undefined,
+    previousSnapshotDate: previous?.snapshotDate ?? undefined,
     previousTotalValue: previous.totalValueUsd,
     currentTotalValue: current.totalValueUsd,
     totalAbsoluteChange,

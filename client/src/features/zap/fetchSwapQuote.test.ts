@@ -1,5 +1,13 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { fetchSwapQuote, ZapQuoteError } from "./fetchSwapQuote";
+import {
+  describeZapQuoteVerifyFailure,
+  fetchSwapQuote,
+  isExpiredQuoteError,
+  isQuoteCancellation,
+  QuoteRequestCancelledError,
+  verifySwapQuote,
+  ZapQuoteError,
+} from "./fetchSwapQuote";
 
 const quoteRequest = {
   inputTokenContract: "A",
@@ -8,11 +16,6 @@ const quoteRequest = {
   inputDecimals: 7,
   vaultDecimals: 7,
 };
-import {
-  fetchSwapQuote,
-  isQuoteCancellation,
-  QuoteRequestCancelledError,
-} from "./fetchSwapQuote";
 
 describe("fetchSwapQuote", () => {
   const origFetch = globalThis.fetch;
@@ -249,5 +252,103 @@ describe("fetchSwapQuote", () => {
       ),
     ).rejects.toBeInstanceOf(QuoteRequestCancelledError);
     expect(spy).not.toHaveBeenCalled();
+  });
+});
+
+describe("verifySwapQuote", () => {
+  const origFetch = globalThis.fetch;
+  const validQuote = {
+    path: [{ contractId: "A" }],
+    expectedAmountOutStroops: "100",
+    source: "fallback_rate" as const,
+    slippageApplied: 0.005,
+    amountOutAfterSlippage: "99",
+    quotedAt: new Date().toISOString(),
+    minAmountOutStroops: "99",
+    quoteAgeMs: 0,
+    isFallback: true,
+    issuedAt: new Date().toISOString(),
+    expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    routeHash: "abc",
+    assetConfigVersion: "def",
+  };
+
+  afterEach(() => {
+    vi.stubGlobal("fetch", origFetch);
+    vi.unstubAllGlobals();
+  });
+
+  it("returns true when the server reports success", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        Promise.resolve({ ok: true, json: async () => ({ success: true }) } as Response),
+      ),
+    );
+    await expect(verifySwapQuote(validQuote)).resolves.toBe(true);
+  });
+
+  it("throws a typed ZapQuoteError with the server's STALE_QUOTE code", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        Promise.resolve({
+          ok: false,
+          status: 400,
+          json: async () => ({
+            error: "STALE_QUOTE",
+            message: "Quote has expired",
+            recoverable: true,
+          }),
+        } as Response),
+      ),
+    );
+
+    const err = await verifySwapQuote(validQuote).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ZapQuoteError);
+    expect(err).toMatchObject({
+      code: "STALE_QUOTE",
+      status: 400,
+      recoverable: true,
+    });
+    expect(isExpiredQuoteError(err)).toBe(true);
+  });
+
+  it("wraps network failures as recoverable NETWORK_ERROR", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => Promise.reject(new Error("offline"))),
+    );
+
+    const err = await verifySwapQuote(validQuote).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ZapQuoteError);
+    expect(err).toMatchObject({ code: "NETWORK_ERROR", status: 0, recoverable: true });
+    expect(isExpiredQuoteError(err)).toBe(false);
+  });
+});
+
+describe("describeZapQuoteVerifyFailure", () => {
+  function codeError(code: string, message: string): ZapQuoteError {
+    return new ZapQuoteError(message, { code, status: 400 });
+  }
+
+  it("maps STALE_QUOTE to the deterministic expiry message", () => {
+    expect(
+      describeZapQuoteVerifyFailure(codeError("STALE_QUOTE", "provider said something else")),
+    ).toBe("Quote expired. Refresh and try again.");
+  });
+
+  it("maps CONFIG_DRIFT deterministically", () => {
+    expect(describeZapQuoteVerifyFailure(codeError("CONFIG_DRIFT", "x"))).toBe(
+      "Supported assets changed. Refresh and try again.",
+    );
+  });
+
+  it("falls back to a generic message for unknown codes without echoing the server text", () => {
+    const message = describeZapQuoteVerifyFailure(
+      codeError("SOME_NEW_CODE", "raw provider gibberish"),
+    );
+    expect(message).toBe("Quote validation failed. Refresh and try again.");
+    expect(message).not.toContain("raw provider gibberish");
   });
 });

@@ -1,6 +1,11 @@
 import { Router, Request, Response } from "express";
 import { getZapSupportedAssetsPayload } from "../config/zapAssetsConfig";
-import { getZapQuote, verifyZapQuote, type ZapQuoteBody } from "../services/zapQuote";
+import {
+  getZapQuote,
+  verifyZapQuote,
+  RECOVERABLE_VERIFY_ERROR_CODES,
+  type ZapQuoteBody,
+} from "../services/zapQuote";
 import { sendError } from "../utils/errorResponse";
 import { validateZapQuote } from "../middleware/validation";
 import { recordFailure, resolveNetworkLabel } from "../monitoring/prometheus";
@@ -37,6 +42,12 @@ router.post("/quote", validateZapQuote, async (req: Request, res: Response) => {
       inputDecimals: Number(b.inputDecimals ?? 7),
       vaultDecimals: Number(b.vaultDecimals ?? 7),
       slippageTolerance: b.slippageTolerance !== undefined ? Number(b.slippageTolerance) : undefined,
+      // Reserve check (#1148) is opt-in: only run when the caller supplies a
+      // wallet address to check against.
+      walletAddress:
+        typeof b.walletAddress === "string" && b.walletAddress.trim() !== ""
+          ? b.walletAddress.trim()
+          : undefined,
     };
 
     const [quote, vaultPauseState] = await Promise.all([
@@ -84,8 +95,11 @@ router.post("/verify", (req: Request, res: Response) => {
       return sendError(
         res,
         400,
-        result.errorCode || "INVALID_QUOTE",
-        result.reason || "Invalid quote",
+        result.errorCode,
+        result.reason,
+        undefined,
+        undefined,
+        RECOVERABLE_VERIFY_ERROR_CODES.has(result.errorCode) || undefined,
       );
     }
     res.json({ success: true });

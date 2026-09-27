@@ -4,7 +4,16 @@ import {
   compareSnapshots,
   type SnapshotComparisonResult,
 } from "../../../shared/types/snapshotComparison";
+import { evaluateValuationFreshness } from "./valuationFreshnessGuard";
 import type { UserTransaction } from "@prisma/client";
+
+/** Options for daily-movement freshness annotation (#1362). */
+export interface DailyMovementOptions {
+  /** Evaluation clock (epoch ms) for freshness; defaults to `Date.now()`. */
+  now?: number;
+  /** Freshness threshold in ms; defaults to the guard's default. */
+  maxAgeMs?: number;
+}
 
 /** Raised when a snapshot comparison is requested for a date with no stored snapshot. */
 export class SnapshotNotFoundError extends Error {
@@ -23,8 +32,15 @@ export class PortfolioMovementService {
   /**
    * Get daily portfolio movement for a wallet.
    * Compares today's snapshot against yesterday's.
+   *
+   * Annotates the result with `freshness` metadata derived from the current
+   * snapshot's `updatedAt` (#1362). Without options the response shape is
+   * unchanged apart from the additive `freshness` field.
    */
-  async getDailyMovement(walletAddress: string): Promise<DailyMovement> {
+  async getDailyMovement(
+    walletAddress: string,
+    options: DailyMovementOptions = {},
+  ): Promise<DailyMovement> {
     const today = this.getDateKey(new Date());
     const yesterday = this.getDateKey(new Date(Date.now() - 24 * 60 * 60 * 1000));
 
@@ -48,6 +64,12 @@ export class PortfolioMovementService {
       }),
     ]);
 
+    const freshness = evaluateValuationFreshness({
+      valuedAt: currentSnapshot?.updatedAt ?? null,
+      now: options.now,
+      maxAgeMs: options.maxAgeMs,
+    });
+
     if (!currentSnapshot) {
       // No current snapshot—return neutral state
       return {
@@ -65,6 +87,7 @@ export class PortfolioMovementService {
         priceMovementOnly: 0,
         hasPreviousSnapshot: false,
         isNegativeMovement: false,
+        freshness,
       };
     }
 
@@ -75,6 +98,7 @@ export class PortfolioMovementService {
     const movement = calculateDailyMovement(
       {
         walletAddress,
+        snapshotDate: today.toISOString().split("T")[0],
         totalValueUsd: currentSnapshot.totalValueUsd,
         assetBreakdown:
           (currentSnapshot.assetBreakdown as Record<
@@ -89,6 +113,7 @@ export class PortfolioMovementService {
       },
       previousSnapshot
         ? {
+            snapshotDate: yesterday.toISOString().split("T")[0],
             totalValueUsd: previousSnapshot.totalValueUsd,
             assetBreakdown:
               (previousSnapshot.assetBreakdown as Record<
@@ -107,6 +132,8 @@ export class PortfolioMovementService {
         withdrawn: transactions.withdrawn,
       },
     );
+
+    movement.freshness = freshness;
 
     return movement;
   }

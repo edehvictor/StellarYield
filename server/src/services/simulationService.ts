@@ -208,6 +208,14 @@ export interface RebalanceParams {
   allocations: RebalanceAllocationInput[];
   feeBps?: number; // turnover fee in bps (default 20 = 0.2%)
   dataAgeSeconds?: number; // age of the market data feeding the preview
+  /**
+   * ISO-8601 timestamp of the market snapshot the preview's APY/liquidity
+   * inputs were sourced from. When omitted or invalid, the preview is
+   * treated as stale (see `SNAPSHOT_MISSING` / `SNAPSHOT_STALE`) rather than
+   * silently assumed fresh — a missing timestamp is not evidence of fresh
+   * data (issue #1149).
+   */
+  snapshotTimestamp?: string | null;
 }
 
 export interface RebalanceLeg {
@@ -220,6 +228,25 @@ export interface RebalanceLeg {
   deltaUsd: number; // targetValue - currentValue (signed)
 }
 
+/**
+ * Freshness metadata for the market snapshot a simulator response was
+ * computed from (issue #1149). Always present on `RebalancePreview` so
+ * client result panels can render a stale-data warning state without
+ * re-deriving age from `dataAgeSeconds`/`snapshotTimestamp` themselves.
+ */
+export interface SnapshotFreshness {
+  /** Age of the market snapshot in milliseconds, or `null` when unknown. */
+  snapshotAgeMs: number | null;
+  /**
+   * True when the snapshot is older than `staleSnapshotThresholdMs`, OR when
+   * no valid snapshot timestamp/age was supplied at all. A missing timestamp
+   * is treated as stale, never as fresh.
+   */
+  isStale: boolean;
+  /** Threshold (ms) used to decide staleness, echoed back for the client. */
+  staleSnapshotThresholdMs: number;
+}
+
 export interface RebalancePreview {
   isSimulationOnly: true;
   legs: RebalanceLeg[];
@@ -229,6 +256,7 @@ export interface RebalancePreview {
   totalTurnoverUsd: number; // capital that actually moves
   estimatedFeeUsd: number;
   maxDriftPct: number; // largest absolute drift across legs
+  snapshotFreshness: SnapshotFreshness;
   warnings: SimulationWarning[];
 }
 
@@ -249,6 +277,41 @@ export const REBALANCE_THRESHOLDS = {
 // `Math.round` that breaks ties differently for negative deltas. Used for both
 // percent and USD values, which the contract carries at the same 2 decimals.
 const round2 = (value: number): number => roundTo(value, 2);
+
+/**
+ * Compute snapshot freshness metadata for a rebalance preview (issue #1149).
+ *
+ * Prefers an explicit `snapshotTimestamp` (age computed against wall-clock
+ * `now`); falls back to caller-supplied `dataAgeSeconds` when no timestamp is
+ * given. When neither is present, or the timestamp fails to parse, the
+ * snapshot is reported as stale with an unknown age — a missing/invalid
+ * timestamp must never be silently treated as fresh.
+ */
+export function computeSnapshotFreshness(
+  params: Pick<RebalanceParams, "snapshotTimestamp" | "dataAgeSeconds">,
+  now: number = Date.now(),
+): SnapshotFreshness {
+  const staleSnapshotThresholdMs = REBALANCE_THRESHOLDS.staleDataSeconds * 1000;
+
+  let snapshotAgeMs: number | null = null;
+
+  if (params.snapshotTimestamp !== undefined && params.snapshotTimestamp !== null) {
+    const parsed = Date.parse(params.snapshotTimestamp);
+    if (!Number.isNaN(parsed)) {
+      snapshotAgeMs = Math.max(0, now - parsed);
+    }
+  } else if (
+    params.dataAgeSeconds !== undefined &&
+    Number.isFinite(params.dataAgeSeconds) &&
+    params.dataAgeSeconds >= 0
+  ) {
+    snapshotAgeMs = params.dataAgeSeconds * 1000;
+  }
+
+  const isStale = snapshotAgeMs === null || snapshotAgeMs > staleSnapshotThresholdMs;
+
+  return { snapshotAgeMs, isStale, staleSnapshotThresholdMs };
+}
 
 /**
  * Validate rebalance inputs. Returns a list of human-readable errors; an
@@ -389,17 +452,27 @@ export function simulateRebalance(params: RebalanceParams): RebalancePreview {
     });
   }
 
-  if (
-    params.dataAgeSeconds !== undefined &&
-    params.dataAgeSeconds > t.staleDataSeconds
-  ) {
-    warnings.push({
-      code: "STALE_DATA",
-      severity: "warning",
-      affectedField: "dataAgeSeconds",
-      message: `Stale data: preview uses market data ${Math.round(params.dataAgeSeconds / 60)}m old; refresh before committing.`,
-      remediation: "Refresh market data and re-run the simulation before committing any capital.",
-    });
+  const snapshotFreshness = computeSnapshotFreshness(params);
+
+  if (snapshotFreshness.isStale) {
+    if (snapshotFreshness.snapshotAgeMs === null) {
+      warnings.push({
+        code: "SNAPSHOT_MISSING",
+        severity: "warning",
+        affectedField: "snapshotTimestamp",
+        message:
+          "No market snapshot timestamp was supplied for this preview; treating it as stale until freshness can be confirmed.",
+        remediation: "Provide a snapshotTimestamp (or dataAgeSeconds) and re-run the simulation before committing any capital.",
+      });
+    } else {
+      warnings.push({
+        code: "STALE_DATA",
+        severity: "warning",
+        affectedField: "snapshotTimestamp",
+        message: `Stale data: preview uses a market snapshot ${Math.round(snapshotFreshness.snapshotAgeMs / 60000)}m old; refresh before committing.`,
+        remediation: "Refresh market data and re-run the simulation before committing any capital.",
+      });
+    }
   }
 
   return {
@@ -411,6 +484,7 @@ export function simulateRebalance(params: RebalanceParams): RebalancePreview {
     totalTurnoverUsd: round2(totalTurnoverUsd),
     estimatedFeeUsd: round2(estimatedFeeUsd),
     maxDriftPct: round2(maxDriftPct),
+    snapshotFreshness,
     warnings,
   };
 }

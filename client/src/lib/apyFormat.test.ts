@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { formatApy, formatApyDeviation } from "./apyFormat";
+import { formatApy, formatApyDeviation, formatRewardRate } from "./apyFormat";
 
 describe("formatApy — normal range", () => {
   it("formats a typical APY with 2 decimals", () => {
@@ -104,5 +104,57 @@ describe("formatApyDeviation", () => {
   it("does not collapse a tiny deviation to 0", () => {
     const result = formatApyDeviation(0.002);
     expect(result).not.toBe("+0.00");
+  });
+});
+
+describe("formatRewardRate (#1150)", () => {
+  it("formats a typical reward rate consistently with formatApy", () => {
+    expect(formatRewardRate(6.5)).toBe(formatApy(6.5));
+    expect(formatRewardRate(6.5)).toBe("6.50%");
+  });
+
+  it("renders zero as a real, explicit 0.00% rate — not blank or unavailable", () => {
+    expect(formatRewardRate(0)).toBe("0.00%");
+  });
+
+  it("renders a distinct unavailable label for null", () => {
+    expect(formatRewardRate(null)).toBe("—");
+  });
+
+  it("renders a distinct unavailable label for undefined", () => {
+    expect(formatRewardRate(undefined)).toBe("—");
+  });
+
+  it("renders the unavailable label for NaN rather than crashing or showing NaN%", () => {
+    expect(formatRewardRate(NaN)).toBe("—");
+  });
+
+  it("renders the unavailable label for Infinity", () => {
+    expect(formatRewardRate(Infinity)).toBe("—");
+  });
+
+  it("accepts a custom unavailable label", () => {
+    expect(formatRewardRate(null, { unavailableLabel: "No data" })).toBe("No data");
+  });
+
+  it("distinguishes zero from unavailable — they never render the same string", () => {
+    expect(formatRewardRate(0)).not.toBe(formatRewardRate(null));
+  });
+
+  it("preserves precision consistency for representative rate values", () => {
+    // Same magnitude-adaptive precision rules as formatApy, applied uniformly
+    // regardless of which panel calls it — the core DRY fix for #1150.
+    expect(formatRewardRate(0.003)).toBe("0.0030%");
+    expect(formatRewardRate(0.5)).toBe("0.5000%");
+    expect(formatRewardRate(12.3456)).toBe("12.35%");
+    expect(formatRewardRate(15_000)).toBe("15.00K%");
+  });
+
+  it("passes through formatApy options (e.g. suffix: false)", () => {
+    expect(formatRewardRate(6.5, { suffix: false })).toBe("6.50");
+  });
+
+  it("passes through showPositiveSign for a reward-rate delta display", () => {
+    expect(formatRewardRate(1.5, { showPositiveSign: true, suffix: false })).toBe("+1.50");
   });
 });

@@ -11,9 +11,13 @@ import { useBackendStatus } from "../hooks/useBackendStatus";
 import { useVaultActionAvailability } from "../hooks/useVaultActionAvailability";
 import type { VaultActionAvailabilityMap } from "../hooks/useVaultActionAvailability";
 import { RecoveryAdvisor } from "./AIAdvisor/RecoveryAdvisor";
+import { TransactionErrorBoundary } from "./transaction/TransactionErrorBoundary";
 import { fetchVaultStats, type VaultStats, formatTvl, validateVaultSlug } from "../lib/vaultData";
 import VaultCapacityWarning, { type VaultCapacityStatus } from "./VaultCapacityWarning";
 import VaultMigrationReadinessPanel from "./VaultMigrationReadinessPanel";
+import SharePriceFreshnessBanner from "./SharePriceFreshnessBanner";
+import YieldSourceFeeHistoryPanel from "./YieldSourceFeeHistoryPanel";
+import { VaultRiskBadge } from "./common/VaultRiskBadge";
 
 /**
  * Injects or updates a <meta> tag in document.head.
@@ -274,6 +278,19 @@ export default function Vault() {
         <VaultMigrationReadinessPanel vaultSlug={activeSlug} />
       </div>
 
+      <div className="max-w-3xl w-full text-left">
+        <SharePriceFreshnessBanner vaultId={activeSlug} />
+      </div>
+
+      {stats && (
+        <div className="max-w-3xl w-full text-left">
+          <YieldSourceFeeHistoryPanel
+            protocolName={stats.protocol}
+            feeHistory={stats.feeHistory}
+          />
+        </div>
+      )}
+
       <div className="glass-panel p-8 mt-8 max-w-3xl w-full text-left">
         <div className="flex items-center justify-center gap-2 mb-6">
           <ActionTab action="deposit" label="Deposit" />
@@ -281,16 +298,16 @@ export default function Vault() {
         </div>
 
         {vaultAction === "deposit" ? (
-          <>
+          <TransactionErrorBoundary workflowName="deposit">
             <ActionDisabledBanner action="deposit" />
             <VaultCapacityWarning capacity={capacity} />
             <ZapDepositPanel walletAddress={walletAddress} />
-          </>
+          </TransactionErrorBoundary>
         ) : (
-          <>
+          <TransactionErrorBoundary workflowName="withdraw">
             <ActionDisabledBanner action="withdraw" />
             <WithdrawPanel walletAddress={walletAddress} />
-          </>
+          </TransactionErrorBoundary>
         )}
       </div>
     </div>

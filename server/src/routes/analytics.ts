@@ -1,4 +1,5 @@
 import { Router } from "express";
+import { cacheControl } from "../middleware/cacheHeaders";
 import { recordFailure, resolveNetworkLabel } from "../monitoring/prometheus";
 import {
   portfolioAttributionEngine,
@@ -40,7 +41,10 @@ const router = Router();
  * GET /api/analytics/attribution/:walletAddress
  * Generate portfolio attribution report for a wallet
  */
-router.get("/attribution/:walletAddress", async (req, res) => {
+router.get(
+  "/attribution/:walletAddress",
+  cacheControl({ maxAgeSeconds: 60, staleWhileRevalidateSeconds: 30 }),
+  async (req, res) => {
   try {
     const { walletAddress } = req.params;
     const { startTime, endTime } = req.query;
@@ -168,7 +172,10 @@ router.delete("/attribution/cache/:walletAddress", async (req, res) => {
  * GET /api/analytics/compatibility
  * Run comprehensive compatibility check
  */
-router.get("/compatibility", async (req, res) => {
+router.get(
+  "/compatibility",
+  cacheControl({ maxAgeSeconds: 60, staleWhileRevalidateSeconds: 30 }),
+  async (req, res) => {
   try {
     const report = await protocolCompatibilityEngine.runCompatibilityCheck();
     const formattedReport = formatCompatibilityReport(report);
@@ -183,7 +190,6 @@ router.get("/compatibility", async (req, res) => {
       }];
     }
 
-    res.json(successEnvelope(formattedReport, 'analytics/compatibility'));
     res.json(successEnvelope(formattedReport, "analytics/compatibility"));
   } catch (error) {
     console.error("Compatibility check failed:", error);
@@ -204,7 +210,10 @@ router.get("/compatibility", async (req, res) => {
  * GET /api/analytics/compatibility/:protocolName
  * Check compatibility for specific protocol
  */
-router.get("/compatibility/:protocolName", async (req, res) => {
+router.get(
+  "/compatibility/:protocolName",
+  cacheControl({ maxAgeSeconds: 60, staleWhileRevalidateSeconds: 30 }),
+  async (req, res) => {
   try {
     const { protocolName } = req.params;
     const status =
@@ -230,7 +239,10 @@ router.get("/compatibility/:protocolName", async (req, res) => {
  * GET /api/analytics/compatibility/safe/:protocolName
  * Check if protocol is safe for strategy execution
  */
-router.get("/compatibility/safe/:protocolName", async (req, res) => {
+router.get(
+  "/compatibility/safe/:protocolName",
+  cacheControl({ maxAgeSeconds: 60, staleWhileRevalidateSeconds: 30 }),
+  async (req, res) => {
   try {
     const { protocolName } = req.params;
     const report = await protocolCompatibilityEngine.runCompatibilityCheck();
@@ -302,7 +314,10 @@ router.post("/compatibility/config", async (req, res) => {
  * Get critical health alerts
  * NOTE: must be declared before /health/:strategyId to avoid being swallowed
  */
-router.get("/health/alerts", async (req, res) => {
+router.get(
+  "/health/alerts",
+  cacheControl({ maxAgeSeconds: 30, staleWhileRevalidateSeconds: 15 }),
+  async (req, res) => {
   try {
     // Get health scores for all strategies (mock list)
     const strategyIds = [
@@ -418,7 +433,10 @@ router.post("/health/batch", async (req, res) => {
  * Get health score for a specific strategy
  * NOTE: must be declared after static /health/* routes
  */
-router.get("/health/:strategyId", async (req, res) => {
+router.get(
+  "/health/:strategyId",
+  cacheControl({ maxAgeSeconds: 30, staleWhileRevalidateSeconds: 15 }),
+  async (req, res) => {
   try {
     const { strategyId } = req.params;
     const { strategyName } = req.query;
@@ -457,13 +475,12 @@ router.get("/health/:strategyId", async (req, res) => {
  * Returns each source's status (healthy/degraded/stale/unavailable), latest
  * fetch time, uptime, latency, and failure reason.
  */
-router.get("/sources/health", async (_req, res) => {
+router.get(
+  "/sources/health",
+  cacheControl({ maxAgeSeconds: 30, staleWhileRevalidateSeconds: 15 }),
+  async (_req, res) => {
   try {
     const registry = await getSourceHealthRegistry();
-    res.setHeader(
-      "Cache-Control",
-      "public, max-age=30, stale-while-revalidate=15",
-    );
     res.json(successEnvelope(registry, "analytics/sources/health"));
   } catch (error) {
     console.error("Source health registry generation failed:", error);
@@ -487,7 +504,10 @@ router.get("/sources/health", async (_req, res) => {
  * Compare and rank providers
  * NOTE: must be declared before /reliability/:providerId
  */
-router.get("/reliability/compare", async (req, res) => {
+router.get(
+  "/reliability/compare",
+  cacheControl({ maxAgeSeconds: 60, staleWhileRevalidateSeconds: 30 }),
+  async (req, res) => {
   try {
     const providers = [
       { id: "blend_api", name: "Blend Protocol", source: "api" },
@@ -515,7 +535,10 @@ router.get("/reliability/compare", async (req, res) => {
  * Get providers suitable for recommendations
  * NOTE: must be declared before /reliability/:providerId
  */
-router.get("/reliability/recommendations", async (req, res) => {
+router.get(
+  "/reliability/recommendations",
+  cacheControl({ maxAgeSeconds: 60, staleWhileRevalidateSeconds: 30 }),
+  async (req, res) => {
   try {
     const { minReliability = 70 } = req.query;
     const providers =
@@ -553,7 +576,10 @@ router.get("/reliability/recommendations", async (req, res) => {
  * Get reliability score for a specific provider
  * NOTE: must be declared after static /reliability/* routes
  */
-router.get("/reliability/:providerId", async (req, res) => {
+router.get(
+  "/reliability/:providerId",
+  cacheControl({ maxAgeSeconds: 60, staleWhileRevalidateSeconds: 30 }),
+  async (req, res) => {
   try {
     const { providerId } = req.params;
     const { providerName, dataSource } = req.query;
@@ -659,7 +685,10 @@ router.post("/reliability/config", async (req, res) => {
  * GET /api/analytics/dashboard
  * Get comprehensive analytics dashboard data
  */
-router.get("/dashboard", async (req, res) => {
+router.get(
+  "/dashboard",
+  cacheControl({ maxAgeSeconds: 30, staleWhileRevalidateSeconds: 15 }),
+  async (req, res) => {
   try {
     const { walletAddress, strategyIds, providerIds } = req.query;
 
@@ -785,7 +814,10 @@ router.get("/dashboard", async (req, res) => {
  * GET /api/analytics/strategy-state-transitions/:strategyId
  * Returns an audit graph of lifecycle transitions for a strategy.
  */
-router.get("/strategy-state-transitions/:strategyId", async (req, res) => {
+router.get(
+  "/strategy-state-transitions/:strategyId",
+  cacheControl({ maxAgeSeconds: 60, staleWhileRevalidateSeconds: 30 }),
+  async (req, res) => {
   try {
     const { strategyId } = req.params;
     const limit = Math.max(1, Math.min(500, Number(req.query.limit) || 100));
@@ -875,7 +907,10 @@ router.post("/recommendation-stability/compare", async (req, res) => {
  * GET /api/analytics/providers/uptime
  * Returns historical uptime reports for all known yield data providers.
  */
-router.get("/providers/uptime", async (_req, res) => {
+router.get(
+  "/providers/uptime",
+  cacheControl({ maxAgeSeconds: 120, staleWhileRevalidateSeconds: 60 }),
+  async (_req, res) => {
   try {
     const reports = await yieldReliabilityEngine.getAllProviderUptimeReports();
     res.json(successEnvelope(reports, "analytics/providers/uptime"));
@@ -898,7 +933,10 @@ router.get("/providers/uptime", async (_req, res) => {
  * Paginated recommendation timeline for a user
  * Query params: cursor (optional), limit (optional, default 20, max 100)
  */
-router.get("/recommendations/timeline/:walletAddress", (req, res) => {
+router.get(
+  "/recommendations/timeline/:walletAddress",
+  cacheControl({ maxAgeSeconds: 30, staleWhileRevalidateSeconds: 15 }),
+  (req, res) => {
   try {
     const { walletAddress } = req.params;
     const { cursor, limit: rawLimit } = req.query;

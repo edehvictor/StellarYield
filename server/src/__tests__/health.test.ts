@@ -1,6 +1,10 @@
 import request from "supertest";
 import express from "express";
 import healthRouter from "../routes/health";
+import {
+  resetIntegrationHealthDigest,
+  runIntegrationHealthDigest,
+} from "../services/integrationHealthDigestService";
 
 // ── Queue health mocks ──────────────────────────────────────────────────────
 
@@ -345,5 +349,46 @@ describe("GET /api/health/startup", () => {
     expect(response.status).toBe(503);
     expect(response.body.status).toBe("failed");
     expect(response.body.errors.length).toBeGreaterThan(0);
+  });
+});
+
+describe("GET /api/health/digest", () => {
+  const app = express();
+  app.use("/api/health", healthRouter);
+
+  afterEach(() => {
+    resetIntegrationHealthDigest();
+  });
+
+  it("returns 404 HEALTH_DIGEST_NOT_READY before the first scheduled run", async () => {
+    const response = await request(app).get("/api/health/digest");
+
+    expect(response.status).toBe(404);
+    expect(response.body).toMatchObject({ error: "HEALTH_DIGEST_NOT_READY", recoverable: true });
+  });
+
+  it("returns the latest recorded digest", async () => {
+    const { digest } = await runIntegrationHealthDigest({
+      probes: [
+        {
+          name: "database",
+          check: async () => ({
+            status: "up",
+            checkedAt: "2026-09-24T09:00:00.000Z",
+            errorCode: null,
+            retryable: false,
+            latencyMs: 3,
+          }),
+        },
+      ],
+      deliver: async () => undefined,
+      timeoutMs: 1_000,
+      now: () => new Date("2026-09-24T09:00:00.000Z"),
+    });
+
+    const response = await request(app).get("/api/health/digest");
+
+    expect(response.status).toBe(200);
+    expect(response.body).toEqual(digest);
   });
 });

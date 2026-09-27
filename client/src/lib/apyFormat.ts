@@ -96,3 +96,49 @@ function formatCompactLarge(value: number): string {
 export function formatApyDeviation(value: number): string {
   return formatApy(value, { suffix: false, showPositiveSign: true });
 }
+
+/**
+ * Shared reward-rate display helper (#1150).
+ *
+ * Before this, reward/APY rates were formatted ad hoc across dashboard,
+ * strategy, and vault-card panels — most with a bare `value.toFixed(2)}%`
+ * that (a) diverges from `formatApy`'s magnitude-adaptive precision (so a
+ * tiny rate silently prints "0.00%" in some panels but not others), and
+ * (b) has no explicit handling for a missing/unavailable rate, so a
+ * `null`/`undefined` value either crashes `toFixed` or silently renders
+ * blank depending on the call site's null-guard (or lack of one).
+ *
+ * `formatRewardRate` is the single entry point every panel should use for a
+ * reward-rate percentage display: it normalizes null/undefined/non-finite
+ * values to one explicit "unavailable" label, treats zero as a real,
+ * meaningful rate (not the same as unavailable), and otherwise defers to
+ * `formatApy` so precision stays consistent with the chart/tooltip call
+ * sites that already used it.
+ *
+ * Note on APR vs APY: this codebase's yield/reward values
+ * (`NormalizedYield.apy`, `.netApy`, `.totalApy`, `.rewards[].apy`,
+ * `rewardOffsetApy`, etc.) are exclusively APY — there is no APR
+ * representation or APR→APY conversion anywhere in this codebase's data
+ * model. `formatRewardRate` therefore does not attempt to distinguish or
+ * convert between the two; it takes a raw APY percentage value and formats
+ * it. If an APR representation is introduced later, the conversion should
+ * be applied by the caller (or a future `type` parameter added here) rather
+ * than guessed at in this helper.
+ */
+export interface FormatRewardRateOptions extends FormatApyOptions {
+  /** Label shown for a null/undefined/non-finite rate. Default: "—". */
+  unavailableLabel?: string;
+}
+
+export function formatRewardRate(
+  value: number | null | undefined,
+  options: FormatRewardRateOptions = {},
+): string {
+  const { unavailableLabel = "—", ...apyOptions } = options;
+
+  if (value === null || value === undefined || !Number.isFinite(value)) {
+    return unavailableLabel;
+  }
+
+  return formatApy(value, apyOptions);
+}

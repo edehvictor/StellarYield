@@ -24,6 +24,11 @@ import {
 } from "../monitoring/dependencyGraph";
 import { getWalletBootStatus } from "../utils/stellarAuth";
 import { getIndexerBootStatus } from "../indexer/indexerStatus";
+import {
+  getLatestIntegrationHealthDigest,
+  INTEGRATION_HEALTH_DIGEST_ERRORS,
+} from "../services/integrationHealthDigestService";
+import { sendError } from "../utils/errorResponse";
 
 const router = Router();
 const prisma = new PrismaClient();
@@ -358,7 +363,7 @@ export interface ReadinessResponse {
   checkedAt: string;
 }
 
-async function checkDatabaseWithLatency(): Promise<DatabaseSnapshot> {
+export async function checkDatabaseWithLatency(): Promise<DatabaseSnapshot> {
   const start = Date.now();
   const checkedAt = new Date().toISOString();
   try {
@@ -381,7 +386,7 @@ async function checkDatabaseWithLatency(): Promise<DatabaseSnapshot> {
   }
 }
 
-async function checkHorizonWithLatency(): Promise<HorizonSnapshot> {
+export async function checkHorizonWithLatency(): Promise<HorizonSnapshot> {
   const start = Date.now();
   const checkedAt = new Date().toISOString();
   try {
@@ -409,7 +414,7 @@ async function checkHorizonWithLatency(): Promise<HorizonSnapshot> {
   }
 }
 
-async function checkIndexerWithLatency(
+export async function checkIndexerWithLatency(
   latestLedger?: number,
 ): Promise<IndexerSnapshot> {
   const start = Date.now();
@@ -447,7 +452,7 @@ async function checkIndexerWithLatency(
   }
 }
 
-async function checkSorobanRpcWithLatency(): Promise<SorobanRpcSnapshot> {
+export async function checkSorobanRpcWithLatency(): Promise<SorobanRpcSnapshot> {
   const start = Date.now();
   const checkedAt = new Date().toISOString();
   try {
@@ -471,7 +476,7 @@ async function checkSorobanRpcWithLatency(): Promise<SorobanRpcSnapshot> {
   }
 }
 
-async function checkCacheWithLatency(): Promise<CacheSnapshot> {
+export async function checkCacheWithLatency(): Promise<CacheSnapshot> {
   const redis = new Redis(REDIS_URL, {
     maxRetriesPerRequest: null,
     enableReadyCheck: false,
@@ -589,6 +594,30 @@ router.get("/graph", async (_req: Request, res: Response) => {
     ok: !isOutage,
     timestamp: new Date().toISOString(),
   });
+});
+
+/**
+ * GET /health/digest
+ *
+ * Returns the latest scheduled integration health digest (#1341): overall
+ * status, per-integration status with stable error codes, and counts. Until
+ * the first scheduled run completes it answers 404 `HEALTH_DIGEST_NOT_READY`.
+ */
+router.get("/digest", (_req: Request, res: Response) => {
+  const digest = getLatestIntegrationHealthDigest();
+  if (!digest) {
+    const notReady = INTEGRATION_HEALTH_DIGEST_ERRORS.HEALTH_DIGEST_NOT_READY;
+    return sendError(
+      res,
+      notReady.httpStatus,
+      notReady.code,
+      notReady.defaultMessage,
+      undefined,
+      undefined,
+      notReady.retryable,
+    );
+  }
+  res.json(digest);
 });
 
 // ── Typed snapshot helpers ────────────────────────────────────────────────

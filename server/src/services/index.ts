@@ -15,8 +15,18 @@ export { yieldReliabilityEngine } from "./yieldReliabilityService";
 export {
   getSourceHealthRegistry,
   detectRegistryConflicts,
+  listYieldSources,
+  partitionYieldSources,
+  promoteYieldSource,
+  unregisterYieldSource,
 } from "./yieldSourceRegistryService";
 export type * from "./yieldSourceRegistryService";
+export {
+  validateYieldSourceOnboarding,
+  YieldSourceOnboardingError,
+  REQUIRED_ONBOARDING_FIELDS,
+} from "./yieldSourceOnboardingService";
+export type * from "./yieldSourceOnboardingService";
 export { opportunityMomentumEngine } from "./opportunityMomentumEngine";
 
 // Fallback Tree Service

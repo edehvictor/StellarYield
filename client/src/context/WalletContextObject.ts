@@ -12,6 +12,8 @@ export interface WalletContextValue {
   connectedAt: string | null;
   lastActivityAt: string | null;
   isConnected: boolean;
+  /** True when a connected session exists but has exceeded its TTL (#1152). */
+  isSessionExpired: boolean;
   isConnecting: boolean;
   isFreighterInstalled: boolean | null;
   errorMessage: string | null;

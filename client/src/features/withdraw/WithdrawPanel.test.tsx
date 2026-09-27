@@ -3,6 +3,12 @@ import userEvent from "@testing-library/user-event";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import WithdrawPanel from "./WithdrawPanel";
 import { withdraw, getUserShares } from "../../services/soroban";
+import { apiFetch } from "../../lib/api";
+
+vi.mock("../../lib/api", () => ({
+  apiFetch: vi.fn(),
+  getApiBaseUrlOrNull: () => "http://localhost:3001",
+}));
 
 vi.mock("../../services/soroban", () => ({
   withdraw: vi.fn(),
@@ -18,13 +24,53 @@ vi.mock("../zap/assets", () => ({
   }),
 }));
 
+// WithdrawPanel is wallet-address-prop-driven, but the #1152 session-expiry
+// recovery hook reads live session state via useWallet(). In production
+// WalletProvider always wraps the app (see main.tsx); tests mock the hook
+// directly to keep this file's render calls context-free.
+vi.mock("../../context/useWallet", () => ({
+  useWallet: () => ({
+    isConnected: true,
+    isSessionExpired: false,
+    connectWallet: vi.fn().mockResolvedValue(true),
+    providerId: "freighter",
+  }),
+}));
+
 const mockWithdraw = vi.mocked(withdraw);
 const mockGetUserShares = vi.mocked(getUserShares);
+const mockApiFetch = vi.mocked(apiFetch);
+
+async function typeAmountAndAwaitReadyButton(amount: string) {
+  const input = screen.getByPlaceholderText("0.00");
+  await userEvent.type(input, amount);
+  await waitFor(
+    () => expect(screen.getByRole("button", { name: /^Withdraw$/i })).toBeInTheDocument(),
+    { timeout: 3000 },
+  );
+}
 
 describe("WithdrawPanel", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockGetUserShares.mockResolvedValue(500_0000000n);
+    mockApiFetch.mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        vaultId: "usdc",
+        requestedAmountUsd: 10,
+        exitFeeUsd: 0,
+        exitFeeBps: 0,
+        processingDelayLabel: "Instant (~5 seconds on-chain)",
+        processingDelaySeconds: 5,
+        estimatedNetUsd: 10,
+        optimisticNetUsd: 10,
+        conservativeNetUsd: 10,
+        priceImpactPct: 0,
+        isLowLiquidity: false,
+        quotedAt: new Date().toISOString(),
+      }),
+    } as Response);
   });
 
   it("prompts for wallet connection when no wallet address is provided", () => {
@@ -52,10 +98,9 @@ describe("WithdrawPanel", () => {
 
     render(<WithdrawPanel walletAddress="GABCDEF123" />);
 
-    const input = screen.getByPlaceholderText("0.00");
-    await userEvent.type(input, "10");
+    await typeAmountAndAwaitReadyButton("10");
 
-    const button = screen.getByRole("button", { name: /withdraw/i });
+    const button = screen.getByRole("button", { name: /^Withdraw$/i });
     fireEvent.click(button);
 
     await waitFor(() => {
@@ -80,9 +125,8 @@ describe("WithdrawPanel", () => {
 
     render(<WithdrawPanel walletAddress="GABCDEF123" />);
 
-    const input = screen.getByPlaceholderText("0.00");
-    await userEvent.type(input, "10");
-    fireEvent.click(screen.getByRole("button", { name: /withdraw/i }));
+    await typeAmountAndAwaitReadyButton("10");
+    fireEvent.click(screen.getByRole("button", { name: /^Withdraw$/i }));
 
     let dialog: HTMLElement;
     await waitFor(() => {
@@ -90,6 +134,40 @@ describe("WithdrawPanel", () => {
       expect(dialog).toBeInTheDocument();
     });
     expect(within(dialog!).getByText(/Insufficient Shares/i)).toBeInTheDocument();
+  });
+
+  it("shows a low-reserve vault warning when the preview breaches the reserve buffer", async () => {
+    mockApiFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        vaultId: "usdc",
+        requestedAmountUsd: 10,
+        exitFeeUsd: 0,
+        exitFeeBps: 0,
+        processingDelayLabel: "Instant (~5 seconds on-chain)",
+        processingDelaySeconds: 5,
+        estimatedNetUsd: 10,
+        optimisticNetUsd: 10,
+        conservativeNetUsd: 10,
+        priceImpactPct: 0,
+        isLowLiquidity: false,
+        quotedAt: new Date().toISOString(),
+        reserveImpact: {
+          currentReserveRatioPct: 10,
+          projectedReserveRatioPct: 4.5,
+          projectedReserveUsd: 45000,
+          breachesMinBuffer: true,
+          minBufferPct: 8,
+        },
+      }),
+    } as Response);
+
+    render(<WithdrawPanel walletAddress="GABCDEF123" />);
+
+    await typeAmountAndAwaitReadyButton("10");
+
+    expect(await screen.findByText(/low reserve detected/i)).toBeInTheDocument();
+    expect(screen.getByText(/projected reserve ratio/i)).toBeInTheDocument();
   });
 
   it("rejects an amount exceeding the loaded share balance without calling withdraw", async () => {
@@ -101,7 +179,10 @@ describe("WithdrawPanel", () => {
 
     const input = screen.getByPlaceholderText("0.00");
     await userEvent.type(input, "999999");
-    fireEvent.click(screen.getByRole("button", { name: /withdraw/i }));
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: /^Withdraw$/i })).toBeInTheDocument();
+    });
+    fireEvent.click(screen.getByRole("button", { name: /^Withdraw$/i }));
 
     expect(screen.getByText(/exceeds your share balance/i)).toBeInTheDocument();
     expect(mockWithdraw).not.toHaveBeenCalled();

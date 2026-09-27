@@ -250,6 +250,11 @@ describe("KNOWN_CONTRACT_ERROR_CODES", () => {
         expect(KNOWN_CONTRACT_ERROR_CODES.has(3002)).toBe(true);
     });
 
+    it("contains the zap quote-expired code 4001", () => {
+        expect(KNOWN_CONTRACT_ERROR_CODES.has(4001)).toBe(true);
+        expect(decodeTransactionError("Error(Contract, #4001)").title).toBe("Quote Expired");
+    });
+
     it("every code in the set decodes to a non-fallback title", () => {
         for (const code of KNOWN_CONTRACT_ERROR_CODES) {
             const result = decodeTransactionError(`Error(Contract, #${code})`);

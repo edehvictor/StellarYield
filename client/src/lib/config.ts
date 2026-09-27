@@ -16,6 +16,15 @@ import {
   type ContractName,
   type NetworkName,
 } from "../services/contractRegistry";
+import {
+  CONTRACT_ENV_KEYS,
+  detectNetworkFromPassphrase,
+  getDiagnosticRpcUrl,
+  getEffectivePassphrase,
+  getHorizonUrl,
+} from "./networkEnv";
+
+export { detectNetworkFromPassphrase };
 
 export type DependencyStatus = "healthy" | "warning" | "error" | "unconfigured";
 
@@ -207,33 +216,18 @@ export function checkWalletDiagnostics(
   };
 }
 
-export function detectNetworkFromPassphrase(passphrase?: string): NetworkName {
-  const pass = passphrase ?? "";
-  if (pass.includes("mainnet") || pass.includes("Public Global")) {
-    return "mainnet";
-  }
-  if (pass === "" || pass.includes("local") || pass.includes("standalone")) {
-    return "local";
-  }
-  return "testnet";
-}
-
 /**
  * Inspect active Stellar network configuration.
  */
 export function checkNetworkDiagnostics(env: ImportMetaEnv = import.meta.env): NetworkDiagnostics {
   const passphrase = env.VITE_NETWORK_PASSPHRASE ?? "";
-  const activeNetwork = passphrase ? detectNetworkFromPassphrase(passphrase) : detectNetwork();
-  const effectivePassphrase =
-    passphrase ||
-    (activeNetwork === "mainnet"
-      ? "Public Global Stellar Network ; September 2015"
-      : activeNetwork === "local"
-      ? "Standalone Network ; February 2017"
-      : "Test SDF Network ; September 2015");
+  const activeNetwork = passphrase
+    ? detectNetworkFromPassphrase(passphrase)
+    : detectNetwork();
+  const effectivePassphrase = getEffectivePassphrase(env);
 
-  const rpcUrl = env.VITE_SOROBAN_RPC_URL || null;
-  const horizonUrl = env.VITE_HORIZON_URL || null;
+  const rpcUrl = getDiagnosticRpcUrl(env);
+  const horizonUrl = getHorizonUrl(env);
 
   let status: DependencyStatus = "healthy";
   let hint = `Active network: ${activeNetwork.toUpperCase()}.`;
@@ -296,7 +290,7 @@ export function checkRegistryDiagnostics(
       missingContracts.push(name);
     }
 
-    const envKey = name === "vault" ? "VITE_CONTRACT_ID" : `VITE_${name.toUpperCase()}_CONTRACT_ID`;
+    const envKey = CONTRACT_ENV_KEYS[name];
     const hasEnvOverride = Boolean(import.meta.env[envKey]);
 
     contracts.push({

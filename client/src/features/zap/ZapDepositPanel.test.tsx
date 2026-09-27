@@ -1,7 +1,8 @@
-import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { render, screen, fireEvent, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import ZapDepositPanel from "./ZapDepositPanel";
+import { zapDeposit } from "../../services/soroban";
 
 const mockFetch = vi.fn();
 global.fetch = mockFetch;
@@ -40,6 +41,19 @@ vi.mock("../settings/SettingsContext", () => ({
 
 vi.mock("../settings/types", () => ({
   resolveSlippage: () => 0.5,
+}));
+
+// ZapDepositPanel is wallet-address-prop-driven, but the #1152 session-expiry
+// recovery hook reads live session state via useWallet(). In production
+// WalletProvider always wraps the app (see main.tsx); tests mock the hook
+// directly to keep this file's render calls context-free.
+vi.mock("../../context/useWallet", () => ({
+  useWallet: () => ({
+    isConnected: true,
+    isSessionExpired: false,
+    connectWallet: vi.fn().mockResolvedValue(true),
+    providerId: "freighter",
+  }),
 }));
 
 function createMockQuote(overrides: Record<string, unknown> = {}) {
@@ -143,8 +157,8 @@ describe("ZapDepositPanel", () => {
     });
   });
 
-  describe("stale quote state", () => {
-    it("shows stale quote warning when quote is old", async () => {
+  describe("expired quote state", () => {
+    it("shows the expired invalidation banner when the quote TTL has elapsed", async () => {
       const staleQuotedAt = new Date(Date.now() - 120_000).toISOString();
       mockFetch.mockResolvedValue({
         ok: true,
@@ -157,11 +171,19 @@ describe("ZapDepositPanel", () => {
       await userEvent.type(input, "100");
 
       await waitFor(() => {
-        expect(screen.getByText("Stale quote")).toBeInTheDocument();
+        expect(screen.getByText("Quote expired")).toBeInTheDocument();
       });
+
+      const banner = screen
+        .getAllByRole("alert")
+        .find((el) => el.textContent?.includes("Quote expired"));
+      expect(banner).toBeTruthy();
+      expect(
+        within(banner!).getByRole("button", { name: /refresh quote/i }),
+      ).toBeInTheDocument();
     });
 
-    it("blocks submission when quote is stale", async () => {
+    it("blocks submission when quote has expired", async () => {
       const staleQuotedAt = new Date(Date.now() - 120_000).toISOString();
       mockFetch.mockResolvedValue({
         ok: true,
@@ -179,6 +201,152 @@ describe("ZapDepositPanel", () => {
 
       const submitBtn = screen.getByRole("button", { name: /zap deposit|deposit/i });
       expect(submitBtn).toBeDisabled();
+    });
+  });
+
+  describe("server-side quote invalidation on verify", () => {
+    function mockFreshQuoteThenVerify(
+      verifyBody: { error: string; message: string; recoverable?: boolean },
+    ) {
+      mockFetch.mockImplementation((url: string) => {
+        if (String(url).includes("/api/zap/verify")) {
+          return Promise.resolve({
+            ok: false,
+            status: 400,
+            json: async () => verifyBody,
+          });
+        }
+        return Promise.resolve({
+          ok: true,
+          json: async () =>
+            createMockQuote({
+              quotedAt: new Date().toISOString(),
+              expiresAt: new Date(Date.now() + 60_000).toISOString(),
+            }),
+        });
+      });
+    }
+
+    it("invalidates the preview and shows the deterministic STALE_QUOTE message", async () => {
+      mockFreshQuoteThenVerify({
+        error: "STALE_QUOTE",
+        message: "Quote has expired",
+        recoverable: true,
+      });
+
+      render(<ZapDepositPanel walletAddress="GABCDEF123" />);
+
+      const input = screen.getByPlaceholderText("0.00");
+      await userEvent.type(input, "100");
+
+      await waitFor(() => {
+        expect(screen.getByText("Simulated")).toBeInTheDocument();
+      });
+
+      fireEvent.click(screen.getByRole("button", { name: /zap deposit/i }));
+
+      await waitFor(() => {
+        expect(
+          screen.getByText("Quote expired. Refresh and try again."),
+        ).toBeInTheDocument();
+      });
+
+      // Preview hard-invalidated: expected output cleared to the empty state.
+      await waitFor(() => {
+        expect(screen.getByText("—")).toBeInTheDocument();
+      });
+      expect(
+        screen.queryByText("Min. after", { exact: false }),
+      ).not.toBeInTheDocument();
+
+      // Server flagged the failure recoverable → retry action is offered.
+      expect(
+        screen.getByRole("button", { name: /retry quote/i }),
+      ).toBeInTheDocument();
+    });
+
+    it("shows the deterministic CONFIG_DRIFT message without echoing server text", async () => {
+      mockFreshQuoteThenVerify({
+        error: "CONFIG_DRIFT",
+        message: "Asset configuration has drifted",
+        recoverable: true,
+      });
+
+      render(<ZapDepositPanel walletAddress="GABCDEF123" />);
+
+      const input = screen.getByPlaceholderText("0.00");
+      await userEvent.type(input, "100");
+
+      await waitFor(() => {
+        expect(screen.getByText("Simulated")).toBeInTheDocument();
+      });
+
+      fireEvent.click(screen.getByRole("button", { name: /zap deposit/i }));
+
+      await waitFor(() => {
+        expect(
+          screen.getByText("Supported assets changed. Refresh and try again."),
+        ).toBeInTheDocument();
+      });
+      expect(
+        screen.queryByText("Asset configuration has drifted"),
+      ).not.toBeInTheDocument();
+    });
+  });
+
+  describe("on-chain quote deadline", () => {
+    const EXPIRES_AT = "2099-01-01T00:01:00.500Z";
+
+    function mockFreshQuoteThenVerifyOk() {
+      mockFetch.mockImplementation((url: string) => {
+        if (String(url).includes("/api/zap/verify")) {
+          return Promise.resolve({ ok: true, json: async () => ({ success: true }) });
+        }
+        return Promise.resolve({
+          ok: true,
+          json: async () =>
+            createMockQuote({ quotedAt: new Date().toISOString(), expiresAt: EXPIRES_AT }),
+        });
+      });
+    }
+
+    async function submitZap() {
+      render(<ZapDepositPanel walletAddress="GABCDEF123" />);
+      await userEvent.type(screen.getByPlaceholderText("0.00"), "100");
+      await waitFor(() => expect(screen.getByText("Simulated")).toBeInTheDocument());
+      fireEvent.click(screen.getByRole("button", { name: /zap deposit/i }));
+    }
+
+    it("binds the transaction to the quote expiresAt (floored seconds)", async () => {
+      mockFreshQuoteThenVerifyOk();
+      vi.mocked(zapDeposit).mockResolvedValueOnce({ success: true, hash: "0xhash" });
+
+      await submitZap();
+
+      await waitFor(() => expect(zapDeposit).toHaveBeenCalledTimes(1));
+      const params = vi.mocked(zapDeposit).mock.calls[0][1];
+      expect(params.deadlineUnixSeconds).toBe(
+        BigInt(Math.floor(Date.parse(EXPIRES_AT) / 1000)),
+      );
+      expect(params.expectedAmountOut).toBe(9_500_000n);
+      expect(params.allowPartial).toBe(true);
+    });
+
+    it("invalidates the preview when the contract rejects with QuoteExpired (4001)", async () => {
+      mockFreshQuoteThenVerifyOk();
+      vi.mocked(zapDeposit).mockResolvedValueOnce({
+        success: false,
+        error: "Contract Execution Error [4001 Unknown]: ...",
+        errorCode: 4001,
+      });
+
+      await submitZap();
+
+      await waitFor(() => {
+        expect(screen.getByText("Quote expired. Refresh and try again.")).toBeInTheDocument();
+      });
+      expect(screen.queryByText("Min. after", { exact: false })).not.toBeInTheDocument();
+      expect(screen.queryByText(/Contract Execution Error/)).not.toBeInTheDocument();
     });
   });
 
@@ -316,6 +484,9 @@ describe("ZapDepositPanel", () => {
       expect(screen.queryByRole("link", { name: /view account on explorer/i })).not.toBeInTheDocument();
       expect(screen.queryByRole("link", { name: /contact support/i })).not.toBeInTheDocument();
       expect(screen.queryByRole("button", { name: /retry quote/i })).not.toBeInTheDocument();
+    });
+  });
+
   describe("per-vault preferences", () => {
     beforeEach(() => {
       localStorage.clear();

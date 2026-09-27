@@ -1,10 +1,29 @@
 import React, { useMemo } from "react";
-import { ArrowUpRight, ArrowDownRight, Minus } from "lucide-react";
-import type { DailyMovement, AssetMovement, ProtocolMovement } from "../../../shared/types/dailyMovement";
+import { ArrowUpRight, ArrowDownRight, Minus, AlertTriangle } from "lucide-react";
+import type { DailyMovement, AssetMovement, ProtocolMovement, ValuationFreshness } from "../../../shared/types/dailyMovement";
+import { describeFreshnessNotice } from "./dailyMovementErrors";
 
 interface DailyMovementPanelProps {
   movement: DailyMovement;
   compact?: boolean;
+}
+
+function FreshnessNotice({ freshness }: { freshness?: ValuationFreshness }) {
+  const notice = describeFreshnessNotice(freshness);
+  if (!notice) {
+    return null;
+  }
+
+  return (
+    <div
+      data-testid="daily-movement-freshness-notice"
+      className="flex items-center gap-2 p-3 bg-yellow-500/10 border border-yellow-500/30 rounded-lg text-sm text-yellow-400"
+      role="status"
+    >
+      <AlertTriangle className="w-4 h-4 shrink-0" aria-hidden="true" />
+      <span>{notice}</span>
+    </div>
+  );
 }
 
 function formatUsd(value: number): string {
@@ -105,8 +124,9 @@ export const DailyMovementPanel: React.FC<DailyMovementPanelProps> = ({ movement
   // If no previous snapshot, show neutral state
   if (!movement.hasPreviousSnapshot) {
     return (
-      <div className="glass-panel p-6 border border-gray-700">
+      <div className="glass-panel p-6 border border-gray-700 space-y-4">
         <h3 className="text-lg font-bold mb-4 text-gray-300">Daily Portfolio Movement</h3>
+        <FreshnessNotice freshness={movement.freshness} />
         <div className="flex items-center justify-center py-8 text-gray-500">
           <p>No previous snapshot available for comparison.</p>
         </div>
@@ -123,6 +143,7 @@ export const DailyMovementPanel: React.FC<DailyMovementPanelProps> = ({ movement
           <h4 className="font-semibold text-gray-200">Daily Change</h4>
           <MovementBadge movement={movement.totalPercentChange} isNegative={isNegative} />
         </div>
+        <FreshnessNotice freshness={movement.freshness} />
         <div className="grid grid-cols-3 gap-3 text-sm">
           <div>
             <div className="text-gray-500 text-xs">Portfolio Value</div>
@@ -149,6 +170,7 @@ export const DailyMovementPanel: React.FC<DailyMovementPanelProps> = ({ movement
 
   return (
     <div className="glass-panel p-6 border border-gray-700 space-y-6">
+      <FreshnessNotice freshness={movement.freshness} />
       {/* Header with overall movement */}
       <div className="flex items-center justify-between">
         <div>

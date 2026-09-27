@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   AlertTriangle,
   ArrowDownToLine,
@@ -93,6 +93,9 @@ export default function UnifiedActivityTimeline({
   const [selectedTypes, setSelectedTypes] = useState<AccountActivityEventType[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [retryCount, setRetryCount] = useState(0);
+
+  const retry = useCallback(() => setRetryCount((c) => c + 1), []);
 
   useEffect(() => {
     let cancelled = false;
@@ -141,7 +144,7 @@ export default function UnifiedActivityTimeline({
     return () => {
       cancelled = true;
     };
-  }, [selectedTypes, walletAddress]);
+  }, [selectedTypes, walletAddress, retryCount]);
 
   const groupedEvents = useMemo(() => {
     const groups = new Map<string, AccountActivityEvent[]>();
@@ -204,9 +207,21 @@ export default function UnifiedActivityTimeline({
       )}
 
       {!loading && error && (
-        <div className="flex items-center gap-2 rounded-xl border border-red-500/30 bg-red-500/10 p-3 text-sm text-red-300">
-          <AlertTriangle size={16} />
-          {error}
+        <div
+          className="flex items-center justify-between gap-2 rounded-xl border border-red-500/30 bg-red-500/10 p-3 text-sm text-red-300"
+          data-testid="activity-timeline-error"
+        >
+          <span className="flex items-center gap-2">
+            <AlertTriangle size={16} />
+            {error}
+          </span>
+          <button
+            type="button"
+            onClick={retry}
+            className="flex items-center gap-1.5 rounded-lg border border-red-500/30 px-2.5 py-1 text-xs font-medium text-red-200 hover:bg-red-500/10"
+          >
+            <RefreshCw size={12} /> Retry
+          </button>
         </div>
       )}
 

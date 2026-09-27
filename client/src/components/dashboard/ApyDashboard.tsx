@@ -23,15 +23,19 @@ import {
   Maximize2,
 } from "lucide-react";
 import { apiUrl } from "../../lib/api";
+import { BackendUnavailable } from "../BackendUnavailable";
 import { stableSort } from "../../lib/stableSort";
 import EmptyState from "../common/EmptyState";
 import { EMPTY_STATE_APY } from "../../utils/emptyStateCopy";
 import { LiquidityBufferPanel } from "./LiquidityBufferPanel";
+import { FreshnessBanner } from "./FreshnessBanner";
 import { computeDecayedFreshnessConfidence } from "./freshnessDecay";
 import { RISK_EXPLANATIONS, RiskLevel } from "../../config/riskConfig";
 import { VaultRiskBadge } from "../common/VaultRiskBadge";
 import { useDensity } from "../../context/DensityContext";
 import type { DensityMode } from "../../context/DensityContext";
+import { cachedFetch } from "../../lib/cachedFetch";
+import { formatRewardRate } from "../../lib/apyFormat";
 
 // ── Types ───────────────────────────────────────────────────────────────
 
@@ -173,13 +177,7 @@ function normalizeApyEntry(entry: ApiApyEntry): ApyEntry {
 }
 
 function getErrorMessage(error: unknown): string {
-  if (error instanceof Error && error.message) {
-    if (error.message.startsWith("HTTP")) {
-      return `Yield API request failed (${error.message})`;
-    }
-    return error.message;
-  }
-  return "Unable to fetch live APY data right now";
+  return "Unable to fetch live APY data right now. The backend service may be disconnected.";
 }
 
 function getSortButtonLabel(
@@ -294,6 +292,10 @@ export default function ApyDashboard() {
   const [viewMode, setViewMode] = useState<ViewMode>("grid");
   const [selectedCategory, setSelectedCategory] = useState<string>("All");
   const [refreshing, setRefreshing] = useState(false);
+  const [cacheIndicator, setCacheIndicator] = useState<
+    "offline" | "cached" | null
+  >(null);
+  const [cacheFetchedAt, setCacheFetchedAt] = useState<number | null>(null);
   const { startRequest, isCurrent } = useStaleResponseGuard();
 
   const fetchApyData = useCallback(async (showLoadingState = true) => {
@@ -305,30 +307,45 @@ export default function ApyDashboard() {
 
     try {
       setError(null);
-      const res = await fetch(apiUrl("/api/yields"));
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const data: unknown = await res.json();
+      const result = await cachedFetch<unknown>(apiUrl("/api/yields"));
       if (!isCurrent(token)) return;
-      const rows = Array.isArray(data) ? data : [];
-      const augmented: ApyEntry[] = rows.map((row) => {
-        const entry = normalizeApyEntry(row as ApiApyEntry);
-        const fetchedTime = entry.fetchedAt
-          ? new Date(entry.fetchedAt).getTime()
-          : Date.now();
-        const freshness = computeDecayedFreshnessConfidence(
-          Date.now() - fetchedTime,
+      if (result.data == null) {
+        setError(
+          result.error
+            ? getErrorMessage(new Error(result.error))
+            : "Unable to fetch live APY data right now",
         );
-        return {
-          ...entry,
-          freshnessConfidence: freshness.confidence,
-          unusableDueToStale: freshness.unusable,
-        };
-      });
-      setApyData(augmented);
+        setApyData([]);
+        setCacheIndicator(null);
+        setCacheFetchedAt(null);
+      } else {
+        const rows = Array.isArray(result.data) ? result.data : [];
+        const augmented: ApyEntry[] = rows.map((row) => {
+          const entry = normalizeApyEntry(row as ApiApyEntry);
+          const fetchedTime = entry.fetchedAt
+            ? new Date(entry.fetchedAt).getTime()
+            : Date.now();
+          const freshness = computeDecayedFreshnessConfidence(
+            Date.now() - fetchedTime,
+          );
+          return {
+            ...entry,
+            freshnessConfidence: freshness.confidence,
+            unusableDueToStale: freshness.unusable,
+          };
+        });
+        setApyData(augmented);
+        setCacheIndicator(
+          result.offline ? "offline" : result.fromCache ? "cached" : null,
+        );
+        setCacheFetchedAt(result.fetchedAt);
+        setError(null);
+      }
     } catch (err) {
       if (!isCurrent(token)) return;
       setError(getErrorMessage(err));
       setApyData([]);
+      setCacheIndicator(null);
     } finally {
       if (isCurrent(token)) {
         setLoading(false);
@@ -339,6 +356,15 @@ export default function ApyDashboard() {
 
   useEffect(() => {
     void fetchApyData();
+  }, [fetchApyData]);
+
+  // Auto-refresh cached rates when connectivity returns (#1125).
+  useEffect(() => {
+    const handleOnline = () => {
+      void fetchApyData(false);
+    };
+    window.addEventListener("online", handleOnline);
+    return () => window.removeEventListener("online", handleOnline);
   }, [fetchApyData]);
 
   const handleRefresh = () => {
@@ -447,21 +473,11 @@ export default function ApyDashboard() {
             Compare yields across Stellar DeFi protocols
           </p>
         </header>
-        <div className="glass-panel p-12 text-center">
-          <div className="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-red-500/10 mb-6">
-            <AlertTriangle size={32} className="text-[#FF5E5E]" />
-          </div>
-          <h3 className="text-xl font-bold mb-2">Failed to Load APY Data</h3>
-          <p className="text-gray-400 max-w-md mx-auto mb-6">
-            {error}. Please try again.
-          </p>
-          <button
-            onClick={handleRefresh}
-            className="btn-primary inline-flex items-center gap-2"
-          >
-            <RefreshCw size={16} /> Retry
-          </button>
-        </div>
+        <BackendUnavailable
+          featureName="APY Data"
+          reason="The backend service is currently disconnected or unavailable. Please try again later."
+          onRetry={handleRefresh}
+        />
       </div>
     );
   }
@@ -499,6 +515,19 @@ export default function ApyDashboard() {
           {refreshing ? "Refreshing..." : "Refresh Rates"}
         </button>
       </header>
+
+      {cacheIndicator && apyData.length > 0 && (
+        <FreshnessBanner
+          lastUpdated={
+            cacheFetchedAt != null
+              ? new Date(cacheFetchedAt).toISOString()
+              : undefined
+          }
+          source="cache"
+          isOffline={cacheIndicator === "offline"}
+          onRefresh={handleRefresh}
+        />
+      )}
 
       {error && (
         <div
@@ -539,7 +568,7 @@ export default function ApyDashboard() {
               <Flame size={14} /> Best APY
             </div>
             <p className="text-2xl font-bold text-[#3EAC75]">
-              {bestApy.toFixed(2)}%
+              {formatRewardRate(bestApy)}
             </p>
             <p className="text-xs text-gray-500 mt-1">
               Net after fees/slippage
@@ -549,7 +578,7 @@ export default function ApyDashboard() {
             <div className="flex items-center gap-2 text-gray-400 text-xs font-semibold uppercase tracking-wider mb-2">
               <TrendingUp size={14} /> Avg APY
             </div>
-            <p className="text-2xl font-bold">{avgApy.toFixed(2)}%</p>
+            <p className="text-2xl font-bold">{formatRewardRate(avgApy)}</p>
             <p className="text-xs text-gray-500 mt-1">
               Portfolio net APY average
             </p>
@@ -608,26 +637,26 @@ export default function ApyDashboard() {
                   <tr key={row.id} className="border-t border-white/10">
                     <td className="py-2">{row.vault}</td>
                     <td className="py-2 text-right text-red-300">
-                      {row.totalFeeDragApy.toFixed(2)}%
+                      {formatRewardRate(row.totalFeeDragApy)}
                     </td>
                     <td className="py-2 text-right">
-                      {row.managementFeeApy.toFixed(2)}%
+                      {formatRewardRate(row.managementFeeApy)}
                     </td>
                     <td className="py-2 text-right">
-                      {row.protocolFeeApy.toFixed(2)}%
+                      {formatRewardRate(row.protocolFeeApy)}
                     </td>
                     <td className="py-2 text-right">
-                      {row.slippageApy.toFixed(2)}%
+                      {formatRewardRate(row.slippageApy)}
                     </td>
                     <td className="py-2 text-right">
-                      {row.networkFeeApy.toFixed(2)}%
+                      {formatRewardRate(row.networkFeeApy)}
                     </td>
                     <td className="py-2 text-right text-green-300">
-                      -{row.rewardOffsetApy.toFixed(2)}%
+                      -{formatRewardRate(row.rewardOffsetApy)}
                     </td>
                     <td className="py-2 text-right">
                       {row.unknownFeeApy > 0
-                        ? `${row.unknownFeeApy.toFixed(2)}%`
+                        ? formatRewardRate(row.unknownFeeApy)
                         : "Unknown / None"}
                     </td>
                   </tr>
@@ -807,7 +836,7 @@ export default function ApyDashboard() {
                       {/* APY */}
                       <div className="flex items-baseline gap-2 mb-1">
                         <span className="text-3xl font-extrabold text-white">
-                          {(entry.netApy ?? entry.apy).toFixed(2)}
+                          {formatRewardRate(entry.netApy ?? entry.apy, { suffix: false })}
                         </span>
                         <span className="text-lg font-bold text-gray-400">
                           % APY
@@ -815,8 +844,8 @@ export default function ApyDashboard() {
                       </div>
                       <p className="text-xs text-gray-500 flex items-center gap-1.5">
                         <span>
-                          Gross {(entry.totalApy ?? entry.apy).toFixed(2)}% |
-                          Drag {(entry.feeDragApy ?? 0).toFixed(2)}%
+                          Gross {formatRewardRate(entry.totalApy ?? entry.apy)} |
+                          Drag {formatRewardRate(entry.feeDragApy ?? 0)}
                         </span>
                         <button
                           onClick={() => setIsFeeModalOpen(true)}
@@ -837,8 +866,7 @@ export default function ApyDashboard() {
                           ) : (
                             <ArrowDownRight size={12} />
                           )}
-                          {isPositive ? "+" : ""}
-                          {entry.change24h.toFixed(2)}% 24h
+                          {formatRewardRate(entry.change24h, { showPositiveSign: true })} 24h
                         </span>
                         <span className="text-gray-500">
                           TVL {formatTvl(entry.tvl)}
@@ -871,7 +899,7 @@ export default function ApyDashboard() {
                           {entry.netYieldSensitivity
                             .map(
                               (s) =>
-                                `${s.environment[0].toUpperCase()}:${s.netApy.toFixed(1)}%`,
+                                `${s.environment[0].toUpperCase()}:${formatRewardRate(s.netApy)}`,
                             )
                             .join(" ")}
                         </div>
@@ -1058,10 +1086,10 @@ export default function ApyDashboard() {
                           </td>
                           <td className="px-6 py-5">
                             <span className="text-green-400 font-extrabold text-lg">
-                              {(entry.netApy ?? entry.apy).toFixed(2)}%
+                              {formatRewardRate(entry.netApy ?? entry.apy)}
                             </span>
                             <p className="text-[10px] text-gray-500">
-                              Gross {(entry.totalApy ?? entry.apy).toFixed(2)}%
+                              Gross {formatRewardRate(entry.totalApy ?? entry.apy)}
                             </p>
                           </td>
                           <td className="px-6 py-5">
@@ -1073,8 +1101,7 @@ export default function ApyDashboard() {
                               ) : (
                                 <ArrowDownRight size={14} />
                               )}
-                              {isPositive ? "+" : ""}
-                              {entry.change24h.toFixed(2)}%
+                              {formatRewardRate(entry.change24h, { showPositiveSign: true })}
                             </span>
                           </td>
                           <td className="px-6 py-5 text-gray-300 font-medium">

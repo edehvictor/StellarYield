@@ -16,6 +16,7 @@ import {
   type ReconcileCauseCategory,
   type ReconcileCauseCode,
 } from "../../../../shared/types/reconcileCause";
+import { stableSort } from "../../lib/stableSort";
 import "./PortfolioReconcile.css";
 
 export type ReconcileAnomalyType = "missing" | "duplicate" | "stale" | "orphaned" | "matched";
@@ -156,18 +157,67 @@ const CauseBadge: React.FC<{ code: ReconcileCauseCode; detail?: string }> = ({ c
   );
 };
 
-function groupByVault(rows: ReconcileRow[]): ReconcileGroup[] {
+/** Typed fallback for malformed registry rows; always sorts last. */
+export const UNKNOWN_VAULT_LABEL = "Unknown Vault";
+
+/** Normalize null/undefined/empty vault names so sorting never throws. */
+export function normalizeVaultName(vault: unknown): string {
+  if (typeof vault !== "string") return UNKNOWN_VAULT_LABEL;
+  const trimmed = vault.trim();
+  return trimmed.length === 0 ? UNKNOWN_VAULT_LABEL : trimmed;
+}
+
+function compareVaultNames(a: string, b: string): number {
+  const aUnknown = a === UNKNOWN_VAULT_LABEL;
+  const bUnknown = b === UNKNOWN_VAULT_LABEL;
+  if (aUnknown && bUnknown) return 0;
+  if (aUnknown) return 1;
+  if (bUnknown) return -1;
+  return a.localeCompare(b);
+}
+
+function compareReconcileRows(a: ReconcileRow, b: ReconcileRow): number {
+  const asset = String(a.asset ?? "").localeCompare(String(b.asset ?? ""));
+  if (asset !== 0) return asset;
+  const anomaly = String(a.anomalyType ?? "").localeCompare(String(b.anomalyType ?? ""));
+  if (anomaly !== 0) return anomaly;
+  const severity = String(a.severity ?? "").localeCompare(String(b.severity ?? ""));
+  if (severity !== 0) return severity;
+  const status = String(a.status ?? "").localeCompare(String(b.status ?? ""));
+  if (status !== 0) return status;
+  const expected = String(a.expected ?? "").localeCompare(String(b.expected ?? ""));
+  if (expected !== 0) return expected;
+  const observed = String(a.observed ?? "").localeCompare(String(b.observed ?? ""));
+  if (observed !== 0) return observed;
+  return String(a.causeCode ?? "").localeCompare(String(b.causeCode ?? ""));
+}
+
+function rowTiebreakId(r: ReconcileRow): string {
+  return [
+    String(r.asset ?? ""),
+    String(r.anomalyType ?? ""),
+    String(r.severity ?? ""),
+    String(r.status ?? ""),
+    String(r.expected ?? ""),
+    String(r.observed ?? ""),
+    String(r.delta ?? ""),
+    String(r.causeCode ?? ""),
+  ].join("|");
+}
+
+export function groupByVault(rows: ReconcileRow[]): ReconcileGroup[] {
   const map = new Map<string, ReconcileRow[]>();
   for (const row of rows) {
-    const key = row.vault ?? "Unknown";
+    const key = normalizeVaultName((row as { vault?: unknown }).vault);
     const group = map.get(key) ?? [];
     group.push(row);
     map.set(key, group);
   }
-  return Array.from(map.entries()).map(([vault, groupRows]) => ({
+  const groups = Array.from(map.entries()).map(([vault, groupRows]) => ({
     vault,
-    rows: groupRows,
+    rows: stableSort(groupRows, compareReconcileRows, rowTiebreakId),
   }));
+  return stableSort(groups, (a, b) => compareVaultNames(a.vault, b.vault), (g) => g.vault);
 }
 
 function formatEvidence(evidence: ReconcileEvidence): string {

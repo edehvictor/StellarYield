@@ -55,11 +55,15 @@ fn read_tail(env: &Env) -> u32 {
 }
 
 fn write_head(env: &Env, head: u32) {
-    env.storage().instance().set(&WithdrawalQueueKey::Head, &head);
+    env.storage()
+        .instance()
+        .set(&WithdrawalQueueKey::Head, &head);
 }
 
 fn write_tail(env: &Env, tail: u32) {
-    env.storage().instance().set(&WithdrawalQueueKey::Tail, &tail);
+    env.storage()
+        .instance()
+        .set(&WithdrawalQueueKey::Tail, &tail);
 }
 
 #[contractimpl]
@@ -169,7 +173,7 @@ impl YieldVault {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{YieldVaultClient};
+    use crate::YieldVaultClient;
     use soroban_sdk::testutils::Address as _;
     use soroban_sdk::Env;
 

@@ -163,21 +163,23 @@ export function assertValidScenarioInput(body: unknown): TreasuryScenario {
 
   const validation = validateAllocationsPayload(allocations);
   if (!validation.valid) {
+    // Sum mismatches are a client input error (400 allocation_total_mismatch)
+    // per the route contract; other allocation policy failures stay 422.
+    // Always attach fieldErrors so callers can inspect per-field codes.
+    const hasSumMismatch = validation.errors.some((e) => e.code === 'sum_mismatch');
+    if (hasSumMismatch) {
+      throw new TreasuryValidationError(
+        'allocation_total_mismatch',
+        'Allocation percentages must sum to 100.',
+        400,
+        { fieldErrors: validation.errors },
+      );
+    }
     throw new TreasuryValidationError(
       'allocation_validation_failed',
       'Allocation validation failed.',
       400,
       { fieldErrors: validation.errors },
-    );
-  }
-
-  const totalAllocationPct = allocations.reduce((sum, item) => sum + (item.allocationPct as number), 0);
-  if (Math.abs(totalAllocationPct - 100) > 0.01) {
-    throw new TreasuryValidationError(
-      'allocation_total_mismatch',
-      'Allocation percentages must sum to 100.',
-      400,
-      { allocationTotalPct: totalAllocationPct },
     );
   }
 

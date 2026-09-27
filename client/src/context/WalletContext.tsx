@@ -3,6 +3,7 @@ import { isConnected } from "@stellar/freighter-api";
 import {
   clearStoredSession,
   connectWalletSession,
+  isSessionExpired,
   loadStoredSession,
   recoverSession,
 } from "../auth/session";
@@ -156,6 +157,10 @@ export function WalletProvider({ children }: { children: ReactNode }) {
       connectedAt: session?.connectedAt ?? null,
       lastActivityAt: session?.lastActivityAt ?? null,
       isConnected: Boolean(session?.walletAddress),
+      // Issue #1152: exposed so protected flows (quote preview, tx submission)
+      // can check expiry synchronously before acting, rather than only
+      // discovering it when a signing/read call fails deep in a service.
+      isSessionExpired: session ? isSessionExpired(session) : false,
       isConnecting,
       isFreighterInstalled,
       errorMessage,

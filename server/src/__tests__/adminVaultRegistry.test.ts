@@ -40,7 +40,9 @@ describe("GET /api/admin/vaults/registry", () => {
 
     expect(res.status).toBe(200);
     expect(Array.isArray(res.body.vaults)).toBe(true);
-    expect(res.body.vaults.some((v: { vaultId: string }) => v.vaultId === "usdc")).toBe(true);
+    expect(
+      res.body.vaults.some((v: { vaultId: string }) => v.vaultId === "usdc"),
+    ).toBe(true);
   });
 
   it("rejects a non-admin caller (403)", async () => {
@@ -48,6 +50,43 @@ describe("GET /api/admin/vaults/registry", () => {
       .get("/api/admin/vaults/registry")
       .set("Authorization", USER_TOKEN);
     expect(res.status).toBe(403);
+  });
+
+  it("filters entries by lifecycle status", async () => {
+    await request(app)
+      .post("/api/admin/vaults/usdc/registry")
+      .set("Authorization", ADMIN_TOKEN)
+      .send({ status: "PAUSED" });
+
+    const res = await request(app)
+      .get("/api/admin/vaults/registry?status=paused")
+      .set("Authorization", ADMIN_TOKEN);
+
+    expect(res.status).toBe(200);
+    expect(res.body.vaults.length).toBeGreaterThan(0);
+    expect(
+      res.body.vaults.every((v: { status: string }) => v.status === "PAUSED"),
+    ).toBe(true);
+  });
+
+  it("returns an empty list when no entries match the lifecycle filter", async () => {
+    const res = await request(app)
+      .get("/api/admin/vaults/registry?status=deprecated")
+      .set("Authorization", ADMIN_TOKEN);
+
+    expect(res.status).toBe(200);
+    expect(res.body.vaults).toEqual([]);
+  });
+
+  it("rejects an unsupported lifecycle filter with a stable error", async () => {
+    const res = await request(app)
+      .get("/api/admin/vaults/registry?status=retired")
+      .set("Authorization", ADMIN_TOKEN);
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe(
+      "status must be one of: ACTIVE, PAUSED, DEPRECATED",
+    );
   });
 });
 
@@ -75,7 +114,9 @@ describe("POST /api/admin/vaults/:vaultId/registry", () => {
     const check = await request(app)
       .get("/api/admin/vaults/registry")
       .set("Authorization", ADMIN_TOKEN);
-    const usdc = check.body.vaults.find((v: { vaultId: string }) => v.vaultId === "usdc");
+    const usdc = check.body.vaults.find(
+      (v: { vaultId: string }) => v.vaultId === "usdc",
+    );
     expect(usdc.status).not.toBe("PAUSED");
   });
 

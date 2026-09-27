@@ -246,10 +246,7 @@ impl OptimisticGovernance {
     /// Read-only aggregate readiness check: reports every specific reason
     /// (if any) currently blocking `execute()` for this proposal, instead of
     /// only the first one a caller would hit via a revert.
-    pub fn is_execution_ready(
-        env: Env,
-        proposal_id: u64,
-    ) -> Result<ExecutionReadiness, Error> {
+    pub fn is_execution_ready(env: Env, proposal_id: u64) -> Result<ExecutionReadiness, Error> {
         Self::require_init(&env)?;
 
         let proposal: Proposal = env

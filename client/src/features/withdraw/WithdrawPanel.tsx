@@ -23,12 +23,22 @@ import {
   isWithdrawQuoteStale,
   withdrawQuoteAgeSeconds,
 } from "./withdrawQuoteFreshness";
+import { useProtectedWalletAction } from "../../hooks/useProtectedWalletAction";
+import SessionExpiredRecovery from "../../components/wallet/SessionExpiredRecovery";
 
 export interface WithdrawPanelProps {
   walletAddress: string | null;
 }
 
 // ── Withdrawal preview types ────────────────────────────────────────────────
+
+interface ReserveImpactPreview {
+  currentReserveRatioPct: number;
+  projectedReserveRatioPct: number;
+  projectedReserveUsd: number;
+  breachesMinBuffer: boolean;
+  minBufferPct: number;
+}
 
 interface WithdrawalPreview {
   vaultId: string;
@@ -45,6 +55,7 @@ interface WithdrawalPreview {
   quotedAt: string;
   expiresAt?: string;
   quoteTtlMs?: number;
+  reserveImpact?: ReserveImpactPreview;
 }
 
 // Fallback USD rate — in production this would come from a price oracle.
@@ -220,6 +231,21 @@ function PreviewPanel({
           reduce price impact.
         </div>
       )}
+
+      {/* Low-reserve warning */}
+      {preview.reserveImpact?.breachesMinBuffer && (
+        <div
+          role="alert"
+          className="flex items-start gap-2 rounded-lg bg-amber-500/10 border border-amber-500/30 p-3 text-xs text-amber-200/80"
+        >
+          <AlertTriangle className="w-4 h-4 shrink-0 text-amber-400 mt-0.5" />
+          <span>
+            <span className="font-medium text-amber-100">Low reserve detected.</span>{" "}
+            This withdrawal would leave the vault below its minimum reserve
+            buffer. Projected reserve ratio: {preview.reserveImpact.projectedReserveRatioPct.toFixed(1)}% vs {preview.reserveImpact.minBufferPct}% minimum.
+          </span>
+        </div>
+      )}
     </div>
   );
 }
@@ -269,7 +295,19 @@ export default function WithdrawPanel({ walletAddress }: WithdrawPanelProps) {
     setRefreshNonce((n) => n + 1);
   }, []);
 
-  const refreshBalance = useCallback(async () => {
+  // Issue #1152: recovery primitives for protected flows (share-balance /
+  // preview reads and the withdrawal submission below) that assume a live
+  // wallet session.
+  const {
+    pendingRecovery,
+    runProtected,
+    reconnectAndResume,
+    retryPending,
+    cancelPending,
+    isReconnecting,
+  } = useProtectedWalletAction();
+
+  const fetchShareBalance = useCallback(async () => {
     if (!walletAddress) return;
     try {
       const shares = await getUserShares(walletAddress);
@@ -282,9 +320,18 @@ export default function WithdrawPanel({ walletAddress }: WithdrawPanelProps) {
     }
   }, [walletAddress]);
 
+  // The share-balance read backs the withdrawal preview (max amount, balance
+  // validation) and requires a live wallet session — treated as the
+  // "quote preview" protected flow for this panel. An expired session here
+  // surfaces recovery instead of leaving the balance silently stale/blank.
+  const refreshBalance = useCallback(async () => {
+    await runProtected("Load withdrawal preview", fetchShareBalance);
+  }, [runProtected, fetchShareBalance]);
+
   useEffect(() => {
     void refreshBalance();
-  }, [refreshBalance]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [walletAddress]);
 
   // ── Fetch withdrawal preview ──────────────────────────────────────────────
   useEffect(() => {
@@ -398,7 +445,7 @@ export default function WithdrawPanel({ walletAddress }: WithdrawPanelProps) {
     }
   }, []);
 
-  const handleWithdraw = useCallback(async () => {
+  const executeWithdraw = useCallback(async () => {
     if (!walletAddress) return;
 
     // Block submission when preview data is still loading or missing due to
@@ -463,6 +510,15 @@ export default function WithdrawPanel({ walletAddress }: WithdrawPanelProps) {
     previewLoading,
   ]);
 
+  // Issue #1152: check for an expired session immediately before submitting
+  // the withdrawal (transaction submission is the second protected flow
+  // named in the issue). An expired session captures executeWithdraw as a
+  // resumable action and surfaces recovery instead of an uncaught error
+  // from deep inside withdraw()/the signing adapter.
+  const handleWithdraw = useCallback(async () => {
+    await runProtected("Withdraw", executeWithdraw);
+  }, [runProtected, executeWithdraw]);
+
   const retryWithdraw = useCallback(() => {
     setError("");
     void handleWithdraw();
@@ -493,6 +549,16 @@ export default function WithdrawPanel({ walletAddress }: WithdrawPanelProps) {
 
   return (
     <div className="bg-white/5 backdrop-blur-xl rounded-2xl border border-white/10 p-6 max-w-md mx-auto">
+      {pendingRecovery && (
+        <SessionExpiredRecovery
+          actionLabel={pendingRecovery.label}
+          onReconnect={() => void reconnectAndResume()}
+          onRetry={() => void retryPending()}
+          onCancel={cancelPending}
+          isReconnecting={isReconnecting}
+        />
+      )}
+
       {showFailedModal && error && (
         <TransactionFailedModal
           error={decodeTransactionError(error)}

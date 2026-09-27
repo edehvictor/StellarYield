@@ -44,6 +44,12 @@ export interface ConfidenceInputs {
   volatilityPct: number;
   dataCompleteness: number;
   modelFit: number;
+  /** Density of data points across the observed window, [0, 1]. */
+  historyCoverage: number;
+  /** Combined coverage multiplier applied to confidence, [0, 1]. */
+  coverageDecay: number;
+  /** Coverage dimensions that triggered a meaningful penalty. */
+  coverageReasons: string[];
 }
 
 export interface ApyPrediction {

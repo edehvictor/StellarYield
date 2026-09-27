@@ -1,4 +1,5 @@
 import { Readable } from "stream";
+import { computeObjectChecksum } from "../../utils/checksum";
 
 /**
  * CSV Export Engine — Tax & Accounting Data Transformer
@@ -404,4 +405,117 @@ export function createExportFilename(
   const date = new Date().toISOString().split("T")[0];
   const shortAddr = sanitizeFilenameSegment(address.slice(0, 8));
   return `stellaryield-${reportType}-${env}-${shortAddr}-${date}.${extension}`;
+}
+
+export interface ScheduledReportFilenameOptions {
+  reportType?: string;
+  frequency?: "daily" | "weekly" | "monthly" | "quarterly" | "annual" | string;
+  periodStart?: Date | string | number;
+  periodEnd?: Date | string | number;
+  extension?: string;
+  environment?: string;
+}
+
+function formatDateSegment(val?: Date | string | number): string | null {
+  if (!val) return null;
+  const d = val instanceof Date ? val : new Date(val);
+  if (isNaN(d.getTime())) return null;
+  return d.toISOString().split("T")[0];
+}
+
+/**
+ * Create a deterministic, filesystem-safe filename for scheduled batch exports.
+ *
+ * Format:
+ * `stellaryield-<reportType>[-<frequency>]-<env>-<YYYY-MM-DD>[-to-<YYYY-MM-DD>].<ext>`
+ * e.g. `stellaryield-weekly-yield-report-weekly-production-2026-05-18-to-2026-05-24.csv`
+ */
+export function createScheduledReportFilename(
+  options: ScheduledReportFilenameOptions = {},
+): string {
+  const reportType = sanitizeFilenameSegment(options.reportType ?? "report");
+  const frequency = options.frequency ? sanitizeFilenameSegment(options.frequency) : null;
+  const env = options.environment
+    ? sanitizeFilenameSegment(options.environment)
+    : currentEnvironment();
+  const extension = sanitizeFilenameSegment(options.extension ?? "csv") || "csv";
+
+  const startStr = formatDateSegment(options.periodStart);
+  const endStr = formatDateSegment(options.periodEnd);
+
+  let dateSegment: string;
+  if (startStr && endStr) {
+    dateSegment = `${startStr}-to-${endStr}`;
+  } else if (startStr) {
+    dateSegment = startStr;
+  } else {
+    dateSegment = new Date().toISOString().split("T")[0];
+  }
+
+  const parts = ["stellaryield", reportType];
+  if (frequency) {
+    parts.push(frequency);
+  }
+  parts.push(env);
+  parts.push(dateSegment);
+
+  return `${parts.join("-")}.${extension}`;
+}
+
+export interface ParsedScheduledReportFilename {
+  prefix: string;
+  reportType: string;
+  frequency?: string;
+  environment: string;
+  dateRange: string;
+  extension: string;
+}
+
+/**
+ * Parse and validate a deterministic scheduled report filename.
+ */
+export function parseScheduledReportFilename(
+  filename: string,
+): ParsedScheduledReportFilename | null {
+  const match = filename.match(/^stellaryield-([a-zA-Z0-9._-]+)\.([a-zA-Z0-9]+)$/);
+  if (!match) return null;
+  const base = match[1];
+  const extension = match[2];
+  const segments = base.split("-");
+  if (segments.length < 2) return null;
+
+  return {
+    prefix: "stellaryield",
+    reportType: segments[0],
+    environment: segments.length >= 3 ? segments[segments.length - 2] : "unknown",
+    dateRange: segments[segments.length - 1],
+    extension,
+  };
+}
+
+export interface CsvAuditResult {
+  checksum: string;
+  rowCount: number;
+  schemaVersion: number;
+  isValid: boolean;
+}
+
+/**
+ * Computes a backend checksum audit for generated CSV rows.
+ * This guarantees integrity and provides an audit trail for generated records.
+ */
+export function auditCsvRows(records: TransactionRecord[]): CsvAuditResult {
+  let isValid = true;
+  try {
+    validateTransactionDataset(records);
+  } catch (err) {
+    isValid = false;
+  }
+  
+  return {
+    checksum: computeObjectChecksum(records),
+    rowCount: Array.isArray(records) ? records.length : 0,
+    schemaVersion: CSV_SCHEMA_VERSION,
+    isValid
+  };
 }

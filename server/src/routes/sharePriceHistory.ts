@@ -1,5 +1,9 @@
 import { Router, Request, Response } from "express";
 import { sendError } from "../utils/errorResponse";
+import {
+  evaluateSharePriceFreshness,
+  SHARE_PRICE_FRESHNESS_THRESHOLDS,
+} from "../services/sharePriceFreshness";
 
 type SharePriceHistoryPrismaClient = {
   sharePriceSnapshot: {
@@ -16,6 +20,15 @@ type SharePriceHistoryPrismaClient = {
         snapshotAt: Date;
       }>
     >;
+    findFirst(args: {
+      where?: { vaultId?: string };
+      orderBy: { snapshotAt: "desc" };
+    }): Promise<{ snapshotAt: Date } | null>;
+  };
+  event?: {
+    findFirst(args: {
+      orderBy: { createdAt: "desc" };
+    }): Promise<{ createdAt: Date } | null>;
   };
   $disconnect?: () => Promise<void>;
 };
@@ -123,6 +136,74 @@ sharePriceHistoryRouter.get(
       void error;
       const fixture = generateFixtureSnapshots(vaultId, days);
       res.json(fixture);
+    }
+  },
+);
+
+/**
+ * GET /api/vaults/:vaultId/share-price-freshness
+ *
+ * Compares the latest share price snapshot with the latest indexed event
+ * checkpoint (#1155). Always answers 200 with a `status` of
+ * `current | delayed | missing`; `message` carries the warning (including
+ * the last known update time) when data is delayed or missing, and is null
+ * when data is current so dashboards can stay quiet.
+ *
+ * Query params:
+ *   maxAgeMs — override the delay threshold (invalid values fall back to the
+ *              default of 36 hours)
+ */
+sharePriceHistoryRouter.get(
+  "/:vaultId/share-price-freshness",
+  async (req: Request, res: Response) => {
+    const { vaultId } = req.params;
+
+    const rawMaxAgeMs = Number(req.query.maxAgeMs ?? Number.NaN);
+    const maxDelayMs =
+      Number.isFinite(rawMaxAgeMs) && rawMaxAgeMs > 0
+        ? rawMaxAgeMs
+        : SHARE_PRICE_FRESHNESS_THRESHOLDS.maxDelayMs;
+
+    const prisma = await loadPrismaClient();
+
+    if (
+      !prisma ||
+      !("sharePriceSnapshot" in prisma) ||
+      !prisma.sharePriceSnapshot ||
+      !prisma.event
+    ) {
+      res.json({ vaultId, ...evaluateSharePriceFreshness({ maxDelayMs }) });
+      return;
+    }
+
+    try {
+      const [latestSnapshot, latestEvent] = await Promise.all([
+        prisma.sharePriceSnapshot.findFirst({
+          where: { vaultId },
+          orderBy: { snapshotAt: "desc" },
+        }),
+        prisma.event.findFirst({ orderBy: { createdAt: "desc" } }),
+      ]);
+
+      await prisma.$disconnect?.();
+
+      res.json({
+        vaultId,
+        ...evaluateSharePriceFreshness({
+          sharePriceUpdatedAt: latestSnapshot?.snapshotAt ?? null,
+          eventCheckpointAt: latestEvent?.createdAt ?? null,
+          maxDelayMs,
+        }),
+      });
+    } catch (error) {
+      await prisma.$disconnect?.().catch(() => undefined);
+      void error;
+      sendError(
+        res,
+        500,
+        "SHARE_PRICE_FRESHNESS_ERROR",
+        "Failed to evaluate share price freshness.",
+      );
     }
   },
 );

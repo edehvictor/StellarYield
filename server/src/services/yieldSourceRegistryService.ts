@@ -24,6 +24,12 @@ import {
   yieldReliabilityEngine,
   type DataSourceReliability,
 } from "./yieldReliabilityService";
+import {
+  validateYieldSourceOnboarding,
+  YieldSourceOnboardingError,
+  type OnboardingChecklistIssue,
+  type YieldSourceOnboardingMetadata,
+} from "./yieldSourceOnboardingService";
 
 export type SourceHealthStatus =
   | "healthy"
@@ -55,6 +61,24 @@ export interface YieldSourceRegistryEntry {
   aliases?: string[];
   sourceLabels?: string[];
   sourceLabel?: string;
+  /** Required onboarding metadata (#1156); entries without it are excluded. */
+  onboarding?: YieldSourceOnboardingMetadata;
+}
+
+/** One registry entry that failed the onboarding checklist (#1156). */
+export interface IncompleteYieldSource {
+  id: string;
+  name: string;
+  missingFields: string[];
+  issues: OnboardingChecklistIssue[];
+  message: string;
+}
+
+/** Onboarding checklist summary embedded in the registry payload (#1156). */
+export interface SourceOnboardingSummary {
+  status: "valid" | "incomplete";
+  /** Entries excluded from `sources` because their checklist failed. */
+  incompleteSources: IncompleteYieldSource[];
 }
 
 export type RegistryConflictType = "providerId" | "alias" | "sourceLabel";
@@ -90,6 +114,8 @@ export interface SourceHealthRegistry {
   cacheVersion: number;
   /** ISO timestamp of the last cache invalidation (or generation if never invalidated). */
   lastInvalidatedAt: string;
+  /** Onboarding checklist status (#1156): incomplete entries are excluded from `sources`. */
+  onboarding: SourceOnboardingSummary;
 }
 
 // ── Classification thresholds ─────────────────────────────────────────────
@@ -246,12 +272,151 @@ export function summarizeSourceHealth(
 
 /** Registered yield data sources tracked by the health dashboard. */
 export const REGISTERED_SOURCES: YieldSourceRegistryEntry[] = [
-  { id: "blend_api", name: "Blend Protocol", source: "api" },
-  { id: "soroswap_api", name: "Soroswap", source: "api" },
-  { id: "defindex_api", name: "DeFindex", source: "api" },
-  { id: "stellar_expert", name: "Stellar Expert", source: "oracle" },
-  { id: "coingecko", name: "CoinGecko", source: "oracle" },
+  {
+    id: "blend_api",
+    name: "Blend Protocol",
+    source: "api",
+    onboarding: {
+      protocol: "Blend",
+      asset: "USDC",
+      fee: { managementBps: 0, performanceBps: 1000 },
+      risk: { level: "Medium" },
+      freshness: { maxAgeSeconds: 1800 },
+    },
+  },
+  {
+    id: "soroswap_api",
+    name: "Soroswap",
+    source: "api",
+    onboarding: {
+      protocol: "Soroswap",
+      asset: "XLM-USDC",
+      fee: { managementBps: 30, performanceBps: 0 },
+      risk: { level: "Medium" },
+      freshness: { maxAgeSeconds: 1800 },
+    },
+  },
+  {
+    id: "defindex_api",
+    name: "DeFindex",
+    source: "api",
+    onboarding: {
+      protocol: "DeFindex",
+      asset: "USDC",
+      fee: { managementBps: 0, performanceBps: 500 },
+      risk: { level: "Medium" },
+      freshness: { maxAgeSeconds: 1800 },
+    },
+  },
+  {
+    id: "stellar_expert",
+    name: "Stellar Expert",
+    source: "oracle",
+    onboarding: {
+      protocol: "Stellar Expert",
+      asset: "USDC",
+      fee: { managementBps: 0, performanceBps: 0 },
+      risk: { level: "Low" },
+      freshness: { maxAgeSeconds: 3600 },
+    },
+  },
+  {
+    id: "coingecko",
+    name: "CoinGecko",
+    source: "oracle",
+    onboarding: {
+      protocol: "CoinGecko",
+      asset: "USDC",
+      fee: { managementBps: 0, performanceBps: 0 },
+      risk: { level: "Low" },
+      freshness: { maxAgeSeconds: 3600 },
+    },
+  },
 ];
+
+/**
+ * Sources promoted at runtime through `promoteYieldSource` (#1156).
+ * Kept separate from the static registry so promotion can be validated,
+ * audited, and rolled back (`unregisterYieldSource`) without code changes.
+ */
+const promotedYieldSources: YieldSourceRegistryEntry[] = [];
+
+/** Every known source: the static registry plus runtime promotions. */
+export function listYieldSources(): YieldSourceRegistryEntry[] {
+  return [...REGISTERED_SOURCES, ...promotedYieldSources];
+}
+
+/**
+ * Split sources into checklist-eligible entries (visible on production routes)
+ * and incomplete entries (excluded, with actionable reasons).
+ */
+export function partitionYieldSources(entries: YieldSourceRegistryEntry[]): {
+  eligible: YieldSourceRegistryEntry[];
+  incomplete: IncompleteYieldSource[];
+} {
+  const eligible: YieldSourceRegistryEntry[] = [];
+  const incomplete: IncompleteYieldSource[] = [];
+
+  for (const entry of entries) {
+    const result = validateYieldSourceOnboarding(entry);
+    if (result.valid) {
+      eligible.push(entry);
+    } else {
+      incomplete.push({
+        id: typeof entry.id === "string" ? entry.id : "unknown",
+        name: typeof entry.name === "string" ? entry.name : "unknown",
+        missingFields: result.missingFields,
+        issues: result.issues,
+        message: result.message,
+      });
+    }
+  }
+
+  return { eligible, incomplete };
+}
+
+/**
+ * Promote a yield source so it becomes visible on production routes (#1156).
+ *
+ * Throws {@link YieldSourceOnboardingError} when the onboarding checklist
+ * fails or the id is already registered — incomplete entries are never added.
+ */
+export function promoteYieldSource(
+  entry: YieldSourceRegistryEntry,
+): YieldSourceRegistryEntry {
+  const result = validateYieldSourceOnboarding(entry);
+  if (!result.valid) {
+    throw new YieldSourceOnboardingError(result.message, {
+      code: "ONBOARDING_CHECKLIST_FAILED",
+      statusCode: 400,
+      missingFields: result.missingFields,
+      issues: result.issues,
+    });
+  }
+
+  if (listYieldSources().some((source) => source.id === entry.id)) {
+    throw new YieldSourceOnboardingError(
+      `Yield source "${entry.id}" is already registered.`,
+      { code: "YIELD_SOURCE_ALREADY_REGISTERED", statusCode: 409 },
+    );
+  }
+
+  promotedYieldSources.push(entry);
+  registryCache.del(CACHE_KEY);
+  return entry;
+}
+
+/**
+ * Remove a runtime-promoted source (the static `REGISTERED_SOURCES` entries
+ * cannot be unregistered this way). Returns false when the id is unknown.
+ */
+export function unregisterYieldSource(id: string): boolean {
+  const index = promotedYieldSources.findIndex((source) => source.id === id);
+  if (index === -1) return false;
+  promotedYieldSources.splice(index, 1);
+  registryCache.del(CACHE_KEY);
+  return true;
+}
 
 function normalizeIdentity(identity: string): string {
   const value = identity.trim().toLowerCase();
@@ -335,8 +500,10 @@ interface RegistryCacheEntry {
   version: number;
   /** Timestamp (epoch ms) when this entry was generated. */
   generatedAt: number;
-  /** Snapshot of provider IDs at generation time, used to detect changes. */
+  /** Snapshot of eligible provider IDs at generation time, used to detect changes. */
   knownProviderIds: string[];
+  /** Fingerprint of the incomplete-source set, used to detect checklist changes. */
+  knownIncomplete: string;
   /** Snapshot of provider statuses (status + failureReason), used to detect health changes. */
   knownStatuses: Map<
     string,
@@ -357,15 +524,29 @@ let lastInvalidatedAt = new Date().toISOString();
 const CACHE_KEY = "yieldSourceHealthRegistry";
 
 /**
+ * Fingerprint of the incomplete-source set so checklist changes (an entry
+ * losing required metadata) invalidate the cache even when the eligible id
+ * set happens to stay the same.
+ */
+function incompleteFingerprint(incomplete: IncompleteYieldSource[]): string {
+  return incomplete
+    .map((entry) => `${entry.id}:${[...entry.missingFields].sort().join("|")}`)
+    .sort()
+    .join(";");
+}
+
+/**
  * Check whether the cached registry is still valid by comparing the current
- * registered sources and their health status against the snapshot stored in
- * the cache entry. Returns `true` if the cache is still fresh.
+ * eligible sources, their health status, and the incomplete-source fingerprint
+ * against the snapshot stored in the cache entry. Returns `true` if the cache
+ * is still fresh.
  */
 function isRegistryCacheValid(entry: RegistryCacheEntry): boolean {
-  const nowIds = new Set(REGISTERED_SOURCES.map((s) => s.id));
+  const { eligible, incomplete } = partitionYieldSources(listYieldSources());
+  const nowIds = new Set(eligible.map((s) => s.id));
   const cachedIds = new Set(entry.knownProviderIds);
 
-  // 1. Source set changed (provider added or removed)
+  // 1. Eligible source set changed (provider added, removed, or checklist flipped)
   if (
     nowIds.size !== cachedIds.size ||
     [...nowIds].some((id) => !cachedIds.has(id))
@@ -373,8 +554,13 @@ function isRegistryCacheValid(entry: RegistryCacheEntry): boolean {
     return false;
   }
 
-  // 2. Check each provider for metadata or health status changes
-  for (const source of REGISTERED_SOURCES) {
+  // 2. Incomplete-source set or its reasons changed (#1156)
+  if (incompleteFingerprint(incomplete) !== entry.knownIncomplete) {
+    return false;
+  }
+
+  // 3. Check each eligible provider for metadata changes
+  for (const source of eligible) {
     const cachedStatus = entry.knownStatuses.get(source.id);
     if (!cachedStatus) return false;
 
@@ -408,7 +594,13 @@ function isRegistryCacheValid(entry: RegistryCacheEntry): boolean {
  * `lastInvalidatedAt` diagnostic fields.
  */
 export async function getSourceHealthRegistry(): Promise<SourceHealthRegistry> {
-  const conflictResult = detectRegistryConflicts(REGISTERED_SOURCES);
+  const allSources = listYieldSources();
+  const { eligible, incomplete } = partitionYieldSources(allSources);
+  const conflictResult = detectRegistryConflicts(allSources);
+  const onboarding: SourceOnboardingSummary = {
+    status: incomplete.length > 0 ? "incomplete" : "valid",
+    incompleteSources: incomplete,
+  };
   const cached = registryCache.get<RegistryCacheEntry>(CACHE_KEY);
 
   if (conflictResult.status === "conflicted") {
@@ -422,7 +614,7 @@ export async function getSourceHealthRegistry(): Promise<SourceHealthRegistry> {
   ) {
     // Check health changes: we still need to compare statuses from the engine
     const reliabilityScores =
-      await yieldReliabilityEngine.getReliabilityScores(REGISTERED_SOURCES);
+      await yieldReliabilityEngine.getReliabilityScores(eligible);
 
     let healthChanged = false;
     for (const r of reliabilityScores) {
@@ -449,6 +641,7 @@ export async function getSourceHealthRegistry(): Promise<SourceHealthRegistry> {
         cacheAge: ageSeconds,
         cacheVersion: cached.version,
         lastInvalidatedAt,
+        onboarding,
       };
     }
   }
@@ -467,13 +660,15 @@ export async function getSourceHealthRegistry(): Promise<SourceHealthRegistry> {
       cacheAge: 0,
       cacheVersion: cacheVersionCounter,
       lastInvalidatedAt,
+      onboarding,
     };
     return registry;
   }
 
-  // Build fresh registry
+  // Build fresh registry from checklist-eligible sources only (#1156):
+  // incomplete entries never reach production routes.
   const reliabilityScores =
-    await yieldReliabilityEngine.getReliabilityScores(REGISTERED_SOURCES);
+    await yieldReliabilityEngine.getReliabilityScores(eligible);
 
   const now = Date.now();
   const sources = reliabilityScores
@@ -510,13 +705,15 @@ export async function getSourceHealthRegistry(): Promise<SourceHealthRegistry> {
     cacheAge: 0,
     cacheVersion: cacheVersionCounter,
     lastInvalidatedAt,
+    onboarding,
   };
 
   const entry: RegistryCacheEntry = {
     registry,
     version: cacheVersionCounter,
     generatedAt: now,
-    knownProviderIds: REGISTERED_SOURCES.map((s) => s.id),
+    knownProviderIds: eligible.map((s) => s.id),
+    knownIncomplete: incompleteFingerprint(incomplete),
     knownStatuses,
     knownMetadata,
   };

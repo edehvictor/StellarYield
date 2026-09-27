@@ -22,12 +22,21 @@ import type { TxPhase } from "./transactionPhase";
 import { resolveDeadlineSeconds, type TxSettings } from "../features/settings/types";
 import { getContractId, validateContractRegistryEntry } from "./contractRegistry";
 import { apiFetch } from "../lib/api";
+import { getNetworkPassphrase, getRpcUrl } from "../lib/networkEnv";
+import {
+  buildDepositSimulationDiff,
+  type TransactionSimulationDiff,
+} from "./simulationDiff";
+import {
+  decodeContractPanic,
+  type ContractErrorNamespace,
+  type DecodedContractPanic,
+} from "../../../shared/types/contractPanic";
 
 // ── Configuration ───────────────────────────────────────────────────────
 
-export const RPC_URL = import.meta.env.VITE_SOROBAN_RPC_URL ?? "https://soroban-testnet.stellar.org";
-export const NETWORK_PASSPHRASE =
-  import.meta.env.VITE_NETWORK_PASSPHRASE ?? "Test SDF Network ; September 2015";
+export const RPC_URL = getRpcUrl();
+export const NETWORK_PASSPHRASE = getNetworkPassphrase();
 
 const POLL_INTERVAL_MS = 2_000;
 const POLL_TIMEOUT_MS = 30_000;
@@ -44,6 +53,40 @@ export interface TxResult {
   success: boolean;
   hash?: string;
   error?: string;
+  /**
+   * Numeric contract error code when the failure was a typed contract error
+   * (e.g. 4001 `QuoteExpired`). Lets callers branch without parsing `error`.
+   */
+  errorCode?: number;
+  /**
+   * Contract failure decoded from the simulation's structured diagnostic
+   * events (#1339). Prefer it over parsing `error` when rendering a failure.
+   */
+  panic?: DecodedContractPanic;
+}
+
+/** Placeholder code the SDK uses when no contract error code was recognized. */
+const SDK_GENERIC_ERROR_CODE = 999;
+
+function contractErrorCode(parsed: unknown): number | undefined {
+  const code = (parsed as { errorCode?: unknown } | null)?.errorCode;
+  return typeof code === "number" && code !== SDK_GENERIC_ERROR_CODE ? code : undefined;
+}
+
+/**
+ * Thrown when simulation fails. Carries the panic decoded from the structured
+ * diagnostic events together with the SDK error whose message callers display.
+ */
+export class ContractSimulationError extends Error {
+  readonly panic: DecodedContractPanic;
+  readonly sdkError: Error;
+
+  constructor(panic: DecodedContractPanic, sdkError: Error) {
+    super(sdkError.message);
+    this.name = "ContractSimulationError";
+    this.panic = panic;
+    this.sdkError = sdkError;
+  }
 }
 
 /** Lifecycle phases for Soroban flows (timeline + callbacks). */
@@ -75,6 +118,16 @@ function getVaultClient(contractId?: string): VaultClient {
 export async function getUserShares(userAddress: string): Promise<bigint> {
   const vaultClient = getVaultClient();
   return vaultClient.getShares(userAddress);
+}
+
+/** Best-effort share balance; returns null when unavailable so diff building can degrade gracefully. */
+async function getSharesQuietly(userAddress: string): Promise<number | null> {
+  try {
+    const shares = await getUserShares(userAddress);
+    return typeof shares === "bigint" ? Number(shares) : null;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -126,6 +179,24 @@ export function getZapContract(): StellarSdk.Contract {
   return new StellarSdk.Contract(contractId);
 }
 
+/** The failed `TxResult` for a thrown error, keeping any decoded contract panic. */
+function failedTxResult(err: unknown): TxResult {
+  if (err instanceof ContractSimulationError) {
+    return {
+      success: false,
+      error: err.sdkError.message,
+      panic: err.panic,
+      errorCode: err.panic.contractCode ?? contractErrorCode(err.sdkError),
+    };
+  }
+  const parsed = parseContractError(err);
+  return {
+    success: false,
+    error: parsed.message,
+    errorCode: contractErrorCode(parsed),
+  };
+}
+
 async function buildContractCallOn(
   contract: StellarSdk.Contract,
   sourcePublicKey: string,
@@ -133,6 +204,7 @@ async function buildContractCallOn(
   args: StellarSdk.xdr.ScVal[],
   onPhase?: TxPhaseCallback,
   txSettings?: TxSettings,
+  errorNamespace?: ContractErrorNamespace,
 ): Promise<string> {
   onPhase?.("building");
   const server = getServer();
@@ -153,7 +225,10 @@ async function buildContractCallOn(
 
   if (StellarSdk.rpc.Api.isSimulationError(simulated)) {
     const errResp = simulated as StellarSdk.rpc.Api.SimulateTransactionErrorResponse;
-    throw parseContractError(errResp.error);
+    throw new ContractSimulationError(
+      decodeContractPanic(errResp.events, errorNamespace),
+      parseContractError(errResp.error),
+    );
   }
 
   const assembled = StellarSdk.rpc.assembleTransaction(
@@ -244,7 +319,7 @@ export async function executeContractCall(
   txSettings?: TxSettings,
 ): Promise<TxResult> {
   try {
-    const xdr = await buildContractCallOn(getContract(), sourcePublicKey, method, args, onPhase, txSettings);
+    const xdr = await buildContractCallOn(getContract(), sourcePublicKey, method, args, onPhase, txSettings, "vault");
 
     onPhase?.("waiting_for_wallet");
     const signer = signTx ?? ((x: string, p: string) => signWithFreighter(x, p));
@@ -267,11 +342,7 @@ export async function executeContractCall(
     return result;
   } catch (err) {
     onPhase?.("failure");
-    const parsed = parseContractError(err);
-    return {
-      success: false,
-      error: parsed.message,
-    };
+    return failedTxResult(err);
   }
 }
 
@@ -310,11 +381,7 @@ export async function executeContractCallOn(
     return result;
   } catch (err) {
     onPhase?.("failure");
-    const parsed = parseContractError(err);
-    return {
-      success: false,
-      error: parsed.message,
-    };
+    return failedTxResult(err);
   }
 }
 
@@ -327,7 +394,7 @@ export async function executeZapContractCall(
   txSettings?: TxSettings,
 ): Promise<TxResult> {
   try {
-    const xdr = await buildContractCallOn(getZapContract(), sourcePublicKey, method, args, onPhase, txSettings);
+    const xdr = await buildContractCallOn(getZapContract(), sourcePublicKey, method, args, onPhase, txSettings, "zap");
 
     onPhase?.("waiting_for_wallet");
     const signedXdr = await signWithFreighter(xdr, NETWORK_PASSPHRASE);
@@ -349,11 +416,7 @@ export async function executeZapContractCall(
     return result;
   } catch (err) {
     onPhase?.("failure");
-    const parsed = parseContractError(err);
-    return {
-      success: false,
-      error: parsed.message,
-    };
+    return failedTxResult(err);
   }
 }
 
@@ -364,6 +427,15 @@ export interface ZapDepositParams {
   amountIn: bigint;
   minAmountOut: bigint;
   minSharesOut: bigint;
+  /** Quoted swap output; `0n` disables partial-fill detection on-chain. */
+  expectedAmountOut: bigint;
+  /** Accept output below `expectedAmountOut` as long as it meets `minAmountOut`. */
+  allowPartial: boolean;
+  /**
+   * Quote `expiresAt` as a Unix timestamp in seconds. The contract rejects the
+   * transaction with `QuoteExpired` (4001) if the ledger closes after it.
+   */
+  deadlineUnixSeconds: bigint;
 }
 
 export async function zapDeposit(
@@ -375,7 +447,7 @@ export async function zapDeposit(
 ): Promise<TxResult> {
   return executeZapContractCall(
     userAddress,
-    "zap_deposit",
+    "zap_deposit_with_deadline",
     [
       new StellarSdk.Address(userAddress).toScVal(),
       new StellarSdk.Address(params.inputTokenContract).toScVal(),
@@ -384,6 +456,9 @@ export async function zapDeposit(
       StellarSdk.nativeToScVal(params.amountIn, { type: "i128" }),
       StellarSdk.nativeToScVal(params.minAmountOut, { type: "i128" }),
       StellarSdk.nativeToScVal(params.minSharesOut, { type: "i128" }),
+      StellarSdk.nativeToScVal(params.expectedAmountOut, { type: "i128" }),
+      StellarSdk.nativeToScVal(params.allowPartial, { type: "bool" }),
+      StellarSdk.nativeToScVal(params.deadlineUnixSeconds, { type: "u64" }),
     ],
     onPhase,
     useFeeBump,
@@ -402,15 +477,32 @@ export async function deposit(
   useFeeBump: boolean = true,
   signTx?: (xdr: string, networkPassphrase: string) => Promise<string>,
   txSettings?: TxSettings,
+  onSimulationDiff?: (diff: TransactionSimulationDiff) => void,
 ): Promise<TxResult> {
   try {
     onPhase?.("simulating");
     const vaultClient = getVaultClient();
+    const sharesBefore = await getSharesQuietly(userAddress);
     const prepared = await vaultClient.deposit.prepare({
       from: userAddress,
       amount,
       min_shares_out: minSharesOut,
     });
+
+    // Surface the before/after simulation diff before any signing happens.
+    if (onSimulationDiff) {
+      const simulatedShares =
+        typeof prepared.meta.simulationResult === "bigint"
+          ? Number(prepared.meta.simulationResult)
+          : null;
+      onSimulationDiff(
+        buildDepositSimulationDiff({
+          amountUsd: Number(amount),
+          expectedShares: simulatedShares,
+          sharesBefore,
+        }),
+      );
+    }
 
     onPhase?.("waiting_for_wallet");
     const signer = new CustomSigner(

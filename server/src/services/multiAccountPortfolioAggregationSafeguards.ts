@@ -27,12 +27,12 @@ export class MultiAccountPortfolioAggregationSafeguards {
     }
 
     if (portfolios.length > this.MAX_ACCOUNTS_ALLOWED) {
-      throw new AggregationSafeguardError(\`Aggregation exceeded maximum allowed accounts: \${this.MAX_ACCOUNTS_ALLOWED}\`);
+      throw new AggregationSafeguardError(`Aggregation exceeded maximum allowed accounts: ${this.MAX_ACCOUNTS_ALLOWED}`);
     }
 
     const totalBalance = portfolios.reduce((sum, p) => sum + p.balance, 0);
     if (totalBalance > this.MAX_TOTAL_BALANCE) {
-      throw new AggregationSafeguardError(\`Aggregation exceeded maximum safe total balance capacity\`);
+      throw new AggregationSafeguardError('Aggregation exceeded maximum safe total balance capacity');
     }
 
     // Ensure no duplicate accounts

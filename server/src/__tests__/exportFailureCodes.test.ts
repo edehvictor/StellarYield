@@ -98,6 +98,13 @@ describe("export failure code catalog", () => {
     expect(isExportFailureCode("MADE_UP_CODE")).toBe(false);
     expect(lookupExportFailure("MADE_UP_CODE")).toBeUndefined();
   });
+
+  it("should have a recovery note for all failure codes", () => {
+    Object.values(EXPORT_FAILURES).forEach((descriptor) => {
+      expect(descriptor.recoveryNote).toBeDefined();
+      expect(descriptor.recoveryNote!.length).toBeGreaterThan(0);
+    });
+  });
 });
 
 // ── Portfolio export: validation category ─────────────────────────────────

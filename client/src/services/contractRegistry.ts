@@ -20,6 +20,10 @@
 
 import * as StellarSdk from "@stellar/stellar-sdk";
 import registryJson from "../../../contracts/registry.json";
+import {
+  detectNetworkFromPassphrase,
+  getContractEnvOverrides,
+} from "../lib/networkEnv";
 
 export type ContractName =
   | "vault"
@@ -91,28 +95,13 @@ let cacheVersionCounter = 0;
 let lastInvalidatedAt = Date.now();
 
 export function detectNetwork(): NetworkName {
-  const passphrase =
-    import.meta.env.VITE_NETWORK_PASSPHRASE ?? "";
-  if (passphrase.includes("mainnet") || passphrase.includes("Public Global")) {
-    return "mainnet";
-  }
-  if (passphrase === "" || passphrase.includes("local") || passphrase.includes("standalone")) {
-    return "local";
-  }
-  return "testnet";
+  return detectNetworkFromPassphrase(import.meta.env.VITE_NETWORK_PASSPHRASE ?? "");
 }
 
-const ENV_OVERRIDES: Partial<Record<ContractName, string | undefined>> = {
-  vault: import.meta.env.VITE_CONTRACT_ID,
-  zap: import.meta.env.VITE_ZAP_CONTRACT_ID,
-  token: import.meta.env.VITE_TOKEN_CONTRACT_ID,
-  governance: import.meta.env.VITE_GOVERNANCE_CONTRACT_ID,
-  strategy: import.meta.env.VITE_STRATEGY_CONTRACT_ID,
-  emissionController: import.meta.env.VITE_EMISSION_CONTROLLER_CONTRACT_ID,
-  liquidStaking: import.meta.env.VITE_LIQUID_STAKING_CONTRACT_ID,
-  stableswap: import.meta.env.VITE_STABLESWAP_CONTRACT_ID,
-  vesting: import.meta.env.VITE_VESTING_CONTRACT_ID,
-};
+/** Read at call time so `vi.stubEnv` and runtime env views stay live. */
+function getEnvOverrides(): Partial<Record<ContractName, string | undefined>> {
+  return getContractEnvOverrides();
+}
 
 function isCacheValid(entry: RegistryCacheEntry, network: NetworkName): boolean {
   const age = Date.now() - entry.generatedAt;
@@ -130,7 +119,7 @@ function isCacheValid(entry: RegistryCacheEntry, network: NetworkName): boolean 
   ];
 
   for (const name of contractNames) {
-    const envOverride = ENV_OVERRIDES[name];
+    const envOverride = getEnvOverrides()[name];
     const currentId = envOverride || registry[network]?.[name] || "";
     const cachedId = entry.knownContractIds.get(name);
 
@@ -152,7 +141,7 @@ function buildCacheEntry(network: NetworkName): RegistryCacheEntry {
   const knownContractIds = new Map<ContractName, string>();
 
   for (const name of contractNames) {
-    const envOverride = ENV_OVERRIDES[name];
+    const envOverride = getEnvOverrides()[name];
     const id = envOverride || registry[network]?.[name] || "";
     contractIds[name] = id;
     knownContractIds.set(name, id);
@@ -223,7 +212,7 @@ export function getContractId(
   name: ContractName,
   network?: NetworkName,
 ): string {
-  const envOverride = ENV_OVERRIDES[name];
+  const envOverride = getEnvOverrides()[name];
   if (envOverride) return envOverride;
 
   const net = network ?? detectNetwork();

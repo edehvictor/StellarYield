@@ -161,13 +161,44 @@ export async function verifySwapQuote(
     if (options?.signal?.aborted || (err instanceof Error && err.name === "AbortError")) {
       throw new QuoteRequestCancelledError();
     }
-    throw err;
+    throw new ZapQuoteError(err instanceof Error ? err.message : "Network request failed", {
+      code: "NETWORK_ERROR",
+      status: 0,
+      recoverable: true,
+    });
   }
 
   if (!res.ok) {
-    const txt = await res.text();
-    throw new Error(txt || `Quote verification failed (${res.status})`);
+    throw await toZapQuoteError(res);
   }
   const data = await res.json();
   return data.success === true;
+}
+
+/**
+ * Deterministic user-facing message for a failed `POST /api/zap/verify`.
+ *
+ * Mapped from the server's machine-readable error `code` only — never by
+ * parsing raw provider/server message text — so copy stays stable across
+ * backend wording changes. Unknown codes fall back to a generic message.
+ */
+const VERIFY_FAILURE_MESSAGES: Record<string, string> = {
+  STALE_QUOTE: "Quote expired. Refresh and try again.",
+  CONFIG_DRIFT: "Supported assets changed. Refresh and try again.",
+  ROUTE_MISMATCH: "Quote route no longer matches. Refresh and try again.",
+  UNSUPPORTED_ASSET: "An asset in this quote is no longer supported. Refresh and try again.",
+  SLIPPAGE_EXCEEDED: "Quote slippage exceeds the allowed limit. Adjust slippage and refresh.",
+  INVALID_QUOTE: "Quote is invalid. Refresh and try again.",
+  VERIFY_FAILED: "Quote validation failed. Refresh and try again.",
+  NETWORK_ERROR: "Could not verify quote due to a network error. Try again.",
+};
+
+/** Returns true when the server rejected the quote because its TTL elapsed. */
+export function isExpiredQuoteError(error: unknown): boolean {
+  return error instanceof ZapQuoteError && error.code === "STALE_QUOTE";
+}
+
+/** Deterministic UI message for a verify failure; falls back for unknown codes. */
+export function describeZapQuoteVerifyFailure(error: ZapQuoteError): string {
+  return VERIFY_FAILURE_MESSAGES[error.code] ?? "Quote validation failed. Refresh and try again.";
 }

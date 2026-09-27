@@ -137,3 +137,90 @@ describe("POST /api/deposits/recommend — deposit amount bounds (#1317)", () =>
     expect(mockRecommend).not.toHaveBeenCalled();
   });
 });
+
+// ── GET /api/deposits/status/:txHash (#1146) ────────────────────────────
+
+const VALID_TX_HASH = "a".repeat(64);
+
+const mockFindUnique = jest.fn();
+
+jest.mock("@prisma/client", () => ({
+  PrismaClient: jest.fn().mockImplementation(() => ({
+    userTransaction: {
+      findUnique: (...args: unknown[]) => mockFindUnique(...args),
+    },
+  })),
+}));
+
+describe("GET /api/deposits/status/:txHash — reload reconciliation (#1146)", () => {
+  let app: Express;
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockFindUnique.mockReset();
+    app = express();
+    app.use(express.json());
+    app.use("/api/deposits", depositsRouter);
+  });
+
+  it("rejects a malformed tx hash", async () => {
+    const res = await request(app).get("/api/deposits/status/not-a-hash");
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe("INVALID_TX_HASH");
+    expect(mockFindUnique).not.toHaveBeenCalled();
+  });
+
+  it("returns pending when the transaction has not been indexed yet", async () => {
+    mockFindUnique.mockResolvedValue(null);
+
+    const res = await request(app).get(`/api/deposits/status/${VALID_TX_HASH}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ txHash: VALID_TX_HASH, status: "pending" });
+  });
+
+  it("returns confirmed with tx details once the indexer has recorded the transaction", async () => {
+    const timestamp = new Date("2026-01-01T00:00:00.000Z");
+    mockFindUnique.mockResolvedValue({
+      txHash: VALID_TX_HASH,
+      vaultId: "primary-yield-vault",
+      amount: 100,
+      shares: 98.5,
+      action: "DEPOSIT",
+      timestamp,
+    });
+
+    const res = await request(app).get(`/api/deposits/status/${VALID_TX_HASH}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({
+      txHash: VALID_TX_HASH,
+      status: "confirmed",
+      amount: 100,
+      shares: 98.5,
+      vaultId: "primary-yield-vault",
+      confirmedAt: timestamp.toISOString(),
+    });
+  });
+
+  it("returns DB_UNAVAILABLE when Prisma cannot be loaded", async () => {
+    jest.resetModules();
+    jest.doMock("@prisma/client", () => {
+      throw new Error("module not found");
+    });
+
+    // Re-require the router fresh so the failing dynamic import is exercised.
+    const freshRouter = require("../deposits").default;
+    const freshApp = express();
+    freshApp.use(express.json());
+    freshApp.use("/api/deposits", freshRouter);
+
+    const res = await request(freshApp).get(`/api/deposits/status/${VALID_TX_HASH}`);
+
+    expect(res.status).toBe(503);
+    expect(res.body.error).toBe("DB_UNAVAILABLE");
+
+    jest.dontMock("@prisma/client");
+  });
+});

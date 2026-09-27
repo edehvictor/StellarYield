@@ -9,7 +9,7 @@
  *
  * | Variable                              | Default                  |
  * | ------------------------------------- | ------------------------ |
- * | `RECONCILIATION_SCHEDULE`             | `0 */6 * * *` (every 6h)|
+ * | `RECONCILIATION_SCHEDULE`             | every 6h (`0 *` + `/6 * * *` cron) |
  * | `RECONCILIATION_DRIFT_THRESHOLD_PCT`  | `0.05` (5%)              |
  * | `RECONCILIATION_CONSECUTIVE_ALERT`    | `3`                      |
  * | `RECONCILIATION_WALLETS`              | (none)                   |

@@ -96,14 +96,11 @@ export default function StrategyComparison() {
         <header className="mb-6">
           <h2 className="text-4xl font-extrabold tracking-tight mb-2">Strategy Comparison</h2>
         </header>
-        <div className="glass-panel p-12 text-center border border-red-500/30 bg-red-500/5">
-          <AlertTriangle size={32} className="text-red-500 mx-auto mb-4" />
-          <h3 className="text-xl font-bold mb-2">Failed to Load Strategy Data</h3>
-          <p className="text-gray-400 max-w-md mx-auto mb-6">{error}</p>
-          <button onClick={fetchStrategies} className="btn-primary inline-flex items-center gap-2">
-            <RefreshCw size={16} /> Retry Fetch
-          </button>
-        </div>
+        <BackendUnavailable 
+          featureName="Strategy Comparison"
+          reason="The backend service is currently disconnected or unavailable. Please try again later."
+          onRetry={fetchStrategies}
+        />
       </div>
     );
   }

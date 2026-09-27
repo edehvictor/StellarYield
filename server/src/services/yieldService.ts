@@ -93,6 +93,7 @@ import {
 import { fetchNetworkSnapshot } from "./stellarNetworkService";
 import { freezeService } from "./freezeService";
 import { RewardScheduleRegistry } from "./rewardScheduleRegistry";
+import { recordFeeSnapshotIfChanged } from "./protocolFeeHistoryService";
 import type { NormalizedYield, RawProtocolYield, RewardStream } from "../types/yields";
 
 const cache = new NodeCache({
@@ -138,6 +139,16 @@ async function buildProtocolSnapshot(
   }));
 
   const rewards = [...(config.rewardStreams || []), ...extraRewards];
+
+  // Protocol fee history (#1147): record a snapshot whenever the combined
+  // management + performance fee for this protocol differs from the last
+  // recorded value. No-ops when unchanged, so this stays cheap on every
+  // refresh cycle even though fees rarely move.
+  recordFeeSnapshotIfChanged(
+    config.protocolName,
+    config.managementFeeBps + config.performanceFeeBps,
+    fetchedAt,
+  );
 
   return {
     protocolName: config.protocolName,

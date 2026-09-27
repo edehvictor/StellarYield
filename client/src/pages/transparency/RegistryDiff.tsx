@@ -39,8 +39,8 @@ export const KNOWN_CONTRACT_NAMES: string[] = [
 export const NETWORKS: NetworkName[] = ['testnet', 'mainnet', 'local'];
 
 export function computeRegistryDiff(
-  current: Record<string, Record<string, string> | undefined> | null | undefined = registryJson,
-  previous: Record<string, Record<string, string> | undefined> | null | undefined = prevJson,
+  current: Record<string, Record<string, string> | undefined> | null | undefined = registryJson as unknown as Record<string, Record<string, string> | undefined>,
+  previous: Record<string, Record<string, string> | undefined> | null | undefined = prevJson as unknown as Record<string, Record<string, string> | undefined>,
 ): RegistryDiffResult {
   const result: RegistryDiffResult = {
     testnet: [],
@@ -92,8 +92,8 @@ export interface RegistryDiffPageProps {
 }
 
 export default function RegistryDiffPage({
-  currentRegistry = registryJson,
-  previousRegistry = prevJson,
+  currentRegistry = registryJson as unknown as Record<string, Record<string, string> | undefined>,
+  previousRegistry = prevJson as unknown as Record<string, Record<string, string> | undefined>,
 }: RegistryDiffPageProps) {
   const [copyState, setCopyState] = useState<Record<string, "idle" | "copied" | "error">>({});
 

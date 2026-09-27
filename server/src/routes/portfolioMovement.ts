@@ -3,6 +3,12 @@ import {
   PortfolioMovementService,
   SnapshotNotFoundError,
 } from "../services/portfolioMovementService";
+import {
+  FreshnessQueryError,
+  StaleValuationError,
+  assertFreshValuation,
+  parseValuationFreshnessQuery,
+} from "../services/valuationFreshnessGuard";
 import { sendError } from "../utils/errorResponse";
 import { validateWalletAddress } from "../middleware/validation";
 import { PrismaClient } from "@prisma/client";
@@ -15,6 +21,14 @@ const portfolioMovementRouter = Router();
 /**
  * GET /api/portfolio/:walletAddress/daily-movement
  * Get today's portfolio movement (comparing against yesterday).
+ *
+ * Freshness guardrails (#1362) — opt-in via query params:
+ * - `?requireFresh=true` → 409 STALE_VALUATION_SNAPSHOT when the backing
+ *   snapshot is missing or older than the threshold; 404 SNAPSHOT_NOT_FOUND
+ *   when no current snapshot exists.
+ * - `?maxAgeMs=<positive int>` → override the freshness threshold.
+ * Responses always include an additive `freshness` annotation; requests
+ * without `requireFresh` keep their existing 200 behavior.
  */
 portfolioMovementRouter.get(
   "/:walletAddress/daily-movement",
@@ -22,11 +36,40 @@ portfolioMovementRouter.get(
   async (req: Request, res: Response) => {
     try {
       const { walletAddress } = req.params;
+      const guard = parseValuationFreshnessQuery(
+        req.query as Record<string, unknown>,
+      );
 
-      const movement = await movementService.getDailyMovement(walletAddress);
+      const movement = await movementService.getDailyMovement(walletAddress, {
+        maxAgeMs: guard.maxAgeMs,
+      });
+
+      if (guard.requireFresh) {
+        if (!movement.freshness?.snapshotValuedAt) {
+          throw new SnapshotNotFoundError(walletAddress, movement.snapshotDate);
+        }
+        assertFreshValuation(movement.freshness);
+      }
 
       res.json(movement);
     } catch (error) {
+      if (error instanceof FreshnessQueryError) {
+        return sendError(res, 400, error.code, error.message, error.details);
+      }
+      if (error instanceof SnapshotNotFoundError) {
+        return sendError(res, 404, "SNAPSHOT_NOT_FOUND", error.message);
+      }
+      if (error instanceof StaleValuationError) {
+        return sendError(
+          res,
+          409,
+          error.code,
+          error.message,
+          error.freshness,
+          undefined,
+          true,
+        );
+      }
       sendError(
         res,
         500,

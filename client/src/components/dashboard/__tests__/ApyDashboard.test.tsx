@@ -17,6 +17,7 @@ function createDeferredResponse() {
 describe("ApyDashboard states", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    window.localStorage.clear();
     window.matchMedia = vi.fn().mockImplementation((query) => ({
       matches: false,
       media: query,
@@ -107,7 +108,7 @@ describe("ApyDashboard states", () => {
     render(<ApyDashboard />);
 
     expect(
-      await screen.findByText(/Failed to Load APY Data/i),
+      await screen.findByText(/APY Data Temporarily Unavailable/i),
     ).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: /Retry/i }));
 
@@ -243,6 +244,63 @@ describe("ApyDashboard states", () => {
         name: /TVL sorted descending; activate to sort ascending/i,
       }),
     ).toHaveAttribute("aria-pressed", "true");
+  });
+
+  it("shows cached rates with an offline banner and refreshes on reconnect", async () => {
+    const user = userEvent.setup();
+    const rows = [
+      {
+        protocol: "Blend",
+        asset: "USDC",
+        apy: 8.42,
+        tvl: 2450000,
+        risk: "Low",
+        change24h: 0.32,
+        rewardTokens: ["BLND"],
+        category: "Lending",
+      },
+    ];
+
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => rows,
+    });
+
+    render(<ApyDashboard />);
+    await screen.findByText("USDC");
+
+    // Subsequent refresh fails (offline) — cached rows keep rendering.
+    mockFetch.mockRejectedValueOnce(new TypeError("fetch failed"));
+    await user.click(screen.getByRole("button", { name: /Refresh Rates/i }));
+
+    const banner = await screen.findByTestId("offline-cache-banner");
+    expect(banner).toHaveTextContent("Offline — Showing Cached Data");
+    expect(screen.getAllByText("Blend").length).toBeGreaterThan(0);
+    expect(
+      screen.queryByText(/APY Data Temporarily Unavailable/i),
+    ).not.toBeInTheDocument();
+
+    // Reconnect: fresh response replaces the cache and clears the banner.
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => [
+        {
+          protocol: "Soroswap",
+          asset: "XLM-USDC",
+          apy: 14.75,
+          tvl: 3100000,
+          risk: "Medium",
+        },
+      ],
+    });
+    act(() => {
+      window.dispatchEvent(new Event("online"));
+    });
+
+    expect((await screen.findAllByText("Soroswap")).length).toBeGreaterThan(0);
+    await waitFor(() => {
+      expect(screen.queryByTestId("offline-cache-banner")).not.toBeInTheDocument();
+    });
   });
 });
 

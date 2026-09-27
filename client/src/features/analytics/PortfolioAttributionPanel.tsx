@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState } from "react";
 import { PieChart, Pie, Cell, ResponsiveContainer, Tooltip, Legend, BarChart, Bar, XAxis, YAxis, CartesianGrid } from "recharts";
 import { TrendingUp, TrendingDown, Minus, Info, Calendar, DollarSign, Target } from "lucide-react";
 import EmptyState from "../../components/common/EmptyState";
@@ -11,6 +11,8 @@ import {
   CHART_PANEL_AXIS,
   CHART_PANEL_LABEL,
 } from "../../components/charts/darkModeContrast";
+import { useCachedFetch } from "../../hooks/useCachedFetch";
+import { FreshnessBanner } from "../../components/dashboard/FreshnessBanner";
 
 // ── Types ───────────────────────────────────────────────────────────────
 
@@ -111,52 +113,35 @@ function getTrendIcon(percentage: number) {
 // ── Component ───────────────────────────────────────────────────────────
 
 export default function PortfolioAttributionPanel({ walletAddress }: PortfolioAttributionPanelProps) {
-  const [report, setReport] = useState<AttributionReport | null>(null);
-  const [isLoading, setIsLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
   const [timeWindow, setTimeWindow] = useState({
     start: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString(), // 30 days ago
     end: new Date().toISOString(),
   });
 
-  useEffect(() => {
-    fetchAttributionReport();
-  }, [walletAddress, timeWindow]);
-
-  const fetchAttributionReport = async () => {
-    try {
-      setIsLoading(true);
-      setError(null);
-
-      const response = await fetch(
-        `/api/analytics/attribution/${walletAddress}?startTime=${timeWindow.start}&endTime=${timeWindow.end}`
-      );
-
-      if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}`);
-      }
-
-      const data = await response.json();
-      setReport(data.data);
-    } catch (err) {
-      console.error("Failed to fetch attribution report:", err);
-      setError(err instanceof Error ? err.message : "Failed to fetch attribution report");
-    } finally {
-      setIsLoading(false);
-    }
-  };
+  const attributionPath = `/api/analytics/attribution/${walletAddress}?startTime=${timeWindow.start}&endTime=${timeWindow.end}`;
+  const {
+    data: report,
+    isLoading,
+    error,
+    isOffline,
+    isFromCache,
+    fetchedAt,
+    refresh: fetchAttributionReport,
+  } = useCachedFetch<AttributionReport>(attributionPath, {
+    select: (json) => (json as { data: AttributionReport }).data,
+  });
 
   const handleTimeWindowChange = (days: number) => {
     const end = new Date();
     const start = new Date(end.getTime() - days * 24 * 60 * 60 * 1000);
-    
+
     setTimeWindow({
       start: start.toISOString(),
       end: end.toISOString(),
     });
   };
 
-  if (isLoading) {
+  if (isLoading && !report) {
     return (
       <div className="glass-panel p-8">
         <div className="flex items-center justify-center py-12">
@@ -166,14 +151,14 @@ export default function PortfolioAttributionPanel({ walletAddress }: PortfolioAt
     );
   }
 
-  if (error) {
+  if (error && !report) {
     return (
       <div className="glass-panel p-8">
         <div className="text-center py-12">
           <Info className="mx-auto mb-4 text-red-400" size={48} />
           <h3 className="text-lg font-semibold mb-2">Attribution Data Unavailable</h3>
           <p className="text-gray-400 mb-4">{error}</p>
-          <button onClick={fetchAttributionReport} className="btn-primary">
+          <button onClick={() => fetchAttributionReport()} className="btn-primary">
             Retry
           </button>
         </div>
@@ -255,6 +240,19 @@ export default function PortfolioAttributionPanel({ walletAddress }: PortfolioAt
           </select>
         </div>
       </div>
+
+      {(isOffline || isFromCache) && (
+        <FreshnessBanner
+          lastUpdated={
+            fetchedAt != null
+              ? new Date(fetchedAt).toISOString()
+              : report.generatedAt
+          }
+          source="cache"
+          isOffline={isOffline}
+          onRefresh={() => fetchAttributionReport()}
+        />
+      )}
 
       {/* Summary Stats */}
       <div className="grid grid-cols-1 md:grid-cols-4 gap-4">

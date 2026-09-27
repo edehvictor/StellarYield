@@ -17,10 +17,26 @@ import {
   previewImport,
   TreasuryValidationError,
   RebalancingPreviewError,
+  type AllocationPosition,
 } from "../services/treasurySimulationService";
 import { successEnvelope, errorEnvelope } from "../types/envelope";
 import { toExportFailure } from "../types/exportFailure";
 import { requireAdmin } from "../middleware/authz";
+import {
+  validatePolicy,
+  evaluatePolicy,
+  type PolicyEvaluationContext,
+} from "../services/allocationPolicyDsl";
+import {
+  TreasuryWithdrawalError,
+  treasuryWithdrawalCooldownService,
+} from "../services/treasuryWithdrawalCooldownService";
+import {
+  saveSimulationSnapshot,
+  listSimulationSnapshots,
+  getSimulationSnapshot,
+  SimulationSnapshotError,
+} from "../services/rebalanceSimulationSnapshotService";
 
 const router = Router();
 
@@ -84,7 +100,7 @@ function validateAllocations(allocations: unknown): allocations is AllocationPos
  * POST /api/treasury/simulate
  * Run a treasury simulation. Optionally saves the scenario.
  */
-router.post("/simulate", requireAdmin, (req: Request, res: Response) => {
+router.post("/simulate", requireAdmin, async (req: Request, res: Response) => {
   try {
     const scenario = assertValidScenarioInput({
       ...req.body,
@@ -100,7 +116,21 @@ router.post("/simulate", requireAdmin, (req: Request, res: Response) => {
       ? result.concentrationWarnings
       : undefined;
 
-    res.json(successEnvelope(result, "treasury/simulate", warnings));
+    // #1419: persist a point-in-time snapshot of this result on request.
+    // Best-effort — a snapshot-persistence failure never fails the
+    // simulation itself, since the (already-computed) result is still
+    // valid and useful without history.
+    let snapshotId: string | undefined;
+    if (req.body.snapshot) {
+      try {
+        const snapshot = await saveSimulationSnapshot(scenario, result, { saved: !!req.body.save });
+        snapshotId = snapshot.id;
+      } catch {
+        // Swallowed intentionally — see comment above.
+      }
+    }
+
+    res.json(successEnvelope({ ...result, snapshotId }, "treasury/simulate", warnings));
   } catch (err) {
     if (err instanceof TreasuryValidationError) {
       res.status(err.statusCode).json(
@@ -294,6 +324,83 @@ router.delete("/scenarios/:id", requireAdmin, (req: Request, res: Response) => {
 });
 
 /**
+ * POST /api/treasury/policy/dry-run
+ * Validate (and optionally evaluate) an allocation policy without persisting it.
+ *
+ * Never calls storePolicy — the policy store is left untouched. Optional
+ * `contexts` run evaluatePolicy against each provided vault context so callers
+ * can preview rule matches before committing a policy.
+ */
+router.post("/policy/dry-run", requireAdmin, (req: Request, res: Response) => {
+  try {
+    const body = (req.body ?? {}) as {
+      policy?: unknown;
+      contexts?: unknown;
+    };
+
+    if (body.policy === undefined) {
+      res.status(400).json(
+        errorEnvelope(
+          "INVALID_POLICY",
+          "Request body must include a `policy` object.",
+          "treasury/policy/dry-run",
+        ),
+      );
+      return;
+    }
+
+    const validation = validatePolicy(body.policy);
+    if (!validation.ok) {
+      res.status(422).json(
+        errorEnvelope(
+          "INVALID_POLICY",
+          "Policy failed validation.",
+          "treasury/policy/dry-run",
+          { errors: validation.errors },
+        ),
+      );
+      return;
+    }
+
+    let evaluations: ReturnType<typeof evaluatePolicy>[] | undefined;
+    if (body.contexts !== undefined) {
+      if (!Array.isArray(body.contexts)) {
+        res.status(400).json(
+          errorEnvelope(
+            "INVALID_POLICY",
+            "`contexts` must be an array of evaluation contexts when provided.",
+            "treasury/policy/dry-run",
+          ),
+        );
+        return;
+      }
+      evaluations = body.contexts.map((raw) =>
+        evaluatePolicy(validation.policy, raw as PolicyEvaluationContext),
+      );
+    }
+
+    res.json(
+      successEnvelope(
+        {
+          policy: validation.policy,
+          persisted: false,
+          evaluations,
+        },
+        "treasury/policy/dry-run",
+      ),
+    );
+  } catch {
+    res.status(400).json(
+      errorEnvelope(
+        "INVALID_POLICY",
+        "Invalid request body",
+        "treasury/policy/dry-run",
+      ),
+    );
+  }
+});
+
+/**
  * POST /api/treasury/cashflow/preview
  * Validate an array of cashflow rows before importing.
  */
@@ -350,6 +457,169 @@ router.post("/cashflow/import", requireAdmin, (req: Request, res: Response) => {
       "treasury/cashflow/import",
     ),
   );
+});
+
+// ── Treasury withdrawal cooldown (#1343) ─────────────────────────────────────
+
+/**
+ * Emit a typed error envelope for treasury withdrawal cooldown routes.
+ * `COOLDOWN_ACTIVE` is retryable once the cooldown lapses; validation and
+ * not-found failures are not.
+ */
+function sendWithdrawalError(res: Response, err: unknown, route: string): void {
+  if (err instanceof TreasuryWithdrawalError) {
+    const classification =
+      err.code === "COOLDOWN_ACTIVE"
+        ? { category: "validation", retryable: true }
+        : { category: "validation", retryable: false };
+    res.status(err.statusCode).json(
+      errorEnvelope(err.code, err.message, route, err.details, classification),
+    );
+    return;
+  }
+  res.status(400).json(
+    errorEnvelope("INVALID_REQUEST", "Invalid request body", route),
+  );
+}
+
+/**
+ * POST /api/treasury/withdrawals
+ * Submit a treasury withdrawal request (admin only). Enforces the per-vault
+ * cooldown: 409 COOLDOWN_ACTIVE while a recent pending withdrawal still
+ * consumes the vault's cooldown window.
+ */
+router.post(
+  "/withdrawals",
+  treasuryMutationLimiter,
+  requireAdmin,
+  (req: Request, res: Response) => {
+    try {
+      const withdrawal = treasuryWithdrawalCooldownService.submitWithdrawal({
+        vaultId: req.body?.vaultId,
+        amountUsd: req.body?.amountUsd,
+        requestedBy:
+          req.body?.requestedBy ??
+          (req as Request & { user?: { id?: string } }).user?.id,
+        memo: req.body?.memo,
+      });
+      res.status(201).json(successEnvelope(withdrawal, "treasury/withdrawals"));
+    } catch (err) {
+      sendWithdrawalError(res, err, "treasury/withdrawals");
+    }
+  },
+);
+
+/**
+ * GET /api/treasury/withdrawals
+ * List withdrawal requests (admin only), newest first. Optional
+ * `?vaultId=` filter.
+ */
+router.get("/withdrawals", requireAdmin, (req: Request, res: Response) => {
+  const vaultId =
+    typeof req.query.vaultId === "string" && req.query.vaultId.length > 0
+      ? { vaultId: req.query.vaultId }
+      : {};
+  res.json(
+    successEnvelope(
+      treasuryWithdrawalCooldownService.listWithdrawals(vaultId),
+      "treasury/withdrawals",
+    ),
+  );
+});
+
+/**
+ * GET /api/treasury/withdrawals/cooldown?vaultId=...
+ * Cooldown status for a vault (admin only): whether a new submission would
+ * be rejected, remaining time, and the blocking pending withdrawal.
+ */
+router.get("/withdrawals/cooldown", requireAdmin, (req: Request, res: Response) => {
+  const vaultId = req.query.vaultId;
+  if (typeof vaultId !== "string" || vaultId.trim().length === 0) {
+    res.status(400).json(
+      errorEnvelope(
+        "INVALID_REQUEST",
+        "vaultId query parameter is required.",
+        "treasury/withdrawals/cooldown",
+        { field: "vaultId" },
+      ),
+    );
+    return;
+  }
+  res.json(
+    successEnvelope(
+      treasuryWithdrawalCooldownService.getCooldownStatus(vaultId.trim()),
+      "treasury/withdrawals/cooldown",
+    ),
+  );
+});
+
+/**
+ * POST /api/treasury/withdrawals/:id/cancel
+ * Cancel a pending withdrawal (admin only), freeing its vault's cooldown
+ * immediately.
+ */
+router.post(
+  "/withdrawals/:id/cancel",
+  treasuryMutationLimiter,
+  requireAdmin,
+  (req: Request, res: Response) => {
+    try {
+      const withdrawal = treasuryWithdrawalCooldownService.cancelWithdrawal(
+        req.params.id,
+      );
+      res.json(successEnvelope(withdrawal, "treasury/withdrawals"));
+    } catch (err) {
+      sendWithdrawalError(res, err, "treasury/withdrawals");
+    }
+  },
+);
+
+function sendSnapshotError(res: Response, err: unknown, route: string): void {
+  if (err instanceof SimulationSnapshotError) {
+    res.status(err.statusCode).json(errorEnvelope(err.code, err.message, route));
+    return;
+  }
+  res.status(503).json(
+    errorEnvelope("SNAPSHOT_UNAVAILABLE", "Simulation snapshot storage is unavailable.", route),
+  );
+}
+
+/**
+ * GET /api/treasury/simulation-snapshots
+ *
+ * #1419 — Lists persisted rebalance-simulation result snapshots,
+ * newest first. Optionally scoped to one scenario via `?scenarioId=`.
+ * Cursor-paginated via `?cursor=` (a snapshot id) and `?limit=`.
+ */
+router.get("/simulation-snapshots", requireAdmin, async (req: Request, res: Response) => {
+  try {
+    const { scenarioId, cursor } = req.query;
+    const limit = req.query.limit ? Number(req.query.limit) : undefined;
+
+    const page = await listSimulationSnapshots({
+      scenarioId: typeof scenarioId === "string" ? scenarioId : undefined,
+      cursor: typeof cursor === "string" ? cursor : undefined,
+      limit: Number.isFinite(limit) ? limit : undefined,
+    });
+
+    res.json(successEnvelope(page, "treasury/simulation-snapshots"));
+  } catch (err) {
+    sendSnapshotError(res, err, "treasury/simulation-snapshots");
+  }
+});
+
+/**
+ * GET /api/treasury/simulation-snapshots/:id
+ *
+ * #1419 — Fetches one persisted simulation snapshot by id.
+ */
+router.get("/simulation-snapshots/:id", requireAdmin, async (req: Request, res: Response) => {
+  try {
+    const snapshot = await getSimulationSnapshot(req.params.id);
+    res.json(successEnvelope(snapshot, "treasury/simulation-snapshots"));
+  } catch (err) {
+    sendSnapshotError(res, err, "treasury/simulation-snapshots");
+  }
 });
 
 export default router;

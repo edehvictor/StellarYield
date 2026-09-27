@@ -9,6 +9,8 @@ import EmptyState from '../../components/common/EmptyState';
 import { EMPTY_STATE_COMPATIBILITY } from '../../utils/emptyStateCopy';
 import { RISK_CHART_COLORS } from "../../components/charts/darkModeContrast";
 import { stableSort } from "../../lib/stableSort";
+import { useCachedFetch } from "../../hooks/useCachedFetch";
+import { FreshnessBanner } from "../../components/dashboard/FreshnessBanner";
 
 // ── Types ───────────────────────────────────────────────────────────────
 
@@ -139,40 +141,25 @@ function sortIssues(issues: CompatibilityIssue[]): CompatibilityIssue[] {
 // ── Component ───────────────────────────────────────────────────────────
 
 export default function CompatibilityPanel() {
-  const [report, setReport] = useState<CompatibilityReport | null>(null);
-  const [isLoading, setIsLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
   const [selectedProtocol, setSelectedProtocol] = useState<CompatibilityStatus | null>(null);
   const [activeAction, setActiveAction] = useState<ActionType>('deposit');
+  const {
+    data: report,
+    isLoading,
+    error,
+    isOffline,
+    isFromCache,
+    fetchedAt,
+    refresh: fetchCompatibilityReport,
+  } = useCachedFetch<CompatibilityReport>('/api/analytics/compatibility', {
+    select: (json) => (json as { data: CompatibilityReport }).data,
+  });
 
   useEffect(() => {
-    fetchCompatibilityReport();
-  }, []);
-
-  const fetchCompatibilityReport = async () => {
-    try {
-      setIsLoading(true);
-      setError(null);
-
-      const response = await fetch('/api/analytics/compatibility');
-
-      if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}`);
-      }
-
-      const data = await response.json();
-      setReport(data.data);
-
-      if (data.data.protocols.length > 0) {
-        setSelectedProtocol(data.data.protocols[0]);
-      }
-    } catch (err) {
-      console.error("Failed to fetch compatibility report:", err);
-      setError(err instanceof Error ? err.message : "Failed to fetch compatibility report");
-    } finally {
-      setIsLoading(false);
+    if (report && report.protocols.length > 0 && !selectedProtocol) {
+      setSelectedProtocol(report.protocols[0]);
     }
-  };
+  }, [report, selectedProtocol]);
 
   /** Registry warnings surfaced when metadata loading fails or is partial. */
   const registryWarnings = report?.registryWarnings ?? [];
@@ -195,7 +182,7 @@ export default function CompatibilityPanel() {
 
   // ── Loading ───────────────────────────────────────────────────────────
 
-  if (isLoading) {
+  if (isLoading && !report) {
     return (
       <div className="glass-panel p-8">
         <div className="flex items-center justify-center py-12">
@@ -207,14 +194,14 @@ export default function CompatibilityPanel() {
 
   // ── Error ─────────────────────────────────────────────────────────────
 
-  if (error) {
+  if (error && !report) {
     return (
       <div className="glass-panel p-8">
         <div className="text-center py-12">
           <AlertTriangle className="mx-auto mb-4 text-red-400" size={48} />
           <h3 className="text-lg font-semibold mb-2">Compatibility Data Unavailable</h3>
           <p className="text-gray-400 mb-4">{error}</p>
-          <button onClick={fetchCompatibilityReport} className="btn-primary">
+          <button onClick={() => fetchCompatibilityReport()} className="btn-primary">
             Retry
           </button>
         </div>
@@ -249,7 +236,7 @@ export default function CompatibilityPanel() {
               Monitor protocol upgrade compatibility and detect breaking changes
             </p>
           </div>
-          <button onClick={fetchCompatibilityReport} className="btn-secondary flex items-center gap-2">
+          <button onClick={() => fetchCompatibilityReport()} className="btn-secondary flex items-center gap-2">
             <RefreshCw size={14} />
             Refresh
           </button>
@@ -286,11 +273,24 @@ export default function CompatibilityPanel() {
             Monitor protocol upgrade compatibility and detect breaking changes
           </p>
         </div>
-        <button onClick={fetchCompatibilityReport} className="btn-secondary flex items-center gap-2">
+        <button onClick={() => fetchCompatibilityReport()} className="btn-secondary flex items-center gap-2">
           <RefreshCw size={14} />
           Refresh
         </button>
       </div>
+
+      {(isOffline || isFromCache) && (
+        <FreshnessBanner
+          lastUpdated={
+            fetchedAt != null
+              ? new Date(fetchedAt).toISOString()
+              : report.generatedAt
+          }
+          source="cache"
+          isOffline={isOffline}
+          onRefresh={() => fetchCompatibilityReport()}
+        />
+      )}
 
       {/* Registry Warning Banner */}
       {registryWarnings.length > 0 && (

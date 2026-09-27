@@ -15,9 +15,9 @@ const SPEC_PATH = path.join(__dirname, "../../openapi.yaml");
 
 // Update these when a PR intentionally changes the OpenAPI schema.
 const EXPECTED_COMPONENTS_SCHEMA_HASH =
-    "e5d31ade4da548c69b9a61e26229f14faf1899d61c102550321e7fc1601d6769";
+    "113a1ebc07067b511e81c528f9b4e5614c386718a4a7ff59c11d41606c3ec264";
 const EXPECTED_PATHS_SCHEMA_HASH =
-    "77a47ba8d94b43472e4a59238df6522b69a53cf0485644ef0e98b1cb56d14194";
+    "eda8709afcad1116d3900e770f20e23d4ecb8fa19e70447918d4b01b45c6723c";
 
 function readSection(spec: string, startMarker: string, endMarker?: string): string {
     const startIdx = spec.indexOf(startMarker);
@@ -48,7 +48,7 @@ describe("OpenAPI schema snapshots", () => {
 
     it("every documented path declares at least one 2xx response", () => {
         const pathBlocks = pathsSection
-            .split(/\n(?=  \/)/) // top-level path entries are indented by 2 spaces
+            .split(/\n(?={2}\/)/) // top-level path entries are indented by 2 spaces
             .filter((block) => block.trim().length > 0);
 
         expect(pathBlocks.length).toBeGreaterThan(0);
@@ -56,9 +56,9 @@ describe("OpenAPI schema snapshots", () => {
         for (const block of pathBlocks) {
             const [pathName] = block.trim().split(":");
             expect(block).toContain("responses:");
-            expect(block, `Path "${pathName}" is missing a 2xx response`).toMatch(
-                /'?2\d\d'?:/,
-            );
+            if (!/'?2\d\d'?:/.test(block)) {
+                throw new Error(`Path "${pathName}" is missing a 2xx response`);
+            }
         }
     });
 });

@@ -8,8 +8,30 @@ import {
     replayDeadLetterById,
     replayDeadLettersByLedgerRange,
 } from "../indexer/indexer";
+import {
+    runGapRepair,
+    listGapRepairRuns,
+    GapRepairError,
+} from "../indexer/gapRepair";
+import { requireAdmin } from "../middleware/authz";
+import { successEnvelope, errorEnvelope } from "../types/envelope";
 
 const router = Router();
+
+/** Map a GapRepairError onto an error envelope response. */
+function sendGapRepairError(res: Response, error: GapRepairError): void {
+    const category =
+        error.statusCode >= 500 ? "service_failure" : "validation";
+    res.status(error.statusCode).json(
+        errorEnvelope(
+            error.code,
+            error.message,
+            "indexer/gap-repair",
+            error.details,
+            { category, retryable: error.statusCode >= 500 },
+        ),
+    );
+}
 
 /**
  * GET /api/indexer/recovery-queue
@@ -90,5 +112,79 @@ router.post("/replay", async (req: Request, res: Response) => {
         res.status(500).json({ error: "Failed to replay recovery queue" });
     }
 });
+
+/**
+ * POST /api/indexer/recovery-queue/gap-repair  (admin only)
+ *
+ * Runs a gap repair over an explicit ledger range and returns the persisted
+ * run summary: scanned range plus restored / skipped / still-missing counts.
+ *
+ * Body: { "startLedger": number, "endLedger": number }
+ */
+router.post(
+    "/gap-repair",
+    requireAdmin,
+    async (req: Request, res: Response): Promise<void> => {
+        try {
+            const prisma = await loadPrismaClient();
+            const { startLedger, endLedger } = req.body ?? {};
+            const run = await runGapRepair(prisma, { startLedger, endLedger });
+            res.json(successEnvelope({ run }, "indexer/gap-repair"));
+        } catch (error) {
+            if (error instanceof GapRepairError) {
+                sendGapRepairError(res, error);
+                return;
+            }
+            res.status(500).json(
+                errorEnvelope(
+                    "GAP_REPAIR_FAILED",
+                    "Failed to run gap repair",
+                    "indexer/gap-repair",
+                ),
+            );
+        }
+    },
+);
+
+/**
+ * GET /api/indexer/recovery-queue/gap-repair  (admin only)
+ *
+ * Lists persisted gap repair summaries, newest first.
+ *
+ * Query parameters:
+ *   limit — max runs to return, 1–100 (default 20)
+ */
+router.get(
+    "/gap-repair",
+    requireAdmin,
+    async (req: Request, res: Response): Promise<void> => {
+        try {
+            const prisma = await loadPrismaClient();
+            const rawLimit = req.query.limit
+                ? parseInt(String(req.query.limit), 10)
+                : 20;
+            const limit = Number.isFinite(rawLimit) ? rawLimit : 20;
+            const runs = await listGapRepairRuns(prisma, limit);
+            res.json(
+                successEnvelope(
+                    { runs, count: runs.length },
+                    "indexer/gap-repair/list",
+                ),
+            );
+        } catch (error) {
+            if (error instanceof GapRepairError) {
+                sendGapRepairError(res, error);
+                return;
+            }
+            res.status(500).json(
+                errorEnvelope(
+                    "GAP_REPAIR_LIST_FAILED",
+                    "Failed to list gap repair runs",
+                    "indexer/gap-repair/list",
+                ),
+            );
+        }
+    },
+);
 
 export default router;
