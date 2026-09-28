@@ -36,6 +36,7 @@ import { useDensity } from "../../context/DensityContext";
 import type { DensityMode } from "../../context/DensityContext";
 import { cachedFetch } from "../../lib/cachedFetch";
 import { formatRewardRate } from "../../lib/apyFormat";
+import { getYieldSourceFreshness } from "./yieldSourceFreshness";
 
 // ── Types ───────────────────────────────────────────────────────────────
 
@@ -69,6 +70,7 @@ interface ApyEntry {
   rewardTokens: string[];
   category: string;
   fetchedAt?: string;
+  isStale?: boolean;
   freshnessConfidence?: number;
   unusableDueToStale?: boolean;
 }
@@ -94,6 +96,7 @@ interface ApiApyEntry {
   rewardTokens?: unknown;
   category?: unknown;
   fetchedAt?: unknown;
+  isStale?: unknown;
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────
@@ -173,6 +176,7 @@ function normalizeApyEntry(entry: ApiApyEntry): ApyEntry {
         ? entry.category
         : deriveCategory(protocol),
     fetchedAt: normalizeFetchedAt(entry.fetchedAt),
+    isStale: typeof entry.isStale === "boolean" ? entry.isStale : undefined,
   };
 }
 
@@ -323,7 +327,7 @@ export default function ApyDashboard() {
         const augmented: ApyEntry[] = rows.map((row) => {
           const entry = normalizeApyEntry(row as ApiApyEntry);
           const fetchedTime = entry.fetchedAt
-            ? new Date(entry.fetchedAt).getTime()
+            ? Date.parse(entry.fetchedAt)
             : Date.now();
           const freshness = computeDecayedFreshnessConfidence(
             Date.now() - fetchedTime,
@@ -765,13 +769,7 @@ export default function ApyDashboard() {
                   "from-gray-500/80 to-gray-600/80";
                 const isPositive = entry.change24h >= 0;
 
-                const fetchedTime = entry.fetchedAt
-                  ? new Date(entry.fetchedAt)
-                  : new Date();
-                const diffMins = Math.floor(
-                  (Date.now() - fetchedTime.getTime()) / 60000,
-                );
-                const isStale = (entry.freshnessConfidence ?? 1) < 0.5;
+                const freshness = getYieldSourceFreshness(entry);
 
                 return (
                   <div
@@ -805,23 +803,23 @@ export default function ApyDashboard() {
 
                       {/* Freshness Indicator */}
                       <div className="flex items-center gap-1.5 mb-3 text-[10px] font-medium uppercase tracking-wider">
-                        {isStale ? (
+                        {freshness.status === "stale" ? (
                           <span
                             className="text-red-400 flex items-center gap-1 bg-red-400/10 px-2 py-0.5 rounded-full"
-                            aria-label={`Stale APY data for ${entry.protocol} ${entry.asset}; last updated ${diffMins} minutes ago`}
+                            aria-label={`Stale APY data for ${entry.protocol} ${entry.asset}; last updated ${freshness.ageMinutes} minutes ago`}
                           >
-                            <Clock size={10} aria-hidden="true" /> Stale Data (
-                            {diffMins}m old)
+                            <Clock size={10} aria-hidden="true" /> Stale Data ({freshness.ageMinutes}m old)
                           </span>
-                        ) : (
+                        ) : freshness.status === "fresh" ? (
                           <span
                             className="text-gray-500 flex items-center gap-1"
-                            aria-label={`Updated just now, ${Math.round((entry.freshnessConfidence ?? 1) * 100)} percent confidence`}
+                            aria-label={`APY data for ${entry.protocol} ${entry.asset} updated ${freshness.ageMinutes} minutes ago`}
                           >
-                            <Clock size={10} aria-hidden="true" /> Updated just
-                            now (
-                            {Math.round((entry.freshnessConfidence ?? 1) * 100)}
-                            % confidence)
+                            <Clock size={10} aria-hidden="true" /> Updated {freshness.ageMinutes}m ago
+                          </span>
+                        ) : (
+                          <span className="text-amber-300 flex items-center gap-1 bg-amber-300/10 px-2 py-0.5 rounded-full" role="status">
+                            <Clock size={10} aria-hidden="true" /> Freshness unavailable
                           </span>
                         )}
                       </div>
@@ -1034,13 +1032,7 @@ export default function ApyDashboard() {
                         "from-gray-500/80 to-gray-600/80";
                       const isPositive = entry.change24h >= 0;
 
-                      const fetchedTime = entry.fetchedAt
-                        ? new Date(entry.fetchedAt)
-                        : new Date();
-                      const diffMins = Math.floor(
-                        (Date.now() - fetchedTime.getTime()) / 60000,
-                      );
-                      const isStale = diffMins > 5;
+                      const freshness = getYieldSourceFreshness(entry);
 
                       return (
                         <tr
@@ -1067,12 +1059,17 @@ export default function ApyDashboard() {
                                   <p className="text-[10px] text-gray-500">
                                     {entry.category}
                                   </p>
-                                  {isStale && (
+                                  {freshness.status === "stale" && (
                                     <span
                                       className="text-[9px] text-red-400 bg-red-400/10 px-1.5 py-px rounded uppercase"
-                                      aria-label={`Stale APY data for ${entry.protocol} ${entry.asset}; last updated ${diffMins} minutes ago`}
+                                      aria-label={`Stale APY data for ${entry.protocol} ${entry.asset}; last updated ${freshness.ageMinutes} minutes ago`}
                                     >
                                       Stale
+                                    </span>
+                                  )}
+                                  {freshness.status === "unknown" && (
+                                    <span className="text-[9px] text-amber-300 bg-amber-300/10 px-1.5 py-px rounded uppercase" role="status">
+                                      Freshness unknown
                                     </span>
                                   )}
                                 </div>

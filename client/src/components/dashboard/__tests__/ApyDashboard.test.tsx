@@ -171,6 +171,39 @@ describe("ApyDashboard states", () => {
     );
   });
 
+  it("shows stale usable yield rows and labels missing freshness", async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => [
+        {
+          protocol: "Blend",
+          asset: "USDC",
+          apy: 8.42,
+          tvl: 2450000,
+          risk: "Low",
+          fetchedAt: new Date(Date.now() - 20 * 60_000).toISOString(),
+        },
+        {
+          protocol: "Soroswap",
+          asset: "XLM-USDC",
+          apy: 14.75,
+          tvl: 3100000,
+          risk: "Medium",
+          fetchedAt: "not-a-timestamp",
+        },
+      ],
+    });
+
+    render(<ApyDashboard />);
+
+    expect(await screen.findByText("USDC")).toBeInTheDocument();
+    expect(
+      screen.getByLabelText(/Stale APY data for Blend USDC; last updated 20 minutes ago/i),
+    ).toBeInTheDocument();
+    expect(screen.getByText("XLM-USDC")).toBeInTheDocument();
+    expect(screen.getByText("Freshness unavailable")).toBeInTheDocument();
+  });
+
   it("handles partial APY rows without breaking layout", async () => {
     mockFetch.mockResolvedValueOnce({
       ok: true,
