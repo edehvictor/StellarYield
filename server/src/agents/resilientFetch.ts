@@ -121,11 +121,18 @@ function isRetryable(error: unknown): boolean {
       msg.includes("econnreset") ||
       msg.includes("econnrefused") ||
       msg.includes("fetch failed") ||
-      msg.includes("server error")
+      msg.includes("server error") ||
+      // 429 Too Many Requests: provider is rate-limiting us — always retryable
+      msg.includes("429") ||
+      msg.includes("rate limit") ||
+      msg.includes("too many requests")
     );
   }
   return false;
 }
+
+/** Extra initial backoff (ms) applied when a 429 is detected. */
+const RATE_LIMIT_BACKOFF_EXTRA_MS = 1_500;
 
 export async function resilientFetch(
   url: string,
@@ -153,6 +160,10 @@ export async function resilientFetch(
 
       clearTimeout(timer);
 
+      if (response.status === 429) {
+        throw new Error(`Rate limited (429): ${response.status}`);
+      }
+
       if (response.status >= 500) {
         throw new Error(`Server error: ${response.status}`);
       }
@@ -173,8 +184,14 @@ export async function resilientFetch(
       lastError = err instanceof Error ? err : new Error(String(err));
 
       if (attempt < options.maxRetries && isRetryable(lastError)) {
+        const isRateLimit = lastError.message.toLowerCase().includes("429") ||
+          lastError.message.toLowerCase().includes("rate limit") ||
+          lastError.message.toLowerCase().includes("too many requests");
+        const base = isRateLimit
+          ? options.initialDelayMs + RATE_LIMIT_BACKOFF_EXTRA_MS
+          : options.initialDelayMs;
         const delay = Math.min(
-          options.initialDelayMs * Math.pow(2, attempt),
+          base * Math.pow(2, attempt),
           options.maxDelayMs,
         );
         await sleep(delay);

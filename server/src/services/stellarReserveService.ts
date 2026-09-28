@@ -1,3 +1,5 @@
+import { enqueueAdapterRequest } from "../agents/adapterRetryQueue";
+
 /**
  * Stellar minimum-balance reserve calculation (#1148).
  *
@@ -173,25 +175,25 @@ export async function fetchWalletReserveSnapshot(
 ): Promise<WalletReserveSnapshot | null> {
   try {
     const timeoutMs = parseInt(process.env.STELLAR_HORIZON_TIMEOUT_MS ?? "10000", 10);
-    const res = await Promise.race([
-      fetch(`${HORIZON_URL}/accounts/${walletAddress}`),
-      new Promise<never>((_, reject) =>
-        setTimeout(() => reject(new Error("Timeout")), timeoutMs),
-      ),
-    ]);
+
+    const res = await enqueueAdapterRequest(
+      () =>
+        Promise.race([
+          fetch(`${HORIZON_URL}/accounts/${walletAddress}`),
+          new Promise<never>((_, reject) =>
+            setTimeout(() => reject(new Error("Timeout")), timeoutMs),
+          ),
+        ]),
+      "horizon-reserve",
+      { maxRetries: 2, initialDelayMs: 500, maxDelayMs: 8_000 },
+    );
+
     if (!res.ok) return null;
 
     const account = (await res.json()) as HorizonAccountResponse;
     const nativeLine = account.balances.find((b) => b.asset_type === "native");
     const xlmBalance = nativeLine ? parseFloat(nativeLine.balance) : 0;
 
-    // A Soroban SAC trustline for a contract-backed asset shows up in
-    // Horizon balances as a "liquidity_pool_shares"-style entry keyed by
-    // asset issuer/contract; SAC wrapper trustlines aren't reliably
-    // distinguishable from classic trustlines via this endpoint alone, so
-    // the caller is expected to also account for contract-level trustline
-    // existence when known. Here we conservatively check whether any
-    // existing balance line's issuer matches the vault token contract id.
     const hasVaultTrustline = account.balances.some(
       (b) => b.asset_issuer === vaultTokenContractId,
     );
