@@ -64,6 +64,32 @@ const ALL_ACTIONS: ActionType[] = [
   "reporting",
 ];
 
+/**
+ * Human-readable categories that explain why a provider/source was
+ * downgraded.  Used to populate the `fallbackReason` field on every
+ * `CompatibilityIssue` so operators can act on the actual root cause
+ * instead of a generic numeric score.
+ */
+export type FallbackReasonCode =
+  | 'version_below_minimum'
+  | 'version_exceeds_maximum'
+  | 'breaking_change_detected'
+  | 'critical_feature_unavailable'
+  | 'version_fetch_failed'
+  | 'compatibility_check_failed'
+  | 'unknown';
+
+/** Mapping from code to operator-readable description. */
+export const FALLBACK_REASON_LABELS: Record<FallbackReasonCode, string> = {
+  version_below_minimum:       'Version below minimum — provider is running an outdated release',
+  version_exceeds_maximum:     'Version exceeds maximum — provider release is ahead of supported range',
+  breaking_change_detected:    'Breaking change detected — protocol update introduced incompatible changes',
+  critical_feature_unavailable:'Critical feature unavailable — required capability is missing from provider',
+  version_fetch_failed:        'Version fetch failed — provider version could not be retrieved',
+  compatibility_check_failed:  'Compatibility check failed — automated check could not complete',
+  unknown:                     'Unknown degradation reason — manual inspection required',
+};
+
 export interface CompatibilityIssue {
   severity: "critical" | "high" | "medium" | "low";
   component: string;
@@ -74,6 +100,43 @@ export interface CompatibilityIssue {
   affectedActions?: ActionType[];
   lastUpdated?: string;
   protocolName?: string;
+  /** Machine-readable code identifying why the provider was downgraded. */
+  fallbackReasonCode?: FallbackReasonCode;
+  /** Human-readable sentence explaining the downgrade reason. */
+  fallbackReason?: string;
+}
+
+/**
+ * Derive a `FallbackReasonCode` and its human-readable label from the
+ * context of a compatibility issue.  The function inspects the `issue`
+ * text (and optionally the component) to pick the most specific code;
+ * it falls back to `'unknown'` when no pattern matches.
+ */
+export function deriveFallbackReason(issue: string, component?: string): {
+  fallbackReasonCode: FallbackReasonCode;
+  fallbackReason: string;
+} {
+  const text = `${issue} ${component ?? ''}`.toLowerCase();
+
+  let code: FallbackReasonCode;
+
+  if (/below required|below minimum|version.*is below/i.test(text)) {
+    code = 'version_below_minimum';
+  } else if (/exceeds maximum|above maximum|version.*exceeds/i.test(text)) {
+    code = 'version_exceeds_maximum';
+  } else if (/breaking change/i.test(text)) {
+    code = 'breaking_change_detected';
+  } else if (/critical feature|features unavailable|missing feature/i.test(text)) {
+    code = 'critical_feature_unavailable';
+  } else if (/failed to fetch.*version|version.*fetch.*fail/i.test(text)) {
+    code = 'version_fetch_failed';
+  } else if (/compatibility check failed|check.*failed/i.test(text)) {
+    code = 'compatibility_check_failed';
+  } else {
+    code = 'unknown';
+  }
+
+  return { fallbackReasonCode: code, fallbackReason: FALLBACK_REASON_LABELS[code] };
   registryConflict?: RegistryConflict;
 }
 
@@ -409,24 +472,25 @@ export class ProtocolCompatibilityEngine {
         autoUpdateAvailable,
       };
     } catch (error) {
-      console.error("Failed to fetch protocol version:", { protocolName });
+      console.error('Failed to fetch protocol version:', { protocolName });
+      const { fallbackReasonCode, fallbackReason } = deriveFallbackReason('Failed to fetch protocol version');
       return {
         protocolName,
-        currentVersion: "unknown",
-        latestVersion: "unknown",
-        status: "incompatible" as const,
-        issues: [
-          {
-            severity: "critical" as const,
-            component: "unknown",
-            issue: "Failed to fetch protocol version",
-            impact: "Cannot determine compatibility",
-            recommendation: "Check protocol connectivity",
-            affectedStrategies: [],
-            protocolName,
-            lastUpdated: new Date().toISOString(),
-          },
-        ],
+        currentVersion: 'unknown',
+        latestVersion: 'unknown',
+        status: 'incompatible' as const,
+        issues: [{
+          severity: 'critical' as const,
+          component: 'unknown',
+          issue: 'Failed to fetch protocol version',
+          impact: 'Cannot determine compatibility',
+          recommendation: 'Check protocol connectivity',
+          affectedStrategies: [],
+          protocolName,
+          lastUpdated: new Date().toISOString(),
+          fallbackReasonCode,
+          fallbackReason,
+        }],
         lastChecked: new Date().toISOString(),
         recommendations: ["Check protocol connectivity"],
         autoUpdateAvailable: false,
@@ -452,12 +516,16 @@ export class ProtocolCompatibilityEngine {
         currentVersion,
       );
       if (!versionCheck.compatible) {
+        const { fallbackReasonCode, fallbackReason } = deriveFallbackReason(versionCheck.reason, requirements.component);
         issues.push({
           severity: versionCheck.isBreaking ? "critical" : "high",
           component: requirements.component,
           issue: versionCheck.reason,
           impact: `Component ${requirements.component} may not function correctly`,
           recommendation: `Update ${requirements.component} to compatible version`,
+          affectedStrategies: await this.getAffectedStrategies(protocolName, requirements.component),
+          fallbackReasonCode,
+          fallbackReason,
           affectedStrategies: await this.getAffectedStrategies(
             protocolName,
             requirements.component,
@@ -472,9 +540,16 @@ export class ProtocolCompatibilityEngine {
         currentVersion,
       );
       if (!featuresCheck.available) {
+        const { fallbackReasonCode, fallbackReason } = deriveFallbackReason('Critical features unavailable', requirements.component);
         issues.push({
           severity: "critical",
           component: requirements.component,
+          issue: 'Critical features unavailable',
+          impact: featuresCheck.missingFeatures.join(', ') + ' are not available',
+          recommendation: 'Upgrade protocol or use alternative implementation',
+          affectedStrategies: await this.getAffectedStrategies(protocolName, requirements.component),
+          fallbackReasonCode,
+          fallbackReason,
           issue: "Critical features unavailable",
           impact:
             featuresCheck.missingFeatures.join(", ") + " are not available",
@@ -493,11 +568,18 @@ export class ProtocolCompatibilityEngine {
         requirements,
       );
       if (breakingChangesCheck.hasBreakingChanges) {
+        const { fallbackReasonCode, fallbackReason } = deriveFallbackReason('Breaking changes detected', requirements.component);
         issues.push({
           severity: breakingChangesCheck.affectsCriticalPath
             ? "critical"
             : "high",
           component: requirements.component,
+          issue: 'Breaking changes detected',
+          impact: breakingChangesCheck.changes.join(', '),
+          recommendation: 'Review and update integration code',
+          affectedStrategies: await this.getAffectedStrategies(protocolName, requirements.component),
+          fallbackReasonCode,
+          fallbackReason,
           issue: "Breaking changes detected",
           impact: breakingChangesCheck.changes.join(", "),
           recommendation: "Review and update integration code",
@@ -508,6 +590,7 @@ export class ProtocolCompatibilityEngine {
         });
       }
     } catch (error) {
+      const { fallbackReasonCode, fallbackReason } = deriveFallbackReason('Compatibility check failed', requirements.component);
       issues.push({
         severity: "medium",
         component: requirements.component,
@@ -515,6 +598,8 @@ export class ProtocolCompatibilityEngine {
         impact: `Unable to verify component compatibility: ${error instanceof Error ? error.message : "Unknown error"}`,
         recommendation: "Manual verification required",
         affectedStrategies: [],
+        fallbackReasonCode,
+        fallbackReason,
       });
     }
 
