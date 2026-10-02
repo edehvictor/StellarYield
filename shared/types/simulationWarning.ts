@@ -37,7 +37,10 @@ export type SimulationWarningCode =
   | "NEGATIVE_CASHFLOW"        // Modeled cashflow turns negative in one or more periods.
   | "RESERVE_BREACH"           // Reserve balance falls below the configured safety threshold.
   | "NEGATIVE_NET_YIELD"       // Net yield (after costs) is negative.
-  | "SEVERE_YIELD_REDUCTION";  // Yield reduced by more than 50% under stress.
+  | "SEVERE_YIELD_REDUCTION"   // Yield reduced by more than 50% under stress.
+  // Negative yield periods
+  | "NEGATIVE_YIELD_PERIOD"    // An allocation earns a negative yield (a loss) in the simulated period.
+  | "CAPITAL_LOSS";            // The simulated portfolio ends below its starting value.
 
 /** Visual severity tier — maps to UI colour tokens. */
 export type SimulationWarningSeverity = "info" | "warning" | "critical";

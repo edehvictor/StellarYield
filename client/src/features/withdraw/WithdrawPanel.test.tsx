@@ -13,6 +13,10 @@ vi.mock("../../lib/api", () => ({
 vi.mock("../../services/soroban", () => ({
   withdraw: vi.fn(),
   getUserShares: vi.fn(),
+  getVaultTotals: vi.fn().mockResolvedValue({
+    totalAssets: 1_050_0000000n,
+    totalShares: 1_000_0000000n,
+  }),
 }));
 
 vi.mock("../zap/assets", () => ({

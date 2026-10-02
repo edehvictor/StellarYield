@@ -3,11 +3,16 @@ import {
   setAuditContext,
   getAuditLogs,
   getAuditStatistics,
-  exportAuditLogsToCSV,
+  auditEntriesToCsv,
   verifyAuditTrailIntegrity,
   recordAdminConfirmation,
   recordCancelledAction,
 } from "../middleware/audit";
+import {
+  AUDIT_EXPORT_MAX_ROWS,
+  parseAuditLogFilterQuery,
+} from "../utils/auditFilters";
+import { sendError } from "../utils/errorResponse";
 import { uploadVaultMetadata } from "../services/ipfs/vaultMetadataService";
 import { freezeService } from "../services/freezeService";
 import {
@@ -378,34 +383,44 @@ adminRouter.post(
 /**
  * Get audit logs
  * GET /api/admin/audit-logs
+ *
+ * Filters (all optional, combined with AND): `wallet`, `action` (one, a
+ * comma-separated list, or repeated), `startDate` / `endDate` (a calendar date
+ * or an ISO 8601 date-time with a zone), `userId`, `resource`.
+ * Invalid filters answer 400 with a stable error code instead of an empty page.
  */
 adminRouter.get(
   "/audit-logs",
   requireAdmin,
   async (req: Request, res: Response): Promise<void> => {
     try {
-      const { userId, action, resource, startDate, endDate, limit, cursor } =
-        req.query;
+      const parsed = parseAuditLogFilterQuery(req.query);
+      if (!parsed.ok) {
+        sendError(res, 400, parsed.error.code, parsed.error.message, {
+          field: parsed.error.field,
+        });
+        return;
+      }
 
+      const { limit, cursor } = req.query;
       const effectiveLimit = parsePaginationLimit(limit);
 
       const logs = await getAuditLogs({
-        userId: userId as string,
-        action: action as string,
-        resource: resource as string,
-        startDate: startDate as string,
-        endDate: endDate as string,
+        ...parsed.filters,
         limit: effectiveLimit + 1,
-        cursor: cursor as string | undefined,
+        cursor: typeof cursor === "string" ? cursor : undefined,
       });
 
       const hasMore = logs.length > effectiveLimit;
       const page = hasMore ? logs.slice(0, effectiveLimit) : logs;
       const nextCursor = hasMore ? page[page.length - 1].id : null;
 
-      const response: PaginatedResponse<(typeof page)[0]> = {
+      const response: PaginatedResponse<(typeof page)[0]> & {
+        filters: typeof parsed.filters;
+      } = {
         data: page,
         pagination: { nextCursor, hasMore, limit: effectiveLimit },
+        filters: parsed.filters,
       };
 
       res.json(response);
@@ -455,15 +470,27 @@ adminRouter.get(
   requireAdmin,
   async (req: Request, res: Response): Promise<void> => {
     try {
-      const { userId, action, resource, startDate, endDate } = req.query;
+      const parsed = parseAuditLogFilterQuery(req.query);
+      if (!parsed.ok) {
+        sendError(res, 400, parsed.error.code, parsed.error.message, {
+          field: parsed.error.field,
+        });
+        return;
+      }
 
-      const csv = await exportAuditLogsToCSV({
-        userId: userId as string,
-        action: action as string,
-        resource: resource as string,
-        startDate: startDate as string,
-        endDate: endDate as string,
+      // The default page size is 100, which would silently drop rows from an
+      // export. Ask for one row past the cap so truncation can be reported.
+      const entries = await getAuditLogs({
+        ...parsed.filters,
+        limit: AUDIT_EXPORT_MAX_ROWS + 1,
       });
+      const truncated = entries.length > AUDIT_EXPORT_MAX_ROWS;
+      const csv = auditEntriesToCsv(
+        truncated ? entries.slice(0, AUDIT_EXPORT_MAX_ROWS) : entries,
+      );
+      if (truncated) {
+        res.setHeader("X-Audit-Export-Truncated", "true");
+      }
 
       res.setHeader("Content-Type", "text/csv");
       res.setHeader(

@@ -120,6 +120,22 @@ export async function getUserShares(userAddress: string): Promise<bigint> {
   return vaultClient.getShares(userAddress);
 }
 
+/**
+ * Vault totals in base units, the same units as `getUserShares`. Together they
+ * give the share price used by the redemption preview (#1404).
+ */
+export async function getVaultTotals(): Promise<{
+  totalAssets: bigint;
+  totalShares: bigint;
+}> {
+  const vaultClient = getVaultClient();
+  const [totalAssets, totalShares] = await Promise.all([
+    vaultClient.totalAssets(),
+    vaultClient.totalShares(),
+  ]);
+  return { totalAssets, totalShares };
+}
+
 /** Best-effort share balance; returns null when unavailable so diff building can degrade gracefully. */
 async function getSharesQuietly(userAddress: string): Promise<number | null> {
   try {

@@ -2,6 +2,7 @@ import { Request, Response, NextFunction } from "express";
 import crypto from "crypto";
 import fs from "fs/promises";
 import path from "path";
+import { auditEntryInvolvesWallet } from "../utils/auditFilters";
 
 /**
  * Best-effort Prisma client for durable audit persistence (#1329). Loaded
@@ -343,7 +344,16 @@ export function verifyAuditEntry(entry: AuditLogEntry): boolean {
  */
 export async function getAuditLogs(filters?: {
   userId?: string;
+  /**
+   * Stellar public key (#1406). Matches entries where the wallet is the
+   * acting identity, the targeted resource, or a wallet recorded in the
+   * entry's `changes`. Case-insensitive.
+   */
+  wallet?: string;
+  /** A single action name. Case-insensitive. */
   action?: string;
+  /** Any of these action names (#1406). Case-insensitive; combined with `action`. */
+  actions?: string[];
   resource?: string;
   startDate?: string;
   endDate?: string;
@@ -356,8 +366,20 @@ export async function getAuditLogs(filters?: {
     results = results.filter((entry) => entry.userId === filters.userId);
   }
 
-  if (filters?.action) {
-    results = results.filter((entry) => entry.action === filters.action);
+  if (filters?.wallet) {
+    const wallet = filters.wallet;
+    results = results.filter((entry) => auditEntryInvolvesWallet(entry, wallet));
+  }
+
+  const wantedActions = new Set(
+    [...(filters?.actions ?? []), ...(filters?.action ? [filters.action] : [])].map(
+      (action) => action.toUpperCase(),
+    ),
+  );
+  if (wantedActions.size > 0) {
+    results = results.filter((entry) =>
+      wantedActions.has(entry.action.toUpperCase()),
+    );
   }
 
   if (filters?.resource) {
@@ -537,8 +559,11 @@ export function setAuditContext(req: Request, context: AuditContext): void {
 export async function exportAuditLogsToCSV(
   filters?: Parameters<typeof getAuditLogs>[0],
 ): Promise<string> {
-  const entries = await getAuditLogs(filters);
+  return auditEntriesToCsv(await getAuditLogs(filters));
+}
 
+/** Render already-selected audit entries as CSV (header row + one row each). */
+export function auditEntriesToCsv(entries: AuditLogEntry[]): string {
   const headers = [
     "ID",
     "Timestamp",

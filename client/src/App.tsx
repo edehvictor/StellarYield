@@ -51,6 +51,7 @@ const DeltaNeutralUnwind = lazy(
 const StrategyLeaderboard = lazy(
   () => import("./pages/leaderboard/StrategyLeaderboard"),
 );
+const AuditLogPanel = lazy(() => import("./pages/admin/AuditLogPanel"));
 const FeatureFlagDiagnosticsPanel = lazy(
   () => import("./pages/admin/FeatureFlagDiagnosticsPanel"),
 );
@@ -561,6 +562,14 @@ const router = createBrowserRouter([
             <RequireOnboarding require="wallet">
               <TreasurySimulation />
             </RequireOnboarding>
+          </RouteBoundary>
+        ),
+      },
+      {
+        path: "/admin/audit-logs",
+        element: (
+          <RouteBoundary routeName="audit-logs">
+            <AuditLogPanel />
           </RouteBoundary>
         ),
       },

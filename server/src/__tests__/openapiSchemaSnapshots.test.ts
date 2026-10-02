@@ -48,7 +48,7 @@ describe("OpenAPI schema snapshots", () => {
 
     it("every documented path declares at least one 2xx response", () => {
         const pathBlocks = pathsSection
-            .split(/\n(?={2}\/)/) // top-level path entries are indented by 2 spaces
+            .split(/\n(?= {2}\/)/) // top-level path entries are indented by 2 spaces
             .filter((block) => block.trim().length > 0);
 
         expect(pathBlocks.length).toBeGreaterThan(0);

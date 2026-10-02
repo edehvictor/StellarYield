@@ -89,8 +89,36 @@ Keep fixtures deterministic — do not use random values. Same input must always
 |-------|------|-------|
 | `label` | string | Display name |
 | `targetWeight` | number | 0–100; all allocations must sum to ~100 |
-| `apy` | number | Fallback annual % when `dailyApy` is absent |
-| `dailyApy` | number[] | Optional per-day annual % series (length = backtest days) |
+| `apy` | number | Fallback annual % when `dailyApy` is absent. May be negative, down to `-100` |
+| `dailyApy` | number[] | Optional per-day annual % series (length = backtest days). Entries may be negative, down to `-36500` |
+
+## Negative yield periods
+
+Yields can be negative: a depeg, a slashing event, an impermanent-loss drawdown, or a strategy that costs more than it earns. The rebalance preview and the backtest both accept them and apply them as losses to principal.
+
+| Input | Accepted range | Why |
+|-------|----------------|-----|
+| `apy` (standing assumption) | `-100` to `10000` (preview) / `-100` and up (backtest) | `-100` is a total loss over a year. A lower rate is not a meaningful long-run assumption. |
+| `dailyApy[i]` | `-36500` and up | Each day compounds by `1 + apy / 100 / 365`; at `-36500` that factor reaches zero, so the allocation loses all of its value in one day. Below it the value would go negative. |
+
+To model a sharp, short loss (for example a 20% depeg in a day), use a `dailyApy` series: `-7300` is a 20% fall in one day. The fields must be finite numbers; `NaN`, `Infinity`, strings and non-array `dailyApy` values are rejected with a `400` and a message naming the offending entry.
+
+A value that reaches zero stays at zero: the engine never lets a position go below nothing, skips rebalancing when there is nothing left to rebalance, and never produces `NaN` weights. A threshold rebalance after a loss re-funds the depleted allocation from the others (less the turnover fee).
+
+The backtest result adds three fields, all additive to the existing response:
+
+| Field | Meaning |
+|-------|---------|
+| `negativeYieldDays` | Days on which the rebalanced portfolio's blended yield was negative |
+| `maxDrawdownPct` | Largest peak-to-trough fall of the rebalanced portfolio, as a positive % (`0` when it never falls) |
+| `passiveMaxDrawdownPct` | The same for the passive benchmark |
+
+Two structured warnings describe a loss (see `shared/types/simulationWarning.ts`):
+
+- `NEGATIVE_YIELD_PERIOD` — one per allocation that earns a negative yield during the window, with the number of negative days and the worst rate. The preview emits it for a negative-yield leg that keeps a target weight. `affectedField` points at `apy` or `dailyApy`.
+- `CAPITAL_LOSS` — the rebalanced portfolio ends below its starting value.
+
+The vault contract charges its performance fee only on positive yield (`apply_performance_fee` returns `(0, 0)` for zero or negative yield), so the simulator charges no performance fee on loss days; it models only the turnover fee on rebalances.
 
 ## Related docs
 

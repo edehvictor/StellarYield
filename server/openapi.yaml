@@ -70,9 +70,9 @@ tags:
   - name: Incidents
     description: Protocol incident tracking and resolution
   - name: Onramp
-    description: Fiat onramp provider webhook integration
+    description: Fiat onramp transaction intents (quote, intent, status, cancel) and the provider webhook
   - name: Offramp
-    description: Fiat offramp withdrawals proxied to the provider
+    description: Fiat offramp withdrawals, proxied to the provider so its API key never reaches the browser
   - name: Deposits
     description: Multi-asset deposit routing recommendations
   - name: Drift
@@ -3581,6 +3581,290 @@ paths:
           description: Failed to fetch recommendations
 
   # ── Onramp ───────────────────────────────────────────────────────────────
+  #
+  # A fiat purchase is a three-step transaction intent:
+  #   1. POST /api/onramp/quote    → a 30-second quote
+  #   2. POST /api/onramp/intent   → confirm the quote; creates a PENDING transaction
+  #   3. GET  /api/onramp/status/{txId} → poll until COMPLETED or FAILED
+  # POST /api/onramp/cancel abandons a PENDING transaction, and the provider
+  # reports the outcome through POST /api/onramp/webhook.
+
+  /api/onramp/quote:
+    post:
+      summary: Create a fiat-to-USDC quote
+      description: |
+        Step 1 of the onramp transaction intent. Returns a short-lived quote that
+        converts `amountFiat` to USDC. The quote expires after 30 seconds, so
+        confirm it with `POST /api/onramp/intent` before `expiresAt`
+        (epoch milliseconds). The rate is currently a fixed 0.98 USDC per unit of
+        fiat, rounded to two decimals. `currency` is case-insensitive and is
+        returned upper-cased.
+      tags:
+        - Onramp
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OnRampQuoteRequest'
+            examples:
+              usd:
+                summary: Quote 100 USD with the default provider
+                value:
+                  amountFiat: 100
+                  currency: USD
+              eurViaMoonPay:
+                summary: Lower-case currency code and an explicit provider
+                value:
+                  amountFiat: 250.5
+                  currency: eur
+                  provider: MOONPAY
+      responses:
+        '200':
+          description: Quote created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OnRampQuote'
+              examples:
+                usd:
+                  summary: 100 USD quoted as 98 USDC
+                  value:
+                    quoteId: quote_k3j9x2m1a
+                    provider: STRIPE
+                    amountFiat: 100
+                    currency: USD
+                    amountUsdc: 98
+                    expiresAt: 1740819660000
+        '400':
+          description: Invalid amount or currency
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OnRampErrorResponse'
+              examples:
+                invalidAmount:
+                  summary: amountFiat is missing, not a number, or not positive
+                  value:
+                    error: Invalid amountFiat. Must be a positive number.
+                invalidCurrency:
+                  summary: currency is not a 3-letter code
+                  value:
+                    error: Invalid currency. Must be a 3-letter currency code.
+
+  /api/onramp/intent:
+    post:
+      summary: Confirm a quote and create a pending onramp transaction
+      description: |
+        Step 2 of the onramp transaction intent. Confirms a quote from
+        `POST /api/onramp/quote` for a wallet and records a `PENDING` transaction
+        with a new provider transaction id (`transaction.providerTxId`, the `txId`
+        used by the status and cancel endpoints). The quote must exist and must
+        not be older than 30 seconds.
+      tags:
+        - Onramp
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OnRampIntentRequest'
+            examples:
+              confirm:
+                summary: Confirm a quote for a wallet
+                value:
+                  quoteId: quote_k3j9x2m1a
+                  walletAddress: GBRPYHIL2CI3FNQ4BXLFMNDLFJUNPU2HY3ZMFSHONUCEOASW7QC7OX2H
+      responses:
+        '200':
+          description: Pending transaction created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OnRampTransactionResponse'
+              examples:
+                pending:
+                  summary: The new PENDING transaction
+                  value:
+                    success: true
+                    transaction:
+                      id: 5b8f0a3e-2c1d-4e7a-9d55-0c6f1a2b3c4d
+                      walletAddress: GBRPYHIL2CI3FNQ4BXLFMNDLFJUNPU2HY3ZMFSHONUCEOASW7QC7OX2H
+                      provider: STRIPE
+                      status: PENDING
+                      amountFiat: 100
+                      currency: USD
+                      amountUsdc: 98
+                      providerTxId: tx_p7q2w9e4r
+                      createdAt: '2025-03-01T09:00:00.000Z'
+                      updatedAt: '2025-03-01T09:00:00.000Z'
+        '400':
+          description: A field is missing, or the quote has expired
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OnRampErrorResponse'
+              examples:
+                missingQuoteId:
+                  summary: quoteId was not sent
+                  value:
+                    error: Missing quoteId.
+                missingWallet:
+                  summary: walletAddress was not sent
+                  value:
+                    error: Missing walletAddress.
+                expiredQuote:
+                  summary: The quote is older than 30 seconds; request a new one
+                  value:
+                    error: Quote has expired.
+        '404':
+          description: No quote with that id
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OnRampErrorResponse'
+              examples:
+                unknownQuote:
+                  summary: Unknown or already-evicted quote
+                  value:
+                    error: Quote not found.
+
+  /api/onramp/status/{txId}:
+    get:
+      summary: Get an onramp transaction's status
+      description: |
+        Step 3 of the onramp transaction intent. Poll this endpoint after
+        `POST /api/onramp/intent` until `status` is `COMPLETED` or `FAILED`.
+        `txId` is the `providerTxId` returned by the intent.
+      tags:
+        - Onramp
+      parameters:
+        - name: txId
+          in: path
+          required: true
+          description: Provider transaction id (`providerTxId`)
+          schema:
+            type: string
+          example: tx_p7q2w9e4r
+      responses:
+        '200':
+          description: Current status and the full transaction
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OnRampStatusResponse'
+              examples:
+                pending:
+                  summary: Still waiting on the provider
+                  value:
+                    status: PENDING
+                    transaction:
+                      id: 5b8f0a3e-2c1d-4e7a-9d55-0c6f1a2b3c4d
+                      walletAddress: GBRPYHIL2CI3FNQ4BXLFMNDLFJUNPU2HY3ZMFSHONUCEOASW7QC7OX2H
+                      provider: STRIPE
+                      status: PENDING
+                      amountFiat: 100
+                      currency: USD
+                      amountUsdc: 98
+                      providerTxId: tx_p7q2w9e4r
+                      createdAt: '2025-03-01T09:00:00.000Z'
+                      updatedAt: '2025-03-01T09:00:00.000Z'
+                completed:
+                  summary: The purchase settled
+                  value:
+                    status: COMPLETED
+                    transaction:
+                      id: 5b8f0a3e-2c1d-4e7a-9d55-0c6f1a2b3c4d
+                      walletAddress: GBRPYHIL2CI3FNQ4BXLFMNDLFJUNPU2HY3ZMFSHONUCEOASW7QC7OX2H
+                      provider: STRIPE
+                      status: COMPLETED
+                      amountFiat: 100
+                      currency: USD
+                      amountUsdc: 98
+                      providerTxId: tx_p7q2w9e4r
+                      createdAt: '2025-03-01T09:00:00.000Z'
+                      updatedAt: '2025-03-01T09:02:31.000Z'
+        '404':
+          description: No transaction with that id
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OnRampErrorResponse'
+              examples:
+                unknown:
+                  summary: Unknown transaction
+                  value:
+                    error: Transaction not found.
+
+  /api/onramp/cancel:
+    post:
+      summary: Cancel a pending onramp transaction
+      description: |
+        Abandons a transaction that is still `PENDING`. The transaction moves to
+        the terminal `FAILED` state. A transaction that has already completed or
+        failed cannot be cancelled.
+      tags:
+        - Onramp
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OnRampCancelRequest'
+            examples:
+              cancel:
+                summary: Cancel by provider transaction id
+                value:
+                  txId: tx_p7q2w9e4r
+      responses:
+        '200':
+          description: Transaction cancelled
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OnRampTransactionResponse'
+              examples:
+                cancelled:
+                  summary: The transaction, now FAILED
+                  value:
+                    success: true
+                    transaction:
+                      id: 5b8f0a3e-2c1d-4e7a-9d55-0c6f1a2b3c4d
+                      walletAddress: GBRPYHIL2CI3FNQ4BXLFMNDLFJUNPU2HY3ZMFSHONUCEOASW7QC7OX2H
+                      provider: STRIPE
+                      status: FAILED
+                      amountFiat: 100
+                      currency: USD
+                      amountUsdc: 98
+                      providerTxId: tx_p7q2w9e4r
+                      createdAt: '2025-03-01T09:00:00.000Z'
+                      updatedAt: '2025-03-01T09:00:40.000Z'
+        '400':
+          description: txId missing, or the transaction is no longer pending
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OnRampErrorResponse'
+              examples:
+                missingTxId:
+                  summary: txId was not sent
+                  value:
+                    error: Missing txId.
+                notPending:
+                  summary: The transaction already completed
+                  value:
+                    error: Cannot cancel transaction in COMPLETED state.
+        '404':
+          description: No transaction with that id
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OnRampErrorResponse'
+              examples:
+                unknown:
+                  summary: Unknown transaction
+                  value:
+                    error: Transaction not found.
 
   /api/onramp/intent:
     post:
@@ -3715,6 +3999,17 @@ paths:
                   type: string
                 amountUsdc:
                   type: number
+            examples:
+              completed:
+                summary: The provider reports a settled purchase
+                value:
+                  provider: STRIPE
+                  txId: tx_p7q2w9e4r
+                  status: COMPLETED
+                  walletAddress: GBRPYHIL2CI3FNQ4BXLFMNDLFJUNPU2HY3ZMFSHONUCEOASW7QC7OX2H
+                  amountFiat: 100
+                  currency: USD
+                  amountUsdc: 98
       responses:
         '200':
           description: Webhook processed
@@ -3727,8 +4022,157 @@ paths:
                     type: boolean
                   transaction:
                     type: object
+              examples:
+                completed:
+                  summary: The transaction is upserted and a DEPOSIT notification is created
+                  value:
+                    success: true
+                    transaction:
+                      id: 5b8f0a3e-2c1d-4e7a-9d55-0c6f1a2b3c4d
+                      walletAddress: GBRPYHIL2CI3FNQ4BXLFMNDLFJUNPU2HY3ZMFSHONUCEOASW7QC7OX2H
+                      provider: STRIPE
+                      status: COMPLETED
+                      amountFiat: 100
+                      currency: USD
+                      amountUsdc: 98
+                      providerTxId: tx_p7q2w9e4r
+                      createdAt: '2025-03-01T09:00:00.000Z'
+                      updatedAt: '2025-03-01T09:02:31.000Z'
         '500':
           description: Failed to process webhook
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OnRampErrorResponse'
+              examples:
+                failed:
+                  summary: The upsert or notification failed
+                  value:
+                    error: Failed to process webhook.
+
+  # ── Offramp ──────────────────────────────────────────────────────────────
+
+  /api/offramp/withdrawals:
+    post:
+      summary: Create an offramp withdrawal
+      description: |
+        Creates a fiat withdrawal intent with the offramp provider. The server
+        proxies the call so the provider's API key never reaches the browser. The
+        request body is forwarded unchanged, and the provider's HTTP status and
+        JSON body are returned unchanged, so the exact fields are defined by the
+        provider. The typed errors below are produced by StellarYield itself.
+      tags:
+        - Offramp
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+              description: Provider-defined withdrawal request, forwarded as-is
+            examples:
+              withdrawal:
+                summary: Illustrative request (the fields are defined by the provider)
+                value:
+                  baseCurrencyCode: usdc
+                  baseCurrencyAmount: 100
+                  quoteCurrencyCode: usd
+                  walletAddress: GBRPYHIL2CI3FNQ4BXLFMNDLFJUNPU2HY3ZMFSHONUCEOASW7QC7OX2H
+      responses:
+        '200':
+          description: The provider accepted the withdrawal; its response is returned unchanged
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+              examples:
+                accepted:
+                  summary: Illustrative provider response
+                  value:
+                    id: wd_8f3a2c1e
+                    status: pending
+        '502':
+          description: The provider could not be reached
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                proxyError:
+                  summary: Network failure talking to the provider
+                  value:
+                    error: OFFRAMP_PROXY_ERROR
+                    message: Failed to reach offramp provider.
+        '503':
+          description: The offramp service is not configured on this server
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                unavailable:
+                  summary: OFFRAMP_API_KEY is not set
+                  value:
+                    error: OFFRAMP_UNAVAILABLE
+                    message: Offramp service not configured.
+
+  /api/offramp/transactions/{txId}:
+    get:
+      summary: Get an offramp transaction's status
+      description: |
+        Proxies the provider's transaction lookup. The provider's HTTP status and
+        JSON body are returned unchanged. `txId` is the id the provider returned
+        when the withdrawal was created.
+      tags:
+        - Offramp
+      parameters:
+        - name: txId
+          in: path
+          required: true
+          description: Provider transaction id
+          schema:
+            type: string
+          example: wd_8f3a2c1e
+      responses:
+        '200':
+          description: The provider's transaction record, returned unchanged
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+              examples:
+                completed:
+                  summary: Illustrative provider response
+                  value:
+                    id: wd_8f3a2c1e
+                    status: completed
+        '502':
+          description: The provider could not be reached
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                proxyError:
+                  summary: Network failure talking to the provider
+                  value:
+                    error: OFFRAMP_PROXY_ERROR
+                    message: Failed to reach offramp provider.
+        '503':
+          description: The offramp service is not configured on this server
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                unavailable:
+                  summary: OFFRAMP_API_KEY is not set
+                  value:
+                    error: OFFRAMP_UNAVAILABLE
+                    message: Offramp service not configured.
 
   # ── Deposits ─────────────────────────────────────────────────────────────
 

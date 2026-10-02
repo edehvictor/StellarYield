@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertTriangle,
   ArrowUpFromLine,
@@ -9,7 +9,7 @@ import {
 import TxStatusTimeline from "../../components/transaction/TxStatusTimeline";
 import TransactionFailedModal from "../../components/transaction/TransactionFailedModal";
 import { decodeTransactionError } from "../../utils/errorDecoder";
-import { withdraw, getUserShares } from "../../services/soroban";
+import { withdraw, getUserShares, getVaultTotals } from "../../services/soroban";
 import {
   TX_PHASE_PIPELINE,
   type TxPhase,
@@ -25,6 +25,13 @@ import {
 } from "./withdrawQuoteFreshness";
 import { useProtectedWalletAction } from "../../hooks/useProtectedWalletAction";
 import SessionExpiredRecovery from "../../components/wallet/SessionExpiredRecovery";
+import RedemptionPreviewPanel from "./RedemptionPreviewPanel";
+import {
+  PARTIAL_WITHDRAWAL_PRESETS,
+  buildRedemptionView,
+  sharesForPreset,
+  type VaultState,
+} from "./redemptionPreview";
 
 export interface WithdrawPanelProps {
   walletAddress: string | null;
@@ -259,6 +266,10 @@ export default function WithdrawPanel({ walletAddress }: WithdrawPanelProps) {
 
   const [shareBalance, setShareBalance] = useState<bigint | null>(null);
   const [balanceError, setBalanceError] = useState<string | null>(null);
+  // Vault totals back the share redemption preview (#1404).
+  const [vaultTotals, setVaultTotals] = useState<VaultState | null>(null);
+  const [totalsError, setTotalsError] = useState<string | null>(null);
+  const [totalsLoading, setTotalsLoading] = useState(false);
   const [amount, setAmount] = useState("");
   const [txPhase, setTxPhase] = useState<TxPhase>("idle");
   const [lastProgressPhase, setLastProgressPhase] = useState<TxPhase>("idle");
@@ -317,6 +328,19 @@ export default function WithdrawPanel({ walletAddress }: WithdrawPanelProps) {
       setBalanceError(
         err instanceof Error ? err.message : "Could not load share balance",
       );
+    }
+
+    // Best effort: the redemption preview is informational, so a failure to
+    // read the totals must not block the withdrawal itself.
+    setTotalsLoading(true);
+    try {
+      setVaultTotals(await getVaultTotals());
+      setTotalsError(null);
+    } catch {
+      setVaultTotals(null);
+      setTotalsError("could not read the vault's share price.");
+    } finally {
+      setTotalsLoading(false);
     }
   }, [walletAddress]);
 
@@ -529,6 +553,31 @@ export default function WithdrawPanel({ walletAddress }: WithdrawPanelProps) {
     setAmount(formatStroopsToDecimal(shareBalance, vaultToken.decimals));
   }, [shareBalance, vaultToken.decimals]);
 
+  const applyPreset = useCallback(
+    (percent: number) => {
+      if (shareBalance === null) return;
+      setAmount(
+        formatStroopsToDecimal(sharesForPreset(shareBalance, percent), vaultToken.decimals),
+      );
+      setError("");
+    },
+    [shareBalance, vaultToken.decimals],
+  );
+
+  // Share redemption preview (#1404): pure math over the on-chain totals, so it
+  // updates instantly as the amount changes.
+  const redemptionView = useMemo(() => {
+    if (!vaultTotals || shareBalance === null || !amount.trim()) return null;
+    let shares: bigint;
+    try {
+      shares = parseDecimalToStroops(amount, vaultToken.decimals);
+    } catch {
+      return null;
+    }
+    if (shares <= 0n) return null;
+    return buildRedemptionView({ totals: vaultTotals, userShares: shareBalance, shares });
+  }, [vaultTotals, shareBalance, amount, vaultToken.decimals]);
+
   // Preview is required before submission; it blocks when an API error occurred.
   const previewMissing = Boolean(amount && previewError && !preview);
   const staleBlocked = Boolean(preview && !previewLoading && isStaleQuote);
@@ -614,6 +663,36 @@ export default function WithdrawPanel({ walletAddress }: WithdrawPanelProps) {
           className="w-full bg-transparent text-white text-2xl outline-none"
         />
       </div>
+
+      {/* ── Partial withdrawal presets and share redemption preview (#1404) ── */}
+      <div
+        role="group"
+        aria-label="Withdraw a portion of your position"
+        className="flex gap-2 mb-4"
+      >
+        {PARTIAL_WITHDRAWAL_PRESETS.map((percent) => (
+          <button
+            key={percent}
+            type="button"
+            onClick={() => applyPreset(percent)}
+            disabled={shareBalance === null || shareBalance === 0n}
+            className="flex-1 rounded-lg border border-white/10 py-1.5 text-xs text-indigo-200 hover:bg-white/5 disabled:opacity-50"
+          >
+            {percent === 100 ? "100%" : `${percent}%`}
+          </button>
+        ))}
+      </div>
+      {(amount.trim() !== "" || totalsLoading) && (
+        <div className="mb-4">
+          <RedemptionPreviewPanel
+            view={redemptionView}
+            loading={totalsLoading && vaultTotals === null}
+            totalsError={amount.trim() !== "" ? totalsError : null}
+            decimals={vaultToken.decimals}
+            symbol={vaultToken.symbol}
+          />
+        </div>
+      )}
 
       {/* ── Withdrawal preview ── */}
       <div className="mb-4">

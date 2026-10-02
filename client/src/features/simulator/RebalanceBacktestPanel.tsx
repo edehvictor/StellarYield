@@ -8,15 +8,18 @@ import {
   type RebalanceBacktestResult,
   type SimulationWarning,
 } from "./rebalanceBacktestService";
+import { MIN_ANNUAL_APY_PCT, parseApyInput, parseApyRows } from "./rebalanceBacktestInputs";
 
-interface AllocationRow extends RebalanceAllocationRule {
+interface AllocationRow extends Omit<RebalanceAllocationRule, "apy"> {
   id: number;
+  /** Raw text of the APY field, so a lone "-" can be typed on the way to "-5". */
+  apyText: string;
 }
 
 let nextId = 1;
 
 function mkRow(label = "", targetWeight = 0, apy = 0): AllocationRow {
-  return { id: nextId++, label, targetWeight, apy };
+  return { id: nextId++, label, targetWeight, apyText: apy === 0 ? "" : String(apy) };
 }
 
 const DEFAULT_ROWS: AllocationRow[] = [
@@ -84,7 +87,7 @@ export default function RebalanceBacktestPanel() {
   const [error, setError] = useState("");
 
   const updateRow = useCallback(
-    (id: number, field: keyof RebalanceAllocationRule, value: string | number) => {
+    (id: number, field: "label" | "targetWeight" | "apyText", value: string | number) => {
       setRows((prev) =>
         prev.map((r) => (r.id === id ? { ...r, [field]: value } : r)),
       );
@@ -123,12 +126,21 @@ export default function RebalanceBacktestPanel() {
       setError("All allocation rows need a label");
       return;
     }
+    const apys = parseApyRows(rows);
+    if (!apys.ok) {
+      setError(apys.error);
+      return;
+    }
 
     const params: RebalanceBacktestParams = {
       initialValueUsd: parseFloat(initialValue) || 100_000,
       startDate,
       endDate,
-      allocations: rows.map(({ label, targetWeight, apy }) => ({ label, targetWeight, apy })),
+      allocations: rows.map(({ label, targetWeight }, i) => ({
+        label,
+        targetWeight,
+        apy: apys.values[i],
+      })),
       strategy,
       ...(strategy === "schedule"
         ? { rebalanceIntervalDays: parseInt(intervalDays, 10) || 30 }
@@ -285,13 +297,19 @@ export default function RebalanceBacktestPanel() {
                   onChange={(e) => updateRow(row.id, "targetWeight", parseFloat(e.target.value) || 0)}
                 />
                 <input
-                  type="number"
-                  className="col-span-3 bg-black/50 border border-gray-700 rounded px-2 py-1.5 text-sm text-white text-right"
+                  type="text"
+                  inputMode="decimal"
+                  aria-label={`APY for ${row.label || "allocation"} (%)`}
+                  title={`Annualised %, negative allowed down to ${MIN_ANNUAL_APY_PCT}`}
+                  className={`col-span-3 bg-black/50 border rounded px-2 py-1.5 text-sm text-right ${
+                    parseApyInput(row.apyText).ok
+                      ? "border-gray-700 text-white"
+                      : "border-red-500/60 text-red-300"
+                  }`}
                   placeholder="8"
-                  value={row.apy || ""}
-                  min={0}
-                  step={0.01}
-                  onChange={(e) => updateRow(row.id, "apy", parseFloat(e.target.value) || 0)}
+                  value={row.apyText}
+                  aria-invalid={parseApyInput(row.apyText).ok ? undefined : true}
+                  onChange={(e) => updateRow(row.id, "apyText", e.target.value)}
                 />
                 <button
                   type="button"
@@ -379,6 +397,28 @@ export default function RebalanceBacktestPanel() {
               </p>
             </div>
           </div>
+
+          {/* Loss summary (#1407) */}
+          {result.maxDrawdownPct !== undefined && (
+            <p data-testid="loss-summary" className="text-sm text-gray-400">
+              Max drawdown{" "}
+              <span className={result.maxDrawdownPct > 0 ? "text-red-400 font-semibold" : "text-gray-300"}>
+                {fmt2(result.maxDrawdownPct)}%
+              </span>
+              {result.passiveMaxDrawdownPct !== undefined && (
+                <> (passive {fmt2(result.passiveMaxDrawdownPct)}%)</>
+              )}
+              {result.negativeYieldDays !== undefined && (
+                <>
+                  {" "}
+                  · Negative-yield days{" "}
+                  <span className="text-gray-200">
+                    {result.negativeYieldDays} of {result.snapshots.length}
+                  </span>
+                </>
+              )}
+            </p>
+          )}
 
           {/* Simulation note */}
           <div className="text-xs text-gray-500 text-right">
