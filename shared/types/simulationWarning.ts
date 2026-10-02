@@ -18,6 +18,7 @@
 export type SimulationWarningCode =
   // Data quality
   | "STALE_DATA"               // Market / price data is older than the freshness threshold.
+  | "SNAPSHOT_MISSING"         // No market snapshot timestamp/age was supplied; treated as stale.
   | "INCOMPLETE_HISTORY"       // Historical data is too sparse to produce a reliable backtest.
   | "UNSUPPORTED_INTERVAL"     // Requested date range or rebalance interval is not supported.
   // Market conditions
@@ -31,7 +32,15 @@ export type SimulationWarningCode =
   | "INSUFFICIENT_LIQUIDITY"   // Not enough liquidity to route the full deposit.
   | "UNSUPPORTED_STRATEGY"     // Strategy/asset combination is not recognised.
   | "ZERO_AMOUNT"              // Deposit amount is zero or negative.
-  | "AMOUNT_TOO_LARGE";        // Deposit amount exceeds the simulation ceiling.
+  | "AMOUNT_TOO_LARGE"         // Deposit amount exceeds the simulation ceiling.
+  // Treasury / cashflow
+  | "NEGATIVE_CASHFLOW"        // Modeled cashflow turns negative in one or more periods.
+  | "RESERVE_BREACH"           // Reserve balance falls below the configured safety threshold.
+  | "NEGATIVE_NET_YIELD"       // Net yield (after costs) is negative.
+  | "SEVERE_YIELD_REDUCTION"   // Yield reduced by more than 50% under stress.
+  // Negative yield periods
+  | "NEGATIVE_YIELD_PERIOD"    // An allocation earns a negative yield (a loss) in the simulated period.
+  | "CAPITAL_LOSS";            // The simulated portfolio ends below its starting value.
 
 /** Visual severity tier — maps to UI colour tokens. */
 export type SimulationWarningSeverity = "info" | "warning" | "critical";

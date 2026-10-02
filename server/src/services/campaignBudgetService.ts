@@ -17,7 +17,16 @@ export interface CampaignClaim {
 export interface RewardCampaignBudget {
   campaignId: string;
   totalBudget: number;
+  /** Funds currently reserved and available to satisfy outstanding claims. */
+  fundedReserve?: number;
   claims: CampaignClaim[];
+}
+
+export interface CampaignFundingReserveValidation {
+  requiredReserve: number;
+  availableReserve: number;
+  shortfall: number;
+  funded: boolean;
 }
 
 export interface CampaignBudgetWarning {
@@ -31,6 +40,27 @@ export interface CampaignBudgetWarning {
    */
   estimatedDaysRemaining: number | null;
   message: string;
+  fundingReserve?: CampaignFundingReserveValidation;
+}
+
+/** Check that escrowed campaign funds cover the unclaimed budget. */
+export function validateCampaignFundingReserve(
+  requiredReserve: number,
+  availableReserve: number,
+): CampaignFundingReserveValidation {
+  if (!Number.isFinite(requiredReserve) || requiredReserve < 0) {
+    throw new RangeError("requiredReserve must be a non-negative finite number.");
+  }
+  if (!Number.isFinite(availableReserve) || availableReserve < 0) {
+    throw new RangeError("availableReserve must be a non-negative finite number.");
+  }
+  const shortfall = Math.max(0, Math.round((requiredReserve - availableReserve) * 100) / 100);
+  return {
+    requiredReserve,
+    availableReserve,
+    shortfall,
+    funded: shortfall === 0,
+  };
 }
 
 /** Remaining budget at or below this fraction of total is flagged "low". */
@@ -97,5 +127,19 @@ export function evaluateCampaignBudget(
     message = `Campaign "${campaign.campaignId}" budget is healthy.`;
   }
 
-  return { status, remainingBudget, claimedToDate, estimatedDaysRemaining, message };
+  return {
+    status,
+    remainingBudget,
+    claimedToDate,
+    estimatedDaysRemaining,
+    message,
+    ...(campaign.fundedReserve === undefined
+      ? {}
+      : {
+          fundingReserve: validateCampaignFundingReserve(
+            remainingBudget,
+            campaign.fundedReserve,
+          ),
+        }),
+  };
 }

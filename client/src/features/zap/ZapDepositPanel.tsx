@@ -1,18 +1,21 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ArrowDown, Zap, Loader2, AlertTriangle, RefreshCw, Clock, Info, Ban } from "lucide-react";
+import { ArrowDown, Zap, Loader2, AlertTriangle, RefreshCw, Clock, Info, Ban, ExternalLink, LifeBuoy, CheckCircle2, History } from "lucide-react";
 import TxStatusTimeline from "../../components/transaction/TxStatusTimeline";
 import TransactionFailedModal from "../../components/transaction/TransactionFailedModal";
-import { decodeTransactionError } from "../../utils/errorDecoder";
+import { decodeTransactionError, ZAP_QUOTE_EXPIRED_ERROR_CODE } from "../../utils/errorDecoder";
 import { zapDeposit } from "../../services/soroban";
+import type { DecodedContractPanic } from "../../../../shared/types/contractPanic";
 import type { TxPhase } from "../../services/transactionPhase";
 import { TX_PHASE_PIPELINE } from "../../services/transactionPhase";
-import { fetchSwapQuote, isQuoteCancellation, verifySwapQuote } from "./fetchSwapQuote";
+import { fetchSwapQuote, isQuoteCancellation, verifySwapQuote, ZapQuoteError } from "./fetchSwapQuote";
 import { minAmountAfterSlippage } from "./slippage";
 import {
   buildZapQuoteRequestKey,
-  isZapQuoteExpired,
+  evaluateZapQuoteInvalidation,
   quoteAgeSeconds,
   recalculateMinOut,
+  ZAP_QUOTE_EXPIRED_MESSAGE,
+  zapQuoteDeadlineSeconds,
 } from "./quoteFreshness";
 import { parseDecimalToStroops, formatStroopsToDecimal } from "./amount";
 import {
@@ -24,13 +27,15 @@ import {
   mergeVaultIntoZapSelectableAssets,
   shouldLoadZapMetadataFromApi,
 } from "./assets";
-import type { ZapAssetOption, ZapQuoteResponse } from "./types";
+import type { ZapAssetOption, ZapQuoteResponse, FeeDriftWarning } from "./types";
+import { detectClientFeeDrift } from "./types";
 import { useSettings } from "../settings/SettingsContext";
 import { resolveSlippage } from "../settings/types";
 import DepositRouteMaterialImpactWarning from "./DepositRouteMaterialImpactWarning";
 import { useDepositImpact } from "./useDepositImpact";
 import type { QuoteSnapshot } from "./useDepositImpact";
 import { getVaultSlippage, setVaultSlippage, resetVaultSlippage } from "../../lib/preferences";
+import { apiFetch, apiUrl } from "../../lib/api";
 
 export interface ZapDepositPanelProps {
   walletAddress: string | null;
@@ -39,6 +44,14 @@ export interface ZapDepositPanelProps {
 const MIN_SLIPPAGE = 0.1;
 const MAX_SLIPPAGE = 15;
 const FALLBACK_SOURCE = "fallback_rate";
+const SUPPORT_URL = "https://github.com/edehvictor/StellarYield/issues";
+
+function explorerAccountUrl(walletAddress: string | null): string {
+  const passphrase = import.meta.env.VITE_NETWORK_PASSPHRASE ?? "";
+  const isMainnet = passphrase.includes("mainnet") || passphrase.includes("Public Global");
+  const base = `https://stellar.expert/explorer/${isMainnet ? "public" : "testnet"}`;
+  return walletAddress ? `${base}/account/${walletAddress}` : base;
+}
 
 export default function ZapDepositPanel({ walletAddress }: ZapDepositPanelProps) {
   const useApiAssets = shouldLoadZapMetadataFromApi();
@@ -90,12 +103,16 @@ export default function ZapDepositPanel({ walletAddress }: ZapDepositPanelProps)
   const [lastProgressPhase, setLastProgressPhase] = useState<TxPhase>("idle");
   const [txHash, setTxHash] = useState<string | null>(null);
   const [error, setError] = useState("");
+  const [failurePanic, setFailurePanic] = useState<DecodedContractPanic | undefined>(undefined);
+  const [quoteError, setQuoteError] = useState<ZapQuoteError | null>(null);
   const [showFailedModal, setShowFailedModal] = useState(false);
   const [quoteLoading, setQuoteLoading] = useState(false);
   const [expectedOut, setExpectedOut] = useState<bigint | null>(null);
   const [quotePath, setQuotePath] = useState<string>("");
   const [quoteSource, setQuoteSource] = useState<string>("");
   const [quoteData, setQuoteData] = useState<ZapQuoteResponse | null>(null);
+  const [vaultPauseState, setVaultPauseState] = useState<ZapQuoteResponse["vaultPauseState"]>();
+  const [feeDriftWarning, setFeeDriftWarning] = useState<FeeDriftWarning | null>(null);
   const [slippageTolerance, setSlippageTolerance] = useState(() =>
     getVaultSlippage(vaultContractId, settingsSlippage)
   );
@@ -109,6 +126,26 @@ export default function ZapDepositPanel({ walletAddress }: ZapDepositPanelProps)
   }, [vaultContractId, settingsSlippage]);
 
   const [showSlippageEdit, setShowSlippageEdit] = useState(false);
+
+  // Reload reconciliation for an in-flight or recently-confirmed deposit
+  // (#1146). On mount, any persisted draft for this wallet is checked
+  // against the indexer so a page reload during/after a deposit shows the
+  // correct pending/confirmed state instead of a blank slate.
+  const [draftState, setDraftState] = useState<DepositDraftState>({ kind: "none" });
+  const [draftDismissed, setDraftDismissed] = useState(false);
+
+  useEffect(() => {
+    if (!walletAddress) return;
+    setDraftDismissed(false);
+    let cancelled = false;
+    void reconcileDepositDraft(walletAddress).then((state) => {
+      if (!cancelled) setDraftState(state);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [walletAddress]);
+
   const prevExpectedOutRef = useRef<bigint | null>(null);
   const quoteAbortRef = useRef<AbortController | null>(null);
   const quoteRequestSeqRef = useRef(0);
@@ -120,6 +157,26 @@ export default function ZapDepositPanel({ walletAddress }: ZapDepositPanelProps)
   const prevRouteRef = useRef<string[] | null>(null);
 
   const needsSwap = inputAsset?.contractId !== vaultToken.contractId;
+
+  useEffect(() => {
+    let cancelled = false;
+    const refresh = async () => {
+      try {
+        const response = await apiFetch(apiUrl("/api/zap/pause-state"));
+        if (!response.ok) return;
+        const payload = await response.json() as { vaultPauseState?: ZapQuoteResponse["vaultPauseState"] };
+        if (!cancelled && payload.vaultPauseState) setVaultPauseState(payload.vaultPauseState);
+      } catch {
+        if (!cancelled) setVaultPauseState({ status: "unknown", checkedAt: new Date().toISOString() });
+      }
+    };
+    void refresh();
+    const timer = window.setInterval(() => void refresh(), 15_000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, []);
 
   useEffect(() => {
     prevExpectedOutRef.current = null;
@@ -163,6 +220,8 @@ export default function ZapDepositPanel({ walletAddress }: ZapDepositPanelProps)
 
     setQuoteLoading(true);
     setError("");
+    setQuoteError(null);
+    setFeeDriftWarning(null);
     const requestSeq = ++quoteRequestSeqRef.current;
     const requestKey = buildZapQuoteRequestKey({
       inputTokenContract: inputAsset.contractId,
@@ -207,6 +266,7 @@ export default function ZapDepositPanel({ walletAddress }: ZapDepositPanelProps)
         setQuotePath(q.path.map((h) => h.label ?? h.contractId.slice(0, 6)).join(" → "));
         setQuoteSource(q.source);
         setQuoteData(q);
+        if (q.vaultPauseState) setVaultPauseState(q.vaultPauseState);
         setQuoteNowMs(Date.now());
       }
     } catch (e) {
@@ -222,6 +282,7 @@ export default function ZapDepositPanel({ walletAddress }: ZapDepositPanelProps)
       latestRouteRef.current = null;
       setExpectedOut(null);
       setError(e instanceof Error ? e.message : "Could not load quote");
+      setQuoteError(e instanceof ZapQuoteError ? e : null);
       setQuoteData(null);
     } finally {
       if (!controller.signal.aborted && requestSeq === quoteRequestSeqRef.current) {
@@ -244,10 +305,23 @@ export default function ZapDepositPanel({ walletAddress }: ZapDepositPanelProps)
     return recalculateMinOut(expectedOut ?? 0n, slippageTolerance, minAmountAfterSlippage);
   }, [expectedOut, slippageTolerance]);
 
-  const isStale = useMemo(() => {
-    if (!quoteData) return false;
-    return isZapQuoteExpired(quoteData, quoteNowMs);
-  }, [quoteData, quoteNowMs]);
+  const quoteInvalidation = useMemo(
+    () => (quoteData ? evaluateZapQuoteInvalidation(quoteData, quoteNowMs) : null),
+    [quoteData, quoteNowMs],
+  );
+
+  const isStale = quoteInvalidation?.status === "expired";
+
+  /** Hard-invalidate the current preview so rejected/expired values cannot be reused. */
+  const invalidatePreview = useCallback(() => {
+    prevExpectedOutRef.current = null;
+    prevRouteRef.current = null;
+    latestRouteRef.current = null;
+    setExpectedOut(null);
+    setQuotePath("");
+    setQuoteSource("");
+    setQuoteData(null);
+  }, []);
 
   const isFallback = useMemo(() => {
     if (!quoteData) return false;
@@ -270,13 +344,36 @@ export default function ZapDepositPanel({ walletAddress }: ZapDepositPanelProps)
     };
   }, [quoteData, expectedOut, slippageTolerance, isFallback, isStale]);
 
+  // Approximate USD size for depth checks: 1:1 for USD-pegged assets and the
+  // vault token; 0 for assets with unknown price (skips size/depth signals).
+  const depositAmountUsd = useMemo(() => {
+    if (!amount || !inputAsset) return 0;
+    const n = parseFloat(amount);
+    if (!Number.isFinite(n) || n <= 0) return 0;
+    const sym = (inputAsset.symbol || "").toUpperCase();
+    const stable =
+      sym === "USDC" ||
+      sym === "USDT" ||
+      sym === "USD" ||
+      sym === (vaultToken?.symbol || "").toUpperCase();
+    return stable ? n : 0;
+  }, [amount, inputAsset, vaultToken]);
+
+  const routeLiquidityDepthUsd = useMemo(() => {
+    const raw = import.meta.env.VITE_ROUTE_LIQUIDITY_DEPTH_USD;
+    if (raw === undefined || String(raw).trim() === "") return undefined;
+    const n = Number(raw);
+    return Number.isFinite(n) && n > 0 ? n : undefined;
+  }, []);
+
   const depositImpact = useDepositImpact({
-    amountUsd: 0,
+    amountUsd: depositAmountUsd,
     slippageTolerance,
     isFallback,
     isStale,
     quote: quoteSnapshot,
     blockStaleQuotes: true,
+    routeLiquidityDepthUsd: routeLiquidityDepthUsd,
   });
 
   const emitPhase = useCallback((p: TxPhase) => {
@@ -302,7 +399,7 @@ export default function ZapDepositPanel({ walletAddress }: ZapDepositPanelProps)
     }
   }, [vaultContractId, settingsSlippage]);
 
-  const handleZap = useCallback(async () => {
+  const executeZap = useCallback(async () => {
     if (!walletAddress || !inputAsset || !vaultContractId || !vaultToken.contractId) return;
     let amountIn: bigint;
     try {
@@ -316,8 +413,8 @@ export default function ZapDepositPanel({ walletAddress }: ZapDepositPanelProps)
       setError("Wait for a valid quote or reduce slippage");
       return;
     }
-    if (quoteData && isZapQuoteExpired(quoteData)) {
-      setError("Quote expired. Refresh and try again.");
+    if (quoteData && evaluateZapQuoteInvalidation(quoteData).status === "expired") {
+      setError(ZAP_QUOTE_EXPIRED_MESSAGE);
       return;
     }
 
@@ -327,16 +424,76 @@ export default function ZapDepositPanel({ walletAddress }: ZapDepositPanelProps)
     setTxHash(null);
     setStatus("loading");
     setError("");
+    setFailurePanic(undefined);
     setShowFailedModal(false);
     try {
-      if (quoteData) {
-        const isValid = await verifySwapQuote(quoteData);
-        if (!isValid) {
-          setError('Quote validation failed. Please refresh and try again.');
-          setShowFailedModal(true);
-          return;
+      const pauseResponse = await apiFetch(apiUrl("/api/zap/pause-state"));
+      if (pauseResponse.ok) {
+        const payload = await pauseResponse.json() as { vaultPauseState?: ZapQuoteResponse["vaultPauseState"] };
+        if (payload.vaultPauseState) {
+          setVaultPauseState(payload.vaultPauseState);
+          if (payload.vaultPauseState.status === "paused") {
+            setStatus("idle");
+            setError("The vault is paused. Deposits are temporarily unavailable.");
+            return;
+          }
         }
       }
+      if (quoteData) {
+        try {
+          const isValid = await verifySwapQuote(quoteData);
+          if (!isValid) {
+            invalidatePreview();
+            setStatus("error");
+            setError("Quote validation failed. Refresh and try again.");
+            return;
+          }
+        } catch (verifyErr) {
+          if (isQuoteCancellation(verifyErr)) {
+            throw verifyErr;
+          }
+          if (verifyErr instanceof ZapQuoteError) {
+            // The server rejected this exact quote — invalidate the preview and
+            // surface a deterministic, code-mapped message (no raw parsing).
+            invalidatePreview();
+            setQuoteError(verifyErr);
+            setStatus("error");
+            setError(describeZapQuoteVerifyFailure(verifyErr));
+            return;
+          }
+          throw verifyErr;
+        }
+
+        // Detect fee drift between the quoted min output and the recalculated
+        // execution-time min output. A material divergence indicates the fee
+        // changed between preview and signing.
+        if (minOut !== null && minOut > 0n) {
+          const drift = detectClientFeeDrift(
+            quoteData.minAmountOutStroops,
+            minOut.toString(),
+          );
+          setFeeDriftWarning(drift);
+          if (drift?.severity === "error") {
+            setError(drift.message);
+            setStatus("idle");
+            return;
+          }
+        }
+      }
+      // Persist minimal deposit-flow context before submission (#1146) so a
+      // reload mid-flow can reconcile against the indexer instead of losing
+      // track of the deposit entirely. Saved without a tx hash yet — the
+      // hash is added right after the wallet returns one, inside zapDeposit's
+      // phase callback below.
+      saveDepositDraft(walletAddress, {
+        amount,
+        vaultContractId,
+        vaultTokenSymbol: vaultToken.symbol,
+        inputTokenContract: inputAsset.contractId,
+        inputTokenSymbol: inputAsset.symbol,
+        submittedAt: Date.now(),
+      });
+
       const result = await zapDeposit(
         walletAddress,
         {
@@ -346,15 +503,43 @@ export default function ZapDepositPanel({ walletAddress }: ZapDepositPanelProps)
           amountIn,
           minAmountOut: minOut,
           minSharesOut: minOut,
+          expectedAmountOut: expectedOut ?? 0n,
+          // `minAmountOut` already enforces the user's slippage tolerance.
+          allowPartial: true,
+          deadlineUnixSeconds: zapQuoteDeadlineSeconds(quoteData),
         },
         emitPhase,
         false,
         settings,
       );
+      if (!result.success && result.errorCode === ZAP_QUOTE_EXPIRED_ERROR_CODE) {
+        // The contract refused the quote as expired before moving any funds.
+        invalidatePreview();
+        setStatus("error");
+        setError(ZAP_QUOTE_EXPIRED_MESSAGE);
+        return;
+      }
       if (!result.success) {
+        setFailurePanic(result.panic);
         throw new Error(result.error || "Transaction failed");
       }
       setTxHash(result.hash ?? null);
+      if (result.hash) {
+        // Re-save with the confirmed tx hash so a reload before on-chain
+        // confirmation can reconcile this specific transaction.
+        saveDepositDraft(walletAddress, {
+          amount,
+          vaultContractId,
+          vaultTokenSymbol: vaultToken.symbol,
+          inputTokenContract: inputAsset.contractId,
+          inputTokenSymbol: inputAsset.symbol,
+          txHash: result.hash,
+          submittedAt: Date.now(),
+        });
+      } else {
+        // No hash was ever returned — nothing resumable to reconcile later.
+        clearDepositDraft(walletAddress);
+      }
       setStatus("success");
       setAmount("");
     } catch (err) {
@@ -369,10 +554,30 @@ export default function ZapDepositPanel({ walletAddress }: ZapDepositPanelProps)
     vaultToken.contractId,
     amount,
     minOut,
+    expectedOut,
     emitPhase,
     settings,
     quoteData,
+    invalidatePreview,
   ]);
+
+  // Issue #1152: wallet sessions can expire mid-flow. Rather than letting
+  // executeZap throw deep inside zapDeposit's signing step (or fail
+  // silently), the session is checked immediately before submission; an
+  // expired session captures executeZap as a resumable action and surfaces
+  // a typed recovery state (reconnect / cancel / retry) instead.
+  const {
+    pendingRecovery,
+    runProtected,
+    reconnectAndResume,
+    retryPending,
+    cancelPending,
+    isReconnecting,
+  } = useProtectedWalletAction();
+
+  const handleZap = useCallback(async () => {
+    await runProtected("Zap deposit", executeZap);
+  }, [runProtected, executeZap]);
 
   const retryZap = useCallback(() => {
     setError("");
@@ -422,6 +627,84 @@ export default function ZapDepositPanel({ walletAddress }: ZapDepositPanelProps)
         </div>
       )}
 
+      {/* Resumed deposit state after a reload (#1146) */}
+      {!draftDismissed && draftState.kind === "pending" && (
+        <div
+          data-testid="deposit-draft-pending"
+          className="mb-4 flex items-start gap-2 text-blue-200/90 text-sm bg-blue-500/10 border border-blue-500/30 rounded-lg p-3"
+          role="status"
+        >
+          <Clock className="w-4 h-4 shrink-0 mt-0.5 text-blue-400" />
+          <div className="flex-1">
+            <p className="font-medium text-blue-300">Deposit still processing</p>
+            <p className="text-xs text-blue-200/70">
+              Your deposit of {draftState.draft.amount} {draftState.draft.inputTokenSymbol} into{" "}
+              {draftState.draft.vaultTokenSymbol} was submitted and is waiting to be confirmed
+              on-chain. This will update automatically.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={() => setDraftDismissed(true)}
+            className="text-blue-300/70 hover:text-blue-200 text-xs shrink-0"
+          >
+            Dismiss
+          </button>
+        </div>
+      )}
+
+      {!draftDismissed && draftState.kind === "confirmed" && (
+        <div
+          data-testid="deposit-draft-confirmed"
+          className="mb-4 flex items-start gap-2 text-green-200/90 text-sm bg-green-500/10 border border-green-500/30 rounded-lg p-3"
+          role="status"
+        >
+          <CheckCircle2 className="w-4 h-4 shrink-0 mt-0.5 text-green-400" />
+          <div className="flex-1">
+            <p className="font-medium text-green-300">Deposit confirmed</p>
+            <p className="text-xs text-green-200/70">
+              Your deposit of {draftState.draft.amount} {draftState.draft.inputTokenSymbol} into{" "}
+              {draftState.draft.vaultTokenSymbol} has been confirmed on-chain
+              {typeof draftState.confirmedShares === "number"
+                ? ` — ${draftState.confirmedShares} shares minted.`
+                : "."}
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={() => setDraftDismissed(true)}
+            className="text-green-300/70 hover:text-green-200 text-xs shrink-0"
+          >
+            Dismiss
+          </button>
+        </div>
+      )}
+
+      {!draftDismissed && draftState.kind === "stale" && (
+        <div
+          data-testid="deposit-draft-stale"
+          className="mb-4 flex items-start gap-2 text-gray-300 text-sm bg-white/5 border border-white/10 rounded-lg p-3"
+          role="status"
+        >
+          <History className="w-4 h-4 shrink-0 mt-0.5 text-gray-400" />
+          <div className="flex-1">
+            <p className="font-medium text-gray-200">Previous deposit not confirmed</p>
+            <p className="text-xs text-gray-400">
+              A deposit of {draftState.draft.amount} {draftState.draft.inputTokenSymbol} submitted
+              earlier was never confirmed on-chain and may not have gone through. Check your wallet
+              history before retrying.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={() => setDraftDismissed(true)}
+            className="text-gray-400 hover:text-gray-200 text-xs shrink-0"
+          >
+            Dismiss
+          </button>
+        </div>
+      )}
+
       {/* Fallback quote warning */}
       {isFallback && needsSwap && (
         <div className="mb-4 flex items-start gap-2 text-amber-200/90 text-sm bg-amber-500/10 border border-amber-500/30 rounded-lg p-3">
@@ -435,17 +718,84 @@ export default function ZapDepositPanel({ walletAddress }: ZapDepositPanelProps)
         </div>
       )}
 
-      {/* Stale quote warning */}
+      {/* Expired quote invalidation banner */}
       {isStale && !quoteLoading && (
-        <div className="mb-4 flex items-start gap-2 text-orange-200/90 text-sm bg-orange-500/10 border border-orange-500/30 rounded-lg p-3">
+        <div
+          className="mb-4 flex items-start gap-2 text-orange-200/90 text-sm bg-orange-500/10 border border-orange-500/30 rounded-lg p-3"
+          role="alert"
+        >
           <Clock className="w-4 h-4 shrink-0 mt-0.5 text-orange-400" />
-          <div>
-            <p className="font-medium text-orange-300">Stale quote</p>
+          <div className="flex-1 min-w-0">
+            <p className="font-medium text-orange-300">Quote expired</p>
             <p className="text-xs text-orange-200/70">
-              Quote is over 60 seconds old. Refresh for current rates.
+              Preview is no longer valid. Refresh for current rates.
             </p>
           </div>
+          <button
+            type="button"
+            onClick={() => void refreshQuote()}
+            disabled={quoteLoading}
+            className="shrink-0 self-center rounded-lg bg-orange-500/20 px-2.5 py-1 text-xs font-medium text-orange-100 hover:bg-orange-500/30 disabled:opacity-50"
+          >
+            Refresh quote
+          </button>
         </div>
+      )}
+
+      {/* Fee drift warning — shown when execution estimate diverges from preview */}
+      {feeDriftWarning && (
+        <div
+          className={`mb-4 flex items-start gap-2 text-sm rounded-lg p-3 border ${
+            feeDriftWarning.severity === "error"
+              ? "bg-red-500/10 border-red-500/30 text-red-200/90"
+              : "bg-amber-500/10 border-amber-500/30 text-amber-200/90"
+          }`}
+          role="alert"
+          aria-live="assertive"
+        >
+          <AlertTriangle
+            className={`w-4 h-4 shrink-0 mt-0.5 ${
+              feeDriftWarning.severity === "error" ? "text-red-400" : "text-amber-400"
+            }`}
+          />
+          <div>
+            <p
+              className={`font-medium ${
+                feeDriftWarning.severity === "error" ? "text-red-300" : "text-amber-300"
+              }`}
+            >
+              {feeDriftWarning.severity === "error" ? "Fee estimate changed" : "Fee drift detected"}
+            </p>
+            <p
+              className={`text-xs ${
+                feeDriftWarning.severity === "error" ? "text-red-200/70" : "text-amber-200/70"
+              }`}
+            >
+              {feeDriftWarning.message}
+            </p>
+            {feeDriftWarning.severity === "error" && (
+              <button
+                type="button"
+                onClick={() => void refreshQuote()}
+                disabled={quoteLoading}
+                className="mt-1.5 inline-flex items-center gap-1 text-xs rounded bg-white/10 px-2 py-0.5 text-red-200 hover:bg-white/20 disabled:opacity-50"
+              >
+                <RefreshCw className={`w-3 h-3 ${quoteLoading ? "animate-spin" : ""}`} />
+                Refresh quote
+              </button>
+            )}
+          </div>
+        </div>
+      )}
+
+      {vaultPauseState?.status === "paused" && (
+        <div className="mb-4 flex items-center gap-2 text-amber-200 text-sm bg-amber-500/10 border border-amber-500/30 rounded-lg p-3" role="status">
+          <AlertTriangle className="w-4 h-4 shrink-0" />
+          <span>Vault paused. Deposits are unavailable until it is resumed.</span>
+        </div>
+      )}
+      {vaultPauseState?.status === "unknown" && (
+        <div className="mb-4 text-gray-300 text-xs" role="status">Vault pause status could not be verified; the transaction may be rejected on-chain.</div>
       )}
 
       <div className="bg-white/5 rounded-xl p-4 mb-2">
@@ -624,16 +974,59 @@ export default function ZapDepositPanel({ walletAddress }: ZapDepositPanelProps)
         </div>
       )}
 
+      {pendingRecovery && (
+        <SessionExpiredRecovery
+          actionLabel={pendingRecovery.label}
+          onReconnect={() => void reconnectAndResume()}
+          onRetry={() => void retryPending()}
+          onCancel={cancelPending}
+          isReconnecting={isReconnecting}
+        />
+      )}
+
       {error && txPhase !== "failure" && (
-        <div className="flex items-center gap-2 text-red-400 text-sm mb-4">
-          <AlertTriangle className="w-4 h-4 shrink-0" />
-          {error}
+        <div className="mb-4 space-y-2">
+          <div className="flex items-center gap-2 text-red-400 text-sm">
+            <AlertTriangle className="w-4 h-4 shrink-0" />
+            <span>{error}</span>
+          </div>
+          {quoteError?.recoverable && (
+            <div className="flex flex-wrap items-center gap-x-4 gap-y-2 pl-6 text-xs">
+              <a
+                href={explorerAccountUrl(walletAddress)}
+                target="_blank"
+                rel="noreferrer"
+                className="inline-flex items-center gap-1 text-gray-300 hover:text-white"
+              >
+                <ExternalLink className="w-3.5 h-3.5" />
+                View account on explorer
+              </a>
+              <a
+                href={SUPPORT_URL}
+                target="_blank"
+                rel="noreferrer"
+                className="inline-flex items-center gap-1 text-gray-300 hover:text-white"
+              >
+                <LifeBuoy className="w-3.5 h-3.5" />
+                Contact support
+              </a>
+              <button
+                type="button"
+                onClick={() => void refreshQuote()}
+                disabled={quoteLoading}
+                className="inline-flex items-center gap-1 rounded-lg bg-white/10 px-2.5 py-1 text-gray-200 hover:bg-white/20 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                <RefreshCw className={`w-3.5 h-3.5 ${quoteLoading ? "animate-spin" : ""}`} />
+                Retry quote
+              </button>
+            </div>
+          )}
         </div>
       )}
 
       {showFailedModal && txPhase === "failure" && error && (
         <TransactionFailedModal
-          error={decodeTransactionError(error)}
+          error={decodeTransactionError(error, failurePanic)}
           onClose={() => setShowFailedModal(false)}
           onRetry={() => {
             setShowFailedModal(false);
@@ -682,11 +1075,13 @@ export default function ZapDepositPanel({ walletAddress }: ZapDepositPanelProps)
         onClick={() => void handleZap()}
         disabled={
           !configOk ||
+          vaultPauseState?.status === "paused" ||
           !amount ||
           status === "loading" ||
           minOut === null ||
           minOut <= 0n ||
-          depositImpact.shouldBlock
+          depositImpact.shouldBlock ||
+          feeDriftWarning?.severity === "error"
         }
         className="w-full py-3 rounded-xl font-semibold text-white bg-gradient-to-r from-blue-500 to-purple-500 hover:from-blue-600 hover:to-purple-600 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
       >

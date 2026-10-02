@@ -1,6 +1,8 @@
 import { useEffect, useState } from "react";
 import { useParams, Link } from "react-router-dom";
 import { Landmark, Loader2, AlertCircle, ArrowLeft, Info } from "lucide-react";
+import EmptyState from "./common/EmptyState";
+import { EMPTY_STATE_VAULT_NOT_FOUND } from "../utils/emptyStateCopy";
 import { ZapDepositPanel } from "../features/zap";
 import { WithdrawPanel } from "../features/withdraw";
 import { useWallet } from "../context/useWallet";
@@ -9,8 +11,12 @@ import { useBackendStatus } from "../hooks/useBackendStatus";
 import { useVaultActionAvailability } from "../hooks/useVaultActionAvailability";
 import type { VaultActionAvailabilityMap } from "../hooks/useVaultActionAvailability";
 import { RecoveryAdvisor } from "./AIAdvisor/RecoveryAdvisor";
+import { TransactionErrorBoundary } from "./transaction/TransactionErrorBoundary";
 import { fetchVaultStats, type VaultStats, formatTvl, validateVaultSlug } from "../lib/vaultData";
 import VaultCapacityWarning, { type VaultCapacityStatus } from "./VaultCapacityWarning";
+import VaultMigrationReadinessPanel from "./VaultMigrationReadinessPanel";
+import SharePriceFreshnessBanner from "./SharePriceFreshnessBanner";
+import YieldSourceFeeHistoryPanel from "./YieldSourceFeeHistoryPanel";
 import { VaultRiskBadge } from "./common/VaultRiskBadge";
 
 /**
@@ -149,13 +155,12 @@ export default function Vault() {
   if (notFound) {
     return (
       <div className="flex flex-col items-center justify-center min-h-[60vh] text-center space-y-6 max-w-md mx-auto px-4">
-        <div className="bg-red-500/20 p-6 rounded-full inline-block">
-          <AlertCircle size={64} className="text-red-500" />
-        </div>
-        <h2 className="text-3xl font-bold text-white">Vault Not Found</h2>
-        <p className="text-gray-400">
-          The vault slug <code className="text-red-400">"{activeSlug}"</code> does not exist in our registry.
-        </p>
+        <EmptyState
+          icon={<AlertCircle size={64} className="text-red-500" />}
+          title={EMPTY_STATE_VAULT_NOT_FOUND.title}
+          description={EMPTY_STATE_VAULT_NOT_FOUND.description}
+          testId="vault-not-found"
+        />
         <Link
           to="/"
           className="flex items-center gap-2 text-green-500 hover:text-green-400 font-semibold transition-colors"
@@ -269,6 +274,23 @@ export default function Vault() {
         <RecoveryAdvisor vaultId={activeSlug} />
       </div>
 
+      <div className="max-w-3xl w-full text-left">
+        <VaultMigrationReadinessPanel vaultSlug={activeSlug} />
+      </div>
+
+      <div className="max-w-3xl w-full text-left">
+        <SharePriceFreshnessBanner vaultId={activeSlug} />
+      </div>
+
+      {stats && (
+        <div className="max-w-3xl w-full text-left">
+          <YieldSourceFeeHistoryPanel
+            protocolName={stats.protocol}
+            feeHistory={stats.feeHistory}
+          />
+        </div>
+      )}
+
       <div className="glass-panel p-8 mt-8 max-w-3xl w-full text-left">
         <div className="flex items-center justify-center gap-2 mb-6">
           <ActionTab action="deposit" label="Deposit" />
@@ -276,16 +298,16 @@ export default function Vault() {
         </div>
 
         {vaultAction === "deposit" ? (
-          <>
+          <TransactionErrorBoundary workflowName="deposit">
             <ActionDisabledBanner action="deposit" />
             <VaultCapacityWarning capacity={capacity} />
             <ZapDepositPanel walletAddress={walletAddress} />
-          </>
+          </TransactionErrorBoundary>
         ) : (
-          <>
+          <TransactionErrorBoundary workflowName="withdraw">
             <ActionDisabledBanner action="withdraw" />
             <WithdrawPanel walletAddress={walletAddress} />
-          </>
+          </TransactionErrorBoundary>
         )}
       </div>
     </div>

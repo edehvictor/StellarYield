@@ -29,6 +29,16 @@ import { sendError } from "../utils/errorResponse";
  *   priceImpactPct         — slippage as a percentage
  *   isLowLiquidity         — true if price impact exceeds 2 %
  *   quotedAt               — ISO timestamp of when the estimate was generated
+ *   expiresAt              — ISO timestamp when the quote becomes stale
+ *                            (quotedAt + 60s TTL, see WITHDRAWAL_QUOTE_TTL_MS)
+ *   quoteTtlMs             — TTL in milliseconds (always 60000)
+ *   reserveImpact          — present only when currentReserveUsd and vaultTvlUsd are
+ *                            both supplied; see ReserveImpactPreview (#1321)
+ *
+ * Optional body fields (all three required together to receive reserveImpact):
+ *   currentReserveUsd — vault's current idle reserve in USD (number, >= 0)
+ *   vaultTvlUsd        — vault's total value locked in USD (number, > 0)
+ *   minBufferPct       — minimum acceptable reserve ratio, 0-100 (default: 8)
  */
 
 /** Derive a human-readable processing delay based on vault policy. */
@@ -50,15 +60,32 @@ function resolveProcessingDelay(vaultId: string): {
 
 const withdrawalPreviewRouter = Router({ mergeParams: true });
 
+/**
+ * Quote time-to-live for withdrawal previews (#1308).
+ * Mirrors the zap quote TTL (60s) so transaction modals share one
+ * deterministic staleness contract: `expiresAt = quotedAt + TTL`.
+ */
+export const WITHDRAWAL_QUOTE_TTL_MS = 60_000;
+
 withdrawalPreviewRouter.post(
   "/:vaultId/withdrawal-preview",
   (req: Request, res: Response): void => {
     const { vaultId } = req.params;
 
-    const { amountUsd, poolLiquidityUsd, exitFeeBps } = req.body as {
+    const {
+      amountUsd,
+      poolLiquidityUsd,
+      exitFeeBps,
+      currentReserveUsd,
+      vaultTvlUsd,
+      minBufferPct,
+    } = req.body as {
       amountUsd?: unknown;
       poolLiquidityUsd?: unknown;
       exitFeeBps?: unknown;
+      currentReserveUsd?: unknown;
+      vaultTvlUsd?: unknown;
+      minBufferPct?: unknown;
     };
 
     // ── Input validation ──────────────────────────────────────────────
@@ -110,6 +137,43 @@ withdrawalPreviewRouter.post(
       return;
     }
 
+    // ── Optional reserve-impact preview inputs ─────────────────────────
+    const reserveInputsProvided =
+      currentReserveUsd !== undefined || vaultTvlUsd !== undefined;
+
+    if (reserveInputsProvided) {
+      if (typeof currentReserveUsd !== "number" || !Number.isFinite(currentReserveUsd) || currentReserveUsd < 0) {
+        sendError(
+          res,
+          400,
+          "INVALID_RESERVE",
+          "currentReserveUsd must be a non-negative finite number.",
+        );
+        return;
+      }
+      if (typeof vaultTvlUsd !== "number" || !Number.isFinite(vaultTvlUsd) || vaultTvlUsd <= 0) {
+        sendError(
+          res,
+          400,
+          "INVALID_TVL",
+          "vaultTvlUsd must be a positive finite number.",
+        );
+        return;
+      }
+      if (
+        minBufferPct !== undefined &&
+        (typeof minBufferPct !== "number" || !Number.isFinite(minBufferPct) || minBufferPct < 0 || minBufferPct > 100)
+      ) {
+        sendError(
+          res,
+          400,
+          "INVALID_MIN_BUFFER_PCT",
+          "minBufferPct must be a number between 0 and 100.",
+        );
+        return;
+      }
+    }
+
     // ── Compute estimate ──────────────────────────────────────────────
     const estimate = ExitImpactService.estimateImpact(
       amountUsd,
@@ -119,6 +183,18 @@ withdrawalPreviewRouter.post(
 
     const { label: processingDelayLabel, seconds: processingDelaySeconds } =
       resolveProcessingDelay(String(vaultId));
+
+    const quotedAt = new Date();
+    const expiresAt = new Date(quotedAt.getTime() + WITHDRAWAL_QUOTE_TTL_MS);
+
+    const reserveImpact = reserveInputsProvided
+      ? ExitImpactService.previewReserveImpact(
+          currentReserveUsd as number,
+          vaultTvlUsd as number,
+          amountUsd,
+          minBufferPct as number | undefined,
+        )
+      : undefined;
 
     res.json({
       vaultId,
@@ -132,7 +208,10 @@ withdrawalPreviewRouter.post(
       conservativeNetUsd: estimate.conservativeAmountUsd,
       priceImpactPct: estimate.priceImpactPct,
       isLowLiquidity: estimate.isLowLiquidity,
-      quotedAt: new Date().toISOString(),
+      quotedAt: quotedAt.toISOString(),
+      expiresAt: expiresAt.toISOString(),
+      quoteTtlMs: WITHDRAWAL_QUOTE_TTL_MS,
+      ...(reserveImpact ? { reserveImpact } : {}),
     });
   },
 );

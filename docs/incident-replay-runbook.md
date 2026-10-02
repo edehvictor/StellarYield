@@ -158,6 +158,33 @@ npm run report:user-impact -- \
 # - Recommended actions
 ```
 
+## Procedure: Detect Broken Replay Sequences
+
+Replay exports never imply a clean replay. After exporting a ledger window, check `replayAnomalies` on the export — missing checkpoints, out-of-order events, and incomplete ranges are surfaced explicitly.
+
+### Step 1: Run the Replay Integrity Check
+
+```bash
+# Export and validate replay integrity for the window
+npm run export:incident-events -- \
+  --from-ledger 50000000 \
+  --to-ledger 50001000 \
+  --validate-replay \
+  --output ./replay/replay-integrity.json
+
+# Output: replayAnomalies[] with type + details, and summary.replayAnomalyCount
+```
+
+### Step 2: Interpret Anomaly Types
+
+| type | Meaning |
+| --- | --- |
+| `missing-checkpoint` | Consecutive events skip ledgers inside the range (a checkpoint is absent). |
+| `out-of-order` | Event ledgers do not appear in ascending sequence. |
+| `incomplete-sequence` | No events cover the range start/end boundaries (or the export is empty). |
+
+A validation error of the form `Replay <type>: <details>` is raised for each anomaly, so broken chains are never mistaken for a clean replay.
+
 ## Procedure: Test Runbook Commands Against Fixtures
 
 All replay commands support read-only mode with test fixtures.
@@ -169,6 +196,10 @@ All replay commands support read-only mode with test fixtures.
 npm test -- --suite replay --useFixtures
 
 # Fixtures located in: backend/keepers/src/__tests__/fixtures/incidents/
+# - clean-replay.json            # contiguous, in-order replay (no anomalies)
+# - missing-checkpoint.json      # events skip ledgers (missing checkpoint)
+# - out-of-order.json            # events not in ascending ledger order
+# - incomplete-sequence.json     # events do not span the full range
 ```
 
 ### Step 2: Verify Event Export

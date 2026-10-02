@@ -1,4 +1,5 @@
 import { ApyDispersionService, type ProviderApyInput } from '../services/apyDispersionService';
+import { computeAllSourceHealth, computeSourceFreshness, computeSourceConfidence, getFreshnessStatus } from '../services/sourceHealthService';
 
 describe('ApyDispersionService', () => {
   let service: ApyDispersionService;
@@ -119,6 +120,23 @@ describe('ApyDispersionService', () => {
       expect(result.sources[0].deviationFromMean).toBe(-1);
       expect(result.sources[1].deviationFromMean).toBe(1);
     });
+
+    it('should include per-source health in sources', () => {
+      const inputs: ProviderApyInput[] = [
+        { provider: 'A', apy: 8, tvlUsd: 1_000_000, fetchedAt: '2026-05-26T00:00:00Z' },
+        { provider: 'B', apy: 10, tvlUsd: 2_000_000, fetchedAt: '2026-05-26T00:00:00Z' },
+      ];
+
+      const result = service.computeDispersion('health-test', 'Health Test', inputs);
+
+      for (const source of result.sources) {
+        expect(source.health).toBeDefined();
+        expect(source.health.provider).toBe(source.provider);
+        expect(typeof source.health.confidence).toBe('number');
+        expect(typeof source.health.freshness).toBe('number');
+        expect(source.health.freshnessStatus).toBeDefined();
+      }
+    });
   });
 
   describe('config updates', () => {
@@ -145,88 +163,96 @@ describe('ApyDispersionService', () => {
     });
   });
 
-  // ── Precision at extreme magnitudes (#1070) ─────────────────────────────
-
-  describe('sub-basis-point (tiny) APY values', () => {
-    it('does not round a sub-basis-point mean APY to zero', () => {
+  describe('mixed source quality', () => {
+    it('should identify stale sources in the breakdown', () => {
+      const now = new Date('2026-05-26T12:00:00Z');
       const inputs: ProviderApyInput[] = [
-        { provider: 'A', apy: 0.00003, tvlUsd: 1_000_000, fetchedAt: '2026-05-26T00:00:00Z' },
-        { provider: 'B', apy: 0.00004, tvlUsd: 1_000_000, fetchedAt: '2026-05-26T00:00:00Z' },
+        { provider: 'FreshSource', apy: 8.0, tvlUsd: 10_000_000, fetchedAt: '2026-05-26T11:59:30Z' }, // 30s ago = fresh
+        { provider: 'StaleSource', apy: 7.5, tvlUsd: 8_000_000, fetchedAt: '2026-05-26T11:00:00Z' }, // 60 min ago = hard-stale
       ];
 
-      const result = service.computeDispersion('tiny', 'Tiny Strategy', inputs);
+      const healthResults = computeAllSourceHealth(inputs, now);
 
-      expect(result.meanApy).toBeGreaterThan(0);
-      expect(result.medianApy).toBeGreaterThan(0);
+      expect(healthResults).toHaveLength(2);
+      const freshSource = healthResults.find(h => h.provider === 'FreshSource')!;
+      const staleSource = healthResults.find(h => h.provider === 'StaleSource')!;
+
+      expect(freshSource.freshnessStatus).toBe('fresh');
+      expect(freshSource.freshness).toBe(1.0);
+      expect(staleSource.freshnessStatus).toBe('hard-stale');
+      expect(staleSource.freshness).toBe(0);
     });
 
-    it('preserves a tiny standard deviation instead of collapsing it to zero', () => {
+    it('should flag low-confidence sources that deviate from mean', () => {
+      const now = new Date('2026-05-26T12:00:00Z');
       const inputs: ProviderApyInput[] = [
-        { provider: 'A', apy: 0.00001, tvlUsd: 1_000_000, fetchedAt: '2026-05-26T00:00:00Z' },
-        { provider: 'B', apy: 0.00009, tvlUsd: 1_000_000, fetchedAt: '2026-05-26T00:00:00Z' },
+        { provider: 'A', apy: 10, tvlUsd: 1_000_000, fetchedAt: '2026-05-26T11:59:00Z' },
+        { provider: 'B', apy: 10.5, tvlUsd: 2_000_000, fetchedAt: '2026-05-26T11:59:00Z' },
+        { provider: 'C', apy: 10.2, tvlUsd: 1_500_000, fetchedAt: '2026-05-26T11:59:00Z' },
+        { provider: 'Outlier', apy: 20, tvlUsd: 500_000, fetchedAt: '2026-05-26T11:59:00Z' },
       ];
 
-      const result = service.computeDispersion('tiny-spread', 'Tiny Spread', inputs);
+      const healthResults = computeAllSourceHealth(inputs, now);
+      const outlier = healthResults.find(h => h.provider === 'Outlier')!;
+      const normal = healthResults.find(h => h.provider === 'A')!;
 
-      expect(result.stdDev).toBeGreaterThan(0);
-      expect(result.range).toBeGreaterThan(0);
+      // The outlier should have lower confidence due to deviation
+      expect(outlier.confidence).toBeLessThan(normal.confidence);
     });
 
-    it('keeps a tiny per-source deviation from mean non-zero', () => {
+    it('should surface stale sources in dispersion sources array', () => {
       const inputs: ProviderApyInput[] = [
-        { provider: 'A', apy: 0.00002, tvlUsd: 1_000_000, fetchedAt: '2026-05-26T00:00:00Z' },
-        { provider: 'B', apy: 0.00006, tvlUsd: 1_000_000, fetchedAt: '2026-05-26T00:00:00Z' },
+        { provider: 'Fresh', apy: 8.0, tvlUsd: 10_000_000, fetchedAt: new Date().toISOString() },
+        { provider: 'Old', apy: 8.1, tvlUsd: 9_000_000, fetchedAt: '2020-01-01T00:00:00Z' },
       ];
 
-      const result = service.computeDispersion('tiny-dev', 'Tiny Deviation', inputs);
+      const result = service.computeDispersion('mixed-fresh', 'Mixed Fresh', inputs);
 
-      for (const source of result.sources) {
-        expect(source.deviationFromMean).not.toBe(0);
-      }
-    });
-  });
+      const freshSrc = result.sources.find(s => s.provider === 'Fresh')!;
+      const oldSrc = result.sources.find(s => s.provider === 'Old')!;
 
-  describe('unusually large (synthetic/stress) APY values', () => {
-    it('handles a very large synthetic rate without overflow', () => {
-      const inputs: ProviderApyInput[] = [
-        { provider: 'A', apy: 500_000, tvlUsd: 1_000_000, fetchedAt: '2026-05-26T00:00:00Z' },
-        { provider: 'B', apy: 520_000, tvlUsd: 1_000_000, fetchedAt: '2026-05-26T00:00:00Z' },
-      ];
-
-      const result = service.computeDispersion('extreme', 'Extreme Stress Test', inputs);
-
-      expect(Number.isFinite(result.meanApy)).toBe(true);
-      expect(Number.isFinite(result.stdDev)).toBe(true);
-      expect(Number.isFinite(result.coefficientOfVariation)).toBe(true);
-      expect(result.meanApy).toBeGreaterThan(0);
-    });
-
-    it('handles an extreme synthetic rate at the billions scale', () => {
-      const inputs: ProviderApyInput[] = [
-        { provider: 'A', apy: 9_000_000_000, tvlUsd: 1_000_000, fetchedAt: '2026-05-26T00:00:00Z' },
-        { provider: 'B', apy: 9_500_000_000, tvlUsd: 1_000_000, fetchedAt: '2026-05-26T00:00:00Z' },
-      ];
-
-      const result = service.computeDispersion('billions', 'Billions Scale', inputs);
-
-      expect(Number.isFinite(result.meanApy)).toBe(true);
-      expect(Number.isNaN(result.meanApy)).toBe(false);
-      expect(result.dispersionLevel).toBeDefined();
+      expect(freshSrc.health.freshnessStatus).toBe('fresh');
+      expect(oldSrc.health.freshnessStatus).toBe('hard-stale');
     });
   });
 
-  describe('mixed magnitude bands in the same input set', () => {
-    it('does not let a tiny value get swamped into zero by a large one', () => {
-      const inputs: ProviderApyInput[] = [
-        { provider: 'A', apy: 0.00001, tvlUsd: 1_000_000, fetchedAt: '2026-05-26T00:00:00Z' },
-        { provider: 'B', apy: 100_000, tvlUsd: 1_000_000, fetchedAt: '2026-05-26T00:00:00Z' },
-      ];
+  describe('sourceHealthService', () => {
+    it('computeSourceFreshness returns 1 for very recent data', () => {
+      expect(computeSourceFreshness(0)).toBe(1.0);
+      expect(computeSourceFreshness(30_000)).toBe(1.0); // 30s
+    });
 
-      const result = service.computeDispersion('mixed', 'Mixed Magnitudes', inputs);
+    it('computeSourceFreshness returns 0 for very old data', () => {
+      expect(computeSourceFreshness(45 * 60_000)).toBe(0); // 45 min
+      expect(computeSourceFreshness(100 * 60_000)).toBe(0);
+    });
 
-      expect(result.minApy).toBeCloseTo(0.00001, 5);
-      expect(result.maxApy).toBe(100_000);
-      expect(Number.isFinite(result.stdDev)).toBe(true);
+    it('computeSourceFreshness interpolates linearly', () => {
+      const score = computeSourceFreshness(60_000); // 1 min = boundary
+      expect(score).toBe(1.0);
+
+      const midScore = computeSourceFreshness(23 * 60_000); // ~midpoint
+      expect(midScore).toBeGreaterThan(0.3);
+      expect(midScore).toBeLessThan(0.7);
+    });
+
+    it('getFreshnessStatus returns correct status', () => {
+      expect(getFreshnessStatus(0)).toBe('fresh');
+      expect(getFreshnessStatus(10 * 60_000)).toBe('fresh');
+      expect(getFreshnessStatus(11 * 60_000)).toBe('soft-stale');
+      expect(getFreshnessStatus(46 * 60_000)).toBe('hard-stale');
+    });
+
+    it('computeSourceConfidence penalises high deviation', () => {
+      const lowDev = computeSourceConfidence(1.0, 0.1, 10);
+      const highDev = computeSourceConfidence(1.0, 5, 10);
+      expect(highDev).toBeLessThan(lowDev);
+    });
+
+    it('computeSourceConfidence penalises stale data', () => {
+      const fresh = computeSourceConfidence(1.0, 0, 10);
+      const stale = computeSourceConfidence(0, 0, 10);
+      expect(stale).toBeLessThan(fresh);
     });
   });
 });

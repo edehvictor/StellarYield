@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertTriangle,
   ArrowUpFromLine,
@@ -9,7 +9,7 @@ import {
 import TxStatusTimeline from "../../components/transaction/TxStatusTimeline";
 import TransactionFailedModal from "../../components/transaction/TransactionFailedModal";
 import { decodeTransactionError } from "../../utils/errorDecoder";
-import { withdraw, getUserShares } from "../../services/soroban";
+import { withdraw, getUserShares, getVaultTotals } from "../../services/soroban";
 import {
   TX_PHASE_PIPELINE,
   type TxPhase,
@@ -18,12 +18,34 @@ import { parseDecimalToStroops, formatStroopsToDecimal } from "../zap/amount";
 import { getVaultTokenFromEnv } from "../zap/assets";
 import { apiFetch, getApiBaseUrlOrNull } from "../../lib/api";
 import { useParams } from "react-router-dom";
+import {
+  WITHDRAW_QUOTE_TTL_MS,
+  isWithdrawQuoteStale,
+  withdrawQuoteAgeSeconds,
+} from "./withdrawQuoteFreshness";
+import { useProtectedWalletAction } from "../../hooks/useProtectedWalletAction";
+import SessionExpiredRecovery from "../../components/wallet/SessionExpiredRecovery";
+import RedemptionPreviewPanel from "./RedemptionPreviewPanel";
+import {
+  PARTIAL_WITHDRAWAL_PRESETS,
+  buildRedemptionView,
+  sharesForPreset,
+  type VaultState,
+} from "./redemptionPreview";
 
 export interface WithdrawPanelProps {
   walletAddress: string | null;
 }
 
 // ── Withdrawal preview types ────────────────────────────────────────────────
+
+interface ReserveImpactPreview {
+  currentReserveRatioPct: number;
+  projectedReserveRatioPct: number;
+  projectedReserveUsd: number;
+  breachesMinBuffer: boolean;
+  minBufferPct: number;
+}
 
 interface WithdrawalPreview {
   vaultId: string;
@@ -38,6 +60,9 @@ interface WithdrawalPreview {
   priceImpactPct: number;
   isLowLiquidity: boolean;
   quotedAt: string;
+  expiresAt?: string;
+  quoteTtlMs?: number;
+  reserveImpact?: ReserveImpactPreview;
 }
 
 // Fallback USD rate — in production this would come from a price oracle.
@@ -64,9 +89,19 @@ interface PreviewPanelProps {
   preview: WithdrawalPreview | null;
   loading: boolean;
   error: string | null;
+  isStale: boolean;
+  quoteAgeSecs: number | null;
+  onRefresh: () => void;
 }
 
-function PreviewPanel({ preview, loading, error }: PreviewPanelProps) {
+function PreviewPanel({
+  preview,
+  loading,
+  error,
+  isStale,
+  quoteAgeSecs,
+  onRefresh,
+}: PreviewPanelProps) {
   if (loading) {
     return (
       <div
@@ -105,7 +140,40 @@ function PreviewPanel({ preview, loading, error }: PreviewPanelProps) {
       <h4 className="font-semibold text-white flex items-center gap-2">
         <Info className="w-4 h-4 text-indigo-400" />
         Withdrawal Preview
+        {quoteAgeSecs !== null && (
+          <span
+            data-testid="withdraw-quote-age"
+            className="ml-auto flex items-center gap-1 text-xs font-normal text-gray-400"
+          >
+            <Clock className="w-3 h-3" />
+            {quoteAgeSecs}s ago
+          </span>
+        )}
       </h4>
+
+      {/* Stale quote warning (#1308) — blocks submission until refreshed */}
+      {isStale && (
+        <div
+          role="alert"
+          data-testid="withdraw-stale-warning"
+          className="flex items-start gap-2 rounded-lg bg-yellow-500/10 border border-yellow-500/30 p-3 text-xs text-yellow-200/80"
+        >
+          <Clock className="w-4 h-4 shrink-0 text-yellow-400 mt-0.5" />
+          <span className="flex-1">
+            Stale quote — this estimate is over{" "}
+            {Math.round(WITHDRAW_QUOTE_TTL_MS / 1000)} seconds old and may no
+            longer reflect pool liquidity or fees. Refresh before submitting.
+          </span>
+          <button
+            type="button"
+            onClick={onRefresh}
+            data-testid="withdraw-refresh-quote"
+            className="shrink-0 rounded-md border border-yellow-500/40 px-2 py-1 text-yellow-200 hover:bg-yellow-500/20"
+          >
+            Refresh
+          </button>
+        </div>
+      )}
 
       {/* Net output row */}
       <div className="flex items-center justify-between">
@@ -170,6 +238,21 @@ function PreviewPanel({ preview, loading, error }: PreviewPanelProps) {
           reduce price impact.
         </div>
       )}
+
+      {/* Low-reserve warning */}
+      {preview.reserveImpact?.breachesMinBuffer && (
+        <div
+          role="alert"
+          className="flex items-start gap-2 rounded-lg bg-amber-500/10 border border-amber-500/30 p-3 text-xs text-amber-200/80"
+        >
+          <AlertTriangle className="w-4 h-4 shrink-0 text-amber-400 mt-0.5" />
+          <span>
+            <span className="font-medium text-amber-100">Low reserve detected.</span>{" "}
+            This withdrawal would leave the vault below its minimum reserve
+            buffer. Projected reserve ratio: {preview.reserveImpact.projectedReserveRatioPct.toFixed(1)}% vs {preview.reserveImpact.minBufferPct}% minimum.
+          </span>
+        </div>
+      )}
     </div>
   );
 }
@@ -183,6 +266,10 @@ export default function WithdrawPanel({ walletAddress }: WithdrawPanelProps) {
 
   const [shareBalance, setShareBalance] = useState<bigint | null>(null);
   const [balanceError, setBalanceError] = useState<string | null>(null);
+  // Vault totals back the share redemption preview (#1404).
+  const [vaultTotals, setVaultTotals] = useState<VaultState | null>(null);
+  const [totalsError, setTotalsError] = useState<string | null>(null);
+  const [totalsLoading, setTotalsLoading] = useState(false);
   const [amount, setAmount] = useState("");
   const [txPhase, setTxPhase] = useState<TxPhase>("idle");
   const [lastProgressPhase, setLastProgressPhase] = useState<TxPhase>("idle");
@@ -196,8 +283,42 @@ export default function WithdrawPanel({ walletAddress }: WithdrawPanelProps) {
   const [previewLoading, setPreviewLoading] = useState(false);
   const [previewError, setPreviewError] = useState<string | null>(null);
   const previewDebounce = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Stale-quote clock (#1308): ticks every second while a preview is shown.
+  const [quoteNowMs, setQuoteNowMs] = useState(() => Date.now());
+  const [refreshNonce, setRefreshNonce] = useState(0);
 
-  const refreshBalance = useCallback(async () => {
+  useEffect(() => {
+    if (!preview) return;
+    const id = setInterval(() => setQuoteNowMs(Date.now()), 1000);
+    return () => clearInterval(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [preview]);
+
+  const isStaleQuote = preview
+    ? isWithdrawQuoteStale(preview, quoteNowMs)
+    : false;
+  const quoteAgeSecs = preview
+    ? withdrawQuoteAgeSeconds(preview.quotedAt, quoteNowMs)
+    : null;
+
+  const refreshPreview = useCallback(() => {
+    setQuoteNowMs(Date.now());
+    setRefreshNonce((n) => n + 1);
+  }, []);
+
+  // Issue #1152: recovery primitives for protected flows (share-balance /
+  // preview reads and the withdrawal submission below) that assume a live
+  // wallet session.
+  const {
+    pendingRecovery,
+    runProtected,
+    reconnectAndResume,
+    retryPending,
+    cancelPending,
+    isReconnecting,
+  } = useProtectedWalletAction();
+
+  const fetchShareBalance = useCallback(async () => {
     if (!walletAddress) return;
     try {
       const shares = await getUserShares(walletAddress);
@@ -208,11 +329,33 @@ export default function WithdrawPanel({ walletAddress }: WithdrawPanelProps) {
         err instanceof Error ? err.message : "Could not load share balance",
       );
     }
+
+    // Best effort: the redemption preview is informational, so a failure to
+    // read the totals must not block the withdrawal itself.
+    setTotalsLoading(true);
+    try {
+      setVaultTotals(await getVaultTotals());
+      setTotalsError(null);
+    } catch {
+      setVaultTotals(null);
+      setTotalsError("could not read the vault's share price.");
+    } finally {
+      setTotalsLoading(false);
+    }
   }, [walletAddress]);
+
+  // The share-balance read backs the withdrawal preview (max amount, balance
+  // validation) and requires a live wallet session — treated as the
+  // "quote preview" protected flow for this panel. An expired session here
+  // surfaces recovery instead of leaving the balance silently stale/blank.
+  const refreshBalance = useCallback(async () => {
+    await runProtected("Load withdrawal preview", fetchShareBalance);
+  }, [runProtected, fetchShareBalance]);
 
   useEffect(() => {
     void refreshBalance();
-  }, [refreshBalance]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [walletAddress]);
 
   // ── Fetch withdrawal preview ──────────────────────────────────────────────
   useEffect(() => {
@@ -253,6 +396,7 @@ export default function WithdrawPanel({ walletAddress }: WithdrawPanelProps) {
       const baseUrl = getApiBaseUrlOrNull();
       if (!baseUrl) {
         // No backend — compute client-side fallback so the user still sees a preview
+        const now = new Date();
         const fallbackPreview: WithdrawalPreview = {
           vaultId,
           requestedAmountUsd: amountUsd,
@@ -265,7 +409,11 @@ export default function WithdrawPanel({ walletAddress }: WithdrawPanelProps) {
           conservativeNetUsd: amountUsd,
           priceImpactPct: 0,
           isLowLiquidity: false,
-          quotedAt: new Date().toISOString(),
+          quotedAt: now.toISOString(),
+          expiresAt: new Date(
+            now.getTime() + WITHDRAW_QUOTE_TTL_MS,
+          ).toISOString(),
+          quoteTtlMs: WITHDRAW_QUOTE_TTL_MS,
         };
         setPreview(fallbackPreview);
         setPreviewLoading(false);
@@ -312,7 +460,7 @@ export default function WithdrawPanel({ walletAddress }: WithdrawPanelProps) {
     return () => {
       if (previewDebounce.current) clearTimeout(previewDebounce.current);
     };
-  }, [amount, vaultId, vaultToken.decimals]);
+  }, [amount, vaultId, vaultToken.decimals, refreshNonce]);
 
   const emitPhase = useCallback((p: TxPhase) => {
     setTxPhase(p);
@@ -321,7 +469,7 @@ export default function WithdrawPanel({ walletAddress }: WithdrawPanelProps) {
     }
   }, []);
 
-  const handleWithdraw = useCallback(async () => {
+  const executeWithdraw = useCallback(async () => {
     if (!walletAddress) return;
 
     // Block submission when preview data is still loading or missing due to
@@ -331,6 +479,11 @@ export default function WithdrawPanel({ walletAddress }: WithdrawPanelProps) {
       setError(
         "Preview data is unavailable. Resolve the issue above before submitting.",
       );
+      return;
+    }
+    // Stale quotes must be refreshed before signing (#1308).
+    if (preview && isWithdrawQuoteStale(preview)) {
+      setError("Quote expired. Refresh the preview and try again.");
       return;
     }
 
@@ -381,6 +534,15 @@ export default function WithdrawPanel({ walletAddress }: WithdrawPanelProps) {
     previewLoading,
   ]);
 
+  // Issue #1152: check for an expired session immediately before submitting
+  // the withdrawal (transaction submission is the second protected flow
+  // named in the issue). An expired session captures executeWithdraw as a
+  // resumable action and surfaces recovery instead of an uncaught error
+  // from deep inside withdraw()/the signing adapter.
+  const handleWithdraw = useCallback(async () => {
+    await runProtected("Withdraw", executeWithdraw);
+  }, [runProtected, executeWithdraw]);
+
   const retryWithdraw = useCallback(() => {
     setError("");
     void handleWithdraw();
@@ -391,8 +553,34 @@ export default function WithdrawPanel({ walletAddress }: WithdrawPanelProps) {
     setAmount(formatStroopsToDecimal(shareBalance, vaultToken.decimals));
   }, [shareBalance, vaultToken.decimals]);
 
+  const applyPreset = useCallback(
+    (percent: number) => {
+      if (shareBalance === null) return;
+      setAmount(
+        formatStroopsToDecimal(sharesForPreset(shareBalance, percent), vaultToken.decimals),
+      );
+      setError("");
+    },
+    [shareBalance, vaultToken.decimals],
+  );
+
+  // Share redemption preview (#1404): pure math over the on-chain totals, so it
+  // updates instantly as the amount changes.
+  const redemptionView = useMemo(() => {
+    if (!vaultTotals || shareBalance === null || !amount.trim()) return null;
+    let shares: bigint;
+    try {
+      shares = parseDecimalToStroops(amount, vaultToken.decimals);
+    } catch {
+      return null;
+    }
+    if (shares <= 0n) return null;
+    return buildRedemptionView({ totals: vaultTotals, userShares: shareBalance, shares });
+  }, [vaultTotals, shareBalance, amount, vaultToken.decimals]);
+
   // Preview is required before submission; it blocks when an API error occurred.
   const previewMissing = Boolean(amount && previewError && !preview);
+  const staleBlocked = Boolean(preview && !previewLoading && isStaleQuote);
 
   if (!walletAddress) {
     return (
@@ -410,6 +598,16 @@ export default function WithdrawPanel({ walletAddress }: WithdrawPanelProps) {
 
   return (
     <div className="bg-white/5 backdrop-blur-xl rounded-2xl border border-white/10 p-6 max-w-md mx-auto">
+      {pendingRecovery && (
+        <SessionExpiredRecovery
+          actionLabel={pendingRecovery.label}
+          onReconnect={() => void reconnectAndResume()}
+          onRetry={() => void retryPending()}
+          onCancel={cancelPending}
+          isReconnecting={isReconnecting}
+        />
+      )}
+
       {showFailedModal && error && (
         <TransactionFailedModal
           error={decodeTransactionError(error)}
@@ -466,12 +664,45 @@ export default function WithdrawPanel({ walletAddress }: WithdrawPanelProps) {
         />
       </div>
 
+      {/* ── Partial withdrawal presets and share redemption preview (#1404) ── */}
+      <div
+        role="group"
+        aria-label="Withdraw a portion of your position"
+        className="flex gap-2 mb-4"
+      >
+        {PARTIAL_WITHDRAWAL_PRESETS.map((percent) => (
+          <button
+            key={percent}
+            type="button"
+            onClick={() => applyPreset(percent)}
+            disabled={shareBalance === null || shareBalance === 0n}
+            className="flex-1 rounded-lg border border-white/10 py-1.5 text-xs text-indigo-200 hover:bg-white/5 disabled:opacity-50"
+          >
+            {percent === 100 ? "100%" : `${percent}%`}
+          </button>
+        ))}
+      </div>
+      {(amount.trim() !== "" || totalsLoading) && (
+        <div className="mb-4">
+          <RedemptionPreviewPanel
+            view={redemptionView}
+            loading={totalsLoading && vaultTotals === null}
+            totalsError={amount.trim() !== "" ? totalsError : null}
+            decimals={vaultToken.decimals}
+            symbol={vaultToken.symbol}
+          />
+        </div>
+      )}
+
       {/* ── Withdrawal preview ── */}
       <div className="mb-4">
         <PreviewPanel
           preview={preview}
           loading={previewLoading}
           error={previewError}
+          isStale={isStaleQuote && !previewLoading}
+          quoteAgeSecs={quoteAgeSecs}
+          onRefresh={refreshPreview}
         />
       </div>
 
@@ -498,9 +729,19 @@ export default function WithdrawPanel({ walletAddress }: WithdrawPanelProps) {
       <button
         type="button"
         onClick={() => void handleWithdraw()}
-        disabled={submitting || !amount || previewLoading || previewMissing}
+        disabled={
+          submitting ||
+          !amount ||
+          previewLoading ||
+          previewMissing ||
+          staleBlocked
+        }
         aria-disabled={
-          submitting || !amount || previewLoading || previewMissing
+          submitting ||
+          !amount ||
+          previewLoading ||
+          previewMissing ||
+          staleBlocked
         }
         className="w-full py-3 rounded-xl font-semibold text-white bg-gradient-to-r from-yellow-500 to-orange-500 hover:from-yellow-600 hover:to-orange-600 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
       >
@@ -518,6 +759,11 @@ export default function WithdrawPanel({ walletAddress }: WithdrawPanelProps) {
           <>
             <AlertTriangle className="w-4 h-4" />
             Preview required
+          </>
+        ) : staleBlocked ? (
+          <>
+            <Clock className="w-4 h-4" />
+            Quote stale — refresh
           </>
         ) : (
           <>

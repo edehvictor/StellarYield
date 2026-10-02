@@ -29,7 +29,7 @@ import type { WatchlistItem, ThresholdRule } from "../../../shared/types/watchli
 interface AddRuleDialogState {
   open: boolean;
   itemId?: string;
-  ruleType: "apy_above" | "apy_below" | "tvl_above" | "tvl_below" | "spread_change_above";
+  ruleType: "apy_above" | "apy_below" | "tvl_above" | "tvl_below" | "spread_change_above" | "apy_drop_pct";
   ruleValue: number;
   triggerOnce: boolean;
 }
@@ -132,6 +132,7 @@ function AddRuleDialog({
             >
               <option value="apy_above">APY Above (%)</option>
               <option value="apy_below">APY Below (%)</option>
+              <option value="apy_drop_pct">APY Drop From Baseline (pp)</option>
               <option value="tvl_above">TVL Above ($)</option>
               <option value="tvl_below">TVL Below ($)</option>
               <option value="spread_change_above">Spread Change Above (%)</option>
@@ -220,6 +221,14 @@ function WatchlistItemCard({
           <div className="bg-blue-100 px-3 py-1 rounded text-sm font-semibold text-blue-700">
             {item.currentApy.toFixed(2)}% APY
           </div>
+          {item.apyDropPct !== undefined && item.apyDropPct > 0 && (
+            <div
+              className="bg-red-100 px-3 py-1 rounded text-sm font-semibold text-red-700"
+              title="APY drop from baseline"
+            >
+              -{item.apyDropPct.toFixed(2)}pp drop
+            </div>
+          )}
           {item.alertCount > 0 && <AlertBadge count={item.alertCount} />}
           <button
             onClick={onToggleExpand}

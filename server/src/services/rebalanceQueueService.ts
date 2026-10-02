@@ -46,6 +46,110 @@ export interface PartialFillConfig {
   deferralThreshold?: number; // If fill% < this, defer
 }
 
+// ── Queue health summary (#1076) ────────────────────────────────────────────
+//
+// Raw job totals (e.g. "12 pending, 3 failed") don't tell an operator
+// whether a backlog is healthy: a "pending" entry might be a fresh job
+// that hasn't been picked up yet, one waiting out a retry backoff delay,
+// or one that has already failed once and is due for another attempt
+// right now. Likewise a "failed" entry might still have retries left, or
+// have exhausted them entirely (effectively dead-lettered). This summary
+// distinguishes all of those states from the same underlying fields, with
+// no schema changes required.
+
+export interface QueueHealthSnapshot {
+  /** Currently being executed. */
+  active: number;
+  /** Never attempted yet, and not scheduled for later — ready to run now. */
+  waiting: number;
+  /** Scheduled for later (a future nextRetryAt or deferredUntil) — not yet due. */
+  delayed: number;
+  /** Has failed at least once before and is now due for another attempt. */
+  retrying: number;
+  /** Terminally failed, but with retries still remaining on paper (e.g. intent expired before exhausting attempts). */
+  failed: number;
+  /** Terminally failed after exhausting all retry attempts. */
+  deadLettered: number;
+  /** Sum of the six buckets above. */
+  total: number;
+  generatedAt: string;
+}
+
+/** Minimal fields needed to classify one queue entry's health bucket. */
+export interface QueueEntrySnapshot {
+  status: RebalanceStatus;
+  executionType: ExecutionType;
+  attemptCount: number;
+  maxRetries: number;
+  nextRetryAt: Date | null;
+  deferredUntil: Date | null;
+}
+
+/**
+ * Classifies a set of queue entries into a health summary distinguishing
+ * waiting, delayed, retrying, active, failed, and dead-lettered states
+ * (#1076). Pure function — no DB access — so it can be tested directly
+ * against synthetic snapshots (empty, overloaded, mixed-state).
+ */
+export function summarizeQueueHealth(
+  entries: QueueEntrySnapshot[],
+  now: Date = new Date(),
+): QueueHealthSnapshot {
+  let active = 0;
+  let waiting = 0;
+  let delayed = 0;
+  let retrying = 0;
+  let failed = 0;
+  let deadLettered = 0;
+
+  for (const entry of entries) {
+    if (entry.status === REBALANCE_STATUS.PROCESSING) {
+      active++;
+      continue;
+    }
+
+    if (entry.status === REBALANCE_STATUS.FAILED) {
+      if (entry.attemptCount >= entry.maxRetries) {
+        deadLettered++;
+      } else {
+        failed++;
+      }
+      continue;
+    }
+
+    if (entry.status === REBALANCE_STATUS.PENDING) {
+      const scheduledInFuture =
+        (entry.nextRetryAt !== null && entry.nextRetryAt.getTime() > now.getTime()) ||
+        (entry.executionType === EXECUTION_TYPE.DEFERRED &&
+          entry.deferredUntil !== null &&
+          entry.deferredUntil.getTime() > now.getTime());
+
+      if (scheduledInFuture) {
+        delayed++;
+      } else if (entry.attemptCount > 0) {
+        retrying++;
+      } else {
+        waiting++;
+      }
+      continue;
+    }
+
+    // PARTIAL / COMPLETED / CANCELLED are outside this backlog-health
+    // picture and are intentionally not counted in any bucket.
+  }
+
+  return {
+    active,
+    waiting,
+    delayed,
+    retrying,
+    failed,
+    deadLettered,
+    total: active + waiting + delayed + retrying + failed + deadLettered,
+    generatedAt: now.toISOString(),
+  };
+}
+
 /**
  * RebalanceQueueService
  *
@@ -312,6 +416,39 @@ export class RebalanceQueueService {
     ]);
 
     return { pendingCount: pending, processingCount: processing, partialCount: partial, failedCount: failed, deferredCount: deferred };
+  }
+
+  /**
+   * Summarizes rebalance-queue backlog health (#1076): waiting, delayed,
+   * retrying, active, failed, and dead-lettered counts, optionally scoped
+   * to one vault. Separates a job simply scheduled for later (delayed)
+   * from one that already failed once and is now due for another attempt
+   * (retrying), and separates a terminal failure that still had retries
+   * on paper — e.g. its intent expired first — (failed) from one that
+   * exhausted every retry attempt (deadLettered).
+   */
+  async getQueueHealthSummary(
+    vaultId?: string,
+    now: Date = new Date(),
+  ): Promise<QueueHealthSnapshot> {
+    const entries = await prisma.rebalanceQueueEntry.findMany({
+      where: {
+        ...(vaultId ? { vaultId } : {}),
+        status: {
+          in: [REBALANCE_STATUS.PENDING, REBALANCE_STATUS.PROCESSING, REBALANCE_STATUS.FAILED],
+        },
+      },
+      select: {
+        status: true,
+        executionType: true,
+        attemptCount: true,
+        maxRetries: true,
+        nextRetryAt: true,
+        deferredUntil: true,
+      },
+    });
+
+    return summarizeQueueHealth(entries, now);
   }
 
   /**

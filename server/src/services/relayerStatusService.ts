@@ -42,6 +42,7 @@ const DEDUP_WINDOW_HOURS = 24;
 
 const events: RelayEvent[] = [];
 const seenHashes = new Map<string, number>(); // hash -> timestamp ms
+const seenFingerprints = new Map<string, number>(); // fingerprint -> timestamp ms
 const startedAt = Date.now();
 
 let pendingCount = 0;
@@ -98,6 +99,23 @@ export function recordRelayFailure(id: string, durationMs: number, error: string
 
 export function isHashSeen(hash: string): boolean {
   return seenHashes.has(hash);
+}
+
+/**
+ * Deterministic transaction fingerprint tracking (#1319).
+ *
+ * Complements the raw-XDR hash replay protection above: two submissions
+ * with different XDR encodings but the same semantic fields (sender,
+ * receiver, amount, asset, memo/nonce, timestamp bucket) will share a
+ * fingerprint and be flagged as duplicates.
+ */
+export function isFingerprintSeen(fingerprint: string): boolean {
+  pruneSeenFingerprints();
+  return seenFingerprints.has(fingerprint);
+}
+
+export function recordFingerprint(fingerprint: string): void {
+  seenFingerprints.set(fingerprint, Date.now());
 }
 
 export function getRelayerStatus(): RelayerStatus {
@@ -167,5 +185,12 @@ function pruneSeenHashes(): void {
   const cutoff = Date.now() - DEDUP_WINDOW_HOURS * 60 * 60 * 1000;
   for (const [hash, ts] of seenHashes) {
     if (ts < cutoff) seenHashes.delete(hash);
+  }
+}
+
+function pruneSeenFingerprints(): void {
+  const cutoff = Date.now() - DEDUP_WINDOW_HOURS * 60 * 60 * 1000;
+  for (const [fingerprint, ts] of seenFingerprints) {
+    if (ts < cutoff) seenFingerprints.delete(fingerprint);
   }
 }

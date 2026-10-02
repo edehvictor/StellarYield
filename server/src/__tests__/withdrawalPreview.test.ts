@@ -263,3 +263,92 @@ describe("withdrawal-preview — input validation", () => {
     expect(res.body.error).toBe("INVALID_FEE_BPS");
   });
 });
+
+// ── Balance reserve impact preview (#1321) ─────────────────────────────────
+
+describe("withdrawal-preview — reserve impact preview", () => {
+  it("omits reserveImpact when currentReserveUsd/vaultTvlUsd are not supplied", async () => {
+    const res = await post("usdc", {
+      amountUsd: 100,
+      poolLiquidityUsd: 1_000_000,
+    });
+    expect(res.status).toBe(200);
+    expect(res.body.reserveImpact).toBeUndefined();
+  });
+
+  it("computes reserveImpact when both reserve fields are supplied", async () => {
+    const res = await post("usdc", {
+      amountUsd: 10_000,
+      poolLiquidityUsd: 1_000_000,
+      currentReserveUsd: 50_000,
+      vaultTvlUsd: 500_000,
+    });
+
+    expect(res.status).toBe(200);
+    expect(res.body.reserveImpact).toMatchObject({
+      currentReserveRatioPct: 10,
+      minBufferPct: 8,
+    });
+    expect(res.body.reserveImpact.projectedReserveUsd).toBeCloseTo(40_000, 5);
+  });
+
+  it("flags breachesMinBuffer when the projected ratio falls below minBufferPct", async () => {
+    const res = await post("usdc", {
+      amountUsd: 90_000,
+      poolLiquidityUsd: 1_000_000,
+      currentReserveUsd: 100_000,
+      vaultTvlUsd: 500_000,
+      minBufferPct: 10,
+    });
+
+    expect(res.status).toBe(200);
+    // reserve: 100k -> 10k, tvl: 500k -> 410k => ~2.4% < 10% minBuffer
+    expect(res.body.reserveImpact.breachesMinBuffer).toBe(true);
+  });
+
+  it("does not flag breachesMinBuffer when the projected ratio stays healthy", async () => {
+    const res = await post("usdc", {
+      amountUsd: 1_000,
+      poolLiquidityUsd: 1_000_000,
+      currentReserveUsd: 100_000,
+      vaultTvlUsd: 500_000,
+    });
+
+    expect(res.status).toBe(200);
+    expect(res.body.reserveImpact.breachesMinBuffer).toBe(false);
+  });
+
+  it("rejects a negative currentReserveUsd with INVALID_RESERVE", async () => {
+    const res = await post("usdc", {
+      amountUsd: 100,
+      poolLiquidityUsd: 1_000_000,
+      currentReserveUsd: -1,
+      vaultTvlUsd: 500_000,
+    });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe("INVALID_RESERVE");
+  });
+
+  it("rejects a zero vaultTvlUsd with INVALID_TVL", async () => {
+    const res = await post("usdc", {
+      amountUsd: 100,
+      poolLiquidityUsd: 1_000_000,
+      currentReserveUsd: 1_000,
+      vaultTvlUsd: 0,
+    });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe("INVALID_TVL");
+  });
+
+  it("rejects an out-of-range minBufferPct with INVALID_MIN_BUFFER_PCT", async () => {
+    const res = await post("usdc", {
+      amountUsd: 100,
+      poolLiquidityUsd: 1_000_000,
+      currentReserveUsd: 1_000,
+      vaultTvlUsd: 500_000,
+      minBufferPct: 150,
+    });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe("INVALID_MIN_BUFFER_PCT");
+  });
+});

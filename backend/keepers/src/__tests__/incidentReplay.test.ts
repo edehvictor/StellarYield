@@ -3,8 +3,13 @@ import {
     analyzeKeeperAuditLogs,
     generateUserImpactSummary,
     validateIncidentExport,
+    detectReplayAnomalies,
     type IncidentExport,
 } from '../utils/incidentReplay';
+import cleanReplayFixture from './fixtures/incidents/clean-replay.json';
+import missingCheckpointFixture from './fixtures/incidents/missing-checkpoint.json';
+import outOfOrderFixture from './fixtures/incidents/out-of-order.json';
+import incompleteSequenceFixture from './fixtures/incidents/incomplete-sequence.json';
 
 describe('Incident Replay', () => {
     describe('exportIncidentEvents', () => {
@@ -64,9 +69,10 @@ describe('Incident Replay', () => {
                 events: [],
                 decisions: [],
                 anomalies: [],
+                replayAnomalies: [],
                 affectedVaults: ['vault_1', 'vault_2'],
                 affectedAccounts: ['acc_1', 'acc_2'],
-                summary: { eventCount: 0, decisionCount: 0, anomalyCount: 0 },
+                summary: { eventCount: 0, decisionCount: 0, anomalyCount: 0, replayAnomalyCount: 0 },
             };
 
             const impact = await generateUserImpactSummary('INC-001', mockExport);
@@ -100,9 +106,10 @@ describe('Incident Replay', () => {
                         details: 'Minor price deviation',
                     },
                 ],
+                replayAnomalies: [],
                 affectedVaults: [],
                 affectedAccounts: [],
-                summary: { eventCount: 0, decisionCount: 0, anomalyCount: 2 },
+                summary: { eventCount: 0, decisionCount: 0, anomalyCount: 2, replayAnomalyCount: 0 },
             };
 
             const impact = await generateUserImpactSummary('INC-001', mockExport);
@@ -115,14 +122,19 @@ describe('Incident Replay', () => {
     describe('validateIncidentExport', () => {
         it('validates correct export structure', () => {
             const validExport: IncidentExport = {
-                ledgerRange: { from: 50000000, to: 50001000 },
+                ledgerRange: { from: 50000000, to: 50000002 },
                 exportedAt: new Date().toISOString(),
-                events: [],
+                events: [
+                    { ledger: 50000000, timestamp: new Date().toISOString(), type: 'vault_state_change' },
+                    { ledger: 50000001, timestamp: new Date().toISOString(), type: 'price_update' },
+                    { ledger: 50000002, timestamp: new Date().toISOString(), type: 'vault_state_change' },
+                ],
                 decisions: [],
                 anomalies: [],
+                replayAnomalies: [],
                 affectedVaults: [],
                 affectedAccounts: [],
-                summary: { eventCount: 0, decisionCount: 0, anomalyCount: 0 },
+                summary: { eventCount: 3, decisionCount: 0, anomalyCount: 0, replayAnomalyCount: 0 },
             };
 
             const errors = validateIncidentExport(validExport);
@@ -151,9 +163,10 @@ describe('Incident Replay', () => {
                 events: [],
                 decisions: [],
                 anomalies: [],
+                replayAnomalies: [],
                 affectedVaults: [],
                 affectedAccounts: [],
-                summary: { eventCount: 0, decisionCount: 0, anomalyCount: 0 },
+                summary: { eventCount: 0, decisionCount: 0, anomalyCount: 0, replayAnomalyCount: 0 },
             };
 
             const errors = validateIncidentExport(invalidExport);
@@ -174,9 +187,10 @@ describe('Incident Replay', () => {
                 ],
                 decisions: [],
                 anomalies: [],
+                replayAnomalies: [],
                 affectedVaults: [],
                 affectedAccounts: [],
-                summary: { eventCount: 1, decisionCount: 0, anomalyCount: 0 },
+                summary: { eventCount: 1, decisionCount: 0, anomalyCount: 0, replayAnomalyCount: 0 },
             };
 
             const errors = validateIncidentExport(exportWithSecret);
@@ -190,9 +204,10 @@ describe('Incident Replay', () => {
                 events: 'not an array',
                 decisions: [],
                 anomalies: [],
+                replayAnomalies: [],
                 affectedVaults: [],
                 affectedAccounts: [],
-                summary: { eventCount: 0, decisionCount: 0, anomalyCount: 0 },
+                summary: { eventCount: 0, decisionCount: 0, anomalyCount: 0, replayAnomalyCount: 0 },
             };
 
             const errors = validateIncidentExport(invalidExport);
@@ -211,9 +226,85 @@ describe('Incident Replay', () => {
             expect(Array.isArray(decisions)).toBe(true);
             expect(impact.incidentId).toBe('INC-001');
 
-            // Validation should pass
+            // An export with no events over a ledger range is an incomplete
+            // replay, not a clean one — it must be surfaced explicitly.
+            expect(export_.replayAnomalies.length).toBeGreaterThan(0);
+            expect(export_.replayAnomalies[0].type).toBe('incomplete-sequence');
+            expect(export_.summary.replayAnomalyCount).toBe(export_.replayAnomalies.length);
+
             const errors = validateIncidentExport(export_);
-            expect(errors.length).toBe(0);
+            expect(errors.some((e) => e.includes('Replay incomplete-sequence'))).toBe(true);
+        });
+    });
+
+    describe('detectReplayAnomalies', () => {
+        it('reports no anomalies for a clean contiguous replay', () => {
+            const anomalies = detectReplayAnomalies(cleanReplayFixture as IncidentExport);
+
+            expect(anomalies).toEqual([]);
+        });
+
+        it('detects a missing checkpoint between consecutive events', () => {
+            const anomalies = detectReplayAnomalies(missingCheckpointFixture as IncidentExport);
+
+            expect(anomalies.length).toBeGreaterThan(0);
+            expect(anomalies.some((a) => a.type === 'missing-checkpoint')).toBe(true);
+            const missing = anomalies.find((a) => a.type === 'missing-checkpoint');
+            expect(missing?.expectedLedger).toBe(102);
+            expect(missing?.details).toMatch(/Missing checkpoint/);
+        });
+
+        it('detects out-of-order events in a replay sequence', () => {
+            const anomalies = detectReplayAnomalies(outOfOrderFixture as IncidentExport);
+
+            expect(anomalies.some((a) => a.type === 'out-of-order')).toBe(true);
+            const reordered = anomalies.find((a) => a.type === 'out-of-order');
+            expect(reordered?.ledger).toBe(101);
+        });
+
+        it('detects an incomplete replay sequence', () => {
+            const anomalies = detectReplayAnomalies(incompleteSequenceFixture as IncidentExport);
+
+            expect(anomalies.some((a) => a.type === 'incomplete-sequence')).toBe(true);
+            expect(anomalies.some((a) => a.details.includes('Replay starts at ledger 101'))).toBe(true);
+            expect(anomalies.some((a) => a.details.includes('Replay ends at ledger 103'))).toBe(true);
+        });
+
+        it('flags an export with no events as incomplete', () => {
+            const export_: IncidentExport = {
+                ledgerRange: { from: 100, to: 105 },
+                exportedAt: new Date().toISOString(),
+                events: [],
+                decisions: [],
+                anomalies: [],
+                replayAnomalies: [],
+                affectedVaults: [],
+                affectedAccounts: [],
+                summary: { eventCount: 0, decisionCount: 0, anomalyCount: 0, replayAnomalyCount: 0 },
+            };
+
+            const anomalies = detectReplayAnomalies(export_);
+            expect(anomalies).toHaveLength(1);
+            expect(anomalies[0].type).toBe('incomplete-sequence');
+            expect(anomalies[0].details).toMatch(/No events recorded/);
+        });
+    });
+
+    describe('Replay anomalies in operator-facing output', () => {
+        it('exportIncidentEvents surfaces replay anomalies instead of a clean replay', async () => {
+            const export_ = await exportIncidentEvents(100, 105);
+
+            expect(export_.replayAnomalies.length).toBeGreaterThan(0);
+            expect(export_.summary.replayAnomalyCount).toBe(export_.replayAnomalies.length);
+            expect(export_.replayAnomalies.every((a) => a.details.length > 0)).toBe(true);
+        });
+
+        it('validateIncidentExport rejects broken replay chains explicitly', () => {
+            const errors = validateIncidentExport(missingCheckpointFixture as IncidentExport);
+            expect(errors.some((e) => e.includes('Replay missing-checkpoint'))).toBe(true);
+
+            const cleanErrors = validateIncidentExport(cleanReplayFixture as IncidentExport);
+            expect(cleanErrors).toHaveLength(0);
         });
     });
 });

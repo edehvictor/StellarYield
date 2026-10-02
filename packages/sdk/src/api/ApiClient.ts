@@ -1,4 +1,13 @@
-import type { ApiConfig, ApiRequestOptions, ApiVaultData, HistoricalDataPoint } from "../types";
+import type {
+  ApiCachedGetOptions,
+  ApiCachedGetResult,
+  ApiCacheEntry,
+  ApiCacheStore,
+  ApiConfig,
+  ApiRequestOptions,
+  ApiVaultData,
+  HistoricalDataPoint,
+} from "../types";
 import {
   ApiCancelledError,
   ApiHttpError,
@@ -33,6 +42,29 @@ const DEFAULT_TIMEOUT_MS = 15_000;
 const DEFAULT_MAX_RETRIES = 2;
 const DEFAULT_RETRY_DELAY_MS = 250;
 const DEFAULT_RETRYABLE_STATUSES = [408, 429, 500, 502, 503, 504];
+const DEFAULT_CACHE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+
+/**
+ * Simple in-process cache store for environments without durable storage.
+ * Suitable for tests and short-lived processes.
+ */
+export function createMemoryCacheStore(): ApiCacheStore {
+  const map = new Map<string, string>();
+  return {
+    get<T>(key: string): ApiCacheEntry<T> | null {
+      const raw = map.get(key);
+      if (!raw) return null;
+      try {
+        return JSON.parse(raw) as ApiCacheEntry<T>;
+      } catch {
+        return null;
+      }
+    },
+    set<T>(key: string, entry: ApiCacheEntry<T>): void {
+      map.set(key, JSON.stringify(entry));
+    },
+  };
+}
 
 function sleep(ms: number, signal?: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
@@ -397,5 +429,75 @@ export class ApiClient {
       undefined,
       requestOptions
     );
+  }
+
+  /**
+   * GET with offline cache fallback (#1125).
+   *
+   * Successful responses are written to `config.cacheStore`. When the
+   * network fails (or times out) a fresh-enough cached entry is returned
+   * with `fromCache: true` / `offline: true` so callers can render an
+   * explicit offline indicator. Fresh responses always replace the cached
+   * copy, so reconnecting automatically serves up-to-date data again.
+   *
+   * Requires `config.cacheStore`; without one this behaves like a plain
+   * GET that reports errors instead of throwing when possible.
+   * Caller cancellation ({@link ApiCancelledError}) still throws.
+   */
+  async cachedGet<T>(
+    path: string,
+    options?: ApiCachedGetOptions
+  ): Promise<ApiCachedGetResult<T>> {
+    const store = this.config.cacheStore;
+    const key = `sy_api_get:${options?.cacheKey ?? path}`;
+    const maxAgeMs = options?.maxAgeMs ?? DEFAULT_CACHE_MAX_AGE_MS;
+
+    const readCached = async (): Promise<ApiCacheEntry<T> | null> => {
+      if (!store) return null;
+      const entry = await store.get<T>(key);
+      if (!entry || typeof entry.fetchedAt !== "number") return null;
+      if (Date.now() - entry.fetchedAt > maxAgeMs) return null;
+      return entry;
+    };
+
+    const cached = await readCached();
+
+    try {
+      const data = await this.request<T>(path, undefined, options);
+      const fetchedAt = Date.now();
+      if (store) {
+        try {
+          await store.set(key, { data, fetchedAt });
+        } catch {
+          // Cache write failures must not fail the request.
+        }
+      }
+      return { data, fetchedAt, fromCache: false, offline: false, error: null };
+    } catch (err) {
+      if (err instanceof ApiCancelledError) {
+        throw err;
+      }
+
+      const offline =
+        err instanceof ApiNetworkError || err instanceof ApiTimeoutError;
+
+      if (cached) {
+        return {
+          data: cached.data,
+          fetchedAt: cached.fetchedAt,
+          fromCache: true,
+          offline,
+          error: null,
+        };
+      }
+
+      return {
+        data: null,
+        fetchedAt: null,
+        fromCache: false,
+        offline,
+        error: err instanceof Error ? err.message : "Request failed",
+      };
+    }
   }
 }

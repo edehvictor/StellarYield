@@ -8,7 +8,8 @@
     "smoke-test:portable": "node scripts/smoke-test.js",
     "validate-workspace": "node scripts/validate-workspace.js",
     "test:provenance": "vitest run tests/services/provenance.test.ts --coverage",
-    "setup:doctor": "node scripts/setup-doctor.js"
+    "setup:doctor": "node scripts/setup-doctor.js",
+    "deployment:manifest:diff": "node scripts/compare-deployment-manifests.js"
   },
   "dependencies": {
     "@tailwindcss/vite": "^4.2.1",

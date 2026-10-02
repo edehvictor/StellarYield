@@ -9,6 +9,20 @@ import {
   ALERT_THRESHOLD_REASON_DESCRIPTIONS,
   type AlertThresholdRecommendationInput,
 } from "../alertsPreferenceRules";
+import {
+  recordPreferenceChange,
+  getPreferenceAuditHistory,
+  getAuditEntryById,
+  findRevertTarget,
+  resetAuditStore,
+  getAuditEntryCount,
+} from "../alertPreferenceAuditService";
+import {
+  updateAlertPreferences,
+  getAlertPreferences,
+  revertAlertPreferences,
+  resetAlertPreferencesStore,
+} from "../alertsService";
 
 describe("alert preference suppression rules", () => {
   const prefs = {
@@ -216,6 +230,405 @@ describe("Deterministic Alert Threshold Recommendations", () => {
 
       expect(getAlertThresholdRecommendation(wallet, vault)).toBeUndefined();
       expect(getAlertThresholdRecommendationHistory(wallet, vault)).toEqual([]);
+    });
+  });
+});
+
+describe("Alert Preference Audit Trail", () => {
+  beforeEach(() => {
+    resetAuditStore();
+  });
+
+  const samplePrefs = {
+    channel: "email" as const,
+    cooldownMinutes: 60,
+    severityThreshold: 5,
+    quietHoursStart: 23,
+    quietHoursEnd: 6,
+  };
+
+  describe("recordPreferenceChange", () => {
+    it("should record an audit entry with all required fields", () => {
+      const entry = recordPreferenceChange({
+        walletAddress: "GWALLET1",
+        vaultId: "Blend",
+        actor: "GWALLET1",
+        source: "api",
+        before: null,
+        after: samplePrefs,
+        reason: "Initial setup",
+      });
+
+      expect(entry.id).toMatch(/^audit-\d+$/);
+      expect(entry.walletAddress).toBe("GWALLET1");
+      expect(entry.vaultId).toBe("Blend");
+      expect(entry.actor).toBe("GWALLET1");
+      expect(entry.source).toBe("api");
+      expect(entry.before).toBeNull();
+      expect(entry.after).toEqual(samplePrefs);
+      expect(entry.reason).toBe("Initial setup");
+      expect(typeof entry.timestamp).toBe("string");
+      expect(new Date(entry.timestamp).toISOString()).toBe(entry.timestamp);
+    });
+
+    it('should record entry with "before" snapshot on update', () => {
+      const updatedPrefs = { ...samplePrefs, cooldownMinutes: 120 };
+      const entry = recordPreferenceChange({
+        walletAddress: "GWALLET1",
+        vaultId: "Blend",
+        actor: "GWALLET1",
+        source: "api",
+        before: samplePrefs,
+        after: updatedPrefs,
+      });
+
+      expect(entry.before).toEqual(samplePrefs);
+      expect(entry.after.cooldownMinutes).toBe(120);
+    });
+
+    it("should use unique IDs for each entry", () => {
+      const entry1 = recordPreferenceChange({
+        walletAddress: "GWALLET1",
+        vaultId: "Blend",
+        actor: "GWALLET1",
+        source: "api",
+        before: null,
+        after: samplePrefs,
+      });
+      const entry2 = recordPreferenceChange({
+        walletAddress: "GWALLET1",
+        vaultId: "Blend",
+        actor: "GWALLET1",
+        source: "api",
+        before: samplePrefs,
+        after: samplePrefs,
+      });
+
+      expect(entry1.id).not.toBe(entry2.id);
+    });
+
+    it("should support all audit sources", () => {
+      for (const source of ["api", "system", "admin", "revert"] as const) {
+        const entry = recordPreferenceChange({
+          walletAddress: "GWALLET1",
+          vaultId: "Blend",
+          actor: "actor",
+          source,
+          before: null,
+          after: samplePrefs,
+        });
+        expect(entry.source).toBe(source);
+      }
+    });
+  });
+
+  describe("getPreferenceAuditHistory", () => {
+    it("should return empty array when no entries exist", () => {
+      const history = getPreferenceAuditHistory("GWALLET1", "Blend");
+      expect(history).toEqual([]);
+    });
+
+    it("should return entries in newest-first order", () => {
+      const prefs1 = { ...samplePrefs, cooldownMinutes: 30 };
+      const prefs2 = { ...samplePrefs, cooldownMinutes: 90 };
+
+      recordPreferenceChange({
+        walletAddress: "GWALLET1",
+        vaultId: "Blend",
+        actor: "GWALLET1",
+        source: "api",
+        before: null,
+        after: prefs1,
+      });
+      recordPreferenceChange({
+        walletAddress: "GWALLET1",
+        vaultId: "Blend",
+        actor: "GWALLET1",
+        source: "api",
+        before: prefs1,
+        after: prefs2,
+      });
+
+      const history = getPreferenceAuditHistory("GWALLET1", "Blend");
+      expect(history).toHaveLength(2);
+      expect(history[0].after.cooldownMinutes).toBe(90);
+      expect(history[1].after.cooldownMinutes).toBe(30);
+    });
+
+    it("should isolate histories by wallet+vault pair", () => {
+      recordPreferenceChange({
+        walletAddress: "GWALLET1",
+        vaultId: "Blend",
+        actor: "GWALLET1",
+        source: "api",
+        before: null,
+        after: samplePrefs,
+      });
+      recordPreferenceChange({
+        walletAddress: "GWALLET2",
+        vaultId: "Blend",
+        actor: "GWALLET2",
+        source: "api",
+        before: null,
+        after: samplePrefs,
+      });
+
+      expect(getPreferenceAuditHistory("GWALLET1", "Blend")).toHaveLength(1);
+      expect(getPreferenceAuditHistory("GWALLET2", "Blend")).toHaveLength(1);
+      expect(getPreferenceAuditHistory("GWALLET1", "Soroswap")).toHaveLength(0);
+    });
+  });
+
+  describe("getAuditEntryById", () => {
+    it("should find an entry by its ID", () => {
+      const entry = recordPreferenceChange({
+        walletAddress: "GWALLET1",
+        vaultId: "Blend",
+        actor: "GWALLET1",
+        source: "api",
+        before: null,
+        after: samplePrefs,
+      });
+
+      const found = getAuditEntryById("GWALLET1", "Blend", entry.id);
+      expect(found).toBeDefined();
+      expect(found?.id).toBe(entry.id);
+    });
+
+    it("should return undefined for non-existent entry", () => {
+      const found = getAuditEntryById("GWALLET1", "Blend", "audit-9999");
+      expect(found).toBeUndefined();
+    });
+  });
+
+  describe("findRevertTarget", () => {
+    it("should return undefined when fewer than 2 entries exist", () => {
+      recordPreferenceChange({
+        walletAddress: "GWALLET1",
+        vaultId: "Blend",
+        actor: "GWALLET1",
+        source: "api",
+        before: null,
+        after: samplePrefs,
+      });
+
+      expect(findRevertTarget("GWALLET1", "Blend")).toBeUndefined();
+    });
+
+    it("should return the second entry as the revert target", () => {
+      const prefs1 = { ...samplePrefs, cooldownMinutes: 30 };
+      const prefs2 = { ...samplePrefs, cooldownMinutes: 90 };
+
+      recordPreferenceChange({
+        walletAddress: "GWALLET1",
+        vaultId: "Blend",
+        actor: "GWALLET1",
+        source: "api",
+        before: null,
+        after: prefs1,
+      });
+      recordPreferenceChange({
+        walletAddress: "GWALLET1",
+        vaultId: "Blend",
+        actor: "GWALLET1",
+        source: "api",
+        before: prefs1,
+        after: prefs2,
+      });
+
+      const target = findRevertTarget("GWALLET1", "Blend");
+      expect(target).toBeDefined();
+      expect(target?.after.cooldownMinutes).toBe(30);
+    });
+  });
+
+  describe("resetAuditStore", () => {
+    it("should clear all entries and reset ID counter", () => {
+      recordPreferenceChange({
+        walletAddress: "GWALLET1",
+        vaultId: "Blend",
+        actor: "GWALLET1",
+        source: "api",
+        before: null,
+        after: samplePrefs,
+      });
+
+      resetAuditStore();
+      expect(getPreferenceAuditHistory("GWALLET1", "Blend")).toEqual([]);
+    });
+  });
+
+  describe("getAuditEntryCount", () => {
+    it("should return 0 for empty store", () => {
+      expect(getAuditEntryCount("GWALLET1", "Blend")).toBe(0);
+    });
+
+    it("should return correct count after entries are added", () => {
+      recordPreferenceChange({
+        walletAddress: "GWALLET1",
+        vaultId: "Blend",
+        actor: "GWALLET1",
+        source: "api",
+        before: null,
+        after: samplePrefs,
+      });
+      recordPreferenceChange({
+        walletAddress: "GWALLET1",
+        vaultId: "Blend",
+        actor: "GWALLET1",
+        source: "api",
+        before: samplePrefs,
+        after: samplePrefs,
+      });
+
+      expect(getAuditEntryCount("GWALLET1", "Blend")).toBe(2);
+    });
+  });
+});
+
+describe("Preference Update, Revert, and Audit Integration", () => {
+  const wallet = "GWALLET_AUDIT";
+  const vault = "usdc-vault";
+  const samplePrefs = {
+    channel: "email" as const,
+    cooldownMinutes: 60,
+    severityThreshold: 5,
+    quietHoursStart: 23,
+    quietHoursEnd: 6,
+  };
+
+  beforeEach(() => {
+    resetAuditStore();
+    resetAlertPreferencesStore();
+  });
+
+  describe("updateAlertPreferences", () => {
+    it("should store preferences and create an audit entry", () => {
+      const result = updateAlertPreferences(wallet, vault, samplePrefs, {
+        actor: wallet,
+        source: "api",
+        reason: "Initial setup",
+      });
+
+      expect(result.preferences).toEqual(samplePrefs);
+      expect(result.auditEntry.before).toBeNull();
+      expect(result.auditEntry.after).toEqual(samplePrefs);
+      expect(result.auditEntry.source).toBe("api");
+      expect(result.auditEntry.reason).toBe("Initial setup");
+    });
+
+    it("should record previous state when updating existing preferences", () => {
+      updateAlertPreferences(wallet, vault, samplePrefs, {
+        actor: wallet,
+        source: "api",
+      });
+
+      const updated = { ...samplePrefs, cooldownMinutes: 120 };
+      const result = updateAlertPreferences(wallet, vault, updated, {
+        actor: wallet,
+        source: "api",
+        reason: "Increased cooldown",
+      });
+
+      expect(result.auditEntry.before).toEqual(samplePrefs);
+      expect(result.auditEntry.after.cooldownMinutes).toBe(120);
+    });
+
+    it('should default source to "api" and actor to walletAddress', () => {
+      const result = updateAlertPreferences(wallet, vault, samplePrefs);
+      expect(result.auditEntry.source).toBe("api");
+      expect(result.auditEntry.actor).toBe(wallet);
+    });
+
+    it("should allow overriding actor and source", () => {
+      const result = updateAlertPreferences(wallet, vault, samplePrefs, {
+        actor: "system",
+        source: "system",
+      });
+      expect(result.auditEntry.actor).toBe("system");
+      expect(result.auditEntry.source).toBe("system");
+    });
+  });
+
+  describe("getAlertPreferences", () => {
+    it("should return undefined when no preferences exist", () => {
+      expect(getAlertPreferences(wallet, vault)).toBeUndefined();
+    });
+
+    it("should return stored preferences after update", () => {
+      updateAlertPreferences(wallet, vault, samplePrefs);
+      expect(getAlertPreferences(wallet, vault)).toEqual(samplePrefs);
+    });
+  });
+
+  describe("revertAlertPreferences", () => {
+    it("should revert to the previous preference snapshot", () => {
+      updateAlertPreferences(wallet, vault, samplePrefs);
+      const updated = { ...samplePrefs, cooldownMinutes: 180 };
+      updateAlertPreferences(wallet, vault, updated);
+
+      const result = revertAlertPreferences(wallet, vault);
+      expect(result.preferences.cooldownMinutes).toBe(60);
+      expect(result.auditEntry.source).toBe("revert");
+    });
+
+    it("should record the revert in audit history", () => {
+      updateAlertPreferences(wallet, vault, samplePrefs);
+      updateAlertPreferences(wallet, vault, { ...samplePrefs, cooldownMinutes: 180 });
+      revertAlertPreferences(wallet, vault);
+
+      const history = getPreferenceAuditHistory(wallet, vault);
+      // Newest first: revert, update, initial
+      expect(history).toHaveLength(3);
+      expect(history[0].source).toBe("revert");
+      expect(history[0].after.cooldownMinutes).toBe(60);
+      expect(history[0].before?.cooldownMinutes).toBe(180);
+    });
+
+    it("should revert to a specific audit entry by ID", () => {
+      updateAlertPreferences(wallet, vault, samplePrefs);
+      const entry2 = updateAlertPreferences(
+        wallet,
+        vault,
+        { ...samplePrefs, cooldownMinutes: 120 },
+      );
+      updateAlertPreferences(wallet, vault, { ...samplePrefs, cooldownMinutes: 180 });
+
+      const result = revertAlertPreferences(wallet, vault, entry2.auditEntry.id);
+      expect(result.preferences.cooldownMinutes).toBe(120);
+    });
+
+    it("should throw when no previous snapshot exists to revert to", () => {
+      updateAlertPreferences(wallet, vault, samplePrefs);
+      // Only one entry — no previous to revert to
+      expect(() => revertAlertPreferences(wallet, vault)).toThrow(
+        "No previous preference snapshot to revert to",
+      );
+    });
+
+    it("should throw when the target entry ID does not exist", () => {
+      updateAlertPreferences(wallet, vault, samplePrefs);
+      expect(() => revertAlertPreferences(wallet, vault, "audit-nonexistent")).toThrow(
+        "Audit entry audit-nonexistent not found",
+      );
+    });
+
+    it("should allow multiple consecutive reverts creating a full audit trail", () => {
+      const prefs1 = { ...samplePrefs, cooldownMinutes: 30 };
+      const prefs2 = { ...samplePrefs, cooldownMinutes: 90 };
+
+      updateAlertPreferences(wallet, vault, prefs1);
+      updateAlertPreferences(wallet, vault, prefs2);
+      revertAlertPreferences(wallet, vault); // back to prefs1
+      revertAlertPreferences(wallet, vault); // back to prefs2 (before prefs1)
+
+      const history = getPreferenceAuditHistory(wallet, vault);
+      expect(history).toHaveLength(4);
+      // Newest first: revert(prefs2), revert(prefs1), update(prefs2), initial(prefs1)
+      expect(history[0].source).toBe("revert");
+      expect(history[0].after.cooldownMinutes).toBe(90);
+      expect(history[1].source).toBe("revert");
+      expect(history[1].after.cooldownMinutes).toBe(30);
     });
   });
 });

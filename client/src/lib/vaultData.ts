@@ -16,6 +16,13 @@ export const VAULT_REGISTRY: Record<string, { name: string; asset: string; proto
   bluechip:   { name: "Blue Chip Vault",     asset: "Blue Chip",  protocol: "DeFindex" },
 };
 
+/** A single recorded protocol fee change (#1147). */
+export interface ProtocolFeeSnapshot {
+  /** Combined management + performance fee, in basis points. */
+  feeBps: number;
+  changedAt: string;
+}
+
 export interface VaultStats {
   name: string;
   asset: string;
@@ -26,6 +33,8 @@ export interface VaultStats {
   risk: string;
   /** Whether the data came from the live API (true) or fallback defaults (false). */
   live: boolean;
+  /** Recent protocol fee changes, newest-first (#1147). Empty when none recorded or unavailable. */
+  feeHistory: ProtocolFeeSnapshot[];
 }
 
 interface YieldsApiEntry {
@@ -34,6 +43,7 @@ interface YieldsApiEntry {
   apy: number;
   tvl: number;
   risk: string;
+  feeHistory?: ProtocolFeeSnapshot[];
 }
 
 export interface VaultValidationResult {
@@ -89,11 +99,15 @@ export async function fetchVaultStats(
       tvl: entry?.tvl ?? 0,
       risk: entry?.risk ?? "Unknown",
       live: !!entry,
+      // Server always sends an array; default to empty when the server
+      // response is missing/malformed the field, or when no entry matched
+      // at all, so callers never need a null-check.
+      feeHistory: Array.isArray(entry?.feeHistory) ? entry.feeHistory : [],
     };
   } catch (error) {
     console.error("Error fetching vault stats:", error);
     // Graceful degradation: return meta with zeroed stats, marked as not live
-    return { ...meta, apy: 0, tvl: 0, risk: "Unknown", live: false };
+    return { ...meta, apy: 0, tvl: 0, risk: "Unknown", live: false, feeHistory: [] };
   }
 }
 

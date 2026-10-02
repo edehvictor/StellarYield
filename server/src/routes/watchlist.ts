@@ -86,6 +86,7 @@ router.post("/", async (req: Request, res: Response) => {
       opportunityName,
       currentApy,
       currentTvl,
+      baselineApy,
     } = req.body;
 
     if (!opportunityId || !opportunityType || !opportunityName) {
@@ -101,7 +102,8 @@ router.post("/", async (req: Request, res: Response) => {
       opportunityType,
       opportunityName,
       currentApy || 0,
-      currentTvl || 0
+      currentTvl || 0,
+      typeof baselineApy === "number" ? baselineApy : undefined
     );
 
     res.status(201).json(item);
@@ -149,6 +151,26 @@ router.post("/:itemId/rules", async (req: Request, res: Response) => {
     if (!type || typeof value !== "number") {
       res.status(400).json({
         error: "Missing or invalid required fields: type (string), value (number)",
+      });
+      return;
+    }
+
+    const allowedTypes = [
+      "apy_above",
+      "apy_below",
+      "tvl_above",
+      "tvl_below",
+      "spread_change_above",
+      "apy_drop_pct",
+    ];
+    if (!allowedTypes.includes(type)) {
+      res.status(400).json({ error: `Unsupported rule type: ${type}` });
+      return;
+    }
+
+    if (type === "apy_drop_pct" && (value <= 0 || value > 100)) {
+      res.status(400).json({
+        error: "apy_drop_pct value must be between 0 and 100 (exclusive of 0)",
       });
       return;
     }

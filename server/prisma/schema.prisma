@@ -657,6 +657,32 @@ model IndexerContinuityCheck {
   @@index([checkType, checkedAt])
 }
 
+// ── Gap Repair Run Summaries (Issue #1154) ─────────────────────────────────
+
+model IndexerRepairRun {
+  id                   String   @id @default(uuid())
+  /// Start checkpoint of the scanned ledger range.
+  startLedger          Int
+  /// End checkpoint of the scanned ledger range.
+  endLedger            Int
+  /// Dead-letter events replayed successfully during this run.
+  restoredCount        Int      @default(0)
+  /// Dead-letter events already resolved before this run (no action needed).
+  skippedCount         Int      @default(0)
+  /// Dead-letter events still unresolved after this run.
+  stillMissingCount    Int      @default(0)
+  /// completed | failed
+  status               String
+  /// Typed failure reason for failed runs (e.g. REPLAY_ERROR).
+  failureReasonCode    String?
+  failureReasonMessage String?
+  startedAt            DateTime @default(now())
+  finishedAt           DateTime?
+
+  @@index([startedAt])
+  @@index([status, startedAt])
+}
+
 // ── Per-Contract Cursor Models (Issue #888) ─────────────────────────────────
 
 model ContractIndexerCursor {
@@ -750,4 +776,55 @@ model ProjectionAuditLog {
   @@index([projectionVersionId])
   @@index([vaultId, auditType, auditedAt])
   @@index([hasDrift, auditedAt])
+}
+
+/// Durable, hash-chained record of admin/critical actions (#1329). Mirrors
+/// AuditLogEntry (server/src/middleware/audit.ts), which already computes
+/// the hash chain and HMAC signature; this model is a persistence layer for
+/// it, since that file previously only wrote to an in-memory array and a
+/// local JSONL file (lost on redeploy).
+model CriticalActionAuditLog {
+  id             String   @id
+  timestamp      DateTime
+  userId         String
+  userEmail      String?
+  action         String
+  resource       String
+  resourceId     String?
+  method         String
+  endpoint       String
+  status         Int
+  changes        Json?
+  ipAddress      String
+  userAgent      String
+  previousHash   String
+  hash           String   @unique
+  signature      String?
+  confirmationText String?
+  cancelled      Boolean  @default(false)
+
+  @@index([timestamp])
+  @@index([userId, timestamp])
+  @@index([action, timestamp])
+}
+
+// ── Treasury Rebalance Simulation Snapshots (Issue #1419) ───────────────────
+//
+// `treasurySimulationService`'s scenarioStore only persists simulation
+// *inputs* (and only in-memory). This model persists a point-in-time
+// snapshot of a simulation *result*, so "what did we predict for this
+// allocation on this date" survives a restart and can be compared against
+// what actually happened later.
+
+model RebalanceSimulationSnapshot {
+  id            String   @id @default(uuid())
+  scenarioId    String?  // links back to a saved TreasuryScenario, if the run was saved
+  scenarioLabel String?
+  inputs        Json     // the TreasuryScenario the snapshot was computed from
+  result        Json     // the full SimulationResult at the time of the run
+  createdBy     String?
+  createdAt     DateTime @default(now())
+
+  @@index([scenarioId, createdAt])
+  @@index([createdAt])
 }

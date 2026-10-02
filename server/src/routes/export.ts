@@ -7,7 +7,8 @@ import {
   previewToCsvRecords,
   type RawTaxTransaction,
 } from "../services/export";
-import { sendError } from "../utils/errorResponse";
+import { exportService } from "../services/exportService";
+import { sendExportError } from "../utils/errorResponse";
 import { validateWalletAddress } from "../middleware/validation";
 import { safeWalletId } from "../utils/redact";
 
@@ -121,7 +122,11 @@ exportRouter.get(
     try {
       const fetched = await fetchRawTransactions(address);
       if (fetched.status === "error") {
-        sendError(res, fetched.httpCode, fetched.errorCode, fetched.message);
+        sendExportError(res, null, {
+          statusCode: fetched.httpCode,
+          code: fetched.errorCode,
+          message: fetched.message,
+        });
         return;
       }
       const preview = buildTaxLotPreview(fetched.rawTxs);
@@ -132,12 +137,11 @@ exportRouter.get(
         encodeURIComponent(address),
         error,
       );
-      sendError(
-        res,
-        500,
-        "EXPORT_PREVIEW_FAILED",
-        "Failed to build tax export preview.",
-      );
+      sendExportError(res, error, {
+        statusCode: 500,
+        code: "EXPORT_PREVIEW_FAILED",
+        message: "Failed to build tax export preview.",
+      });
     }
   },
 );
@@ -163,22 +167,45 @@ exportRouter.get(
     try {
       const fetched = await fetchRawTransactions(address);
       if (fetched.status === "error") {
-        sendError(res, fetched.httpCode, fetched.errorCode, fetched.message);
+        sendExportError(res, null, {
+          statusCode: fetched.httpCode,
+          code: fetched.errorCode,
+          message: fetched.message,
+        });
         return;
       }
 
       const preview = buildTaxLotPreview(fetched.rawTxs);
       if (!preview.canDownload) {
-        sendError(
-          res,
-          409,
-          "PREVIEW_WARNINGS_PRESENT",
-          "Tax export has blocking warnings; resolve them via the preview endpoint before downloading.",
-        );
+        sendExportError(res, null, {
+          statusCode: 409,
+          code: "PREVIEW_WARNINGS_PRESENT",
+          message: "Tax export has blocking warnings; resolve them via the preview endpoint before downloading.",
+        });
         return;
       }
 
       const records = previewToCsvRecords(preview);
+
+      // --- Idempotency key handling ---
+      const idempotencyKey = req.headers["idempotency-key"] as string | undefined;
+      const idempotencyParams = { address, type: "csv-export" };
+      if (idempotencyKey) {
+        const check = exportService.checkIdempotency(idempotencyKey, idempotencyParams);
+        if (check.status === "mismatch") {
+          sendExportError(res, null, {
+            statusCode: 422,
+            code: "IDEMPOTENCY_KEY_MISMATCH",
+            message: "The idempotency key has already been used with different parameters.",
+          });
+          return;
+        }
+        if (check.status === "hit" && check.result) {
+          res.setHeader("Idempotent-Replayed", "true");
+          res.status(200).json({ replayed: true });
+          return;
+        }
+      }
 
       const filename = createExportFilename(address);
       res.setHeader("Content-Type", "text/csv; charset=utf-8");
@@ -189,9 +216,22 @@ exportRouter.get(
 
       const csvStream = createCSVStream(records);
       csvStream.pipe(res);
+
+      // Store the result for future idempotent replays
+      if (idempotencyKey) {
+        exportService.storeIdempotentResult(
+          idempotencyKey,
+          idempotencyParams,
+          { version: "1.0.0", generatedAt: new Date().toISOString(), timestamp: new Date().toISOString(), appVersion: "1.0.0", opportunities: [], metadata: { totalOpportunities: 0, scoringMethodology: "csv-export", sourceFreshness: 0, filtersApplied: { address } } },
+        );
+      }
     } catch (error) {
       console.error("[export] Failed to export data for: %s", safeWalletId(address), error);
-      sendError(res, 500, "EXPORT_FAILED", "Failed to generate export.");
+      sendExportError(res, error, {
+        statusCode: 500,
+        code: "EXPORT_FAILED",
+        message: "Failed to generate export.",
+      });
     }
   },
 );

@@ -128,8 +128,8 @@ describe('StrategyComparison Component', () => {
     render(<StrategyComparison />);
 
     await waitFor(() => {
-      expect(screen.getByText('Failed to Load Strategy Data')).toBeInTheDocument();
-      expect(screen.getByText('Network offline')).toBeInTheDocument();
+      expect(screen.getByText('Strategy Comparison Temporarily Unavailable')).toBeInTheDocument();
+      expect(screen.getByText('The backend service is currently disconnected or unavailable. Please try again later.')).toBeInTheDocument();
     });
   });
 

@@ -27,20 +27,22 @@ import {
 import { getApiBaseUrl } from "../../lib/api";
 import { parseSmokeRunResult } from "./smokeResults";
 import VaultReliabilityPanel from "./VaultReliabilityPanel";
+import VaultSharePriceReconcilePanel from "../../features/vault_share_price/VaultSharePriceReconcilePanel";
 import AuditReplayReportPanel from "./AuditReplayReportPanel";
 import RegistryDiffPage from "./RegistryDiff";
+import DeploymentManifestVerifier from "../../components/DeploymentManifestVerifier";
 import registryJson from "../../../../contracts/registry.json";
 import prevRegistryJson from "../../../../contracts/registry.previous.json";
 import {
-  assessRegistryFromRecords,
-  getStateLabel,
-  getSubsystemLabel,
-  mapIndexerStatus,
-  mapRelayerStatus,
-  mapSmokeTestStatus,
-  summarizeTransparencyHealth,
-  type SubsystemState,
-  type TransparencyHealthSummary,
+    assessRegistryFromRecords,
+    getStateLabel,
+    getSubsystemLabel,
+    mapIndexerStatus,
+    mapRelayerStatus,
+    mapSmokeTestStatus,
+    summarizeTransparencyHealth,
+    type SubsystemState,
+    type TransparencyHealthSummary,
 } from "./transparencyServiceHealth";
 
 const getApiBase = () => {
@@ -516,7 +518,9 @@ export default function TransparencyDashboard() {
 
             {/* Data Source Reliability */}
             <VaultReliabilityPanel />
+            <VaultSharePriceReconcilePanel />
             <AuditReplayReportPanel />
+            <DeploymentManifestVerifier />
             <RegistryDiffPage />
         </div>
     );

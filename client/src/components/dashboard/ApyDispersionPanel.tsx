@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { BarChart3, AlertTriangle, RefreshCw, CheckCircle, MinusCircle, XCircle, Info } from 'lucide-react';
 import { formatApy, formatApyDeviation } from '../../lib/apyFormat';
+import { stableSort } from '../../lib/stableSort';
 
 interface DispersionSource {
   provider: string;
@@ -147,7 +148,11 @@ export default function ApyDispersionPanel({ strategyId = 'blend-usdc', strategy
       </div>
 
       <div className="space-y-1.5">
-        {dispersion.sources.map((source) => (
+        {stableSort(
+          dispersion.sources,
+          (a, b) => b.apy - a.apy,
+          (source) => source.provider,
+        ).map((source) => (
           <div
             key={source.provider}
             className="flex items-center justify-between py-2 px-2.5 rounded-lg bg-white/5"

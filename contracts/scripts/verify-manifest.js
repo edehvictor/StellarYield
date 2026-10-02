@@ -26,10 +26,17 @@
  *               (default: contracts/registry.json relative to this script)
  *   --network   Network name: testnet | mainnet | local
  *               (default: taken from manifest.network)
+ *   --schema    Path to the JSON Schema to validate the manifest against
+ *               (default: contracts/scripts/manifest-schema.json relative to
+ *               this script). Pass "none" to skip schema validation.
+ *
+ * Validation order: provenance metadata first, then JSON-Schema conformance,
+ * then drift comparison against the registry. Exit 1 on the first failing
+ * stage so CI failures are unambiguous.
  *
  * Exit codes:
  *   0 — manifest absent (skip) or all entries agree
- *   1 — malformed provenance or one or more drift issues found
+ *   1 — malformed provenance, schema non-conformance, or one or more drift issues
  */
 
 "use strict";
@@ -165,6 +172,110 @@ function validateProvenance(manifest, selectedNetwork) {
 }
 
 // ---------------------------------------------------------------------------
+// Minimal JSON Schema (draft-07 subset) validation
+// ---------------------------------------------------------------------------
+// Supports the constructs used by manifest-schema.json: type (incl. union),
+// properties, required, additionalProperties, minProperties, const, enum,
+// pattern, minLength, and items. No external validator dependency is required.
+const VALIDATOR_SCHEMA_DEFAULT = path.join(__dirname, "manifest-schema.json");
+
+function validateSchemaInstance(instance, schema, pathStr = "$") {
+  const errors = [];
+
+  if (schema.type !== undefined) {
+    const types = Array.isArray(schema.type) ? schema.type : [schema.type];
+    const got =
+      instance === null ? "null" : Array.isArray(instance) ? "array" : typeof instance;
+    if (!types.includes(got)) {
+      errors.push({ path: pathStr, message: `expected type ${types.join(" | ")} but got ${got}` });
+      return errors;
+    }
+    if (types.includes("null") && instance === null) return errors;
+  }
+  if (instance === null) return errors;
+
+  if (typeof instance === "string") {
+    if (typeof schema.minLength === "number" && instance.length < schema.minLength) {
+      errors.push({ path: pathStr, message: `length ${instance.length} is less than minLength ${schema.minLength}` });
+    }
+    if (schema.pattern) {
+      try {
+        if (!new RegExp(schema.pattern).test(instance)) {
+          errors.push({ path: pathStr, message: `value does not match pattern ${schema.pattern}` });
+        }
+      } catch {
+        errors.push({ path: pathStr, message: "schema pattern is not a valid regular expression" });
+      }
+    }
+  }
+
+  if (schema.const !== undefined && instance !== schema.const) {
+    errors.push({ path: pathStr, message: `expected const ${JSON.stringify(schema.const)} but got ${JSON.stringify(instance)}` });
+  }
+  if (schema.enum !== undefined && !schema.enum.includes(instance)) {
+    errors.push({ path: pathStr, message: `value must be one of [${schema.enum.map((v) => JSON.stringify(v)).join(", ")}]` });
+  }
+
+  if (Array.isArray(instance)) {
+    if (schema.items) {
+      instance.forEach((item, index) => {
+        errors.push(...validateSchemaInstance(item, schema.items, `${pathStr}[${index}]`));
+      });
+    }
+    return errors;
+  }
+
+  if (typeof instance === "object") {
+    for (const prop of schema.required ?? []) {
+      if (!Object.prototype.hasOwnProperty.call(instance, prop)) {
+        errors.push({ path: pathStr, message: `missing required property "${prop}"` });
+      }
+    }
+    if (typeof schema.minProperties === "number" && Object.keys(instance).length < schema.minProperties) {
+      errors.push({ path: pathStr, message: `object has fewer than ${schema.minProperties} properties` });
+    }
+    for (const [key, value] of Object.entries(instance)) {
+      const propSchema =
+        schema.properties && Object.prototype.hasOwnProperty.call(schema.properties, key)
+          ? schema.properties[key]
+          : undefined;
+      if (propSchema) {
+        errors.push(...validateSchemaInstance(value, propSchema, `${pathStr}.${key}`));
+      } else if (schema.additionalProperties === false) {
+        errors.push({ path: pathStr, message: `additional property "${key}" is not allowed` });
+      } else if (
+        schema.additionalProperties &&
+        typeof schema.additionalProperties === "object"
+      ) {
+        errors.push(...validateSchemaInstance(value, schema.additionalProperties, `${pathStr}.${key}`));
+      }
+    }
+  }
+
+  return errors;
+}
+
+function validateManifestAgainstSchema(manifest, schemaPath) {
+  if (!fs.existsSync(schemaPath)) {
+    return [
+      {
+        path: "$",
+        message: `schema file not found at ${schemaPath} (use --schema <path> or --schema none to skip)`,
+      },
+    ];
+  }
+
+  let schema;
+  try {
+    schema = JSON.parse(fs.readFileSync(schemaPath, "utf8"));
+  } catch (err) {
+    return [{ path: "$", message: `schema file ${schemaPath} is not valid JSON: ${err.message}` }];
+  }
+
+  return validateSchemaInstance(manifest, schema);
+}
+
+// ---------------------------------------------------------------------------
 // CLI argument parsing
 // ---------------------------------------------------------------------------
 function parseArgs(argv) {
@@ -227,6 +338,19 @@ function main() {
     process.exit(1);
   }
 
+  // Schema conformance check (after provenance, before drift).
+  const schemaPath = args.schema === undefined ? VALIDATOR_SCHEMA_DEFAULT : args.schema;
+  if (schemaPath !== "none") {
+    const schemaErrors = validateManifestAgainstSchema(manifest, schemaPath);
+    if (schemaErrors.length > 0) {
+      console.error("ERROR: manifest does not conform to the deployment manifest schema:");
+      for (const error of schemaErrors) {
+        console.error(`  - ${error.path}: ${error.message}`);
+      }
+      process.exit(1);
+    }
+  }
+
   // Load registry
   if (!fs.existsSync(registryPath)) {
     console.error(`ERROR: registry.json not found at ${registryPath}`);
@@ -250,6 +374,7 @@ function main() {
   console.log(`--- Verifying deployment manifest against registry [${network}] ---`);
   console.log(`  Manifest:  ${args.manifest}`);
   console.log(`  Registry:  ${registryPath}`);
+  console.log(`  Schema:    ${schemaPath === "none" ? "skip (--schema none)" : schemaPath}`);
   console.log();
 
   const issues = [];

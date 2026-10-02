@@ -98,7 +98,7 @@ describe("StrategyComparison - Backend Unavailable", () => {
     render(<StrategyComparison />);
 
     await waitFor(() => {
-      expect(screen.getByText(/Failed to Load Strategy Data/i)).toBeInTheDocument();
+      expect(screen.getByText(/Strategy Comparison Temporarily Unavailable/i)).toBeInTheDocument();
     });
   });
 });

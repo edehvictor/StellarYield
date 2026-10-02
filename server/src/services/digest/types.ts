@@ -49,6 +49,23 @@ export interface WatchlistEvent {
   recordedAt: string;
 }
 
+export type DriftSeverity = "low" | "medium" | "high" | "critical";
+export type DriftCause = "overweight" | "underweight" | "recovered";
+
+export interface DriftAlertEvent {
+  eventId: string;
+    eventType: "drift";
+      portfolioId: string;      // wallet/account the drift belongs to
+        assetId: string;          // vaultId
+          severity: DriftSeverity;
+            driftCause: DriftCause;   // overweight / underweight / recovered — distinct causes never merge
+              driftAmount: number;
+                message: string;
+                  triggeredAt: string;      // ISO 8601
+                    recordedAt: string;       // ISO 8601
+                    }
+
+
 export type NotificationEvent =
   | AlertEvent
   | RecommendationEvent
@@ -66,6 +83,19 @@ export interface RankedCluster extends Cluster {
   summary: string;
 }
 
+// ─── Digest Payload types ─────────────────────────────────────────────────────
+
+export interface DriftDigestItem {
+  portfolioId: string;
+  assetId: string;
+  severity: DriftSeverity;
+  driftCause: DriftCause;
+  occurrenceCount: number;
+  latestTriggeredAt: string; // preserved max triggeredAt in the group
+  latestMessage: string;
+  alertIds: string[];
+}
+
 export interface RankedClusterEntry {
   eventType: EventType;
   vaultId?: string;
@@ -79,6 +109,7 @@ export interface DigestPayload {
   generatedAt: string;
   scheduleMode: ScheduleMode;
   clusters: RankedClusterEntry[];
+  checksum?: string; // sha256 hex of stable representation of payload
 }
 
 export interface ScheduleConfig {

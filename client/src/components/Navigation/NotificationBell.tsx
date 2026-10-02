@@ -1,7 +1,6 @@
 import React, { useState } from "react";
 import {
   Bell,
-  Trash2,
   CheckCircle,
   Info,
   AlertTriangle,
@@ -11,72 +10,24 @@ import {
   useUnreadCount,
   useNotificationsList,
 } from "../../context/NotificationContext";
+import { useWallet } from "../../context/useWallet";
 import { useBackendStatus } from "../../hooks/useBackendStatus";
 
 const NotificationBell: React.FC = () => {
   const unreadCount = useUnreadCount();
   const { notifications, isLoading, error, markAsRead, markAllAsRead } =
     useNotificationsList();
+  const { walletAddress } = useWallet();
   const [isOpen, setIsOpen] = useState(false);
   const backendStatus = useBackendStatus();
 
-  useEffect(() => {
-    if (isConnected && walletAddress) {
-      fetchNotifications();
-      // Poll every 30 seconds
-      const interval = setInterval(fetchNotifications, 30000);
-      return () => clearInterval(interval);
-    }
-  }, [isConnected, walletAddress]);
-
-  const fetchNotifications = async () => {
-    try {
-      const res = await fetch(apiUrl(`/api/notifications/${walletAddress}`));
-      if (!res.ok) {
-        setBackendError(true);
-        return;
-      }
-      const data = await res.json();
-      setNotifications(data);
-      setUnreadCount(data.filter((n: Notification) => !n.isRead).length);
-      setBackendError(false);
-    } catch (err) {
-      console.error("Failed to fetch notifications", err);
-      setBackendError(true);
-    }
+  const handleMarkAsRead = async (id: string) => {
+    await markAsRead(id);
   };
 
-  const markAsRead = async (id: string) => {
-    try {
-      const res = await fetch(apiUrl(`/api/notifications/${id}/read`), { method: "PATCH" });
-      if (!res.ok) {
-        setBackendError(true);
-        return;
-      }
-      setNotifications(prev => prev.map(n => n.id === id ? { ...n, isRead: true } : n));
-      setUnreadCount(count => count - 1);
-      setBackendError(false);
-    } catch (err) {
-      console.error("Failed to mark as read", err);
-      setBackendError(true);
-    }
-  };
-
-  const clearAll = async () => {
-    try {
-      if (!walletAddress) return;
-      const res = await fetch(apiUrl(`/api/notifications/${walletAddress}`), { method: "DELETE" });
-      if (!res.ok) {
-        setBackendError(true);
-        return;
-      }
-      setNotifications([]);
-      setUnreadCount(0);
-      setBackendError(false);
-    } catch (err) {
-      console.error("Failed to clear notifications", err);
-      setBackendError(true);
-    }
+  const handleMarkAllAsRead = async () => {
+    if (walletAddress) await markAllAsRead(walletAddress);
+    setIsOpen(false);
   };
 
   const getTimeAgo = (dateStr: string) => {

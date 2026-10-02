@@ -5,7 +5,10 @@ import {
   recordRelaySuccess,
   recordRelayFailure,
   isHashSeen,
+  isFingerprintSeen,
+  recordFingerprint,
 } from '../services/relayerStatusService';
+import { computeTransactionFingerprint } from '../utils/transactionFingerprint';
 
 // In a real app, this would be in an environment variable
 const RELAYER_SECRET_KEY = process.env.RELAYER_SECRET_KEY || 'SAH2...'; // Replace with a valid secret for local dev if needed
@@ -37,6 +40,16 @@ export const signFeeBump = async (req: Request, res: Response) => {
     // Parse the inner transaction
     const innerTx = StellarSdk.TransactionBuilder.fromXDR(innerTxXdr, NETWORK_PASSPHRASE);
 
+    // Deterministic fingerprint-based duplicate detection (#1319): unlike the
+    // raw-XDR hash check above, this catches duplicate *economic* transactions
+    // (same sender/receiver/amount/asset/memo) even if re-encoded differently.
+    const fingerprint = computeTransactionFingerprintForTx(innerTx as StellarSdk.Transaction);
+    if (fingerprint && isFingerprintSeen(fingerprint)) {
+      const durationMs = Date.now() - startMs;
+      recordRelayFailure(relayId, durationMs, 'Duplicate transaction detected (fingerprint)');
+      return res.status(409).json({ error: 'Duplicate transaction - fingerprint match' });
+    }
+
     // Create the fee bump transaction
     const feeBump = StellarSdk.TransactionBuilder.buildFeeBumpTransaction(
       relayerKeypair,
@@ -51,6 +64,9 @@ export const signFeeBump = async (req: Request, res: Response) => {
     const durationMs = Date.now() - startMs;
     const feeBumpHash = feeBump.hash().toString('hex');
     recordRelaySuccess(relayId, durationMs, hashHex, feeBumpHash);
+    if (fingerprint) {
+      recordFingerprint(fingerprint);
+    }
 
     return res.json({
       success: true,
@@ -64,3 +80,39 @@ export const signFeeBump = async (req: Request, res: Response) => {
     return res.status(500).json({ error: 'Failed to sign fee bump' });
   }
 };
+
+/**
+ * Derives a deterministic transaction fingerprint from a parsed Stellar
+ * transaction's first payment operation, for duplicate-submission detection.
+ *
+ * Returns `undefined` when the transaction has no operations or its first
+ * operation isn't a simple payment (e.g. path payments, Soroban invocations,
+ * or account management ops) — fingerprinting is scoped to the common
+ * relayed-payment case rather than guessing at fields for arbitrary
+ * operation types.
+ */
+export function computeTransactionFingerprintForTx(
+  tx: StellarSdk.Transaction
+): string | undefined {
+  const [firstOp] = tx.operations ?? [];
+  if (!firstOp || firstOp.type !== 'payment') {
+    return undefined;
+  }
+
+  const memoValue = tx.memo?.value;
+  const memo =
+    typeof memoValue === 'string'
+      ? memoValue
+      : memoValue != null
+        ? memoValue.toString()
+        : undefined;
+
+  return computeTransactionFingerprint({
+    sender: firstOp.source ?? tx.source,
+    receiver: firstOp.destination,
+    amount: firstOp.amount,
+    asset: firstOp.asset.isNative() ? 'native' : `${firstOp.asset.getCode()}:${firstOp.asset.getIssuer()}`,
+    memo,
+    timestampMs: Date.now(),
+  });
+}

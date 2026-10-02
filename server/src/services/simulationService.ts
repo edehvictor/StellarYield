@@ -187,6 +187,39 @@ export function simulateDeposit(params: SimulationParams): SimulationResult {
   return result;
 }
 
+// ── Yield bounds (#1407) ────────────────────────────────────────────────
+//
+// Yields can be negative: a depeg, a slashing event, an impermanent-loss
+// drawdown or a strategy that costs more than it earns all shrink principal.
+// The simulators used to reject any APY below zero, so a user could not
+// model the very periods they most need to understand.
+
+/**
+ * Lowest annualised APY accepted as a standing assumption: a total loss over
+ * a year. Anything lower is not a meaningful long-run rate — use a
+ * `dailyApy` series to model a sharper, shorter loss.
+ */
+export const MIN_ANNUAL_APY_PCT = -100;
+
+/**
+ * Lowest APY accepted for a single day of a `dailyApy` series. Each day
+ * compounds by `1 + apy / 100 / 365`, so this is the point where that factor
+ * reaches zero: the allocation loses its whole value in one day. Below it the
+ * factor would go negative and a position could be worth less than nothing.
+ */
+export const MIN_DAILY_APY_PCT = -36_500;
+
+/** Returns the problem with an APY input, or `null` when it is acceptable. */
+function apyProblem(label: string, value: unknown, min: number): string | null {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return `apy for ${label} must be a finite number.`;
+  }
+  if (value < min) {
+    return `apy for ${label} must be at least ${min}% (got ${value}).`;
+  }
+  return null;
+}
+
 // ── Rebalance Simulation Sandbox ────────────────────────────────────────
 //
 // Previews the effect of moving from a current allocation to a target
@@ -208,6 +241,14 @@ export interface RebalanceParams {
   allocations: RebalanceAllocationInput[];
   feeBps?: number; // turnover fee in bps (default 20 = 0.2%)
   dataAgeSeconds?: number; // age of the market data feeding the preview
+  /**
+   * ISO-8601 timestamp of the market snapshot the preview's APY/liquidity
+   * inputs were sourced from. When omitted or invalid, the preview is
+   * treated as stale (see `SNAPSHOT_MISSING` / `SNAPSHOT_STALE`) rather than
+   * silently assumed fresh — a missing timestamp is not evidence of fresh
+   * data (issue #1149).
+   */
+  snapshotTimestamp?: string | null;
 }
 
 export interface RebalanceLeg {
@@ -220,6 +261,25 @@ export interface RebalanceLeg {
   deltaUsd: number; // targetValue - currentValue (signed)
 }
 
+/**
+ * Freshness metadata for the market snapshot a simulator response was
+ * computed from (issue #1149). Always present on `RebalancePreview` so
+ * client result panels can render a stale-data warning state without
+ * re-deriving age from `dataAgeSeconds`/`snapshotTimestamp` themselves.
+ */
+export interface SnapshotFreshness {
+  /** Age of the market snapshot in milliseconds, or `null` when unknown. */
+  snapshotAgeMs: number | null;
+  /**
+   * True when the snapshot is older than `staleSnapshotThresholdMs`, OR when
+   * no valid snapshot timestamp/age was supplied at all. A missing timestamp
+   * is treated as stale, never as fresh.
+   */
+  isStale: boolean;
+  /** Threshold (ms) used to decide staleness, echoed back for the client. */
+  staleSnapshotThresholdMs: number;
+}
+
 export interface RebalancePreview {
   isSimulationOnly: true;
   legs: RebalanceLeg[];
@@ -229,6 +289,7 @@ export interface RebalancePreview {
   totalTurnoverUsd: number; // capital that actually moves
   estimatedFeeUsd: number;
   maxDriftPct: number; // largest absolute drift across legs
+  snapshotFreshness: SnapshotFreshness;
   warnings: SimulationWarning[];
 }
 
@@ -249,6 +310,52 @@ export const REBALANCE_THRESHOLDS = {
 // `Math.round` that breaks ties differently for negative deltas. Used for both
 // percent and USD values, which the contract carries at the same 2 decimals.
 const round2 = (value: number): number => roundTo(value, 2);
+
+/** Largest peak-to-trough fall of `values`, as a positive percentage (0 when it never falls). */
+function maxDrawdownPct(values: number[]): number {
+  let peak = 0;
+  let worst = 0;
+  for (const value of values) {
+    if (value > peak) peak = value;
+    if (peak > 0) worst = Math.max(worst, ((peak - value) / peak) * 100);
+  }
+  return worst;
+}
+
+/**
+ * Compute snapshot freshness metadata for a rebalance preview (issue #1149).
+ *
+ * Prefers an explicit `snapshotTimestamp` (age computed against wall-clock
+ * `now`); falls back to caller-supplied `dataAgeSeconds` when no timestamp is
+ * given. When neither is present, or the timestamp fails to parse, the
+ * snapshot is reported as stale with an unknown age — a missing/invalid
+ * timestamp must never be silently treated as fresh.
+ */
+export function computeSnapshotFreshness(
+  params: Pick<RebalanceParams, "snapshotTimestamp" | "dataAgeSeconds">,
+  now: number = Date.now(),
+): SnapshotFreshness {
+  const staleSnapshotThresholdMs = REBALANCE_THRESHOLDS.staleDataSeconds * 1000;
+
+  let snapshotAgeMs: number | null = null;
+
+  if (params.snapshotTimestamp !== undefined && params.snapshotTimestamp !== null) {
+    const parsed = Date.parse(params.snapshotTimestamp);
+    if (!Number.isNaN(parsed)) {
+      snapshotAgeMs = Math.max(0, now - parsed);
+    }
+  } else if (
+    params.dataAgeSeconds !== undefined &&
+    Number.isFinite(params.dataAgeSeconds) &&
+    params.dataAgeSeconds >= 0
+  ) {
+    snapshotAgeMs = params.dataAgeSeconds * 1000;
+  }
+
+  const isStale = snapshotAgeMs === null || snapshotAgeMs > staleSnapshotThresholdMs;
+
+  return { snapshotAgeMs, isStale, staleSnapshotThresholdMs };
+}
 
 /**
  * Validate rebalance inputs. Returns a list of human-readable errors; an
@@ -294,10 +401,13 @@ export function validateRebalanceParams(params: RebalanceParams): string[] {
         );
       }
     }
-    if (!Number.isFinite(alloc.apy) || alloc.apy < 0) {
-      errors.push(
-        `apy for ${alloc.label || "allocation"} must be a non-negative number (got ${alloc.apy}).`,
-      );
+    const previewApyProblem = apyProblem(
+      alloc.label || "allocation",
+      alloc.apy,
+      MIN_ANNUAL_APY_PCT,
+    );
+    if (previewApyProblem) {
+      errors.push(previewApyProblem);
     } else if (alloc.apy > 10_000) {
       errors.push(
         `apy for ${alloc.label || "allocation"} of ${alloc.apy}% is not a plausible assumption.`,
@@ -346,6 +456,17 @@ export function simulateRebalance(params: RebalanceParams): RebalancePreview {
     blendedApyBefore += (alloc.apy * alloc.currentWeight) / 100;
     blendedApyAfter += (alloc.apy * alloc.targetWeight) / 100;
     maxDriftPct = Math.max(maxDriftPct, Math.abs(driftPct));
+
+    // Negative yield: capital held in this leg is expected to shrink.
+    if (alloc.apy < 0 && alloc.targetWeight > 0) {
+      warnings.push({
+        code: "NEGATIVE_YIELD_PERIOD",
+        severity: "warning",
+        affectedField: `allocations[${alloc.label}].apy`,
+        message: `${alloc.label} has a negative yield of ${alloc.apy}% APY; the ${round2(alloc.targetWeight)}% target weight is expected to lose value.`,
+        remediation: `Confirm the negative yield for ${alloc.label} is intended, or lower its target weight.`,
+      });
+    }
     grossMovement += Math.abs(deltaUsd);
 
     // Liquidity risk: a buy leg that consumes too much of its available pool.
@@ -389,17 +510,27 @@ export function simulateRebalance(params: RebalanceParams): RebalancePreview {
     });
   }
 
-  if (
-    params.dataAgeSeconds !== undefined &&
-    params.dataAgeSeconds > t.staleDataSeconds
-  ) {
-    warnings.push({
-      code: "STALE_DATA",
-      severity: "warning",
-      affectedField: "dataAgeSeconds",
-      message: `Stale data: preview uses market data ${Math.round(params.dataAgeSeconds / 60)}m old; refresh before committing.`,
-      remediation: "Refresh market data and re-run the simulation before committing any capital.",
-    });
+  const snapshotFreshness = computeSnapshotFreshness(params);
+
+  if (snapshotFreshness.isStale) {
+    if (snapshotFreshness.snapshotAgeMs === null) {
+      warnings.push({
+        code: "SNAPSHOT_MISSING",
+        severity: "warning",
+        affectedField: "snapshotTimestamp",
+        message:
+          "No market snapshot timestamp was supplied for this preview; treating it as stale until freshness can be confirmed.",
+        remediation: "Provide a snapshotTimestamp (or dataAgeSeconds) and re-run the simulation before committing any capital.",
+      });
+    } else {
+      warnings.push({
+        code: "STALE_DATA",
+        severity: "warning",
+        affectedField: "snapshotTimestamp",
+        message: `Stale data: preview uses a market snapshot ${Math.round(snapshotFreshness.snapshotAgeMs / 60000)}m old; refresh before committing.`,
+        remediation: "Refresh market data and re-run the simulation before committing any capital.",
+      });
+    }
   }
 
   return {
@@ -411,6 +542,7 @@ export function simulateRebalance(params: RebalanceParams): RebalancePreview {
     totalTurnoverUsd: round2(totalTurnoverUsd),
     estimatedFeeUsd: round2(estimatedFeeUsd),
     maxDriftPct: round2(maxDriftPct),
+    snapshotFreshness,
     warnings,
   };
 }
@@ -424,8 +556,12 @@ export function simulateRebalance(params: RebalanceParams): RebalancePreview {
 export interface RebalanceAllocationRule {
   label: string;
   targetWeight: number;   // 0-100, must sum to ~100 across all allocations
-  apy: number;            // annual % fallback / average, e.g. 10 = 10%
-  /** Optional per-day APY series (length = backtest day count). Overrides `apy` for that day. */
+  apy: number;            // annual % fallback / average, e.g. 10 = 10%; negative allowed down to MIN_ANNUAL_APY_PCT
+  /**
+   * Optional per-day APY series (length = backtest day count). Overrides `apy`
+   * for that day. Entries may be negative to model a loss period, down to
+   * `MIN_DAILY_APY_PCT`.
+   */
   dailyApy?: number[];
   liquidityUsd?: number;  // optional, for context only
 }
@@ -468,6 +604,12 @@ export interface RebalanceBacktestResult {
   outperformancePct: number;    // portfolio - passive return, expressed as % of initial
   rebalanceCount: number;
   totalFeesUsd: number;
+  /** Days on which the rebalanced portfolio's blended yield was negative. */
+  negativeYieldDays: number;
+  /** Largest peak-to-trough fall of the rebalanced portfolio, as a positive %. */
+  maxDrawdownPct: number;
+  /** Largest peak-to-trough fall of the passive benchmark, as a positive %. */
+  passiveMaxDrawdownPct: number;
   snapshots: RebalanceBacktestSnapshot[];
   rebalanceEvents: RebalanceEvent[];
   warnings: SimulationWarning[];
@@ -535,8 +677,25 @@ export function validateRebalanceBacktestParams(params: RebalanceBacktestParams)
     if (!Number.isFinite(alloc.targetWeight) || alloc.targetWeight < 0 || alloc.targetWeight > 100) {
       errors.push(`targetWeight for "${alloc.label || 'allocation'}" must be 0-100.`);
     }
-    if (!Number.isFinite(alloc.apy) || alloc.apy < 0) {
-      errors.push(`apy for "${alloc.label || 'allocation'}" must be a non-negative number.`);
+    const name = `"${alloc.label || "allocation"}"`;
+    const apyError = apyProblem(name, alloc.apy, MIN_ANNUAL_APY_PCT);
+    if (apyError) errors.push(apyError);
+
+    if (alloc.dailyApy !== undefined) {
+      if (!Array.isArray(alloc.dailyApy)) {
+        errors.push(`dailyApy for ${name} must be an array of numbers.`);
+      } else if (alloc.dailyApy.length > BACKTEST_LIMITS.maxDays + 1) {
+        errors.push(`dailyApy for ${name} has too many entries (max ${BACKTEST_LIMITS.maxDays + 1}).`);
+      } else {
+        const badIndex = alloc.dailyApy.findIndex(
+          (value) => apyProblem(name, value, MIN_DAILY_APY_PCT) !== null,
+        );
+        if (badIndex !== -1) {
+          errors.push(
+            `dailyApy[${badIndex}] for ${name} must be a finite number of at least ${MIN_DAILY_APY_PCT}% (got ${alloc.dailyApy[badIndex]}).`,
+          );
+        }
+      }
     }
     weightSum += alloc.targetWeight;
   }
@@ -568,13 +727,13 @@ export function runRebalanceBacktest(params: RebalanceBacktestParams): Rebalance
 
   const targetWeights = params.allocations.map(a => a.targetWeight / 100);
 
-  const dailyFactorFor = (alloc: RebalanceAllocationRule, dayIndex: number): number => {
-    const apy =
-      alloc.dailyApy && alloc.dailyApy.length > dayIndex
-        ? alloc.dailyApy[dayIndex]
-        : alloc.apy;
-    return 1 + (apy / 100) / 365;
-  };
+  const apyForDay = (alloc: RebalanceAllocationRule, dayIndex: number): number =>
+    alloc.dailyApy && alloc.dailyApy.length > dayIndex ? alloc.dailyApy[dayIndex] : alloc.apy;
+
+  // A negative yield shrinks the position; the factor is floored at zero so an
+  // allocation can lose all of its value in a day but never go below nothing.
+  const dailyFactorFor = (alloc: RebalanceAllocationRule, dayIndex: number): number =>
+    Math.max(0, 1 + apyForDay(alloc, dayIndex) / 100 / 365);
 
   // Backtest-level structured warnings (evaluated once before the loop).
   const warnings: SimulationWarning[] = [];
@@ -611,6 +770,31 @@ export function runRebalanceBacktest(params: RebalanceBacktestParams): Rebalance
     }
   }
 
+  // Warn about every allocation that earns a negative yield during the window.
+  const simulatedDays =
+    Math.round((new Date(params.endDate).getTime() - new Date(params.startDate).getTime()) / 86_400_000) + 1;
+  for (const alloc of params.allocations) {
+    let negativeDays = 0;
+    let worstApy = 0;
+    for (let day = 0; day < simulatedDays; day++) {
+      const apy = apyForDay(alloc, day);
+      if (apy < 0) {
+        negativeDays++;
+        worstApy = Math.min(worstApy, apy);
+      }
+    }
+    if (negativeDays > 0) {
+      const field = alloc.dailyApy && alloc.dailyApy.some((v) => v < 0) ? "dailyApy" : "apy";
+      warnings.push({
+        code: "NEGATIVE_YIELD_PERIOD",
+        severity: "warning",
+        affectedField: `allocations[${alloc.label}].${field}`,
+        message: `"${alloc.label}" earns a negative yield on ${negativeDays} of ${simulatedDays} simulated days (worst ${round2(worstApy)}% APY); its value shrinks on those days.`,
+        remediation: `Confirm the negative yield for "${alloc.label}" is intended, e.g. a depeg, slashing or loss event. Performance fees apply only to positive yield, so none are charged on these days.`,
+      });
+    }
+  }
+
   // Warn when the total fee cost across the whole backtest is large relative to
   // initial portfolio value. We approximate using max possible turnover.
   const estimatedMaxFeeFraction = (feeBps / 10_000) * (365 / rebalanceIntervalDays);
@@ -630,6 +814,9 @@ export function runRebalanceBacktest(params: RebalanceBacktestParams): Rebalance
 
   const snapshots: RebalanceBacktestSnapshot[] = [];
   const rebalanceEvents: RebalanceEvent[] = [];
+  const portfolioSeries: number[] = [];
+  const passiveSeries: number[] = [];
+  let negativeYieldDays = 0;
   let totalFeesUsd = 0;
   let dayNumber = 0;
 
@@ -644,14 +831,20 @@ export function runRebalanceBacktest(params: RebalanceBacktestParams): Rebalance
     passiveAlloc = passiveAlloc.map((v, i) => v * dailyFactorFor(params.allocations[i], dayNumber));
 
     const totalPortfolio = portfolioAlloc.reduce((s, v) => s + v, 0);
-    const currentWeights = portfolioAlloc.map(v => (v / totalPortfolio) * 100);
+    // A portfolio that has lost everything has no weights to drift from.
+    const currentWeights =
+      totalPortfolio > 0
+        ? portfolioAlloc.map(v => (v / totalPortfolio) * 100)
+        : portfolioAlloc.map(() => 0);
 
     // Determine whether a rebalance should occur today
     let shouldRebalance = false;
     let rebalanceReason = '';
     let maxDrift = 0;
 
-    if (params.strategy === 'schedule') {
+    if (totalPortfolio <= 0) {
+      // Nothing left to rebalance.
+    } else if (params.strategy === 'schedule') {
       if (dayNumber > 0 && dayNumber % rebalanceIntervalDays === 0) {
         shouldRebalance = true;
         rebalanceReason = `Scheduled rebalance every ${rebalanceIntervalDays} days`;
@@ -691,11 +884,16 @@ export function runRebalanceBacktest(params: RebalanceBacktestParams): Rebalance
 
     const portfolioTotal = portfolioAlloc.reduce((s, v) => s + v, 0);
     const passiveTotal = passiveAlloc.reduce((s, v) => s + v, 0);
-    const blendedApy = params.allocations.reduce((sum, a, i) => {
-      const apy =
-        a.dailyApy && a.dailyApy.length > dayNumber ? a.dailyApy[dayNumber] : a.apy;
-      return sum + apy * (portfolioAlloc[i] / portfolioTotal);
-    }, 0);
+    const blendedApy =
+      portfolioTotal > 0
+        ? params.allocations.reduce(
+            (sum, a, i) => sum + apyForDay(a, dayNumber) * (portfolioAlloc[i] / portfolioTotal),
+            0,
+          )
+        : 0;
+    if (blendedApy < 0) negativeYieldDays++;
+    portfolioSeries.push(portfolioTotal);
+    passiveSeries.push(passiveTotal);
 
     snapshots.push({
       date: dateStr,
@@ -713,6 +911,16 @@ export function runRebalanceBacktest(params: RebalanceBacktestParams): Rebalance
   const finalPassive = last?.passiveValue ?? params.initialValueUsd;
   const init = params.initialValueUsd;
 
+  if (finalPortfolio < init) {
+    warnings.push({
+      code: "CAPITAL_LOSS",
+      severity: "warning",
+      affectedField: "allocations",
+      message: `The rebalanced portfolio ends ${round2(((init - finalPortfolio) / init) * 100)}% below its starting value of $${round2(init)}.`,
+      remediation: "Review the yield assumptions and allocation weights; negative yields and rebalance fees both reduce principal.",
+    });
+  }
+
   return {
     isSimulationOnly: true,
     startDate: params.startDate,
@@ -725,6 +933,9 @@ export function runRebalanceBacktest(params: RebalanceBacktestParams): Rebalance
     outperformancePct: round2(((finalPortfolio - finalPassive) / init) * 100),
     rebalanceCount: rebalanceEvents.length,
     totalFeesUsd: round2(totalFeesUsd),
+    negativeYieldDays,
+    maxDrawdownPct: round2(maxDrawdownPct(portfolioSeries)),
+    passiveMaxDrawdownPct: round2(maxDrawdownPct(passiveSeries)),
     snapshots,
     rebalanceEvents,
     warnings,

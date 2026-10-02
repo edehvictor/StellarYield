@@ -1,0 +1,20 @@
+{
+  "ledgerRange": { "from": 100, "to": 105 },
+  "exportedAt": "2026-01-01T00:00:00.000Z",
+  "events": [
+    { "ledger": 101, "timestamp": "2026-01-01T00:00:10.000Z", "type": "price_update" },
+    { "ledger": 102, "timestamp": "2026-01-01T00:00:20.000Z", "type": "liquidation_trigger", "vaultId": "vault_2" },
+    { "ledger": 103, "timestamp": "2026-01-01T00:00:30.000Z", "type": "liquidation_execute", "vaultId": "vault_2" }
+  ],
+  "decisions": [],
+  "anomalies": [],
+  "replayAnomalies": [],
+  "affectedVaults": [],
+  "affectedAccounts": [],
+  "summary": {
+    "eventCount": 3,
+    "decisionCount": 0,
+    "anomalyCount": 0,
+    "replayAnomalyCount": 0
+  }
+}

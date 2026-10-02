@@ -1,4 +1,5 @@
 import React, { useEffect, useState, Suspense } from "react";
+import { useStaleResponseGuard } from "../hooks/useStaleResponseGuard";
 import { Activity, ArrowUpRight, ShieldCheck, TrendingUp, Gauge, Network, Sparkles } from "lucide-react";
 import { Link } from "react-router-dom";
 import ApyHistoryChart from "./charts/ApyHistoryChart";
@@ -10,6 +11,7 @@ import { useBackendStatus } from "../hooks/useBackendStatus";
 import { BackendUnavailableAlert } from "./BackendUnavailable";
 import ApyAttribution from "../features/yields/ApyAttribution";
 import ConnectWalletButton from "./wallet/ConnectWalletButton";
+import DependencyGraphPanel from "./dashboard/DependencyGraphPanel";
 
 interface YieldData {
   protocol: string;
@@ -39,15 +41,19 @@ export default function Dashboard() {
   };
 
   const [expandedRows, setExpandedRows] = useState<Record<number, boolean>>({});
+  const { startRequest, isCurrent } = useStaleResponseGuard();
 
   useEffect(() => {
+    const token = startRequest();
     fetch(apiUrl("/api/yields"))
       .then((res) => res.json())
       .then((data) => {
+        if (!isCurrent(token)) return;
         setYields(data);
         setLoading(false);
       })
       .catch((err) => {
+        if (!isCurrent(token)) return;
         console.error("Failed to fetch yields", err);
         setError("Unable to fetch yield data from backend");
         setLoading(false);
@@ -264,6 +270,11 @@ export default function Dashboard() {
               <h4>Portfolio Intelligence</h4>
               <p>Track allocation drift, TVL movements, and strategy health metrics in one single dashboard workspace.</p>
             </article>
+          </div>
+
+          {/* Service Dependency & Health Status Graph */}
+          <div className="mt-8">
+            <DependencyGraphPanel />
           </div>
         </section>
       </div>

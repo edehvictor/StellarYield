@@ -51,6 +51,10 @@ const DeltaNeutralUnwind = lazy(
 const StrategyLeaderboard = lazy(
   () => import("./pages/leaderboard/StrategyLeaderboard"),
 );
+const AuditLogPanel = lazy(() => import("./pages/admin/AuditLogPanel"));
+const FeatureFlagDiagnosticsPanel = lazy(
+  () => import("./pages/admin/FeatureFlagDiagnosticsPanel"),
+);
 const TreasurySimulation = lazy(
   () => import("./pages/treasury/TreasurySimulation"),
 );
@@ -71,6 +75,7 @@ import OnRampModal from "./features/onramp/OnRampModal";
 import { useWallet } from "./context/useWallet";
 import { NotificationProvider } from "./context/NotificationContext";
 import RouteBoundary from "./components/common/RouteBoundary";
+import { TransactionErrorBoundary } from "./components/transaction/TransactionErrorBoundary";
 import RequireOnboarding from "./components/common/RequireOnboarding";
 import {
   Landmark,
@@ -141,9 +146,6 @@ const RootLayout = () => {
       <DiagnosticsModal
         isOpen={isDiagnosticsOpen}
         onClose={() => setIsDiagnosticsOpen(false)}
-      <SettingsModal
-        isOpen={isSettingsOpen}
-        onClose={() => setIsSettingsOpen(false)}
       />
       {/* APY Alerts Modal */}
       {isConnected && walletAddress && (
@@ -346,17 +348,21 @@ const router = createBrowserRouter([
       {
         path: "/vault",
         element: (
-          <RequireOnboarding require="network">
-            <Vault />
-          </RequireOnboarding>
+          <TransactionErrorBoundary workflowName="vault">
+            <RequireOnboarding require="network">
+              <Vault />
+            </RequireOnboarding>
+          </TransactionErrorBoundary>
         ),
       },
       {
         path: "/vault/:slug",
         element: (
-          <RequireOnboarding require="network">
-            <Vault />
-          </RequireOnboarding>
+          <TransactionErrorBoundary workflowName="vault">
+            <RequireOnboarding require="network">
+              <Vault />
+            </RequireOnboarding>
+          </TransactionErrorBoundary>
         ),
       },
       {
@@ -424,12 +430,10 @@ const router = createBrowserRouter([
       {
         path: "/governance",
         element: (
-          <RouteBoundary>
+          <RouteBoundary routeName="governance">
             <RequireOnboarding require="wallet">
               <GovernanceDashboard />
             </RequireOnboarding>
-          <RouteBoundary routeName="governance">
-            <GovernanceDashboard />
           </RouteBoundary>
         ),
       },
@@ -554,12 +558,26 @@ const router = createBrowserRouter([
       {
         path: "/treasury",
         element: (
-          <RouteBoundary>
+          <RouteBoundary routeName="treasury">
             <RequireOnboarding require="wallet">
               <TreasurySimulation />
             </RequireOnboarding>
-          <RouteBoundary routeName="treasury">
-            <TreasurySimulation />
+          </RouteBoundary>
+        ),
+      },
+      {
+        path: "/admin/audit-logs",
+        element: (
+          <RouteBoundary routeName="audit-logs">
+            <AuditLogPanel />
+          </RouteBoundary>
+        ),
+      },
+      {
+        path: "/admin/feature-flags",
+        element: (
+          <RouteBoundary routeName="feature-flags">
+            <FeatureFlagDiagnosticsPanel />
           </RouteBoundary>
         ),
       },

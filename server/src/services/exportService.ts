@@ -13,18 +13,29 @@ import {
   ConfidenceFactors
 } from "./confidenceService";
 import { PortfolioService, type VaultPosition } from "./portfolioService";
+import {
+  ExportFailureError,
+  toExportFailure,
+} from "../types/exportFailure";
 
 export const DEFAULT_EXPORT_RESPONSE_SIZE_LIMIT_BYTES = 1_000_000;
 
-export class ExportSizeLimitExceededError extends Error {
-  constructor(
-    public readonly actualBytes: number,
-    public readonly limitBytes: number,
-  ) {
+/** Default deadline for async export work (reliability scoring, aggregation). */
+export const DEFAULT_EXPORT_TIMEOUT_MS = 15_000;
+
+export class ExportSizeLimitExceededError extends ExportFailureError {
+  public readonly actualBytes: number;
+  public readonly limitBytes: number;
+
+  constructor(actualBytes: number, limitBytes: number) {
     super(
+      "EXPORT_SIZE_LIMIT_EXCEEDED",
       `Export response is ${actualBytes} bytes and exceeds the ${limitBytes} byte response-size limit.`,
+      { actualBytes, limitBytes },
     );
     this.name = "ExportSizeLimitExceededError";
+    this.actualBytes = actualBytes;
+    this.limitBytes = limitBytes;
   }
 }
 
@@ -42,10 +53,74 @@ function resolveExportSizeLimit(filters: Record<string, any>): number {
 
   const limit = Number(rawLimit);
   if (!Number.isFinite(limit) || limit <= 0) {
-    throw new Error("Export response-size limit must be a positive number of bytes.");
+    throw new ExportFailureError(
+      "EXPORT_VALIDATION_FAILED",
+      "Export response-size limit must be a positive number of bytes.",
+      { field: "maxResponseBytes" },
+    );
   }
 
   return Math.floor(limit);
+}
+
+/**
+ * Resolve the export deadline from request filters, defaulting to
+ * {@link DEFAULT_EXPORT_TIMEOUT_MS}. Invalid values fail with a validation
+ * failure code so the UI can show an input error rather than a 500.
+ */
+export function resolveExportTimeoutMs(filters: Record<string, any> = {}): number {
+  const rawTimeout = filters.timeoutMs;
+  if (rawTimeout === undefined || rawTimeout === null || rawTimeout === "") {
+    return DEFAULT_EXPORT_TIMEOUT_MS;
+  }
+
+  const timeout = Number(rawTimeout);
+  if (!Number.isFinite(timeout) || timeout <= 0) {
+    throw new ExportFailureError(
+      "EXPORT_VALIDATION_FAILED",
+      "Export timeout must be a positive number of milliseconds.",
+      { field: "timeoutMs" },
+    );
+  }
+
+  return Math.floor(timeout);
+}
+
+/**
+ * Race an export operation against a deadline. On expiry the promise rejects
+ * with an `EXPORT_TIMEOUT` failure so callers (and the UI) can distinguish
+ * timeouts from validation and service failures.
+ */
+export async function withExportTimeout<T>(
+  operation: Promise<T> | (() => Promise<T> | T),
+  timeoutMs: number = DEFAULT_EXPORT_TIMEOUT_MS,
+  label = "Export",
+): Promise<T> {
+  const run: Promise<T> =
+    typeof operation === "function"
+      ? (async () => operation())()
+      : operation;
+
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      reject(
+        new ExportFailureError(
+          "EXPORT_TIMEOUT",
+          `${label} timed out after ${timeoutMs}ms.`,
+          { timeoutMs },
+        ),
+      );
+    }, timeoutMs);
+  });
+
+  try {
+    return await Promise.race([run, timeout]);
+  } finally {
+    if (timer !== undefined) {
+      clearTimeout(timer);
+    }
+  }
 }
 
 export function assertWithinExportSizeLimit(
@@ -104,10 +179,90 @@ export interface OpportunitySnapshot {
   };
 }
 
+interface IdempotentExportJob {
+  key: string;
+  params: Record<string, any>;
+  result: SnapshotBundle;
+  createdAt: number;
+}
+
+/** Default TTL for idempotency keys (24 hours). */
+const IDEMPOTENCY_KEY_TTL_MS = 24 * 60 * 60 * 1000;
+
+export interface IdempotencyCheckResult {
+  status: "hit" | "mismatch" | "stale" | "miss";
+  result?: SnapshotBundle;
+}
+
 export class ExportService {
+  private idempotencyCache = new Map<string, IdempotentExportJob>();
+
+  /**
+   * Checks whether an idempotency key already has a stored result.
+   *
+   * - "hit"    → caller should return the cached result immediately.
+   * - "mismatch" → the key exists but was created with different params;
+   *                 caller must reject with 422.
+   * - "stale"  → the key exists but has expired; caller should treat as
+   *               a fresh request ("miss") and overwrite the stale entry.
+   * - "miss"   → no entry for this key; proceed normally.
+   */
+  checkIdempotency(
+    key: string,
+    currentParams: Record<string, any>,
+  ): IdempotencyCheckResult {
+    const existing = this.idempotencyCache.get(key);
+    if (!existing) return { status: "miss" };
+
+    if (Date.now() - existing.createdAt > IDEMPOTENCY_KEY_TTL_MS) {
+      this.idempotencyCache.delete(key);
+      return { status: "stale" };
+    }
+
+    const paramsMatch =
+      JSON.stringify(existing.params) === JSON.stringify(currentParams);
+    if (!paramsMatch) return { status: "mismatch" };
+
+    return { status: "hit", result: existing.result };
+  }
+
+  /**
+   * Stores a result against the given idempotency key.
+   */
+  storeIdempotentResult(
+    key: string,
+    params: Record<string, any>,
+    result: SnapshotBundle,
+  ): void {
+    this.idempotencyCache.set(key, {
+      key,
+      params,
+      result,
+      createdAt: Date.now(),
+    });
+  }
+
+  /**
+   * Generates a full snapshot bundle of current opportunity data.
+   * Excludes secrets and internal-only metadata.
+   *
+   * All failures are surfaced as typed `ExportFailureError`s carrying a
+   * stable code: validation issues keep their validation codes, deadline
+   * overruns surface as EXPORT_TIMEOUT, and unexpected/upstream failures
+   * surface as EXPORT_SERVICE_UNAVAILABLE or EXPORT_SERVICE_FAILURE.
+   */
   async generateSnapshotBundle(filters: Record<string, any> = {}): Promise<SnapshotBundle> {
+    try {
+      return await this.buildSnapshotBundle(filters);
+    } catch (err) {
+      throw ExportFailureError.from(toExportFailure(err));
+    }
+  }
+
+  private async buildSnapshotBundle(filters: Record<string, any>): Promise<SnapshotBundle> {
     const now = new Date();
     const isoNow = now.toISOString();
+    const timeoutMs = resolveExportTimeoutMs(filters);
 
     const strategyInputs: StrategyInput[] = PROTOCOLS.map(p => ({
       id: p.protocolName.toLowerCase(),
@@ -121,12 +276,17 @@ export class ExportService {
     }));
 
     const ranked = rankStrategies(strategyInputs);
-    const reliabilityScores = await yieldReliabilityEngine.getReliabilityScores(
-      PROTOCOLS.map(p => ({
-        id: p.protocolName.toLowerCase() + "_api",
-        name: p.protocolName,
-        source: p.source,
-      }))
+    const reliabilityScores = await withExportTimeout(
+      () =>
+        yieldReliabilityEngine.getReliabilityScores(
+          PROTOCOLS.map(p => ({
+            id: p.protocolName.toLowerCase() + "_api",
+            name: p.protocolName,
+            source: p.source,
+          }))
+        ),
+      timeoutMs,
+      "Export bundle generation",
     );
 
     const snapshots: OpportunitySnapshot[] = ranked.map((s, index) => {
@@ -220,3 +380,5 @@ export class ExportService {
 }
 
 export const exportService = new ExportService();
+
+export { IDEMPOTENCY_KEY_TTL_MS };

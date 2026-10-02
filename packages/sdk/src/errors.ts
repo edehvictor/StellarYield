@@ -74,6 +74,35 @@ export class WrongNetworkError extends SorobanSdkError {
   }
 }
 
+/**
+ * Raised when a network id/name isn't one of the networks this app knows how
+ * to operate on (#1109), e.g. a malformed `VITE_NETWORK_PASSPHRASE`/
+ * `STELLAR_NETWORK_PASSPHRASE`, an unrecognized `NetworkName` string coming
+ * from a client flow, or an explicit request for a network outside
+ * `SUPPORTED_NETWORKS`. Unlike {@link WrongNetworkError} (a passphrase that
+ * doesn't match what the caller expected for an otherwise-known network),
+ * this covers a network id that isn't supported at all. Distinct from
+ * `phase: "sign"` errors thrown mid-signing: this is meant to be raised
+ * during validation, before a signing flow even starts, so wallet, chart,
+ * and simulation flows fail the same way instead of assuming the current
+ * network is valid.
+ */
+export class UnsupportedNetworkError extends SorobanSdkError {
+  public readonly code = "unsupported_network" as const;
+  public readonly network: string;
+  public readonly supportedNetworks: readonly string[];
+
+  constructor(network: string, supportedNetworks: readonly string[]) {
+    super(
+      `Unsupported network id: '${network}'. Supported networks are: ${supportedNetworks.join(", ")}.`,
+      "simulate",
+      false
+    );
+    this.network = network;
+    this.supportedNetworks = supportedNetworks;
+  }
+}
+
 export class SpecMismatchError extends SorobanSdkError {
   public readonly expectedHash: string;
   public readonly actualHash: string;

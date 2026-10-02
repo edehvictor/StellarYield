@@ -5,6 +5,7 @@
  * for a proposed multi-position treasury deployment.
  */
 import type { SimulationWarning } from "../../../shared/types/simulationWarning";
+import { validateAllocationsPayload } from "./allocationValidation";
 
 // Re-export for consumers.
 export type { SimulationWarning } from "../../../shared/types/simulationWarning";
@@ -160,13 +161,25 @@ export function assertValidScenarioInput(body: unknown): TreasuryScenario {
     }
   }
 
-  const totalAllocationPct = allocations.reduce((sum, item) => sum + (item.allocationPct as number), 0);
-  if (Math.abs(totalAllocationPct - 100) > 0.01) {
+  const validation = validateAllocationsPayload(allocations);
+  if (!validation.valid) {
+    // Sum mismatches are a client input error (400 allocation_total_mismatch)
+    // per the route contract; other allocation policy failures stay 422.
+    // Always attach fieldErrors so callers can inspect per-field codes.
+    const hasSumMismatch = validation.errors.some((e) => e.code === 'sum_mismatch');
+    if (hasSumMismatch) {
+      throw new TreasuryValidationError(
+        'allocation_total_mismatch',
+        'Allocation percentages must sum to 100.',
+        400,
+        { fieldErrors: validation.errors },
+      );
+    }
     throw new TreasuryValidationError(
-      'allocation_total_mismatch',
-      'Allocation percentages must sum to 100.',
+      'allocation_validation_failed',
+      'Allocation validation failed.',
       400,
-      { allocationTotalPct: totalAllocationPct },
+      { fieldErrors: validation.errors },
     );
   }
 
@@ -180,6 +193,8 @@ export function assertValidScenarioInput(body: unknown): TreasuryScenario {
 }
 
 const CONCENTRATION_THRESHOLD = 0.5;
+const RESERVE_BREACH_THRESHOLD_PCT = 0.1;
+const NEGATIVE_CASHFLOW_THRESHOLD_USD = 0;
 
 const scenarioStore = new Map<string, TreasuryScenario>();
 
@@ -228,6 +243,19 @@ export function simulateTreasury(scenario: TreasuryScenario): SimulationResult {
     totalCapitalUsd > 0 ? (projectedYieldUsd / totalCapitalUsd) * 100 : 0;
 
   const liquidityRiskScore = Math.min(10, Math.max(0, weightedRisk));
+
+  const netYieldUsd = projectedYieldUsd - totalRotationCostUsd;
+  if (netYieldUsd < NEGATIVE_CASHFLOW_THRESHOLD_USD) {
+    const msg = `Net yield is negative ($${netYieldUsd.toFixed(2)}) — rotation costs exceed projected yield`;
+    legacyWarnings.push(msg);
+    warnings.push({
+      code: "NEGATIVE_NET_YIELD",
+      severity: "critical",
+      affectedField: "totalRotationCostUsd",
+      message: msg,
+      remediation: "Reduce rotation costs or increase yield by adjusting allocations to lower-cost or higher-yield vaults.",
+    });
+  }
 
   return {
     scenarioId: id,
@@ -305,6 +333,7 @@ export interface StressRunResult {
     riskScoreDelta: number;
   };
   warnings: string[];
+  structuredWarnings: SimulationWarning[];
 }
 
 export interface ScenarioComparisonResult {
@@ -326,6 +355,7 @@ export interface ScenarioComparisonResult {
       liquidityRiskScore: number;
     };
     warnings: string[];
+    structuredWarnings: SimulationWarning[];
   };
   stressRuns: StressRunResult[];
   summary: {
@@ -383,10 +413,44 @@ export function compareTreasuryScenarios(
     const riskScoreDelta = Math.round((stressSim.liquidityRiskScore - baselineSim.liquidityRiskScore) * 100) / 100;
 
     const stressWarnings = [...stressSim.concentrationWarnings];
-    if (stressNetYieldUsd < 0) {
-      stressWarnings.push(`Net yield turns negative ($${stressNetYieldUsd.toLocaleString()}) under ${config.name}`);
+    const structuredWarnings: SimulationWarning[] = [...stressSim.warnings];
+
+    if (stressNetYieldUsd < NEGATIVE_CASHFLOW_THRESHOLD_USD) {
+      const msg = `Negative cashflow: net yield is $${stressNetYieldUsd.toLocaleString()} under ${config.name}`;
+      stressWarnings.push(msg);
+      structuredWarnings.push({
+        code: "NEGATIVE_CASHFLOW",
+        severity: "critical",
+        affectedField: "netYieldUsd",
+        message: msg,
+        remediation: "Reduce exposure to high-cost positions or increase capital reserves to withstand market stress.",
+      });
     } else if (yieldDeltaPct <= -50) {
-      stressWarnings.push(`Severe yield reduction (${yieldDeltaPct.toFixed(1)}%) under ${config.name}`);
+      const msg = `Severe yield reduction (${yieldDeltaPct.toFixed(1)}%) under ${config.name}`;
+      stressWarnings.push(msg);
+      structuredWarnings.push({
+        code: "SEVERE_YIELD_REDUCTION",
+        severity: "warning",
+        affectedField: "projectedYieldUsd",
+        message: msg,
+        remediation: "Consider diversifying into more stable yield sources to reduce sensitivity to market stress.",
+      });
+    }
+
+    const reserveRatio = baselineSim.projectedYieldUsd > 0
+      ? stressNetYieldUsd / baselineSim.projectedYieldUsd
+      : stressNetYieldUsd >= 0 ? 1 : -1;
+
+    if (reserveRatio < RESERVE_BREACH_THRESHOLD_PCT && stressNetYieldUsd >= 0) {
+      const msg = `Reserve breach: net yield falls to ${(reserveRatio * 100).toFixed(1)}% of baseline under ${config.name}`;
+      stressWarnings.push(msg);
+      structuredWarnings.push({
+        code: "RESERVE_BREACH",
+        severity: "warning",
+        affectedField: "netYieldUsd",
+        message: msg,
+        remediation: "Increase reserve buffer or reduce allocation to volatile positions to maintain safe reserve levels.",
+      });
     }
 
     stressResults.push({
@@ -410,6 +474,7 @@ export function compareTreasuryScenarios(
         riskScoreDelta,
       },
       warnings: stressWarnings,
+      structuredWarnings,
     });
   }
 
@@ -451,6 +516,7 @@ export function compareTreasuryScenarios(
         liquidityRiskScore: baselineSim.liquidityRiskScore,
       },
       warnings: baselineSim.concentrationWarnings,
+      structuredWarnings: baselineSim.warnings,
     },
     stressRuns: stressResults,
     summary: {
@@ -848,4 +914,253 @@ export function previewImport(rows: unknown[]): CashflowImportPreview {
   summary.warningCount = allWarnings.length;
 
   return { validRows, errors: allErrors, warnings: allWarnings, summary };
+}
+
+// ── Deterministic Rebalancing Preview Export (#1294) ────────────────────
+//
+// A rebalancing preview describes the target allocation set (scenario), the
+// current allocation set, and the per-position buy/sell deltas required to get
+// from one to the other. The export is intentionally deterministic: rows are
+// sorted by vault ID, every figure is rounded to a fixed precision, and no
+// wall-clock timestamp is embedded unless the caller supplies one. Identical
+// inputs always yield byte-identical output, which keeps the export scriptable
+// and auditable.
+
+export type RebalancingDirection = "INCREASE" | "DECREASE" | "NO_CHANGE";
+
+export interface RebalancingPreviewRow {
+  vaultId: string;
+  vaultName: string;
+  currentAllocationPct: number;
+  targetAllocationPct: number;
+  currentCapitalUsd: number;
+  targetCapitalUsd: number;
+  deltaUsd: number;
+  direction: RebalancingDirection;
+  rotationCostUsd: number;
+}
+
+export interface RebalancingPreview {
+  scenarioId: string;
+  scenarioName: string;
+  totalCapitalUsd: number;
+  rows: RebalancingPreviewRow[];
+  summary: {
+    positionCount: number;
+    increaseCount: number;
+    decreaseCount: number;
+    unchangedCount: number;
+    totalDeltaUsd: number;
+    totalRotationCostUsd: number;
+  };
+}
+
+export class RebalancingPreviewError extends Error {
+  constructor(
+    public readonly code: string,
+    message: string,
+    public readonly statusCode = 400,
+    public readonly details?: Record<string, unknown>,
+  ) {
+    super(message);
+    this.name = "RebalancingPreviewError";
+  }
+}
+
+const ROUND = (value: number): number => Math.round(value * 100) / 100;
+
+function roundUsd(value: number): number {
+  return ROUND(value);
+}
+
+function roundPct(value: number): number {
+  return ROUND(value);
+}
+
+/**
+ * Validate an optional current allocation set.
+ *
+ * Can be omitted entirely (fresh-deployment baseline), but when provided it
+ * must be a non-empty array whose percentages sum to 100.
+ */
+export function assertValidCurrentAllocations(
+  current?: unknown,
+): AllocationPosition[] {
+  if (current === undefined || current === null) {
+    return [];
+  }
+  if (!Array.isArray(current) || current.length === 0) {
+    throw new RebalancingPreviewError(
+      "INVALID_CURRENT_ALLOCATIONS",
+      "currentAllocations, when provided, must be a non-empty array.",
+      undefined,
+      { received: current },
+    );
+  }
+
+  const allocations = current as AllocationPosition[];
+  for (const [idx, item] of allocations.entries()) {
+    if (!item || typeof item !== "object") {
+      throw new RebalancingPreviewError(
+        "INVALID_CURRENT_ALLOCATIONS",
+        `currentAllocations[${idx}] must be an object.`,
+        undefined,
+        { index: idx },
+      );
+    }
+    const missing: string[] = [];
+    if (typeof item.vaultId !== "string" || item.vaultId.trim().length === 0) missing.push("vaultId");
+    if (!Number.isFinite((item as any).allocationPct)) missing.push("allocationPct");
+    if (missing.length > 0) {
+      throw new RebalancingPreviewError(
+        "INVALID_CURRENT_ALLOCATIONS",
+        `currentAllocations[${idx}] is missing required fields: ${missing.join(", ")}.`,
+        undefined,
+        { index: idx, missingFields: missing },
+      );
+    }
+  }
+
+  const totalCurrentPct = allocations.reduce((sum, item) => sum + (item.allocationPct as number), 0);
+  if (Math.abs(totalCurrentPct - 100) > 0.01) {
+    throw new RebalancingPreviewError(
+      "INVALID_CURRENT_ALLOCATIONS",
+      "current allocation percentages must sum to 100.",
+      undefined,
+      { currentAllocationTotalPct: roundPct(totalCurrentPct) },
+    );
+  }
+
+  return allocations;
+}
+
+/**
+ * Build a deterministic rebalancing preview from a validated target scenario
+ * and (optionally) a current allocation set.
+ *
+ * - Rows are sorted by `vaultId` ascending for a stable export order.
+ * - When `currentAllocations` is omitted, the current position is the zero
+ *   baseline (a fresh-deployment preview).
+ * - Vault-name and rotation-cost metadata are taken from the target scenario so
+ *   the preview stays deterministic even if the current set only carries IDs.
+ */
+export function buildRebalancingPreview(
+  scenario: TreasuryScenario,
+  currentAllocations: AllocationPosition[] = [],
+): RebalancingPreview {
+  const targetById = new Map(scenario.allocations.map((a) => [a.vaultId, a]));
+  const currentById: Map<string, Pick<AllocationPosition, "vaultId" | "allocationPct">> = new Map(
+    currentAllocations.length > 0 ? currentAllocations.map((a) => [a.vaultId, a]) : [],
+  );
+
+  if (currentAllocations.length > 0) {
+    const targetIds = [...targetById.keys()].sort();
+    const currentIds = [...currentById.keys()].sort();
+    const onlyCurrent = currentIds.filter((id) => !targetById.has(id));
+    const onlyTarget = targetIds.filter((id) => !currentById.has(id));
+    if (onlyCurrent.length > 0 || onlyTarget.length > 0) {
+      throw new RebalancingPreviewError(
+        "MISMATCHED_VAULT_SETS",
+        "Current and target allocation sets must reference the same vault IDs.",
+        undefined,
+        { onlyInCurrent: onlyCurrent, onlyInTarget: onlyTarget },
+      );
+    }
+  }
+
+  const rows: RebalancingPreviewRow[] = scenario.allocations
+    .map((target) => {
+      const current = currentById.get(target.vaultId);
+      const currentPct = current ? current.allocationPct : 0;
+      const currentCapitalUsd = roundUsd(scenario.totalCapitalUsd * (currentPct / 100));
+      const targetCapitalUsd = roundUsd(scenario.totalCapitalUsd * (target.allocationPct / 100));
+      const deltaUsd = roundUsd(targetCapitalUsd - currentCapitalUsd);
+      const direction: RebalancingDirection =
+        deltaUsd > 0.001 ? "INCREASE" : deltaUsd < -0.001 ? "DECREASE" : "NO_CHANGE";
+      const rotationCostUsd = roundUsd(
+        Math.abs(deltaUsd) * (target.rotationCostPct / 100),
+      );
+
+      return {
+        vaultId: target.vaultId,
+        vaultName: target.vaultName,
+        currentAllocationPct: roundPct(currentPct),
+        targetAllocationPct: roundPct(target.allocationPct),
+        currentCapitalUsd,
+        targetCapitalUsd,
+        deltaUsd,
+        direction,
+        rotationCostUsd,
+      };
+    })
+    .sort((a, b) => a.vaultId.localeCompare(b.vaultId));
+
+  const summary = {
+    positionCount: rows.length,
+    increaseCount: rows.filter((r) => r.direction === "INCREASE").length,
+    decreaseCount: rows.filter((r) => r.direction === "DECREASE").length,
+    unchangedCount: rows.filter((r) => r.direction === "NO_CHANGE").length,
+    totalDeltaUsd: roundUsd(rows.reduce((sum, r) => sum + r.deltaUsd, 0)),
+    totalRotationCostUsd: roundUsd(rows.reduce((sum, r) => sum + r.rotationCostUsd, 0)),
+  };
+
+  return {
+    scenarioId: scenario.id,
+    scenarioName: scenario.name,
+    totalCapitalUsd: roundUsd(scenario.totalCapitalUsd),
+    rows,
+    summary,
+  };
+}
+
+/**
+ * Serialize a rebalancing preview to deterministic, pretty-printed JSON.
+ * No wall-clock timestamp is embedded.
+ */
+export function exportRebalancingPreviewJSON(preview: RebalancingPreview): string {
+  return `${JSON.stringify(preview, null, 2)}\n`;
+}
+
+/**
+ * Serialize a rebalancing preview to a deterministic CSV report. Rows appear in
+ * the stable (by vault ID) order of `preview.rows`; no timestamp is embedded.
+ */
+export function exportRebalancingPreviewCSV(preview: RebalancingPreview): string {
+  const lines: string[] = [];
+  lines.push("# Treasury Rebalancing Preview");
+  lines.push(`Scenario,${quote(preview.scenarioName)}`);
+  lines.push(`Total Capital (USD),$${preview.totalCapitalUsd.toFixed(2)}`);
+  lines.push("");
+  lines.push(
+    "vaultId,vaultName,currentAllocationPct,targetAllocationPct,currentCapitalUsd,targetCapitalUsd,deltaUsd,direction,rotationCostUsd",
+  );
+  for (const row of preview.rows) {
+    lines.push(
+      [
+        row.vaultId,
+        quote(row.vaultName),
+        row.currentAllocationPct.toFixed(2),
+        row.targetAllocationPct.toFixed(2),
+        row.currentCapitalUsd.toFixed(2),
+        row.targetCapitalUsd.toFixed(2),
+        row.deltaUsd.toFixed(2),
+        row.direction,
+        row.rotationCostUsd.toFixed(2),
+      ].join(","),
+    );
+  }
+  lines.push("");
+  lines.push("# SUMMARY");
+  lines.push(`Position Count,${preview.summary.positionCount}`);
+  lines.push(`Increase Count,${preview.summary.increaseCount}`);
+  lines.push(`Decrease Count,${preview.summary.decreaseCount}`);
+  lines.push(`Unchanged Count,${preview.summary.unchangedCount}`);
+  lines.push(`Total Delta (USD),${preview.summary.totalDeltaUsd.toFixed(2)}`);
+  lines.push(`Total Rotation Cost (USD),${preview.summary.totalRotationCostUsd.toFixed(2)}`);
+  return `${lines.join("\n")}\n`;
+}
+
+function quote(value: string): string {
+  const escaped = value.replace(/"/g, '""');
+  return /[",\n]/.test(escaped) ? `"${escaped}"` : escaped;
 }

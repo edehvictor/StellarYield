@@ -5,11 +5,11 @@
  * status, latest fetch time, uptime, latency, and failure reason.
  */
 
-import { useCallback, useEffect, useState } from "react";
 import { Activity, RefreshCw, AlertTriangle } from "lucide-react";
 import StatusBadge from "../../components/StatusBadge";
 import { FreshnessBanner } from "../../components/dashboard/FreshnessBanner";
 import { apiUrl } from "../../lib/api";
+import { stableSort } from "../../lib/stableSort";
 import {
   getSourceStatusDisplay,
   formatLatency,
@@ -17,35 +17,22 @@ import {
   hasUnhealthySources,
   type SourceHealthRegistry,
 } from "./sourceHealthStatus";
+import { useCachedFetch } from "../../hooks/useCachedFetch";
 
 export default function SourceHealthPanel() {
-  const [registry, setRegistry] = useState<SourceHealthRegistry | null>(null);
-  const [isLoading, setIsLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const {
+    data: registry,
+    isLoading,
+    error,
+    isOffline,
+    isFromCache,
+    fetchedAt,
+    refresh: fetchRegistry,
+  } = useCachedFetch<SourceHealthRegistry>(apiUrl("/api/analytics/sources/health"), {
+    select: (json) => (json as { data: SourceHealthRegistry }).data,
+  });
 
-  const fetchRegistry = useCallback(async () => {
-    try {
-      setIsLoading(true);
-      setError(null);
-      const res = await fetch(apiUrl("/api/analytics/sources/health"));
-      if (!res.ok) {
-        throw new Error(`HTTP ${res.status}`);
-      }
-      const body = await res.json();
-      setRegistry(body.data as SourceHealthRegistry);
-    } catch (err) {
-      console.error("Failed to fetch source health registry:", err);
-      setError(
-        err instanceof Error ? err.message : "Failed to fetch source health",
-      );
-    } finally {
-      setIsLoading(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    fetchRegistry();
-  }, [fetchRegistry]);
+  const showCacheIndicator = isOffline || isFromCache;
 
   return (
     <div className="glass-panel p-6 space-y-4">
@@ -66,7 +53,7 @@ export default function SourceHealthPanel() {
         </button>
       </div>
 
-      {error && (
+      {error && !registry && (
         <div className="flex items-center gap-2 p-3 bg-red-500/10 border border-red-500/30 rounded-lg">
           <AlertTriangle className="w-5 h-5 text-red-500" />
           <span className="text-sm text-red-400">{error}</span>
@@ -79,7 +66,20 @@ export default function SourceHealthPanel() {
 
       {registry && (
         <>
-          <FreshnessBanner lastUpdated={registry.generatedAt} />
+          {showCacheIndicator ? (
+            <FreshnessBanner
+              lastUpdated={
+                fetchedAt != null
+                  ? new Date(fetchedAt).toISOString()
+                  : registry.generatedAt
+              }
+              source="cache"
+              isOffline={isOffline}
+              onRefresh={fetchRegistry}
+            />
+          ) : (
+            <FreshnessBanner lastUpdated={registry.generatedAt} />
+          )}
 
           <div className="flex flex-wrap items-center gap-2 text-sm">
             <span className="text-gray-400">
@@ -129,7 +129,23 @@ export default function SourceHealthPanel() {
                 </tr>
               </thead>
               <tbody>
-                {registry.sources.map((source) => {
+                {stableSort(
+                  registry.sources,
+                  (a, b) => {
+                    // Attention-worthy sources first, then uptime (#1118).
+                    const severity: Record<string, number> = {
+                      unavailable: 0,
+                      stale: 1,
+                      degraded: 2,
+                      healthy: 3,
+                    };
+                    const bySeverity =
+                      (severity[a.status] ?? 4) - (severity[b.status] ?? 4);
+                    if (bySeverity !== 0) return bySeverity;
+                    return b.uptimePct - a.uptimePct;
+                  },
+                  (source) => source.providerId,
+                ).map((source) => {
                   const display = getSourceStatusDisplay(source.status);
                   return (
                     <tr

@@ -2,6 +2,7 @@ import {
   generateCSV,
   createCSVStream,
   createExportFilename,
+  auditCsvRows,
   type TransactionRecord,
 } from "../services/export";
 import { exportService } from "../services/exportService";
@@ -127,6 +128,53 @@ describe("generateCSV", () => {
     ];
     const csv = generateCSV(records);
     expect(csv).toContain("1000.00");
+  });
+});
+
+// ── auditCsvRows ─────────────────────────────────────────────────────────
+
+describe("auditCsvRows", () => {
+  it("generates a correct checksum and audit object for valid records", () => {
+    const records: TransactionRecord[] = [
+      {
+        date: "2025-01-15T00:00:00.000Z",
+        action: "DEPOSIT",
+        asset: "USDC",
+        amount: 1000,
+        usdValue: 1000,
+        txHash: "abc123",
+      },
+    ];
+    const audit = auditCsvRows(records);
+    expect(audit.rowCount).toBe(1);
+    expect(audit.schemaVersion).toBe(1);
+    expect(audit.isValid).toBe(true);
+    expect(audit.checksum).toMatch(/^[a-f0-9]{64}$/);
+  });
+
+  it("handles empty records", () => {
+    const audit = auditCsvRows([]);
+    expect(audit.rowCount).toBe(0);
+    expect(audit.isValid).toBe(true);
+    expect(audit.checksum).toMatch(/^[a-f0-9]{64}$/);
+  });
+
+  it("returns isValid false for invalid records", () => {
+    const records = [
+      {
+        date: "invalid-date",
+        action: "",
+        asset: "",
+        amount: -100,
+        usdValue: -50,
+        txHash: "",
+      },
+    ] as any;
+    
+    const audit = auditCsvRows(records);
+    expect(audit.rowCount).toBe(1);
+    expect(audit.isValid).toBe(false);
+    expect(audit.checksum).toMatch(/^[a-f0-9]{64}$/);
   });
 });
 

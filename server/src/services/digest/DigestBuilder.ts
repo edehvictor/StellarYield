@@ -3,6 +3,7 @@ import { clusterEvents } from './EventClusterer';
 import { deduplicateCluster } from './Deduplicator';
 import { rankClusters } from './EventRanker';
 import { formatDigest } from './DigestFormatter';
+import { groupDriftAlerts } from "./driftDigestGrouping";
 import type {
   DigestPayload,
   IngestResult,

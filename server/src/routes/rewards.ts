@@ -1,4 +1,8 @@
 import { Router, Request, Response } from "express";
+import {
+  evaluateCampaignBudget,
+  type RewardCampaignBudget,
+} from "../services/campaignBudgetService";
 import { RewardScheduleRegistry } from "../services/rewardScheduleRegistry";
 import {
   summarizeRewardScheduleHealth,
@@ -7,6 +11,51 @@ import {
 } from "../services/rewardScheduleHealth";
 
 const router = Router();
+
+/** Validate unclaimed campaign liability against its funded reserve. */
+router.post("/campaign-budget/preview", (req: Request, res: Response) => {
+  const body = req.body as Partial<RewardCampaignBudget> | null;
+  if (
+    !body ||
+    typeof body.campaignId !== "string" ||
+    !body.campaignId.trim() ||
+    typeof body.totalBudget !== "number" ||
+    !Number.isFinite(body.totalBudget) ||
+    body.totalBudget < 0 ||
+    !Array.isArray(body.claims)
+  ) {
+    res.status(400).json({ error: "Provide a campaignId, non-negative totalBudget, and claims array." });
+    return;
+  }
+
+  if (
+    body.fundedReserve !== undefined &&
+    (typeof body.fundedReserve !== "number" || !Number.isFinite(body.fundedReserve) || body.fundedReserve < 0)
+  ) {
+    res.status(400).json({ error: "fundedReserve must be a non-negative finite number." });
+    return;
+  }
+
+  if (body.claims.some((claim) =>
+    !claim ||
+    typeof claim.amount !== "number" ||
+    !Number.isFinite(claim.amount) ||
+    claim.amount < 0 ||
+    typeof claim.claimedAt !== "string" ||
+    !Number.isFinite(Date.parse(claim.claimedAt))
+  )) {
+    res.status(400).json({ error: "Every claim must have a non-negative amount and valid claimedAt timestamp." });
+    return;
+  }
+
+  const campaign: RewardCampaignBudget = {
+    campaignId: body.campaignId,
+    totalBudget: body.totalBudget,
+    claims: body.claims,
+    ...(body.fundedReserve === undefined ? {} : { fundedReserve: body.fundedReserve }),
+  };
+  res.json(evaluateCampaignBudget(campaign));
+});
 
 router.get("/schedule-summary", async (_req: Request, res: Response) => {
   try {

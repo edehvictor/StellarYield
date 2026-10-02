@@ -16,6 +16,12 @@ vi.mock("@creit.tech/xbull-wallet-connect", () => ({
   xBullWalletConnect: vi.fn(),
 }));
 
+// Adapter availability is probed during recoverSession; default to available
+vi.mock("../auth/walletAdapters", () => ({
+  getAdapter: vi.fn(),
+  EXTENSION_ADAPTERS: [],
+}));
+
 import {
   loadStoredSession,
   clearStoredSession,
@@ -23,9 +29,11 @@ import {
   isSessionStale,
   onSessionEvent,
   broadcastSessionEvent,
+  recoverSession,
   SESSION_TTL_MS,
   STALE_THRESHOLD_MS,
 } from "./session";
+import { getAdapter } from "./walletAdapters";
 import type { WalletSession } from "./types";
 
 const STORAGE_KEY = "stellar-yield.wallet-session";
@@ -283,5 +291,88 @@ describe("BroadcastChannel cross-tab events", () => {
     expect(() => broadcastSessionEvent({ type: "disconnect", payload: null })).not.toThrow();
     expect(() => broadcastSessionEvent({ type: "account-change", payload: makeSession() })).not.toThrow();
     expect(() => broadcastSessionEvent({ type: "session-update", payload: makeSession() })).not.toThrow();
+  });
+});
+
+describe("recoverSession — #1297 wallet session handoff recovery", () => {
+  const STORAGE_KEY = "stellar-yield.wallet-session";
+
+  beforeEach(() => {
+    localStorage.clear();
+    vi.clearAllMocks();
+  });
+
+  it("returns no_session when nothing is stored", async () => {
+    const result = await recoverSession();
+    expect(result.status).toBe("no_session");
+    expect(result.session).toBeNull();
+  });
+
+  it("returns expired and clears storage when session TTL has passed", async () => {
+    const expired = makeSession({
+      connectedAt: new Date(Date.now() - SESSION_TTL_MS - 1000).toISOString(),
+    });
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(expired));
+
+    const result = await recoverSession();
+    expect(result.status).toBe("expired");
+    expect(result.session).toBeNull();
+    expect(localStorage.getItem(STORAGE_KEY)).toBeNull();
+  });
+
+  it("returns recovered and updates lastActivityAt for an extension wallet with available provider", async () => {
+    const session = makeSession({ providerId: "freighter", providerAvailable: false });
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(session));
+
+    (getAdapter as ReturnType<typeof vi.fn>).mockReturnValue({
+      isAvailable: vi.fn().mockResolvedValue(true),
+    });
+
+    const result = await recoverSession();
+    expect(result.status).toBe("recovered");
+    expect(result.session?.providerAvailable).toBe(true);
+    expect(result.session?.lastActivityAt).not.toBe(session.lastActivityAt);
+  });
+
+  it("returns degraded when the extension provider is not available after reload", async () => {
+    const session = makeSession({ providerId: "freighter", providerAvailable: true });
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(session));
+
+    (getAdapter as ReturnType<typeof vi.fn>).mockReturnValue({
+      isAvailable: vi.fn().mockResolvedValue(false),
+    });
+
+    const result = await recoverSession();
+    expect(result.status).toBe("degraded");
+    expect(result.session?.providerAvailable).toBe(false);
+    // Session is NOT cleared — user can still read data
+    expect(localStorage.getItem(STORAGE_KEY)).not.toBeNull();
+  });
+
+  it("returns degraded and does not throw when isAvailable() rejects", async () => {
+    const session = makeSession({ providerId: "freighter" });
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(session));
+
+    (getAdapter as ReturnType<typeof vi.fn>).mockReturnValue({
+      isAvailable: vi.fn().mockRejectedValue(new Error("Extension crashed")),
+    });
+
+    const result = await recoverSession();
+    expect(result.status).toBe("degraded");
+    expect(result.session).not.toBeNull();
+  });
+
+  it("persists updated providerAvailable flag to localStorage on recovery", async () => {
+    const session = makeSession({ providerId: "xbull", providerAvailable: undefined });
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(session));
+
+    (getAdapter as ReturnType<typeof vi.fn>).mockReturnValue({
+      isAvailable: vi.fn().mockResolvedValue(true),
+    });
+
+    await recoverSession();
+
+    const stored = JSON.parse(localStorage.getItem(STORAGE_KEY)!) as WalletSession;
+    expect(stored.providerAvailable).toBe(true);
   });
 });

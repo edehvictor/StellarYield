@@ -1,5 +1,6 @@
 import * as StellarSdk from "@stellar/stellar-sdk";
 import { recordReplayError } from "./indexerStatus";
+import { computeEventDedupKey, eventDedupTracker } from "./eventDedup";
 import { recordFailure, resolveNetworkLabel } from "../monitoring/prometheus";
 
 const RPC_URL = process.env.RPC_URL || "https://soroban-testnet.stellar.org";
@@ -9,7 +10,7 @@ const DECODER_VERSION = "1.0.0"; // Semver of current decoder logic
 
 const rpcServer = new StellarSdk.rpc.Server(RPC_URL);
 
-type IndexerPrismaClient = {
+export type IndexerPrismaClient = {
   indexerState: {
     findUnique(args: {
       where: { id: string };
@@ -90,6 +91,7 @@ type IndexerPrismaClient = {
     count(args: {
       where: {
         resolved: boolean;
+        ledger?: { gte?: number; lte?: number };
       };
     }): Promise<number>;
     findFirst(args: {
@@ -97,9 +99,43 @@ type IndexerPrismaClient = {
       orderBy: { nextRetryAt: "asc" };
     }): Promise<{ nextRetryAt: Date } | null>;
   };
+  indexerRepairRun: {
+    create(args: {
+      data: {
+        startLedger: number;
+        endLedger: number;
+        restoredCount: number;
+        skippedCount: number;
+        stillMissingCount: number;
+        status: string;
+        failureReasonCode?: string | null;
+        failureReasonMessage?: string | null;
+        startedAt: Date;
+        finishedAt: Date;
+      };
+    }): Promise<{ id: string }>;
+    findMany(args: {
+      orderBy?: { startedAt: "desc" };
+      take?: number;
+    }): Promise<
+      Array<{
+        id: string;
+        startLedger: number;
+        endLedger: number;
+        restoredCount: number;
+        skippedCount: number;
+        stillMissingCount: number;
+        status: string;
+        failureReasonCode: string | null;
+        failureReasonMessage: string | null;
+        startedAt: Date;
+        finishedAt: Date | null;
+      }>
+    >;
+  };
 };
 
-async function loadPrismaClient(): Promise<IndexerPrismaClient | null> {
+export async function loadPrismaClient(): Promise<IndexerPrismaClient | null> {
   try {
     const prismaModule = (await import("@prisma/client")) as unknown as {
       PrismaClient?: new () => IndexerPrismaClient;
@@ -118,9 +154,33 @@ async function loadPrismaClient(): Promise<IndexerPrismaClient | null> {
 
 /**
  * Known/supported event topic patterns.
+ * Covers the live vault topics (see `contracts/yield_vault/src/lib.rs`
+ * and `server/src/indexer/eventVersionCompat.ts`) plus legacy generics.
  * Extend this set as new event types are added to the contract.
  */
 const KNOWN_EVENT_TOPICS = new Set([
+  "init",
+  "deposit",
+  "dep_for",
+  "withdraw",
+  "withdrawal",
+  "rebal",
+  "tr_sh",
+  "strat_cfg",
+  "harvest",
+  "rescue",
+  "kpr_add",
+  "pause",
+  "unpause",
+  "don_set",
+  "referral",
+  "flash",
+  "zap_init",
+  "zap_dep",
+  "zap_part",
+  "zap_ref",
+  "set_eng",
+  "set_fee",
   "mint",
   "burn",
   "transfer",
@@ -202,6 +262,20 @@ function classifyError(error: unknown): {
   errorMessage: string;
 } {
   const message = error instanceof Error ? error.message : String(error);
+  if (
+    message.includes("UNSUPPORTED_EVENT_VERSION") ||
+    (typeof (error as { code?: unknown }).code === "string" &&
+      (error as { code: string }).code === "UNSUPPORTED_EVENT_VERSION")
+  ) {
+    return { errorClass: "UnsupportedEventVersion", errorMessage: message };
+  }
+  if (
+    message.includes("UNKNOWN_EVENT_TYPE") ||
+    (typeof (error as { code?: unknown }).code === "string" &&
+      (error as { code: string }).code === "UNKNOWN_EVENT_TYPE")
+  ) {
+    return { errorClass: "UnknownTopicError", errorMessage: message };
+  }
   if (message.includes("UnknownTopicError")) {
     return { errorClass: "UnknownTopicError", errorMessage: message };
   }
@@ -238,23 +312,45 @@ function computeRetryDelay(retryCount: number): number {
 }
 
 /**
- * Process a single event: decode, validate, and store.
- * Returns true on success, false if the event should be dead-lettered.
+ * Outcome of processing a single delivered event (#1361).
+ * - "stored"   — decoded and upserted (or already present in the table)
+ * - "duplicate"— re-delivery of an event already ingested in the suppression
+ *                window; skipped before decode/upsert to keep repeated ledger
+ *                ingestion cheap and dead-letter-free
+ * - "failed"   — decode/store failure; recorded to the dead-letter queue
+ */
+export type ProcessEventResult = "stored" | "duplicate" | "failed";
+
+/**
+ * Process a single event: dedup, decode, validate, and store.
  */
 async function processEvent(
   prisma: IndexerPrismaClient,
   event: StellarSdk.rpc.Api.Event,
-): Promise<boolean> {
+): Promise<ProcessEventResult> {
   try {
     // Step 1: Extract raw event data
     const topic = event.topic.map((t) => t.toXDR("base64")).join(":");
     const data = event.value.toXDR("base64");
 
-    // Step 2: Decode the event (may throw for malformed events)
+    // Step 2: Skip re-deliveries from repeated/overlapping ledger ingestion
+    // before doing any decode or database work (#1361).
+    const dedupKey = computeEventDedupKey({
+      contractId: String(event.contractId ?? CONTRACT_ID),
+      ledger: event.ledger,
+      txHash: event.txHash,
+      topic,
+      data,
+    });
+    if (eventDedupTracker.checkAndRecord(dedupKey)) {
+      return "duplicate";
+    }
+
+    // Step 3: Decode the event (may throw for malformed events)
     const decodedTopic = decodeEventTopic(topic);
     const decodedData = decodeEventValue(data);
 
-    // Step 3: Idempotent upsert to events table
+    // Step 4: Idempotent upsert to events table
     await prisma.event.upsert({
       where: {
         txHash_topic_data: {
@@ -273,9 +369,9 @@ async function processEvent(
       },
     });
 
-    return true;
+    return "stored";
   } catch (error) {
-    // Step 4: On failure, record to dead-letter queue
+    // Step 5: On failure, record to dead-letter queue
     const { errorClass, errorMessage } = classifyError(error);
     const topic = event.topic.map((t) => t.toXDR("base64")).join(":");
     const data = event.value.toXDR("base64");
@@ -304,7 +400,7 @@ async function processEvent(
         contractId: String(event.contractId ?? CONTRACT_ID),
       },
     );
-    return false;
+    return "failed";
   }
 }
 
@@ -312,7 +408,7 @@ async function processEvent(
  * Replay a single dead-letter event. Attempts to decode and store it.
  * Updates retry count and resolves if successful.
  */
-async function replayDeadLetter(
+export async function replayDeadLetter(
   prisma: IndexerPrismaClient,
   deadLetter: {
     id: string;
@@ -493,6 +589,21 @@ export async function getUnresolvedDeadLetterCount(
 }
 
 /**
+ * List unresolved dead-letter (failed indexer job) entries, oldest first,
+ * for recovery-queue inspection.
+ */
+export async function listUnresolvedDeadLetters(
+  prisma: IndexerPrismaClient,
+  limit: number = 50,
+) {
+  return prisma.deadLetterEvent.findMany({
+    where: { resolved: false },
+    orderBy: { nextRetryAt: "asc" },
+    take: Math.min(Math.max(limit, 1), 200),
+  });
+}
+
+/**
  * Filter for specific events from our Soroban Vault contract.
  * We parse the XDR and store it in PostgreSQL.
  * Failed events are recorded in the dead-letter queue for later replay.
@@ -552,9 +663,13 @@ export async function startIndexer() {
       });
 
       let failedCount = 0;
+      let storedCount = 0;
+      let duplicateCount = 0;
       for (const event of eventsResponse.events) {
-        const ok = await processEvent(prisma, event);
-        if (!ok) failedCount++;
+        const result = await processEvent(prisma, event);
+        if (result === "failed") failedCount++;
+        else if (result === "duplicate") duplicateCount++;
+        else storedCount++;
       }
 
       // 3. Update state only after all events processed (dead-lettered failures don't block)
@@ -564,8 +679,11 @@ export async function startIndexer() {
         data: { lastLedger: startLedger },
       });
 
-      const statusMsg =
-        failedCount > 0 ? ` (${failedCount} events dead-lettered)` : "";
+      const statusMsg = [
+        failedCount > 0 ? ` (${failedCount} events dead-lettered)` : "",
+        duplicateCount > 0 ? ` (${duplicateCount} duplicates skipped (#1361))` : "",
+        storedCount > 0 ? ` (${storedCount} stored)` : "",
+      ].join("");
       console.log(
         `[Indexer] Successfully processed up to ledger ${startLedger}${statusMsg}`,
       );

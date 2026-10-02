@@ -20,8 +20,25 @@ export interface ApiRetryConfig {
   retryableStatuses?: number[];
 }
 
+/** A cached API payload and the time it was fetched. */
+export interface ApiCacheEntry<T = unknown> {
+  data: T;
+  fetchedAt: number;
+}
+
+/**
+ * Pluggable storage for {@link ApiClient.cachedGet} offline fallback.
+ * Implementations may back onto localStorage, memory, or IndexedDB.
+ */
+export interface ApiCacheStore {
+  get<T>(key: string): ApiCacheEntry<T> | null | Promise<ApiCacheEntry<T> | null>;
+  set<T>(key: string, entry: ApiCacheEntry<T>): void | Promise<void>;
+}
+
 export interface ApiConfig extends ApiRetryConfig {
   baseUrl: string;
+  /** Enables {@link ApiClient.cachedGet} offline/cache fallback. */
+  cacheStore?: ApiCacheStore;
 }
 
 /** Options for a single ApiClient request. */
@@ -36,6 +53,28 @@ export interface ApiRequestOptions {
    * Cancellation surfaces as {@link ApiCancelledError}, not a timeout.
    */
   signal?: AbortSignal;
+}
+
+/** Options for {@link ApiClient.cachedGet}. */
+export interface ApiCachedGetOptions extends ApiRequestOptions {
+  /** Override the cache key (default: the request path). */
+  cacheKey?: string;
+  /** Maximum age of a cached entry to serve (default: 7 days). */
+  maxAgeMs?: number;
+}
+
+/** Result of {@link ApiClient.cachedGet}. */
+export interface ApiCachedGetResult<T> {
+  /** Fresh or cached payload; null when nothing could be loaded. */
+  data: T | null;
+  /** When the served payload was fetched. */
+  fetchedAt: number | null;
+  /** True when data was served from the cache store. */
+  fromCache: boolean;
+  /** True when the request failed due to network/timeout conditions. */
+  offline: boolean;
+  /** Failure message when no data could be served. */
+  error: string | null;
 }
 
 export interface DepositParams {

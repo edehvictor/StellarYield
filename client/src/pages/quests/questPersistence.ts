@@ -443,28 +443,75 @@ export function loadWalletQuestBundle(
   storage: StorageBackend = localStorage,
   options?: LoadQuestBundleOptions,
 ): PersistedWalletQuestBundle {
+  const currentKey = walletQuestStorageKey(walletAddress);
+  let raw: string | null = null;
+  let sourceKey: string | null = null;
+
   try {
-    const key = walletQuestStorageKey(walletAddress);
-    const fromDisk = parseBundle(storage.getItem(key));
-
-    if (fromDisk) {
-      return {
-        ...fromDisk,
-        quests: mergeQuestsWithTemplate(fromDisk.quests, template),
-      };
-    }
-
-    const migrated = readLegacyBundle(storage);
-    if (migrated) {
-      return {
-        version: QUEST_STORAGE_VERSION,
-        quests: mergeQuestsWithTemplate(migrated.quests, template),
-        achievements: migrated.achievements,
-        lastSyncedAt: migrated.lastSyncedAt,
-      };
-    }
+    raw = storage.getItem(currentKey);
+    if (raw) sourceKey = currentKey;
   } catch {
-    /* private browsing mode or storage blocked — return default template */
+    /* ignore */
+  }
+
+  // Fallback to older wallet-specific storage keys
+  if (!raw) {
+    const candidateKeys = [
+      `sy_quest_wallet_v0_${walletAddress}`,
+      `sy_quest_wallet_${walletAddress}`,
+      `sy_quests_${walletAddress}`,
+    ];
+    for (const k of candidateKeys) {
+      try {
+        const val = storage.getItem(k);
+        if (val) {
+          raw = val;
+          sourceKey = k;
+          break;
+        }
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+
+  // Fallback to legacy global unversioned storage keys
+  if (!raw) {
+    const legacy = readLegacyBundle(storage);
+    if (legacy) {
+      const bundle: PersistedWalletQuestBundle = {
+        version: QUEST_STORAGE_VERSION,
+        quests: mergeQuestsWithTemplate(legacy.quests, template),
+        achievements: legacy.achievements,
+        lastSyncedAt: legacy.lastSyncedAt,
+      };
+      saveWalletQuestBundle(walletAddress, bundle, storage);
+      return bundle;
+    }
+  }
+
+  if (!raw) {
+    return {
+      version: QUEST_STORAGE_VERSION,
+      quests: cloneQuests(template),
+      achievements: [],
+      lastSyncedAt: null,
+    };
+  }
+
+  let parsedJson: unknown = null;
+  try {
+    parsedJson = JSON.parse(raw);
+  } catch {
+    // Unrecoverable corrupted JSON -> initialize clean template and fix stored cache
+    const freshBundle: PersistedWalletQuestBundle = {
+      version: QUEST_STORAGE_VERSION,
+      quests: cloneQuests(template),
+      achievements: [],
+      lastSyncedAt: null,
+    };
+    saveWalletQuestBundle(walletAddress, freshBundle, storage);
+    return freshBundle;
   }
 
   const bundle = migrateQuestBundle(parsedJson, template);

@@ -11,9 +11,16 @@ import {
   createAlert,
   listAlerts,
   deleteAlert,
+  updateAlertPreferences,
+  getAlertPreferences,
+  revertAlertPreferences,
   MAX_ALERTS_PER_USER,
   type AlertCondition,
 } from "../services/alertsService";
+import {
+  getPreferenceAuditHistory,
+} from "../services/alertPreferenceAuditService";
+import type { AlertPreferences } from "../services/alertsPreferenceRules";
 
 const router = Router();
 
@@ -116,6 +123,90 @@ router.get("/:wallet", async (req: Request, res: Response) => {
   } catch (err) {
     console.error("[alerts] listAlerts failed", err);
     res.status(500).json({ error: "Failed to fetch alerts" });
+  }
+});
+
+/** GET /api/alerts/:wallet/preferences/history */
+router.get("/:wallet/preferences/history", (req: Request, res: Response) => {
+  const { wallet } = req.params;
+  const { vaultId } = req.query as { vaultId?: string };
+
+  if (!vaultId) {
+    res.status(400).json({ error: "vaultId query parameter is required" });
+    return;
+  }
+
+  const history = getPreferenceAuditHistory(wallet, vaultId);
+  res.json({ walletAddress: wallet, vaultId, history });
+});
+
+/** GET /api/alerts/:wallet/preferences/:vaultId */
+router.get("/:wallet/preferences/:vaultId", (req: Request, res: Response) => {
+  const { wallet, vaultId } = req.params;
+  const preferences = getAlertPreferences(wallet, vaultId);
+  if (!preferences) {
+    res.status(404).json({ error: "No preferences found for this wallet and vault" });
+    return;
+  }
+  res.json({ walletAddress: wallet, vaultId, preferences });
+});
+
+/** PUT /api/alerts/:wallet/preferences/:vaultId */
+router.put("/:wallet/preferences/:vaultId", (req: Request, res: Response) => {
+  const { wallet, vaultId } = req.params;
+  const { channel, cooldownMinutes, severityThreshold, quietHoursStart, quietHoursEnd } =
+    req.body as Record<string, unknown>;
+
+  if (!["email", "in_app"].includes(channel as string)) {
+    res.status(400).json({ error: "channel must be email or in_app" });
+    return;
+  }
+  if (!Number.isFinite(Number(cooldownMinutes)) || Number(cooldownMinutes) < 0 || Number(cooldownMinutes) > 1440) {
+    res.status(400).json({ error: "cooldownMinutes must be between 0 and 1440" });
+    return;
+  }
+  if (!Number.isFinite(Number(severityThreshold)) || Number(severityThreshold) < 0 || Number(severityThreshold) > 1000) {
+    res.status(400).json({ error: "severityThreshold must be between 0 and 1000" });
+    return;
+  }
+  if (!Number.isInteger(Number(quietHoursStart)) || Number(quietHoursStart) < 0 || Number(quietHoursStart) > 23) {
+    res.status(400).json({ error: "quietHoursStart must be an integer from 0 to 23" });
+    return;
+  }
+  if (!Number.isInteger(Number(quietHoursEnd)) || Number(quietHoursEnd) < 0 || Number(quietHoursEnd) > 23) {
+    res.status(400).json({ error: "quietHoursEnd must be an integer from 0 to 23" });
+    return;
+  }
+
+  const newPrefs: AlertPreferences = {
+    channel: channel as "email" | "in_app",
+    cooldownMinutes: Number(cooldownMinutes),
+    severityThreshold: Number(severityThreshold),
+    quietHoursStart: Number(quietHoursStart),
+    quietHoursEnd: Number(quietHoursEnd),
+  };
+
+  const { preferences, auditEntry } = updateAlertPreferences(wallet, vaultId, newPrefs, {
+    actor: wallet,
+    source: "api",
+    reason: req.body.reason as string | undefined,
+  });
+
+  res.json({ walletAddress: wallet, vaultId, preferences, auditEntry });
+});
+
+/** POST /api/alerts/:wallet/preferences/:vaultId/revert */
+router.post("/:wallet/preferences/:vaultId/revert", (req: Request, res: Response) => {
+  const { wallet, vaultId } = req.params;
+  const { entryId } = req.body as { entryId?: string };
+
+  try {
+    const { preferences, auditEntry } = revertAlertPreferences(wallet, vaultId, entryId);
+    res.json({ walletAddress: wallet, vaultId, preferences, auditEntry });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "Failed to revert preferences";
+    const status = message.includes("not found") ? 404 : 500;
+    res.status(status).json({ error: message });
   }
 });
 

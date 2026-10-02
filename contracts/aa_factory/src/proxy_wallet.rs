@@ -49,6 +49,19 @@ pub struct UserOperation {
     pub max_fee: i128,        // Maximum fee user is willing to pay
 }
 
+/// Read-only policy evaluation for a user operation, safe to call before signing.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct UserOperationPolicyPreview {
+    pub wallet_initialized: bool,
+    pub sender_matches_wallet: bool,
+    pub nonce_available: bool,
+    pub not_expired: bool,
+    pub relayer_allowed: bool,
+    pub fee_limit_valid: bool,
+    pub allowed: bool,
+}
+
 /// P-256 (secp256r1) WebAuthn public key stored as uncompressed (x, y).
 #[contracttype]
 #[derive(Clone, Debug)]
@@ -192,6 +205,11 @@ impl ProxyWallet {
 
         Self::verify_relayer(&env, &relayer)?;
 
+        let preview = Self::preview_user_operation(env.clone(), op.clone(), relayer.clone());
+        if !preview.sender_matches_wallet || !preview.fee_limit_valid {
+            return Err(ProxyError::InvalidOperation);
+        }
+
         // Reject stale operations.
         if env.ledger().timestamp() > op.expiry {
             return Err(ProxyError::OperationExpired);
@@ -206,6 +224,54 @@ impl ProxyWallet {
             .publish((symbol_short!("exec"),), (op.nonce, result.success));
 
         Ok(result)
+    }
+
+    /// Evaluate execution policy without consuming a nonce or requiring a signature.
+    /// The result is advisory; execution repeats these checks on-chain.
+    pub fn preview_user_operation(
+        env: Env,
+        op: UserOperation,
+        relayer: Address,
+    ) -> UserOperationPolicyPreview {
+        let current_nonce: u64 = env
+            .storage()
+            .instance()
+            .get(&StorageKey::Nonce)
+            .unwrap_or(0);
+        let used_nonces: Map<u64, bool> = env
+            .storage()
+            .instance()
+            .get(&StorageKey::UsedNonces)
+            .unwrap_or(Map::new(&env));
+        let configured_relayer: Option<Address> = env
+            .storage()
+            .instance()
+            .get(&StorageKey::Relayer);
+
+        let wallet_initialized = env.storage().instance().has(&StorageKey::Initialized);
+        let sender_matches_wallet = op.sender == env.current_contract_address();
+        let nonce_available = op.nonce >= current_nonce && !used_nonces.get(op.nonce).unwrap_or(false);
+        let not_expired = env.ledger().timestamp() <= op.expiry;
+        let relayer_allowed = configured_relayer
+            .map(|configured| configured == relayer)
+            .unwrap_or(true);
+        let fee_limit_valid = op.max_fee >= 0;
+        let allowed = wallet_initialized
+            && sender_matches_wallet
+            && nonce_available
+            && not_expired
+            && relayer_allowed
+            && fee_limit_valid;
+
+        UserOperationPolicyPreview {
+            wallet_initialized,
+            sender_matches_wallet,
+            nonce_available,
+            not_expired,
+            relayer_allowed,
+            fee_limit_valid,
+            allowed,
+        }
     }
 
     /// Execute multiple user operations in batch.
@@ -668,6 +734,32 @@ mod tests {
             },
             max_fee: 1000,
         }
+    }
+
+    #[test]
+    fn test_policy_preview_reports_valid_and_invalid_operation_without_mutation() {
+        let env = Env::default();
+        let (client, owner, _) = setup(&env);
+        let relayer = Address::generate(&env);
+        client.set_relayer(&owner, &relayer);
+        let contract_address = client.address.clone();
+        let valid = make_op(&env, &contract_address, 0, 1000);
+
+        let preview = client.preview_user_operation(&valid, &relayer);
+        assert!(preview.wallet_initialized);
+        assert!(preview.sender_matches_wallet);
+        assert!(preview.nonce_available);
+        assert!(preview.not_expired);
+        assert!(preview.relayer_allowed);
+        assert!(preview.fee_limit_valid);
+        assert!(preview.allowed);
+        assert_eq!(client.get_nonce(), 0);
+
+        let wrong_sender = make_op(&env, &owner, 0, 1000);
+        let rejected = client.preview_user_operation(&wrong_sender, &relayer);
+        assert!(!rejected.sender_matches_wallet);
+        assert!(!rejected.allowed);
+        assert_eq!(client.get_nonce(), 0);
     }
 
     // ── Initialization ─────────────────────────────────────────────────

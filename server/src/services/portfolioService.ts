@@ -11,6 +11,7 @@ import {
   computeFreshnessStatus,
   type FreshnessResult,
 } from "./sourceHealthService";
+import { ExportFailureError } from "../types/exportFailure";
 
 export interface VaultPosition {
   protocol: string;
@@ -106,13 +107,19 @@ export class PortfolioService {
     }
 
     if (classes.length === 0) {
-      throw new Error("Export filters cannot be empty. Please select at least one asset class.");
+      throw new ExportFailureError(
+        "EXPORT_VALIDATION_FAILED",
+        "Export filters cannot be empty. Please select at least one asset class.",
+        { field: "assetClass" },
+      );
     }
 
     for (const c of classes) {
       if (!this.SUPPORTED_ASSET_CLASSES.includes(c)) {
-        throw new Error(
+        throw new ExportFailureError(
+          "EXPORT_VALIDATION_FAILED",
           `Unsupported asset class: "${c}". Supported classes are: ${this.SUPPORTED_ASSET_CLASSES.join(", ")}.`,
+          { assetClass: c, supported: this.SUPPORTED_ASSET_CLASSES },
         );
       }
     }
@@ -120,7 +127,11 @@ export class PortfolioService {
     const filtered = positions.filter((pos) => classes.includes(this.getAssetClass(pos.asset)));
 
     if (filtered.length === 0) {
-      throw new Error("No portfolio data matches the selected filters.");
+      throw new ExportFailureError(
+        "EXPORT_NO_DATA",
+        "No portfolio data matches the selected filters.",
+        { requestedAssetClasses: classes },
+      );
     }
 
     return filtered;
@@ -170,6 +181,7 @@ export class PortfolioService {
   }
 }
 
+/** Escape a CSV field: quote and double-up inner quotes if it contains a comma, quote, or newline. */
 function escapeCsvField(value: string): string {
   if (/[",\n]/.test(value)) {
     return `"${value.replace(/"/g, '""')}"`;

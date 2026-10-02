@@ -43,7 +43,7 @@ tags:
       |---|---|---|
       | `MISSING_FIELDS` | 400 | Required request fields are missing. |
       | `INVALID_AMOUNT` | 400 | `amountInStroops` is not a valid integer string. |
-      | `STALE_QUOTE` | 400 / 422 | The provided quote has expired (older than 60s) and must be refreshed. |
+      | `STALE_QUOTE` | 400 / 422 | The provided quote is past its `expiresAt` (TTL configured via `ZAP_QUOTE_TTL_MS`, default 60s) and must be refreshed. Responses carry `recoverable: true`. |
       | `UNSUPPORTED_ASSET` | 400 / 422 | One or more assets in the quote path are no longer in the supported asset set. |
       | `SLIPPAGE_EXCEEDED` | 400 / 422 | The applied slippage exceeds the maximum allowed threshold (15%). |
       | `ROUTE_MISMATCH` | 400 | The route hash in the quote does not match the current computed path. |
@@ -70,11 +70,185 @@ tags:
   - name: Incidents
     description: Protocol incident tracking and resolution
   - name: Onramp
-    description: Fiat onramp provider webhook integration
+    description: Fiat onramp transaction intents (quote, intent, status, cancel) and the provider webhook
+  - name: Offramp
+    description: Fiat offramp withdrawals, proxied to the provider so its API key never reaches the browser
   - name: Deposits
     description: Multi-asset deposit routing recommendations
+  - name: Drift
+    description: Drift detection and anomaly grouping across portfolio, vault, and strategy services
+  - name: Preferences
+    description: User preference audit trail (digest, notifications, schedule)
+  - name: Governance
+    description: Governance proposals, forecasts, and multi-sig quorum progress
+  - name: Vault
+    description: Vault-level read-only previews (withdrawal quotes, allocation rollback)
 
 paths:
+  /api/drift/group:
+    post:
+      summary: Group arbitrary drift signals
+      description: Groups related drift signals by source, asset, and severity band with deduplication and hierarchical support
+      tags:
+        - Drift
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - signals
+              properties:
+                signals:
+                  type: array
+                  items:
+                    type: object
+                    required:
+                      - id
+                      - source
+                      - asset
+                      - metric
+                      - currentValue
+                      - expectedValue
+                      - deviation
+                      - severity
+                      - timestamp
+                    properties:
+                      id:
+                        type: string
+                      source:
+                        type: string
+                        enum: [portfolio, vault, strategy]
+                      subSource:
+                        type: string
+                      asset:
+                        type: string
+                      metric:
+                        type: string
+                      currentValue:
+                        type: number
+                      expectedValue:
+                        type: number
+                      deviation:
+                        type: number
+                      severity:
+                        type: string
+                        enum: [INFO, LOW, MEDIUM, HIGH, CRITICAL]
+                      timestamp:
+                        type: string
+                      rootCauseId:
+                        type: string
+                      parentSignalId:
+                        type: string
+                options:
+                  type: object
+                  properties:
+                    strategy:
+                      type: string
+                      enum: [bySourceAssetSeverity, byAssetAndProximity, byRootCause, hierarchical]
+                    dedupWindowMs:
+                      type: number
+                    correlationWindowMs:
+                      type: number
+      responses:
+        '200':
+          description: Grouped drift anomalies
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  data:
+                    type: array
+                    items:
+                      type: object
+        '400':
+          description: Invalid request body
+
+  /api/drift/evaluate:
+    post:
+      summary: Evaluate and group vault drift with external signals
+      description: Evaluates current vault USD allocations and external signals, records state, and returns grouped anomalies
+      tags:
+        - Drift
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - vaultValuesUsd
+              properties:
+                vaultValuesUsd:
+                  type: object
+                  additionalProperties:
+                    type: number
+                externalSignals:
+                  type: array
+                  items:
+                    type: object
+                options:
+                  type: object
+      responses:
+        '200':
+          description: Evaluated grouped anomalies
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  data:
+                    type: array
+                    items:
+                      type: object
+        '400':
+          description: Invalid request body
+
+  /api/drift/anomalies:
+    get:
+      summary: Get active grouped drift anomalies
+      description: Retrieves active grouped anomalies with optional filtering by source, severity, or asset
+      tags:
+        - Drift
+      parameters:
+        - in: query
+          name: source
+          schema:
+            type: string
+          description: Filter by source type (portfolio, vault, strategy)
+        - in: query
+          name: severity
+          schema:
+            type: string
+          description: Filter by severity band (INFO, LOW, MEDIUM, HIGH, CRITICAL)
+        - in: query
+          name: asset
+          schema:
+            type: string
+          description: Filter by asset or vault ID
+      responses:
+        '200':
+          description: Active grouped drift anomalies
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  count:
+                    type: integer
+                  data:
+                    type: array
+                    items:
+                      type: object
+
   /api/health:
     get:
       summary: Check system health status
@@ -121,6 +295,64 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/HealthStatus'
+
+  /api/health/digest:
+    get:
+      summary: Latest scheduled integration health digest
+      description: Returns the most recent scheduled digest of backend integration health (database, Horizon, Soroban RPC, indexer, cache). Each integration carries its stable error code; raw provider messages are never included.
+      tags:
+        - Health
+      responses:
+        '200':
+          description: The latest digest
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  generatedAt:
+                    type: string
+                    format: date-time
+                  overallStatus:
+                    type: string
+                    enum: [healthy, degraded, outage]
+                  summary:
+                    type: object
+                    properties:
+                      total:
+                        type: integer
+                      up:
+                        type: integer
+                      warning:
+                        type: integer
+                      down:
+                        type: integer
+                  integrations:
+                    type: array
+                    description: Sorted by severity (down, warning, up), then by name
+                    items:
+                      type: object
+                      properties:
+                        name:
+                          type: string
+                          example: horizon
+                        status:
+                          type: string
+                          enum: [up, warning, down]
+                        errorCode:
+                          type: string
+                          nullable: true
+                          example: HORIZON_UNREACHABLE
+                        retryable:
+                          type: boolean
+                        latencyMs:
+                          type: integer
+                          nullable: true
+                        checkedAt:
+                          type: string
+                          format: date-time
+        '404':
+          description: No digest has been generated yet (`HEALTH_DIGEST_NOT_READY`)
 
   /api/yields:
     get:
@@ -638,6 +870,7 @@ paths:
                   value:
                     error: "STALE_QUOTE"
                     message: "Quote has expired"
+                    recoverable: true
                 unsupportedAsset:
                   summary: UNSUPPORTED_ASSET
                   value:
@@ -1420,6 +1653,74 @@ paths:
         '500':
           description: Failed to compare recommendation stability
 
+  /api/treasury/policy/dry-run:
+    post:
+      summary: Dry-run an allocation policy without persisting it
+      description: |
+        Validates an allocation policy (and optionally evaluates it against
+        zero or more vault contexts) without writing to the policy store.
+        Returns `INVALID_POLICY` with field-level errors when validation fails.
+      tags:
+        - Treasury
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - policy
+              properties:
+                policy:
+                  type: object
+                  description: Allocation policy definition to validate
+                contexts:
+                  type: array
+                  description: Optional evaluation contexts for preview matching
+                  items:
+                    type: object
+                    properties:
+                      vaultId:
+                        type: string
+                      tvlUsd:
+                        type: number
+                      apyPct:
+                        type: number
+                      volatilityPct:
+                        type: number
+                      currentAllocationPct:
+                        type: number
+      responses:
+        '200':
+          description: Policy validated (never persisted)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  data:
+                    type: object
+                    properties:
+                      policy:
+                        type: object
+                      persisted:
+                        type: boolean
+                        enum: [false]
+                      evaluations:
+                        type: array
+                        items:
+                          type: object
+        '400':
+          description: Missing policy or invalid contexts
+        '422':
+          description: Policy failed validation (INVALID_POLICY with details.errors)
+        '401':
+          description: Unauthorized (admin required)
+        '403':
+          description: Forbidden (non-admin)
+
   /api/treasury/simulate:
     post:
       summary: Run treasury simulation
@@ -1620,6 +1921,181 @@ paths:
           description: Scenario not found
         '500':
           description: Failed to delete scenario
+
+  /api/treasury/withdrawals:
+    get:
+      summary: List treasury withdrawals
+      description: >
+        Lists treasury withdrawal requests (admin only), newest first.
+        Optional `vaultId` query filters to a single vault.
+      tags:
+        - Treasury
+      parameters:
+        - name: vaultId
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Restrict results to one vault
+      responses:
+        '200':
+          description: Withdrawals retrieved successfully (success envelope; data is an array of TreasuryWithdrawal)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                    enum: [true]
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/TreasuryWithdrawal'
+                  meta:
+                    type: object
+        '401':
+          description: UNAUTHORIZED — authentication required
+        '403':
+          description: FORBIDDEN — admin access required
+    post:
+      summary: Submit a treasury withdrawal (cooldown enforced)
+      description: >
+        Creates a pending treasury withdrawal for a vault (admin only, #1343).
+        The per-vault cooldown (default 4h) is enforced: while a recent
+        pending withdrawal consumes the cooldown, further submissions fail
+        with 409 COOLDOWN_ACTIVE and stable error.details (remainingMs,
+        availableAt, blockingWithdrawalId). Cancelling the pending withdrawal
+        frees the cooldown immediately.
+      tags:
+        - Treasury
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - vaultId
+                - amountUsd
+              properties:
+                vaultId:
+                  type: string
+                  description: Vault identifier the withdrawal targets
+                amountUsd:
+                  type: number
+                  format: double
+                  exclusiveMinimum: 0
+                  description: Withdrawal amount in USD (must be > 0)
+                requestedBy:
+                  type: string
+                  description: Optional operator id; defaults to the authenticated user
+                memo:
+                  type: string
+                  maxLength: 500
+                  description: Optional operator note
+      responses:
+        '201':
+          description: Withdrawal accepted (success envelope; data is a TreasuryWithdrawal)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                    enum: [true]
+                  data:
+                    $ref: '#/components/schemas/TreasuryWithdrawal'
+                  meta:
+                    type: object
+        '400':
+          description: INVALID_REQUEST — missing or invalid vaultId / amountUsd / requestedBy / memo
+        '401':
+          description: UNAUTHORIZED — authentication required
+        '403':
+          description: FORBIDDEN — admin access required
+        '409':
+          description: COOLDOWN_ACTIVE — vault still inside its withdrawal cooldown window
+        '429':
+          description: Rate limit exceeded for treasury mutation endpoints
+
+  /api/treasury/withdrawals/cooldown:
+    get:
+      summary: Get withdrawal cooldown status for a vault
+      description: >
+        Reports whether a new withdrawal submission for the vault would be
+        blocked by the cooldown, plus remaining time and the blocking pending
+        withdrawal (admin only).
+      tags:
+        - Treasury
+      parameters:
+        - name: vaultId
+          in: query
+          required: true
+          schema:
+            type: string
+          description: Vault identifier to inspect
+      responses:
+        '200':
+          description: Cooldown status (success envelope; data is TreasuryWithdrawalCooldownStatus)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                    enum: [true]
+                  data:
+                    $ref: '#/components/schemas/TreasuryWithdrawalCooldownStatus'
+                  meta:
+                    type: object
+        '400':
+          description: INVALID_REQUEST — vaultId query parameter is required
+        '401':
+          description: UNAUTHORIZED — authentication required
+        '403':
+          description: FORBIDDEN — admin access required
+
+  /api/treasury/withdrawals/{id}/cancel:
+    post:
+      summary: Cancel a pending treasury withdrawal
+      description: >
+        Cancels a pending withdrawal (admin only), freeing the vault's
+        cooldown immediately (#1343).
+      tags:
+        - Treasury
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Withdrawal id
+      responses:
+        '200':
+          description: Withdrawal cancelled (success envelope; data is a TreasuryWithdrawal with status CANCELLED)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                    enum: [true]
+                  data:
+                    $ref: '#/components/schemas/TreasuryWithdrawal'
+                  meta:
+                    type: object
+        '401':
+          description: UNAUTHORIZED — authentication required
+        '403':
+          description: FORBIDDEN — admin access required
+        '404':
+          description: NOT_FOUND — unknown withdrawal id
+        '409':
+          description: INVALID_STATE — withdrawal is not pending (already cancelled)
 
   /api/alerts:
     post:
@@ -2481,6 +2957,124 @@ paths:
 
   # ── Incidents ─────────────────────────────────────────────────────────────
 
+  /api/portfolio/exposure/heatmap:
+    post:
+      summary: Build an asset × protocol exposure heatmap
+      description: >
+        Cross-tabulates positions into a matrix of portfolio share per
+        (asset, protocol) pair. Row and column totals equal the per-asset and
+        per-protocol exposure buckets. Cells are graded against the stricter of
+        the configured asset and protocol concentration thresholds
+        (`CONCENTRATION_*_SHARE`). Beyond `maxAssets` / `maxProtocols`, the
+        smallest entries collapse into an "Other" bucket (key `__other__`).
+        Zero-value positions are skipped; an empty portfolio returns empty arrays.
+      tags:
+        - Portfolio
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [positions]
+              properties:
+                positions:
+                  type: array
+                  maxItems: 1000
+                  items:
+                    type: object
+                    required: [asset, protocol]
+                    properties:
+                      asset:
+                        type: string
+                      protocol:
+                        type: string
+                      valueUsd:
+                        type: number
+                        minimum: 0
+                      currentValueUsd:
+                        type: number
+                        minimum: 0
+                        description: Accepted in place of `valueUsd`.
+                maxAssets:
+                  type: integer
+                  minimum: 1
+                  maximum: 50
+                  default: 8
+                maxProtocols:
+                  type: integer
+                  minimum: 1
+                  maximum: 50
+                  default: 8
+      responses:
+        '200':
+          description: Heatmap matrix
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  assets:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/ExposureHeatmapAxisEntry'
+                  protocols:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/ExposureHeatmapAxisEntry'
+                  cells:
+                    type: array
+                    description: "`cells[row][col]` aligned with `assets[row]` × `protocols[col]`."
+                    items:
+                      type: array
+                      items:
+                        type: object
+                        properties:
+                          valueUsd:
+                            type: number
+                          share:
+                            type: number
+                          severity:
+                            type: string
+                            enum: [ok, warning, critical]
+                  totalValueUsd:
+                    type: number
+                  maxCellShare:
+                    type: number
+                  severity:
+                    type: string
+                    enum: [ok, warning, critical]
+                  cellThreshold:
+                    type: object
+                    properties:
+                      warn:
+                        type: number
+                      critical:
+                        type: number
+                  positionCount:
+                    type: integer
+                  skippedCount:
+                    type: integer
+        '400':
+          description: >
+            `MALFORMED_INPUT` (positions not an array), `INVALID_POSITION`
+            (`details.index` names the offending position), `TOO_MANY_POSITIONS`,
+            or `INVALID_OPTIONS`.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string
+                    enum: [MALFORMED_INPUT, INVALID_POSITION, TOO_MANY_POSITIONS, INVALID_OPTIONS]
+                  message:
+                    type: string
+                  details:
+                    type: object
+                    properties:
+                      index:
+                        type: integer
   /api/portfolio/reconcile:
     post:
       summary: Reconcile a portfolio and explain any failures
@@ -2590,6 +3184,223 @@ paths:
                     type: array
                     items:
                       $ref: '#/components/schemas/ReconcileCauseDescriptor'
+
+  /api/portfolio/import/validate:
+    post:
+      summary: Validate an external portfolio CSV before import
+      description: Checks a holdings CSV (columns protocol, asset, depositedUsd, currentValueUsd; header matching ignores case and punctuation) without importing anything. File-level problems fail with a stable code; row-level problems are listed per row so valid rows can still be previewed.
+      tags:
+        - Portfolio
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [csv]
+              properties:
+                csv:
+                  type: string
+                  description: Raw CSV file contents (at most 64 KB and 1,000 rows)
+                  example: "protocol,asset,depositedUsd,currentValueUsd\nBlend,USDC,1000,1012.5"
+      responses:
+        '200':
+          description: The file is structurally valid; the preview lists valid holdings and any row issues
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  holdings:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        row:
+                          type: integer
+                        protocol:
+                          type: string
+                        asset:
+                          type: string
+                        depositedUsd:
+                          type: number
+                        currentValueUsd:
+                          type: number
+                  issues:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        row:
+                          type: integer
+                          description: Row number in the file, counting the header as row 1
+                        column:
+                          type: string
+                          nullable: true
+                        code:
+                          type: string
+                          enum: [ROW_COLUMN_COUNT, ROW_MISSING_VALUE, ROW_INVALID_AMOUNT, ROW_NEGATIVE_AMOUNT, ROW_DUPLICATE_HOLDING]
+                        message:
+                          type: string
+                  summary:
+                    type: object
+                    properties:
+                      totalRows:
+                        type: integer
+                      validRows:
+                        type: integer
+                      invalidRows:
+                        type: integer
+                      totalDepositedUsd:
+                        type: number
+                      totalCurrentValueUsd:
+                        type: number
+        '400':
+          description: IMPORT_INVALID_REQUEST, IMPORT_EMPTY_FILE, or IMPORT_MALFORMED_CSV
+        '413':
+          description: IMPORT_FILE_TOO_LARGE or IMPORT_TOO_MANY_ROWS
+        '422':
+          description: IMPORT_MISSING_COLUMNS, IMPORT_DUPLICATE_COLUMNS, or IMPORT_NO_DATA_ROWS
+
+  /api/portfolio/{walletAddress}/daily-movement:
+    get:
+      summary: Get daily portfolio movement
+      description: >
+        Compares today's valuation snapshot with yesterday's (#1362). Responses
+        include an additive `freshness` annotation derived from the snapshot's
+        updatedAt. Opt-in guardrails: `requireFresh=true` returns 409
+        STALE_VALUATION_SNAPSHOT when the snapshot is older than the threshold
+        (default 36h, overridable via `maxAgeMs`) and 404 SNAPSHOT_NOT_FOUND
+        when no current snapshot exists. Requests without `requireFresh` keep
+        the historical 200 behavior.
+      tags:
+        - Portfolio
+      parameters:
+        - name: walletAddress
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Stellar wallet address (G...)
+        - name: requireFresh
+          in: query
+          required: false
+          schema:
+            type: boolean
+          description: When true, stale or missing snapshots fail with 409/404 instead of returning 200
+        - name: maxAgeMs
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 604800000
+          description: Freshness threshold in milliseconds (default 129600000 = 36h)
+      responses:
+        '200':
+          description: Daily movement payload (raw DailyMovement with optional freshness annotation)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DailyMovement'
+        '400':
+          description: INVALID_ADDRESS (bad wallet) or INVALID_QUERY (malformed requireFresh / maxAgeMs)
+        '404':
+          description: SNAPSHOT_NOT_FOUND — requireFresh=true and no current snapshot exists
+        '409':
+          description: STALE_VALUATION_SNAPSHOT — requireFresh=true and snapshot older than maxAgeMs (recoverable; retry after refresh)
+        '500':
+          description: DAILY_MOVEMENT_FAILED
+
+  /api/vaults/{vaultId}/allocation-rollback-preview:
+    get:
+      summary: Preview rollback of the vault's pending rebalance
+      description: >
+        Deterministic, read-only preview (#1360) diffing the vault's latest
+        pending rebalance queue entry target weights against the weights a
+        rollback would restore. Identical inputs always produce a
+        byte-identical preview (fixed 4-decimal rounding, byte-wise sorted
+        keys, stable inputHash) — no wall-clock time is embedded. 404
+        NO_PENDING_REBALANCE when there is nothing to roll back.
+      tags:
+        - Vault
+      parameters:
+        - name: vaultId
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Vault identifier
+        - name: reason
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Optional rollback reason included in the preview inputHash
+      responses:
+        '200':
+          description: Rollback preview (AllocationRollbackPreview)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AllocationRollbackPreview'
+        '400':
+          description: INVALID_REQUEST / INVALID_VAULT_ID / INVALID_ALLOCATIONS / ALLOCATIONS_MUST_SUM_100 / ALLOCATION_SCALE_MISMATCH
+        '404':
+          description: NO_PENDING_REBALANCE — no active rebalance queue entry for the vault
+        '500':
+          description: ROLLBACK_PREVIEW_FAILED
+    post:
+      summary: Preview an ad-hoc allocation rollback
+      description: >
+        Deterministic, read-only preview from explicit allocation maps (#1360):
+        `rollbackAllocations` is required; `currentAllocations` is optional
+        (falls back to the pending queue entry when omitted). Same
+        determinism and error contract as GET.
+      tags:
+        - Vault
+      parameters:
+        - name: vaultId
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Vault identifier
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - rollbackAllocations
+              properties:
+                currentAllocations:
+                  type: object
+                  additionalProperties:
+                    type: number
+                  description: Current weights (percent or fraction scale); required when no pending rebalance exists
+                rollbackAllocations:
+                  type: object
+                  additionalProperties:
+                    type: number
+                  description: Weights the rollback would restore (same scale as current)
+                rollbackReason:
+                  type: string
+                  description: Optional rollback reason included in the preview inputHash
+      responses:
+        '200':
+          description: Rollback preview (AllocationRollbackPreview)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AllocationRollbackPreview'
+        '400':
+          description: INVALID_REQUEST / INVALID_VAULT_ID / INVALID_ALLOCATIONS / ALLOCATIONS_MUST_SUM_100 / ALLOCATION_SCALE_MISMATCH
+        '404':
+          description: NO_PENDING_REBALANCE — currentAllocations omitted and no active queue entry exists
+        '500':
+          description: ROLLBACK_PREVIEW_FAILED
 
   /api/incidents:
     get:
@@ -2770,6 +3581,382 @@ paths:
           description: Failed to fetch recommendations
 
   # ── Onramp ───────────────────────────────────────────────────────────────
+  #
+  # A fiat purchase is a three-step transaction intent:
+  #   1. POST /api/onramp/quote    → a 30-second quote
+  #   2. POST /api/onramp/intent   → confirm the quote; creates a PENDING transaction
+  #   3. GET  /api/onramp/status/{txId} → poll until COMPLETED or FAILED
+  # POST /api/onramp/cancel abandons a PENDING transaction, and the provider
+  # reports the outcome through POST /api/onramp/webhook.
+
+  /api/onramp/quote:
+    post:
+      summary: Create a fiat-to-USDC quote
+      description: |
+        Step 1 of the onramp transaction intent. Returns a short-lived quote that
+        converts `amountFiat` to USDC. The quote expires after 30 seconds, so
+        confirm it with `POST /api/onramp/intent` before `expiresAt`
+        (epoch milliseconds). The rate is currently a fixed 0.98 USDC per unit of
+        fiat, rounded to two decimals. `currency` is case-insensitive and is
+        returned upper-cased.
+      tags:
+        - Onramp
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OnRampQuoteRequest'
+            examples:
+              usd:
+                summary: Quote 100 USD with the default provider
+                value:
+                  amountFiat: 100
+                  currency: USD
+              eurViaMoonPay:
+                summary: Lower-case currency code and an explicit provider
+                value:
+                  amountFiat: 250.5
+                  currency: eur
+                  provider: MOONPAY
+      responses:
+        '200':
+          description: Quote created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OnRampQuote'
+              examples:
+                usd:
+                  summary: 100 USD quoted as 98 USDC
+                  value:
+                    quoteId: quote_k3j9x2m1a
+                    provider: STRIPE
+                    amountFiat: 100
+                    currency: USD
+                    amountUsdc: 98
+                    expiresAt: 1740819660000
+        '400':
+          description: Invalid amount or currency
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OnRampErrorResponse'
+              examples:
+                invalidAmount:
+                  summary: amountFiat is missing, not a number, or not positive
+                  value:
+                    error: Invalid amountFiat. Must be a positive number.
+                invalidCurrency:
+                  summary: currency is not a 3-letter code
+                  value:
+                    error: Invalid currency. Must be a 3-letter currency code.
+
+  /api/onramp/intent:
+    post:
+      summary: Confirm a quote and create a pending onramp transaction
+      description: |
+        Step 2 of the onramp transaction intent. Confirms a quote from
+        `POST /api/onramp/quote` for a wallet and records a `PENDING` transaction
+        with a new provider transaction id (`transaction.providerTxId`, the `txId`
+        used by the status and cancel endpoints). The quote must exist and must
+        not be older than 30 seconds.
+      tags:
+        - Onramp
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OnRampIntentRequest'
+            examples:
+              confirm:
+                summary: Confirm a quote for a wallet
+                value:
+                  quoteId: quote_k3j9x2m1a
+                  walletAddress: GBRPYHIL2CI3FNQ4BXLFMNDLFJUNPU2HY3ZMFSHONUCEOASW7QC7OX2H
+      responses:
+        '200':
+          description: Pending transaction created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OnRampTransactionResponse'
+              examples:
+                pending:
+                  summary: The new PENDING transaction
+                  value:
+                    success: true
+                    transaction:
+                      id: 5b8f0a3e-2c1d-4e7a-9d55-0c6f1a2b3c4d
+                      walletAddress: GBRPYHIL2CI3FNQ4BXLFMNDLFJUNPU2HY3ZMFSHONUCEOASW7QC7OX2H
+                      provider: STRIPE
+                      status: PENDING
+                      amountFiat: 100
+                      currency: USD
+                      amountUsdc: 98
+                      providerTxId: tx_p7q2w9e4r
+                      createdAt: '2025-03-01T09:00:00.000Z'
+                      updatedAt: '2025-03-01T09:00:00.000Z'
+        '400':
+          description: A field is missing, or the quote has expired
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OnRampErrorResponse'
+              examples:
+                missingQuoteId:
+                  summary: quoteId was not sent
+                  value:
+                    error: Missing quoteId.
+                missingWallet:
+                  summary: walletAddress was not sent
+                  value:
+                    error: Missing walletAddress.
+                expiredQuote:
+                  summary: The quote is older than 30 seconds; request a new one
+                  value:
+                    error: Quote has expired.
+        '404':
+          description: No quote with that id
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OnRampErrorResponse'
+              examples:
+                unknownQuote:
+                  summary: Unknown or already-evicted quote
+                  value:
+                    error: Quote not found.
+
+  /api/onramp/status/{txId}:
+    get:
+      summary: Get an onramp transaction's status
+      description: |
+        Step 3 of the onramp transaction intent. Poll this endpoint after
+        `POST /api/onramp/intent` until `status` is `COMPLETED` or `FAILED`.
+        `txId` is the `providerTxId` returned by the intent.
+      tags:
+        - Onramp
+      parameters:
+        - name: txId
+          in: path
+          required: true
+          description: Provider transaction id (`providerTxId`)
+          schema:
+            type: string
+          example: tx_p7q2w9e4r
+      responses:
+        '200':
+          description: Current status and the full transaction
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OnRampStatusResponse'
+              examples:
+                pending:
+                  summary: Still waiting on the provider
+                  value:
+                    status: PENDING
+                    transaction:
+                      id: 5b8f0a3e-2c1d-4e7a-9d55-0c6f1a2b3c4d
+                      walletAddress: GBRPYHIL2CI3FNQ4BXLFMNDLFJUNPU2HY3ZMFSHONUCEOASW7QC7OX2H
+                      provider: STRIPE
+                      status: PENDING
+                      amountFiat: 100
+                      currency: USD
+                      amountUsdc: 98
+                      providerTxId: tx_p7q2w9e4r
+                      createdAt: '2025-03-01T09:00:00.000Z'
+                      updatedAt: '2025-03-01T09:00:00.000Z'
+                completed:
+                  summary: The purchase settled
+                  value:
+                    status: COMPLETED
+                    transaction:
+                      id: 5b8f0a3e-2c1d-4e7a-9d55-0c6f1a2b3c4d
+                      walletAddress: GBRPYHIL2CI3FNQ4BXLFMNDLFJUNPU2HY3ZMFSHONUCEOASW7QC7OX2H
+                      provider: STRIPE
+                      status: COMPLETED
+                      amountFiat: 100
+                      currency: USD
+                      amountUsdc: 98
+                      providerTxId: tx_p7q2w9e4r
+                      createdAt: '2025-03-01T09:00:00.000Z'
+                      updatedAt: '2025-03-01T09:02:31.000Z'
+        '404':
+          description: No transaction with that id
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OnRampErrorResponse'
+              examples:
+                unknown:
+                  summary: Unknown transaction
+                  value:
+                    error: Transaction not found.
+
+  /api/onramp/cancel:
+    post:
+      summary: Cancel a pending onramp transaction
+      description: |
+        Abandons a transaction that is still `PENDING`. The transaction moves to
+        the terminal `FAILED` state. A transaction that has already completed or
+        failed cannot be cancelled.
+      tags:
+        - Onramp
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OnRampCancelRequest'
+            examples:
+              cancel:
+                summary: Cancel by provider transaction id
+                value:
+                  txId: tx_p7q2w9e4r
+      responses:
+        '200':
+          description: Transaction cancelled
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OnRampTransactionResponse'
+              examples:
+                cancelled:
+                  summary: The transaction, now FAILED
+                  value:
+                    success: true
+                    transaction:
+                      id: 5b8f0a3e-2c1d-4e7a-9d55-0c6f1a2b3c4d
+                      walletAddress: GBRPYHIL2CI3FNQ4BXLFMNDLFJUNPU2HY3ZMFSHONUCEOASW7QC7OX2H
+                      provider: STRIPE
+                      status: FAILED
+                      amountFiat: 100
+                      currency: USD
+                      amountUsdc: 98
+                      providerTxId: tx_p7q2w9e4r
+                      createdAt: '2025-03-01T09:00:00.000Z'
+                      updatedAt: '2025-03-01T09:00:40.000Z'
+        '400':
+          description: txId missing, or the transaction is no longer pending
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OnRampErrorResponse'
+              examples:
+                missingTxId:
+                  summary: txId was not sent
+                  value:
+                    error: Missing txId.
+                notPending:
+                  summary: The transaction already completed
+                  value:
+                    error: Cannot cancel transaction in COMPLETED state.
+        '404':
+          description: No transaction with that id
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OnRampErrorResponse'
+              examples:
+                unknown:
+                  summary: Unknown transaction
+                  value:
+                    error: Transaction not found.
+
+  /api/onramp/intent:
+    post:
+      summary: Confirm an onramp quote and create a pending deposit
+      description: >
+        Creates a PENDING onramp transaction for a quote. Send an
+        `Idempotency-Key` so a retried request returns the original
+        transaction instead of creating a duplicate.
+      tags:
+        - Onramp
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [quoteId, walletAddress]
+              properties:
+                quoteId:
+                  type: string
+                walletAddress:
+                  type: string
+      responses:
+        '200':
+          description: Pending transaction created (or replayed)
+          headers:
+            Idempotent-Replayed:
+              description: "`true` when this is a stored response replayed for a repeated key."
+              schema:
+                type: string
+                enum: ["true"]
+        '400':
+          description: >
+            `INVALID_IDEMPOTENCY_KEY` (malformed header) or, when
+            `IDEMPOTENCY_REQUIRED=true`, `IDEMPOTENCY_KEY_REQUIRED`.
+        '409':
+          description: >
+            `IDEMPOTENCY_REQUEST_IN_PROGRESS` — a request with this key is still
+            running. `recoverable: true`; retry after `Retry-After` seconds.
+        '422':
+          description: "`IDEMPOTENCY_KEY_REUSED` — the key was already used with a different body."
+        '503':
+          description: >
+            `IDEMPOTENCY_STORE_UNAVAILABLE` — the key could not be checked, so the
+            request was not run. `recoverable: true`; retry with the same key.
+
+  /api/offramp/withdrawals:
+    post:
+      summary: Create an offramp withdrawal (proxied to the provider)
+      description: >
+        Proxies withdrawal creation to the offramp provider and returns its
+        status and body. Send an `Idempotency-Key` so a retried request cannot
+        create a second withdrawal. Provider 5xx and proxy failures are not
+        stored, so the same key can be retried.
+      tags:
+        - Offramp
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: Passed through to the provider unchanged.
+      responses:
+        '201':
+          description: Withdrawal created by the provider (or replayed)
+          headers:
+            Idempotent-Replayed:
+              description: "`true` when this is a stored response replayed for a repeated key."
+              schema:
+                type: string
+                enum: ["true"]
+        '502':
+          description: "`OFFRAMP_PROXY_ERROR` — provider unreachable. Not stored; retry with the same key."
+        '400':
+          description: >
+            `INVALID_IDEMPOTENCY_KEY` (malformed header) or, when
+            `IDEMPOTENCY_REQUIRED=true`, `IDEMPOTENCY_KEY_REQUIRED`.
+        '409':
+          description: >
+            `IDEMPOTENCY_REQUEST_IN_PROGRESS` — a request with this key is still
+            running. `recoverable: true`; retry after `Retry-After` seconds.
+        '422':
+          description: "`IDEMPOTENCY_KEY_REUSED` — the key was already used with a different body."
+        '503':
+          description: >
+            `OFFRAMP_UNAVAILABLE` (not configured) or `IDEMPOTENCY_STORE_UNAVAILABLE` — the key could not be checked, so the
+            request was not run. `recoverable: true`; retry with the same key.
 
   /api/onramp/webhook:
     post:
@@ -2812,6 +3999,17 @@ paths:
                   type: string
                 amountUsdc:
                   type: number
+            examples:
+              completed:
+                summary: The provider reports a settled purchase
+                value:
+                  provider: STRIPE
+                  txId: tx_p7q2w9e4r
+                  status: COMPLETED
+                  walletAddress: GBRPYHIL2CI3FNQ4BXLFMNDLFJUNPU2HY3ZMFSHONUCEOASW7QC7OX2H
+                  amountFiat: 100
+                  currency: USD
+                  amountUsdc: 98
       responses:
         '200':
           description: Webhook processed
@@ -2824,8 +4022,157 @@ paths:
                     type: boolean
                   transaction:
                     type: object
+              examples:
+                completed:
+                  summary: The transaction is upserted and a DEPOSIT notification is created
+                  value:
+                    success: true
+                    transaction:
+                      id: 5b8f0a3e-2c1d-4e7a-9d55-0c6f1a2b3c4d
+                      walletAddress: GBRPYHIL2CI3FNQ4BXLFMNDLFJUNPU2HY3ZMFSHONUCEOASW7QC7OX2H
+                      provider: STRIPE
+                      status: COMPLETED
+                      amountFiat: 100
+                      currency: USD
+                      amountUsdc: 98
+                      providerTxId: tx_p7q2w9e4r
+                      createdAt: '2025-03-01T09:00:00.000Z'
+                      updatedAt: '2025-03-01T09:02:31.000Z'
         '500':
           description: Failed to process webhook
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OnRampErrorResponse'
+              examples:
+                failed:
+                  summary: The upsert or notification failed
+                  value:
+                    error: Failed to process webhook.
+
+  # ── Offramp ──────────────────────────────────────────────────────────────
+
+  /api/offramp/withdrawals:
+    post:
+      summary: Create an offramp withdrawal
+      description: |
+        Creates a fiat withdrawal intent with the offramp provider. The server
+        proxies the call so the provider's API key never reaches the browser. The
+        request body is forwarded unchanged, and the provider's HTTP status and
+        JSON body are returned unchanged, so the exact fields are defined by the
+        provider. The typed errors below are produced by StellarYield itself.
+      tags:
+        - Offramp
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+              description: Provider-defined withdrawal request, forwarded as-is
+            examples:
+              withdrawal:
+                summary: Illustrative request (the fields are defined by the provider)
+                value:
+                  baseCurrencyCode: usdc
+                  baseCurrencyAmount: 100
+                  quoteCurrencyCode: usd
+                  walletAddress: GBRPYHIL2CI3FNQ4BXLFMNDLFJUNPU2HY3ZMFSHONUCEOASW7QC7OX2H
+      responses:
+        '200':
+          description: The provider accepted the withdrawal; its response is returned unchanged
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+              examples:
+                accepted:
+                  summary: Illustrative provider response
+                  value:
+                    id: wd_8f3a2c1e
+                    status: pending
+        '502':
+          description: The provider could not be reached
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                proxyError:
+                  summary: Network failure talking to the provider
+                  value:
+                    error: OFFRAMP_PROXY_ERROR
+                    message: Failed to reach offramp provider.
+        '503':
+          description: The offramp service is not configured on this server
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                unavailable:
+                  summary: OFFRAMP_API_KEY is not set
+                  value:
+                    error: OFFRAMP_UNAVAILABLE
+                    message: Offramp service not configured.
+
+  /api/offramp/transactions/{txId}:
+    get:
+      summary: Get an offramp transaction's status
+      description: |
+        Proxies the provider's transaction lookup. The provider's HTTP status and
+        JSON body are returned unchanged. `txId` is the id the provider returned
+        when the withdrawal was created.
+      tags:
+        - Offramp
+      parameters:
+        - name: txId
+          in: path
+          required: true
+          description: Provider transaction id
+          schema:
+            type: string
+          example: wd_8f3a2c1e
+      responses:
+        '200':
+          description: The provider's transaction record, returned unchanged
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+              examples:
+                completed:
+                  summary: Illustrative provider response
+                  value:
+                    id: wd_8f3a2c1e
+                    status: completed
+        '502':
+          description: The provider could not be reached
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                proxyError:
+                  summary: Network failure talking to the provider
+                  value:
+                    error: OFFRAMP_PROXY_ERROR
+                    message: Failed to reach offramp provider.
+        '503':
+          description: The offramp service is not configured on this server
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                unavailable:
+                  summary: OFFRAMP_API_KEY is not set
+                  value:
+                    error: OFFRAMP_UNAVAILABLE
+                    message: Offramp service not configured.
 
   # ── Deposits ─────────────────────────────────────────────────────────────
 
@@ -2852,6 +4199,11 @@ paths:
         Returns a routing recommendation for a multi-asset deposit: per-asset
         conversion/allocation path, expected vault-token output, estimated
         network fees, and warnings for unsupported assets.
+
+        When `routeLiquidityDepthUsd` (or `DEPOSIT_ROUTE_LIQUIDITY_DEPTH_USD`)
+        and `amountUsd` are provided, oversized deposits are rejected with
+        `INSUFFICIENT_LIQUIDITY_DEPTH` (#1312). The check is skipped when depth
+        or amount is unknown.
       tags:
         - Deposits
       requestBody:
@@ -2878,6 +4230,12 @@ paths:
                       amountInStroops:
                         type: string
                         description: Positive integer amount in stroops as a decimal string
+                amountUsd:
+                  type: number
+                  description: Approximate deposit size in USD for the depth check
+                routeLiquidityDepthUsd:
+                  type: number
+                  description: Observed route liquidity depth in USD (falls back to env)
       responses:
         '200':
           description: Routing recommendation
@@ -2896,15 +4254,342 @@ paths:
                     type: string
                   code:
                     type: string
+        '422':
+          description: INSUFFICIENT_LIQUIDITY_DEPTH — deposit exceeds route liquidity depth cap
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string
+                    enum: [INSUFFICIENT_LIQUIDITY_DEPTH]
+                  message:
+                    type: string
+                  details:
+                    type: object
         '500':
           description: Failed to compute recommendation
+
+  /api/governance/quorum-progress:
+    post:
+      summary: Compute multi-sig signer quorum progress
+      description: |
+        Deterministic quorum progress for a multi-sig operation: signed count,
+        required threshold, remaining signatures, progress percentage, met flag,
+        and per-signer status. Read-only (#1310).
+      tags:
+        - Governance
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - signers
+                - signatures
+                - threshold
+              properties:
+                signers:
+                  type: array
+                  items:
+                    type: string
+                  description: Expected signer public keys
+                signatures:
+                  type: array
+                  items:
+                    type: string
+                  description: Public keys that have signed so far
+                threshold:
+                  type: number
+                  description: Required signature threshold
+      responses:
+        '200':
+          description: Quorum progress
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  signed:
+                    type: integer
+                  required:
+                    type: integer
+                  remaining:
+                    type: integer
+                  progressPct:
+                    type: integer
+                  met:
+                    type: boolean
+                  perSigner:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        address:
+                          type: string
+                        signed:
+                          type: boolean
+        '400':
+          description: Invalid request body
+
+  /api/preferences/audit/{walletAddress}:
+    get:
+      summary: Preference change audit history for a wallet
+      description: |
+        Backend audit trail of non-alert user preference changes (digest
+        preferences, digest schedule, notification preferences). Optional
+        `category` query filters by preference category (#1311).
+      tags:
+        - Preferences
+      parameters:
+        - name: walletAddress
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Stellar public key (G…)
+        - name: category
+          in: query
+          required: false
+          schema:
+            type: string
+            enum:
+              - digest_preference
+              - digest_schedule
+              - notification_preference
+              - other
+      responses:
+        '200':
+          description: Audit history (newest first)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  walletAddress:
+                    type: string
+                  history:
+                    type: array
+                    items:
+                      type: object
+        '400':
+          description: Invalid wallet address or category
 
   # Intentionally excluded routes:
   # - Internal debugging and profiling endpoints under /internal/* are intentionally omitted from this public spec.
   # - Any admin-only endpoints that require interactive session tokens are documented above when needed; ephemeral or highly-sensitive debug routes are excluded.
 
 components:
+  parameters:
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: false
+      description: >
+        Client-generated key (UUID recommended; 1–255 of `A-Za-z0-9._:-`). A
+        repeat with the same key and body replays the stored response instead
+        of running the request again. Keys expire after `IDEMPOTENCY_TTL_MS`
+        (default 24h). Required only when `IDEMPOTENCY_REQUIRED=true`.
+      schema:
+        type: string
+        pattern: '^[A-Za-z0-9._:-]{1,255}$'
   schemas:
+    ExposureHeatmapAxisEntry:
+      type: object
+      properties:
+        key:
+          type: string
+          description: The label, or `__other__` for the collapsed bucket.
+        label:
+          type: string
+        valueUsd:
+          type: number
+        share:
+          type: number
+        severity:
+          type: string
+          enum: [ok, warning, critical]
+        members:
+          type: array
+          items:
+            type: string
+          description: Labels folded into this entry (several only for "Other").
+
+    ValuationFreshness:
+      type: object
+      description: Freshness annotation for a valuation snapshot (#1362)
+      properties:
+        evaluatedAt:
+          type: string
+          format: date-time
+          description: When the server evaluated freshness
+        snapshotValuedAt:
+          type: string
+          format: date-time
+          nullable: true
+          description: When the backing snapshot was last written, if any
+        ageMs:
+          type: integer
+          nullable: true
+          description: Snapshot age at evaluation time in milliseconds (null if no snapshot)
+        maxAgeMs:
+          type: integer
+          description: Maximum age considered fresh for this evaluation
+        isStale:
+          type: boolean
+          description: True when the snapshot is missing or older than maxAgeMs
+    DailyMovement:
+      type: object
+      description: Daily portfolio movement comparison payload
+      properties:
+        walletAddress:
+          type: string
+        snapshotDate:
+          type: string
+          description: ISO date of the current snapshot
+        previousSnapshotDate:
+          type: string
+          nullable: true
+        previousTotalValue:
+          type: number
+          format: double
+        currentTotalValue:
+          type: number
+          format: double
+        totalAbsoluteChange:
+          type: number
+          format: double
+        totalPercentChange:
+          type: number
+          format: double
+        assetMovements:
+          type: array
+          items:
+            type: object
+        protocolMovements:
+          type: array
+          items:
+            type: object
+        depositedToday:
+          type: number
+          format: double
+        withdrawnToday:
+          type: number
+          format: double
+        priceMovementOnly:
+          type: number
+          format: double
+        hasPreviousSnapshot:
+          type: boolean
+        isNegativeMovement:
+          type: boolean
+        freshness:
+          $ref: '#/components/schemas/ValuationFreshness'
+    AllocationRollbackChange:
+      type: object
+      description: Single per-vault weight difference in a rollback preview (#1360)
+      properties:
+        vaultId:
+          type: string
+        currentWeight:
+          type: number
+        rollbackWeight:
+          type: number
+        deltaWeight:
+          type: number
+          description: rollbackWeight - currentWeight (fixed 4-decimal rounding)
+    AllocationRollbackPreview:
+      type: object
+      description: >
+        Deterministic, read-only rollback preview (#1360). Identical inputs
+        always produce an identical preview including `inputHash`.
+      properties:
+        vaultId:
+          type: string
+        source:
+          type: string
+          enum: [explicit, pending-rebalance]
+        currentAllocations:
+          type: object
+          additionalProperties:
+            type: number
+        rollbackAllocations:
+          type: object
+          additionalProperties:
+            type: number
+        changes:
+          type: array
+          items:
+            $ref: '#/components/schemas/AllocationRollbackChange'
+        totalDeltaWeight:
+          type: number
+        noOp:
+          type: boolean
+        conflictingQueueEntryIds:
+          type: array
+          items:
+            type: string
+        safe:
+          type: boolean
+        rollbackReason:
+          type: string
+        inputHash:
+          type: string
+          description: SHA-256 over the canonical inputs
+    TreasuryWithdrawal:
+      type: object
+      description: Treasury withdrawal request (#1343)
+      properties:
+        id:
+          type: string
+        vaultId:
+          type: string
+        amountUsd:
+          type: number
+          format: double
+        status:
+          type: string
+          enum: [PENDING, CANCELLED]
+        requestedBy:
+          type: string
+          nullable: true
+        memo:
+          type: string
+          nullable: true
+        submittedAt:
+          type: string
+          format: date-time
+        cooldownUntil:
+          type: string
+          format: date-time
+        cancelledAt:
+          type: string
+          format: date-time
+          nullable: true
+    TreasuryWithdrawalCooldownStatus:
+      type: object
+      description: Per-vault withdrawal cooldown status (#1343)
+      properties:
+        vaultId:
+          type: string
+        cooldownActive:
+          type: boolean
+        cooldownMs:
+          type: integer
+        remainingMs:
+          type: integer
+        availableAt:
+          type: string
+          format: date-time
+          nullable: true
+        blockingWithdrawalId:
+          type: string
+          nullable: true
+        evaluatedAt:
+          type: string
+          format: date-time
     PortfolioPosition:
       type: object
       required: [assetId, amount]
@@ -3454,7 +5139,7 @@ components:
         expiresAt:
           type: string
           format: date-time
-          description: ISO-8601 timestamp when the quote expires (quotedAt + 60s)
+          description: ISO-8601 timestamp when the quote expires (quotedAt + ZAP_QUOTE_TTL_MS, default 60s)
           example: "2026-07-26T12:01:00.000Z"
         routeHash:
           type: string
@@ -3521,9 +5206,17 @@ components:
         details:
           type: object
           description: Optional structured error details
+        recoverable:
+          type: boolean
+          description: >
+            When true, the client can recover by requesting a fresh quote or
+            retrying (e.g. STALE_QUOTE, CONFIG_DRIFT, ROUTE_MISMATCH,
+            UNSUPPORTED_ASSET, transient QUOTE_FAILED). Absent or false for
+            validation failures that require changing inputs.
       example:
         error: "STALE_QUOTE"
         message: "Quote has expired"
+        recoverable: true
 
     ZapSupportedAssetsResponse:
       type: object
@@ -3769,7 +5462,7 @@ components:
         riskScore: 8.2
         rotationCostPct: 0.15
 
-     TreasurySimulationResult:
+    TreasurySimulationResult:
       type: object
       properties:
         scenarioId:
@@ -3832,7 +5525,7 @@ components:
             rotationCostPct: 0.25
         simulatedAt: "2026-06-26T12:00:00Z"
 
-     TreasuryScenario:
+    TreasuryScenario:
       type: object
       properties:
         id:
@@ -3870,7 +5563,7 @@ components:
             rotationCostPct: 0.25
         createdAt: "2026-06-26T11:45:00Z"
 
-     Alert:
+    Alert:
       type: object
       properties:
         id:
@@ -3897,7 +5590,7 @@ components:
           type: string
           format: date-time
 
-     FragmentationMetrics:
+    FragmentationMetrics:
       type: object
       properties:
         fragmentationScore:
@@ -3963,7 +5656,7 @@ components:
           type: string
           format: date-time
 
-     AuditAlert:
+    AuditAlert:
       type: object
       properties:
         id:
@@ -3990,7 +5683,7 @@ components:
           actionCount: 12
         createdAt: "2026-06-26T12:05:00Z"
 
-     MonitoringStatus:
+    MonitoringStatus:
       type: object
       properties:
         running:
@@ -4018,7 +5711,7 @@ components:
           - "slack-webhook-alerts"
           - "admin-email-alerts"
 
-     MonitoringReport:
+    MonitoringReport:
       type: object
       properties:
         generatedAt:

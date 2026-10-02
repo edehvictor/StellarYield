@@ -1,9 +1,11 @@
+import express from "express";
 import request from "supertest";
-import { createApp } from "../app";
+import driftRouter from "../routes/drift";
 import { DriftService } from "../services/driftService";
 import { driftAnomalyGrouper, DriftSignal, GroupedAnomaly } from "../services/driftAnomalyGrouper";
 import { extractPressureDriftSignals, VaultPressureMetrics } from "../services/vaultPressureService";
 import { extractAttributionDriftSignals, AttributionReport } from "../services/portfolioAttributionService";
+import { extractStrategyHealthDriftSignals, StrategyHealthScore } from "../services/strategyHealthService";
 
 jest.mock("../config/targetAllocations", () => ({
   TARGET_ALLOCATIONS: [
@@ -19,9 +21,9 @@ jest.mock("../services/alertsService", () => ({
 jest.mock("@prisma/client", () => {
   const instance = {
     driftEvent: {
-      findFirst: jest.fn(),
-      create: jest.fn(),
-      update: jest.fn(),
+      findFirst: jest.fn().mockResolvedValue(null),
+      create: jest.fn().mockResolvedValue({ id: "mock-drift-event" }),
+      update: jest.fn().mockResolvedValue({ id: "mock-drift-event", isRecovered: true }),
     },
   };
   const MockPrismaClient = jest.fn(() => instance);
@@ -30,10 +32,12 @@ jest.mock("@prisma/client", () => {
 });
 
 describe("Drift Anomaly Grouping", () => {
-  let app: any;
+  let app: express.Express;
 
   beforeAll(() => {
-    app = createApp();
+    app = express();
+    app.use(express.json());
+    app.use("/api/drift", driftRouter);
   });
 
   beforeEach(() => {
@@ -239,6 +243,45 @@ describe("Drift Anomaly Grouping", () => {
       const confidenceSignal = signals.find((s) => s.metric.includes("decision_confidence_rotation"));
       expect(confidenceSignal).toBeDefined();
       expect(confidenceSignal?.severity).toBe("HIGH");
+    });
+
+    it("extracts DriftSignals from StrategyHealthScore", () => {
+      const score: StrategyHealthScore = {
+        strategyId: "Blend-XLM-Strategy",
+        strategyName: "Blend XLM Yield Strategy",
+        overallScore: 42,
+        metrics: {
+          contractSafety: 0.95,
+          dataFreshness: 0.90,
+          providerUptime: 0.82, // Low uptime trigger (< 0.85 -> HIGH)
+          liquidityConditions: 0.70,
+          executionOutcomes: 0.60,
+          volatilityIndex: 0.50,
+          errorRate: 0.12, // High error rate trigger (>= 0.05 -> HIGH)
+          latency: 450,
+        },
+        status: "critical",
+        signals: [],
+        lastUpdated: new Date().toISOString(),
+        trend: "declining",
+        recommendations: ["Review error rates"],
+      };
+
+      const signals = extractStrategyHealthDriftSignals(score);
+      expect(signals.length).toBeGreaterThanOrEqual(3);
+
+      const healthScoreSig = signals.find((s) => s.metric === "strategy_health_score");
+      expect(healthScoreSig).toBeDefined();
+      expect(healthScoreSig?.source).toBe("strategy");
+      expect(healthScoreSig?.severity).toBe("HIGH");
+
+      const errorRateSig = signals.find((s) => s.metric === "error_rate");
+      expect(errorRateSig).toBeDefined();
+      expect(errorRateSig?.severity).toBe("HIGH");
+
+      const uptimeSig = signals.find((s) => s.metric === "provider_uptime_drop");
+      expect(uptimeSig).toBeDefined();
+      expect(uptimeSig?.severity).toBe("HIGH");
     });
   });
 

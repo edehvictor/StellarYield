@@ -1,5 +1,6 @@
 import VaultIcon from "../vault/VaultIcon";
 import type { VaultIconMetadata } from "../../lib/vaultData";
+import { formatRewardRate } from "../../lib/apyFormat";
 
 export type VaultCardVariant = "list" | "detail" | "action";
 
@@ -35,7 +36,7 @@ export default function VaultCard({
         <div>
           <h3 className="text-xl font-bold">{name}</h3>
           {typeof apy === "number" && (
-            <p className="text-sm text-gray-400">APY {apy.toFixed(2)}%</p>
+            <p className="text-sm text-gray-400">APY {formatRewardRate(apy)}</p>
           )}
         </div>
       </div>
