@@ -22,9 +22,9 @@ export interface LiquidationJobData {
   /** Outstanding debt in sUSD */
   debtAmount: string;
   /** #906: Fencing token incremented on each attempt to reject stale locks */
-  fencingToken: number;
+  fencingToken?: number;
   /** #906: Sequence number required before submission */
-  requiredSequence: number;
+  requiredSequence?: number;
   /**
    * Unix ms timestamp of the oracle price used to compute `currentCrBps`.
    * Omitted when the scanner didn't attach price provenance (dry-run policy
@@ -37,6 +37,16 @@ export interface LiquidationJobData {
    * dry-run policy always blocks liquidation in that case.
    */
   oracleAvailable?: boolean;
+  /** #1539: Expected seized collateral amount at scan time */
+  expectedSeizedCollateral?: string;
+  /** #1539: Minimum acceptable seized collateral floor */
+  minSeizedCollateral?: string;
+  /** #1539: Maximum allowed slippage in basis points (default 300 = 3%) */
+  maxSlippageBps?: number;
+  /** #1539: Oracle price of collateral at scan time (in USD) */
+  oraclePriceUsd?: string | number;
+  /** #1539: Current oracle price at execution time (in USD) */
+  currentOraclePriceUsd?: string | number;
 }
 
 /** Payload for an auto-compound job */
@@ -46,9 +56,9 @@ export interface CompoundJobData {
   /** Expected minimum harvest amount (slippage guard) */
   minHarvestAmount: string;
   /** #906: Fencing token incremented on each attempt to reject stale locks */
-  fencingToken: number;
+  fencingToken?: number;
   /** #906: Sequence number required before submission */
-  requiredSequence: number;
+  requiredSequence?: number;
 }
 
 /**

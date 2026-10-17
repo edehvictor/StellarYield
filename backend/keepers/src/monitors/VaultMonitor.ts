@@ -4,6 +4,29 @@ import { config } from '../config';
 import { logger } from '../utils/logger';
 import { LiquidationJobData } from '../queues/types';
 import { ledgerLagMonitor } from './LedgerLagMonitor';
+import { getRedis } from '../utils/redis';
+
+export const DEFAULT_ALERT_SUPPRESSION_WINDOW_MS = 60_000; // 60s debounce window
+
+/**
+ * Checks and sets a shared suppression key in Redis (#1540).
+ * Uses atomic SET key 1 PX windowMs NX to ensure only one instance emits the alert per window.
+ */
+export async function checkAndSetAlertSuppression(
+  redis: any,
+  key: string,
+  windowMs: number = DEFAULT_ALERT_SUPPRESSION_WINDOW_MS,
+): Promise<boolean> {
+  if (!redis || typeof redis.set !== 'function') {
+    return true; // Fail open if Redis set is unavailable
+  }
+  try {
+    const res = await redis.set(key, '1', 'PX', windowMs, 'NX');
+    return res === 'OK';
+  } catch (err) {
+    return true; // Fail open on Redis errors so alerts are not dropped
+  }
+}
 
 /**
  * Represents the on-chain state of a single CDP fetched from the
@@ -25,18 +48,25 @@ export interface CdpState {
  *  - Uses Soroban RPC `getContractData` to read CDP entries.
  *  - Compares the CR against the configured MCR threshold.
  *  - Deduplicates using jobId = accountAddress to avoid double-queuing.
+ *  - Debounces duplicate alerts across instances using a shared suppression key (#1540).
  *  - Runs on a configurable interval (default 30s).
  */
 export class VaultMonitor {
   private readonly server: rpc.Server;
+  private readonly redis: any;
+  private readonly suppressionWindowMs: number;
   private timer: NodeJS.Timeout | null = null;
 
   constructor(
     private readonly liquidationQueue: Queue<LiquidationJobData>,
     private readonly contractId: string = config.contracts.stablecoinManager,
     sorobanRpcUrl: string = config.stellar.sorobanRpcUrl,
+    redisClient?: any,
+    suppressionWindowMs: number = DEFAULT_ALERT_SUPPRESSION_WINDOW_MS,
   ) {
     this.server = new rpc.Server(sorobanRpcUrl, { allowHttp: true });
+    this.redis = redisClient ?? getRedis();
+    this.suppressionWindowMs = suppressionWindowMs;
   }
 
   /**
@@ -216,7 +246,36 @@ export class VaultMonitor {
     }
   }
 
-  /** Add a liquidation job to the queue, deduplicating by account address. */
+  /**
+   * Check if an alert for this account should be emitted or suppressed (#1540).
+   */
+  async shouldEmitAlert(accountAddress: string, windowMs: number = this.suppressionWindowMs): Promise<boolean> {
+    const key = `vault:alert:suppress:${this.contractId}:${accountAddress}`;
+    return checkAndSetAlertSuppression(this.redis, key, windowMs);
+  }
+
+  /**
+   * Emits or suppresses an alert across multiple monitor instances (#1540).
+   * Returns true if the alert was emitted, false if suppressed.
+   */
+  async emitAlert(cdp: CdpState, windowMs: number = this.suppressionWindowMs): Promise<boolean> {
+    const canEmit = await this.shouldEmitAlert(cdp.accountAddress, windowMs);
+    if (canEmit) {
+      logger.warn(
+        { accountAddress: cdp.accountAddress, crBps: cdp.crBps },
+        '[VaultMonitor] Flagged account for liquidation',
+      );
+      return true;
+    } else {
+      logger.debug(
+        { accountAddress: cdp.accountAddress, crBps: cdp.crBps },
+        '[VaultMonitor] Duplicate alert suppressed by shared debounce window',
+      );
+      return false;
+    }
+  }
+
+  /** Add a liquidation job to the queue, deduplicating by account address and debouncing alerts across instances. */
   private async enqueueForLiquidation(cdp: CdpState): Promise<void> {
     const jobId = `liquidate:${cdp.accountAddress}`;
     const data: LiquidationJobData = {
@@ -224,15 +283,14 @@ export class VaultMonitor {
       currentCrBps: cdp.crBps,
       collateralValueUsd: cdp.collateral.toString(),
       debtAmount: cdp.debtShares.toString(),
+      fencingToken: 0,
+      requiredSequence: 0,
     };
 
     await this.liquidationQueue.add(jobId, data, {
       jobId, // deduplicate — BullMQ ignores duplicate IDs of existing active jobs
     });
 
-    logger.warn(
-      { accountAddress: cdp.accountAddress, crBps: cdp.crBps },
-      '[VaultMonitor] Flagged account for liquidation',
-    );
+    await this.emitAlert(cdp);
   }
 }

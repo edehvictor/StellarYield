@@ -3,7 +3,7 @@ import { Address, nativeToScVal } from '@stellar/stellar-sdk';
 import { getRedis } from '../utils/redis';
 import { config } from '../config';
 import { logger } from '../utils/logger';
-import { KeeperSigner } from '../signer/KeeperSigner';
+import { KeeperSigner, type DryRunPayloadPreview } from '../signer/KeeperSigner';
 import { QUEUE_NAMES, CompoundJobData, JOB_STATES } from '../queues/types';
 import {
   validateFencingToken,
@@ -65,7 +65,9 @@ export class CompoundWorker {
    * @param job - BullMQ Job containing CompoundJobData
    */
   async process(job: Job<CompoundJobData>): Promise<{ txHash: string }> {
-    const { vaultContractId, minHarvestAmount, fencingToken, requiredSequence } = job.data;
+    const { vaultContractId, minHarvestAmount } = job.data;
+    const fencingToken = job.data.fencingToken ?? 0;
+    const requiredSequence = job.data.requiredSequence ?? 0;
 
     logger.info(
       { jobId: job.id, vaultContractId, fencingToken, requiredSequence },
@@ -154,6 +156,45 @@ export class CompoundWorker {
     );
 
     return { txHash };
+  }
+
+  /**
+   * Dry-run mode for compound job (#1542):
+   * Performs validation, sequence checks, and generates a signed payload preview
+   * without broadcasting or mutating job state.
+   */
+  async dryRun(job: Job<CompoundJobData>): Promise<DryRunPayloadPreview> {
+    const { vaultContractId, minHarvestAmount } = job.data;
+    const fencingToken = job.data.fencingToken ?? 0;
+    const requiredSequence = job.data.requiredSequence ?? 0;
+
+    logger.info(
+      { jobId: job.id, vaultContractId, fencingToken, requiredSequence },
+      '[CompoundWorker] [DryRun] Processing compound dry-run preview',
+    );
+
+    if (!validateFencingToken(QUEUE_NAMES.COMPOUND, vaultContractId, fencingToken)) {
+      throw new Error(`FENCING_VIOLATION: stale fencing token for vault ${vaultContractId}`);
+    }
+
+    const account = await this.signer['server'].getAccount(this.signer.publicKey);
+    const currentSequence = parseInt((account as any).sequence, 10);
+    if (currentSequence !== requiredSequence) {
+      throw new Error(
+        `SEQUENCE_MISMATCH: expected sequence ${requiredSequence}, got ${currentSequence}`,
+      );
+    }
+
+    const keeperScVal = new Address(this.signer.publicKey).toScVal();
+    const minAmtXdr = nativeToScVal(BigInt(minHarvestAmount), { type: 'i128' });
+
+    return this.signer.dryRunInvokeContract(
+      vaultContractId,
+      'harvest',
+      [keeperScVal, minAmtXdr],
+      { requiredSequence, fencingToken },
+      { workerName: 'CompoundWorker', jobId: job.id, policyVersion: 'v1' },
+    );
   }
 
   /** Gracefully close the worker (drains in-flight jobs). */

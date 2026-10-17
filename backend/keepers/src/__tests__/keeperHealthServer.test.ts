@@ -71,7 +71,14 @@ describe('startKeeperHealthServer', () => {
 
   it('GET /health/queues returns 200 with queue summary when healthy', async () => {
     const summary = {
-      queues: [{ name: 'liquidation', counts: { pending: 0, waiting: 0, active: 0, completed: 5, failed: 0, delayed: 0, poison: 0 }, status: 'healthy' as const, warnings: [] as string[] }],
+      queues: [{
+        name: 'liquidation',
+        counts: { pending: 0, waiting: 0, active: 0, completed: 5, failed: 0, delayed: 0, poison: 0 },
+        metrics: { queueLength: 0, delayedLength: 0, oldestPendingAgeMs: null, latestFailureReason: null, isStalled: false },
+        status: 'healthy' as const,
+        warnings: [] as string[],
+      }],
+      workers: {},
       overallStatus: 'healthy' as const,
       timestamp: new Date().toISOString(),
       redisStatus: 'healthy' as const,
@@ -90,7 +97,14 @@ describe('startKeeperHealthServer', () => {
 
   it('GET /health/queues returns 200 with warning overallStatus when queues are degraded', async () => {
     const summary = {
-      queues: [{ name: 'liquidation', counts: { pending: 0, waiting: 0, active: 0, completed: 0, failed: 15, delayed: 0, poison: 0 }, status: 'degraded' as const, warnings: ['failed jobs (15) exceed threshold (10)'] }],
+      queues: [{
+        name: 'liquidation',
+        counts: { pending: 0, waiting: 0, active: 0, completed: 0, failed: 15, delayed: 0, poison: 0 },
+        metrics: { queueLength: 0, delayedLength: 0, oldestPendingAgeMs: null, latestFailureReason: null, isStalled: false },
+        status: 'degraded' as const,
+        warnings: ['failed jobs (15) exceed threshold (10)'],
+      }],
+      workers: {},
       overallStatus: 'degraded' as const,
       timestamp: new Date().toISOString(),
       redisStatus: 'healthy' as const,

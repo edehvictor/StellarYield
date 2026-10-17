@@ -14,7 +14,7 @@ describe('fallbackTreeService', () => {
     };
     const decision = await resolveFallbackTree(root, {});
     expect(decision.ok).toBe(true);
-    expect(decision.chosenId).toBe&}d );
+    expect(decision.chosenId).toBe('fallback');
     expect(decision.reasons['primary']).toBe('primary unavailable');
     expect(decision.reasons['fallback']).toBe('fallback healthy');
     expect(decision.evaluationOrder).toEqual([ 'root', 'primary', 'fallback' ]);
