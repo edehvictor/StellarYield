@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-use super::{Order, OrderBook, OrderStatus};
+use super::{Order, OrderBook, OrderBookError, OrderStatus};
 use crate::network::tie_break::sort_canonical;
 
 /// Domain separator mixed into every snapshot checksum
@@ -29,6 +29,8 @@ pub enum SnapshotError {
     DuplicateOrder(String),
     #[error("order {0} not found")]
     UnknownOrder(String),
+    #[error("order book rejected the change: {0}")]
+    Book(#[from] OrderBookError),
 }
 
 /// An order book mutation recorded after a snapshot
@@ -131,7 +133,7 @@ impl OrderBookSnapshot {
             self.token1.clone(),
         );
         for order in &self.orders {
-            book.add_order(order.clone());
+            book.add_order(order.clone())?;
         }
         Ok(book)
     }
@@ -172,7 +174,7 @@ impl OrderBook {
                 if self.orders.contains_key(&order.id) {
                     return Err(SnapshotError::DuplicateOrder(order.id.clone()));
                 }
-                self.add_order(order.clone());
+                self.add_order(order.clone())?;
             }
             BookEvent::OrderRemoved { order_id } => {
                 self.remove_order(order_id)
@@ -182,6 +184,16 @@ impl OrderBook {
                 let mut order = self
                     .remove_order(order_id)
                     .ok_or_else(|| SnapshotError::UnknownOrder(order_id.clone()))?;
+                if *filled > order.amount {
+                    // Put the order back untouched before reporting the bad event.
+                    let (requested, remaining) = (*filled, order.amount);
+                    self.add_order(order)?;
+                    return Err(OrderBookError::Fill(super::FillError::ExceedsRemaining {
+                        requested,
+                        remaining,
+                    })
+                    .into());
+                }
                 order.filled = *filled;
                 if order.remaining() == 0 {
                     order.status = OrderStatus::Filled;
@@ -189,7 +201,7 @@ impl OrderBook {
                     order.status = OrderStatus::PartiallyFilled;
                     // Re-adding keeps the order's queue position because
                     // levels are ordered by (timestamp, id), not arrival.
-                    self.add_order(order);
+                    self.add_order(order)?;
                 }
             }
         }
@@ -224,9 +236,12 @@ mod tests {
             "token0".to_string(),
             "token1".to_string(),
         );
-        book.add_order(order("bid-1", Side::Buy, 99, 1_000, 10));
-        book.add_order(order("bid-2", Side::Buy, 99, 500, 10));
-        book.add_order(order("ask-1", Side::Sell, 101, 800, 11));
+        book.add_order(order("bid-1", Side::Buy, 99, 1_000, 10))
+            .unwrap();
+        book.add_order(order("bid-2", Side::Buy, 99, 500, 10))
+            .unwrap();
+        book.add_order(order("ask-1", Side::Sell, 101, 800, 11))
+            .unwrap();
         book
     }
 

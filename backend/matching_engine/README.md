@@ -217,6 +217,32 @@ The implementation includes comprehensive tests for:
 - Settlement verification (signature validation, double-spend prevention)
 - Network messaging (serialization, broadcasting)
 
+## 🧾 Fills, priority, cancels and settlement reconciliation
+
+**Checked fill quantities.** A fill is applied through `Order::apply_fill` / `OrderBook::fill_order`,
+which fail with `FillError` / `OrderBookError` instead of saturating: a fill larger than the quantity
+left, a `u128` overflow, or a price level whose total disagrees with its orders. The order, its price
+level and its queue position change together or not at all. `MatchResult.error` reports a fill that
+stopped matching early; trades executed before it are still returned. Settlement amounts
+(`amount * price`) and batch totals use checked arithmetic too (`SettlementBatch::try_new`).
+
+**Price-time priority.** A partially filled order keeps its original queue position (orders are ranked
+by timestamp, then order ID) and its price level total is reduced by every fill, so depth and the best
+price stay correct. A replaced order is a new order and joins the back of the queue.
+
+**Versioned cancel and replace.** Every order has a `version` (0 until it is replaced).
+`MatchingEngine::replace_order(pair, id, expected_version, replacement)` keeps the order ID, bumps the
+version and matches the replacement as a new order; only the owning trader may replace.
+`MatchingEngine::cancel_order_versioned(pair, id, expected_version)` rejects a cancel aimed at an older
+version with `OrderBookError::StaleVersion`, so a delayed cancel cannot remove a newer replacement.
+`cancel_order` is unchanged for callers that do not track versions.
+
+**Settlement reconciliation.** `SettlementLedger` records each match before settlement is attempted and
+each attempt's outcome. `reconcile(now_ms)` lists trades that are matched but not committed with a
+`RetryStatus` (`Ready`, `Waiting { retry_at_ms }`, `Exhausted`), using a grace period and an
+exponential backoff. The ledger serialises with `to_json` / `from_json`, so a crash between match and
+settlement is recovered by reloading it and retrying whatever is still pending.
+
 ## 📊 Performance Considerations
 
 ### Order Book

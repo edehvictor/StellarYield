@@ -61,7 +61,9 @@ pub mod utils;
 pub use matching::{MatchResult, MatchingEngine};
 pub use network::{MatchingEngineNetwork, NetworkConfig, NetworkEvent, NetworkMessage};
 pub use orderbook::{
-    BookEvent, Order, OrderBook, OrderBookSnapshot, OrderStatus, OrderType, SequencedEvent, Side,
-    SnapshotError, Trade,
+    BookEvent, FillError, Order, OrderBook, OrderBookError, OrderBookSnapshot, OrderStatus,
+    OrderType, SequencedEvent, Side, SnapshotError, Trade,
 };
-pub use settlement::{SettlementBatch, SettlementData, SettlementPayload, SettlementVerifier};
+pub use settlement::{
+    SettlementBatch, SettlementData, SettlementLedger, SettlementPayload, SettlementVerifier,
+};
