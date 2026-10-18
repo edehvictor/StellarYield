@@ -15,6 +15,18 @@ pub struct PricePoint {
     pub confidence: u32, // 0-100: confidence score based on sample quality and age
 }
 
+/// Maximum age of an oracle observation that may be used directly.
+const MAX_OBSERVATION_AGE: u64 = 900;
+
+/// A price is valid only when it is positive, timestamped in the past, and
+/// fresh enough to describe current market conditions.
+fn is_valid_observation(price: i128, timestamp: u64, now: u64) -> bool {
+    price > 0
+        && timestamp > 0
+        && timestamp <= now
+        && now.saturating_sub(timestamp) < MAX_OBSERVATION_AGE
+}
+
 impl YieldVault {
     pub fn set_oracle(env: Env, admin: Address, oracle: Address) -> Result<(), VaultError> {
         Self::require_admin(&env, &admin)?;
@@ -37,10 +49,22 @@ impl YieldVault {
         let now = env.ledger().timestamp();
 
         if let Some((price, timestamp)) = client.get_price(&token_addr) {
+            // Invalid observations must never influence share minting.
+            if price <= 0 || timestamp == 0 || timestamp > now {
+                env.events().publish(
+                    (
+                        soroban_sdk::symbol_short!("oracle"),
+                        soroban_sdk::symbol_short!("invalid"),
+                    ),
+                    (price, timestamp, now),
+                );
+                return Err(VaultError::InvalidPrice);
+            }
+
             let age_seconds = now.saturating_sub(timestamp);
 
             // Fresh price (< 15 mins): high confidence
-            if age_seconds < 900 {
+            if age_seconds < MAX_OBSERVATION_AGE {
                 let confidence = Self::calculate_confidence(age_seconds, 1);
                 Self::update_price_history(env, price, now, confidence);
                 env.events().publish(
@@ -151,9 +175,12 @@ impl YieldVault {
         };
 
         // Calculate price volatility penalty
+        let now = env.ledger().timestamp();
         let mut prices: Vec<i128> = Vec::new(env);
         for p in history.iter() {
-            prices.push_back(p.price);
+            if is_valid_observation(p.price, p.timestamp, now) {
+                prices.push_back(p.price);
+            }
         }
         let volatility_penalty = Self::calculate_volatility_penalty(&prices);
 
@@ -216,16 +243,20 @@ impl YieldVault {
             return Err(VaultError::InvalidPrice);
         }
 
-        // Require minimum 2 samples for TWAP
-        if history.len() < 2 {
-            return Err(VaultError::InvalidPrice);
-        }
-
+        let now = env.ledger().timestamp();
         let mut sum_price = 0i128;
-        let sample_count = history.len();
+        let mut sample_count = 0u32;
 
         for point in history.iter() {
-            sum_price += point.price;
+            if is_valid_observation(point.price, point.timestamp, now) {
+                sum_price += point.price;
+                sample_count += 1;
+            }
+        }
+
+        // Require at least 2 valid, non-stale samples for TWAP
+        if sample_count < 2 {
+            return Err(VaultError::InvalidPrice);
         }
 
         Ok((sum_price / (sample_count as i128), sample_count))
