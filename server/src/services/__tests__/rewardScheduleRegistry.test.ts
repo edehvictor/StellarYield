@@ -1,17 +1,30 @@
-import { RewardScheduleRegistry } from "../rewardScheduleRegistry";
+import {
+  RewardScheduleRegistry,
+  RewardScheduleOverlapError,
+  schedulesOverlap,
+  findOverlappingSchedule,
+} from "../rewardScheduleRegistry";
 import { RewardSchedule } from "../../types/rewards";
 import { RewardScheduleModel } from "../../models/RewardSchedule";
 
-jest.mock("../../models/RewardSchedule", () => ({
-  RewardScheduleModel: {
+jest.mock("../../models/RewardSchedule", () => {
+  // `RewardScheduleRegistry.registerSchedule` both calls static query methods
+  // (`findOne`, `find`, ...) AND does `new RewardScheduleModel(doc)` followed
+  // by `.save()` when creating a brand-new schedule. Model as a constructable
+  // jest mock function so both usages work against the same mock.
+  const ctor = jest.fn().mockImplementation(function (this: any, doc: any) {
+    Object.assign(this, doc);
+    this.save = jest.fn().mockImplementation(async function (this: any) {
+      return this;
+    });
+  });
+  Object.assign(ctor, {
     findOne: jest.fn(),
     find: jest.fn(),
     updateMany: jest.fn(),
-    prototype: {
-      save: jest.fn()
-    }
-  }
-}));
+  });
+  return { RewardScheduleModel: ctor };
+});
 
 describe("RewardScheduleRegistry", () => {
   describe("calculateEmissionAt", () => {
@@ -73,6 +86,207 @@ describe("RewardScheduleRegistry", () => {
       
       // End of tapering
       expect(RewardScheduleRegistry.calculateEmissionAt(taperSchedule, new Date("2026-12-31T00:00:00Z"))).toBe(0);
+    });
+  });
+
+  describe("schedulesOverlap (conflict matrix)", () => {
+    const window = (start: string, end: string) => ({
+      protocolName: "P",
+      tokenSymbol: "T",
+      startDate: new Date(start),
+      endDate: new Date(end),
+    });
+
+    it("treats touching windows (shared boundary only) as NOT overlapping", () => {
+      // [1,10] and [10,20] share only the instant 10 - not a conflict.
+      const a = window("2026-01-01T00:00:00Z", "2026-01-10T00:00:00Z");
+      const b = window("2026-01-10T00:00:00Z", "2026-01-20T00:00:00Z");
+      expect(schedulesOverlap(a, b)).toBe(false);
+      expect(schedulesOverlap(b, a)).toBe(false);
+    });
+
+    it("treats genuinely overlapping windows as a conflict", () => {
+      const a = window("2026-01-01T00:00:00Z", "2026-01-10T00:00:00Z");
+      const b = window("2026-01-05T00:00:00Z", "2026-01-15T00:00:00Z");
+      expect(schedulesOverlap(a, b)).toBe(true);
+      expect(schedulesOverlap(b, a)).toBe(true);
+    });
+
+    it("treats a fully nested window as a conflict", () => {
+      const outer = window("2026-01-01T00:00:00Z", "2026-01-31T00:00:00Z");
+      const inner = window("2026-01-10T00:00:00Z", "2026-01-20T00:00:00Z");
+      expect(schedulesOverlap(outer, inner)).toBe(true);
+      expect(schedulesOverlap(inner, outer)).toBe(true);
+    });
+
+    it("treats identical windows as a conflict", () => {
+      const a = window("2026-01-01T00:00:00Z", "2026-01-10T00:00:00Z");
+      const b = window("2026-01-01T00:00:00Z", "2026-01-10T00:00:00Z");
+      expect(schedulesOverlap(a, b)).toBe(true);
+    });
+
+    it("treats disjoint (non-touching) windows as NOT overlapping", () => {
+      const a = window("2026-01-01T00:00:00Z", "2026-01-10T00:00:00Z");
+      const b = window("2026-02-01T00:00:00Z", "2026-02-10T00:00:00Z");
+      expect(schedulesOverlap(a, b)).toBe(false);
+    });
+
+    it("findOverlappingSchedule ignores windows from a different protocol or token", () => {
+      const candidate = window("2026-01-01T00:00:00Z", "2026-01-10T00:00:00Z");
+      const otherProtocol = { ...window("2026-01-05T00:00:00Z", "2026-01-15T00:00:00Z"), protocolName: "Other" };
+      const otherToken = { ...window("2026-01-05T00:00:00Z", "2026-01-15T00:00:00Z"), tokenSymbol: "OTHER" };
+      expect(findOverlappingSchedule(candidate, [otherProtocol, otherToken])).toBeUndefined();
+    });
+
+    it("findOverlappingSchedule returns the conflicting window when protocol+token match and ranges overlap", () => {
+      const candidate = window("2026-01-01T00:00:00Z", "2026-01-10T00:00:00Z");
+      const conflicting = window("2026-01-05T00:00:00Z", "2026-01-15T00:00:00Z");
+      expect(findOverlappingSchedule(candidate, [conflicting])).toBe(conflicting);
+    });
+  });
+
+  describe("registerSchedule publish-time overlap detection", () => {
+    const baseArgs = {
+      protocolName: "TestProtocol",
+      tokenSymbol: "TEST",
+      sourceProvenance: "Test source",
+      dailyEmission: 100,
+    };
+
+    beforeEach(() => {
+      jest.clearAllMocks();
+    });
+
+    it("rejects publishing a schedule that overlaps an existing active schedule", async () => {
+      const mockFindOne = RewardScheduleModel.findOne as jest.Mock;
+      const mockFind = RewardScheduleModel.find as jest.Mock;
+
+      mockFindOne.mockResolvedValue(null);
+      mockFind.mockReturnValue({
+        lean: jest.fn().mockResolvedValue([
+          {
+            protocolName: "TestProtocol",
+            tokenSymbol: "TEST",
+            startDate: new Date("2026-01-05T00:00:00Z"),
+            endDate: new Date("2026-01-15T00:00:00Z"),
+          },
+        ]),
+      });
+
+      await expect(
+        RewardScheduleRegistry.registerSchedule({
+          ...baseArgs,
+          startDate: new Date("2026-01-01T00:00:00Z"),
+          endDate: new Date("2026-01-10T00:00:00Z"),
+        }),
+      ).rejects.toThrow(RewardScheduleOverlapError);
+    });
+
+    it("rejects publishing a nested schedule window", async () => {
+      const mockFindOne = RewardScheduleModel.findOne as jest.Mock;
+      const mockFind = RewardScheduleModel.find as jest.Mock;
+
+      mockFindOne.mockResolvedValue(null);
+      mockFind.mockReturnValue({
+        lean: jest.fn().mockResolvedValue([
+          {
+            protocolName: "TestProtocol",
+            tokenSymbol: "TEST",
+            startDate: new Date("2026-01-01T00:00:00Z"),
+            endDate: new Date("2026-01-31T00:00:00Z"),
+          },
+        ]),
+      });
+
+      await expect(
+        RewardScheduleRegistry.registerSchedule({
+          ...baseArgs,
+          startDate: new Date("2026-01-10T00:00:00Z"),
+          endDate: new Date("2026-01-20T00:00:00Z"),
+        }),
+      ).rejects.toThrow(RewardScheduleOverlapError);
+    });
+
+    it("allows publishing a schedule that only touches an existing window's boundary", async () => {
+      const mockFindOne = RewardScheduleModel.findOne as jest.Mock;
+      const mockFind = RewardScheduleModel.find as jest.Mock;
+
+      mockFindOne.mockResolvedValue(null);
+      mockFind.mockReturnValue({
+        lean: jest.fn().mockResolvedValue([
+          {
+            protocolName: "TestProtocol",
+            tokenSymbol: "TEST",
+            startDate: new Date("2026-01-01T00:00:00Z"),
+            endDate: new Date("2026-01-10T00:00:00Z"),
+          },
+        ]),
+      });
+
+      const result = await RewardScheduleRegistry.registerSchedule({
+        ...baseArgs,
+        startDate: new Date("2026-01-10T00:00:00Z"),
+        endDate: new Date("2026-01-20T00:00:00Z"),
+      });
+
+      expect(result).toBeDefined();
+    });
+
+    it("allows publishing when there is no existing active schedule for the protocol/token", async () => {
+      const mockFindOne = RewardScheduleModel.findOne as jest.Mock;
+      const mockFind = RewardScheduleModel.find as jest.Mock;
+
+      mockFindOne.mockResolvedValue(null);
+      mockFind.mockReturnValue({
+        lean: jest.fn().mockResolvedValue([]),
+      });
+
+      const result = await RewardScheduleRegistry.registerSchedule({
+        ...baseArgs,
+        startDate: new Date("2026-01-01T00:00:00Z"),
+        endDate: new Date("2026-01-10T00:00:00Z"),
+      });
+
+      expect(result).toBeDefined();
+    });
+
+    it("excludes the schedule being updated itself from its own overlap check", async () => {
+      const existingDoc = {
+        _id: "existing-id",
+        protocolName: "TestProtocol",
+        tokenSymbol: "TEST",
+        startDate: new Date("2026-01-01T00:00:00Z"),
+        endDate: new Date("2026-01-10T00:00:00Z"),
+        save: jest.fn().mockResolvedValue(undefined),
+      };
+      existingDoc.save.mockImplementation(async function (this: any) {
+        return this;
+      });
+
+      const mockFindOne = RewardScheduleModel.findOne as jest.Mock;
+      const mockFind = RewardScheduleModel.find as jest.Mock;
+
+      mockFindOne.mockResolvedValue(existingDoc);
+      mockFind.mockReturnValue({
+        lean: jest.fn().mockResolvedValue([]),
+      });
+
+      await expect(
+        RewardScheduleRegistry.registerSchedule({
+          ...baseArgs,
+          startDate: new Date("2026-01-01T00:00:00Z"),
+          endDate: new Date("2026-01-12T00:00:00Z"),
+        }),
+      ).resolves.toBeDefined();
+
+      expect(mockFind).toHaveBeenCalledWith(
+        expect.objectContaining({
+          protocolName: "TestProtocol",
+          tokenSymbol: "TEST",
+          isActive: true,
+          _id: { $ne: "existing-id" },
+        }),
+      );
     });
   });
 

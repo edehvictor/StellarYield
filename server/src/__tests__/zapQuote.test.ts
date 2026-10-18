@@ -1,4 +1,4 @@
-import { quoteFallback, getZapQuote } from "../services/zapQuote";
+import { quoteFallback, getZapQuote, detectFeeDrift, getFeeDriftWarnThreshold, getFeeDriftErrorThreshold } from "../services/zapQuote";
 
 // Mock yieldService to prevent real Stellar network calls during CI
 jest.mock("../services/yieldService", () => ({
@@ -204,5 +204,160 @@ describe("getZapQuote", () => {
       if (prevRouter !== undefined) process.env.DEX_ROUTER_CONTRACT_ID = prevRouter;
       else delete process.env.DEX_ROUTER_CONTRACT_ID;
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// detectFeeDrift — regression tests for fee drift detection (issue #1101)
+// ---------------------------------------------------------------------------
+
+describe("detectFeeDrift", () => {
+  // --- null / no-warning cases ---
+
+  it("returns null when preview and execution fee are identical", () => {
+    expect(detectFeeDrift("1000000", "1000000")).toBeNull();
+  });
+
+  it("returns null for a tiny rounding difference below the warn threshold", () => {
+    // 1 stroop difference on 1_000_000 → 0.0001% — well below 5%
+    expect(detectFeeDrift("1000000", "1000001")).toBeNull();
+  });
+
+  it("returns null for a 1% delta (below the 5% default warn threshold)", () => {
+    // 1% of 1_000_000 = 10_000
+    expect(detectFeeDrift("1000000", "1010000")).toBeNull();
+  });
+
+  it("returns null for a 4.9% delta (just below warn threshold)", () => {
+    // 4.9% of 1_000_000 = 49_000
+    expect(detectFeeDrift("1000000", "1049000")).toBeNull();
+  });
+
+  // --- warn-level cases ---
+
+  it("emits a warn-level warning at exactly 5% drift", () => {
+    // 5% of 1_000_000 = 50_000
+    const result = detectFeeDrift("1000000", "1050000");
+    expect(result).not.toBeNull();
+    expect(result?.type).toBe("FEE_DRIFT");
+    expect(result?.severity).toBe("warn");
+    expect(result?.deltaRelative).toBeCloseTo(0.05, 5);
+    expect(result?.previewFee).toBe("1000000");
+    expect(result?.executionFee).toBe("1050000");
+    expect(result?.deltaAbs).toBe("50000");
+    expect(result?.message).toContain("drifted");
+  });
+
+  it("emits a warn-level warning for a 10% increase", () => {
+    // 10% of 2_000_000 = 200_000
+    const result = detectFeeDrift("2000000", "2200000");
+    expect(result?.severity).toBe("warn");
+    expect(result?.deltaRelative).toBeCloseTo(0.1, 5);
+  });
+
+  it("emits a warn-level warning for a fee decrease (negative drift)", () => {
+    // Execution fee is 8% *lower* than preview — still a material change
+    const result = detectFeeDrift("1000000", "920000");
+    expect(result?.severity).toBe("warn");
+    expect(result?.deltaRelative).toBeCloseTo(0.08, 5);
+  });
+
+  // --- error-level cases (≥ 15%) ---
+
+  it("emits an error-level warning at exactly 15% drift", () => {
+    // 15% of 1_000_000 = 150_000
+    const result = detectFeeDrift("1000000", "1150000");
+    expect(result?.severity).toBe("error");
+    expect(result?.deltaRelative).toBeCloseTo(0.15, 5);
+    expect(result?.message).toContain("re-quote");
+  });
+
+  it("emits an error-level warning for a 50% fee increase", () => {
+    const result = detectFeeDrift("1000000", "1500000");
+    expect(result?.severity).toBe("error");
+    expect(result?.deltaRelative).toBeCloseTo(0.5, 5);
+  });
+
+  it("emits an error-level warning for a large fee decrease", () => {
+    // 20% decrease
+    const result = detectFeeDrift("1000000", "800000");
+    expect(result?.severity).toBe("error");
+    expect(result?.deltaRelative).toBeCloseTo(0.2, 5);
+  });
+
+  // --- edge cases ---
+
+  it("returns null when previewFee is zero (avoids division by zero)", () => {
+    expect(detectFeeDrift("0", "1000000")).toBeNull();
+  });
+
+  it("handles large stroop values correctly (bigint arithmetic)", () => {
+    // 10_000_000_000_000 stroops, 10% drift
+    const big = BigInt("10000000000000");
+    const drifted = (big * 110n / 100n).toString();
+    const result = detectFeeDrift(big.toString(), drifted);
+    expect(result?.severity).toBe("warn");
+    expect(result?.deltaRelative).toBeCloseTo(0.1, 5);
+  });
+
+  // --- threshold override via env vars ---
+
+  it("respects a custom warn threshold set via FEE_DRIFT_WARN_THRESHOLD", () => {
+    const prev = process.env.FEE_DRIFT_WARN_THRESHOLD;
+    process.env.FEE_DRIFT_WARN_THRESHOLD = "0.10"; // 10% warn threshold
+
+    // 7% drift should NOT warn with a 10% threshold
+    const below = detectFeeDrift("1000000", "1070000");
+    expect(below).toBeNull();
+
+    // 11% drift should warn
+    const above = detectFeeDrift("1000000", "1110000");
+    expect(above?.severity).toBe("warn");
+
+    if (prev === undefined) delete process.env.FEE_DRIFT_WARN_THRESHOLD;
+    else process.env.FEE_DRIFT_WARN_THRESHOLD = prev;
+  });
+
+  it("respects a custom error threshold set via FEE_DRIFT_ERROR_THRESHOLD", () => {
+    const prevWarn = process.env.FEE_DRIFT_WARN_THRESHOLD;
+    const prevError = process.env.FEE_DRIFT_ERROR_THRESHOLD;
+    process.env.FEE_DRIFT_WARN_THRESHOLD = "0.05";
+    process.env.FEE_DRIFT_ERROR_THRESHOLD = "0.20"; // 20% error threshold
+
+    // 16% drift should be "warn" (below the 20% error threshold)
+    const warnResult = detectFeeDrift("1000000", "1160000");
+    expect(warnResult?.severity).toBe("warn");
+
+    // 21% drift should be "error"
+    const errorResult = detectFeeDrift("1000000", "1210000");
+    expect(errorResult?.severity).toBe("error");
+
+    if (prevWarn === undefined) delete process.env.FEE_DRIFT_WARN_THRESHOLD;
+    else process.env.FEE_DRIFT_WARN_THRESHOLD = prevWarn;
+    if (prevError === undefined) delete process.env.FEE_DRIFT_ERROR_THRESHOLD;
+    else process.env.FEE_DRIFT_ERROR_THRESHOLD = prevError;
+  });
+});
+
+describe("getFeeDriftWarnThreshold / getFeeDriftErrorThreshold", () => {
+  it("returns defaults when env vars are not set", () => {
+    const prevWarn = process.env.FEE_DRIFT_WARN_THRESHOLD;
+    const prevError = process.env.FEE_DRIFT_ERROR_THRESHOLD;
+    delete process.env.FEE_DRIFT_WARN_THRESHOLD;
+    delete process.env.FEE_DRIFT_ERROR_THRESHOLD;
+
+    expect(getFeeDriftWarnThreshold()).toBeCloseTo(0.05);
+    expect(getFeeDriftErrorThreshold()).toBeCloseTo(0.15);
+
+    if (prevWarn !== undefined) process.env.FEE_DRIFT_WARN_THRESHOLD = prevWarn;
+    if (prevError !== undefined) process.env.FEE_DRIFT_ERROR_THRESHOLD = prevError;
+  });
+
+  it("ignores non-numeric env var values and falls back to defaults", () => {
+    const prev = process.env.FEE_DRIFT_WARN_THRESHOLD;
+    process.env.FEE_DRIFT_WARN_THRESHOLD = "not-a-number";
+    expect(getFeeDriftWarnThreshold()).toBeCloseTo(0.05);
+    if (prev === undefined) delete process.env.FEE_DRIFT_WARN_THRESHOLD;
+    else process.env.FEE_DRIFT_WARN_THRESHOLD = prev;
   });
 });

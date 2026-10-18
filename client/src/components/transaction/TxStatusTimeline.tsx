@@ -6,6 +6,7 @@ import {
   isStepCompleted,
 } from "../../services/transactionPhase";
 import { decodeTransactionError } from "../../utils/errorDecoder";
+import { redactSensitiveData } from "../../utils/redactClient";
 
 function stepIsDone(
   steps: readonly TxPhase[],
@@ -152,7 +153,7 @@ export default function TxStatusTimeline({
             <div className="flex flex-wrap gap-2 pt-1">
               <button
                 type="button"
-                onClick={() => void copyText(errorMessage)}
+                onClick={() => void copyText(redactSensitiveData(errorMessage))}
                 className="inline-flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-lg bg-white/10 hover:bg-white/15 text-gray-200"
               >
                 <Copy className="w-3.5 h-3.5" />

@@ -7,6 +7,8 @@
  * Keeps downloaded files predictable and filesystem-safe across the app.
  */
 
+import { getExportEnvironmentTag } from "../../lib/networkEnv";
+
 /** Replace unsafe characters with a hyphen and collapse runs of dots. */
 export function sanitizeFilenameSegment(value: string): string {
   return String(value)
@@ -17,11 +19,7 @@ export function sanitizeFilenameSegment(value: string): string {
 
 /** Resolve the current frontend environment for filename tagging. */
 function currentEnvironment(): string {
-  const env =
-    (import.meta.env.VITE_STELLAR_NETWORK as string | undefined) ??
-    (import.meta.env.MODE as string | undefined) ??
-    "production";
-  return sanitizeFilenameSegment(env.toLowerCase()) || "production";
+  return sanitizeFilenameSegment(getExportEnvironmentTag().toLowerCase()) || "production";
 }
 
 /**

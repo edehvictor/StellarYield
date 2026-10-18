@@ -24,6 +24,8 @@ export interface QuoteSnapshot {
   minOut: bigint;
   /** Previous expectedOut for delta calculation */
   prevExpectedOut?: bigint;
+  /** Previous route hops, used to detect a path change between fetches */
+  prevRoute?: string[];
   /** Whether the quote came from fallback */
   isFallback: boolean;
   /** Whether the quote is stale */
@@ -51,6 +53,8 @@ interface UseDepositImpactInput {
   routeImpactThreshold?: number;
   /** Whether to enforce stale quote blocking */
   blockStaleQuotes?: boolean;
+  /** Observed route liquidity depth in USD (unknown when omitted). #1312 */
+  routeLiquidityDepthUsd?: number;
 }
 
 const WARNING_SLIPPAGE_PCT = 3;
@@ -61,6 +65,15 @@ const LOW_EXECUTION_QUALITY = 70;
 const CRITICAL_EXECUTION_QUALITY = 50;
 const DEFAULT_ROUTE_IMPACT_THRESHOLD = 75;
 const MAX_QUOTE_AGE_MS = 60_000;
+/** Fraction of route liquidity depth a single deposit may consume (#1312). */
+const MAX_DEPTH_UTILIZATION = 0.25;
+/** Warning when deposit exceeds this fraction of depth. */
+const WARN_DEPTH_UTILIZATION = 0.15;
+/** route.length - 1 = hop count. >=3 hops means more than one intermediate pool. */
+const WARNING_HOP_COUNT = 3;
+const CRITICAL_HOP_COUNT = 5;
+/** Output delta below this is treated as "nominally unchanged" for path-change detection. */
+const NOMINAL_OUTPUT_DELTA_PCT = 5;
 
 /**
  * Computes output impact delta as a percentage.
@@ -70,6 +83,17 @@ function computeOutputDelta(prev: bigint | undefined, current: bigint): number {
   if (!prev || prev <= 0n || current <= 0n) return 0;
   const delta = Number(current - prev) / Number(prev);
   return Math.abs(delta) * 100;
+}
+
+/** Number of conversion hops implied by a route's contract list (edges, not nodes). */
+function computeHopCount(route: string[]): number {
+  return route.length > 1 ? route.length - 1 : 0;
+}
+
+/** Whether two route hop lists are identical, in order. */
+function routesEqual(a: string[], b: string[]): boolean {
+  if (a.length !== b.length) return false;
+  return a.every((hop, i) => hop === b[i]);
 }
 
 /**
@@ -100,6 +124,30 @@ export function useDepositImpact(input: UseDepositImpactInput): DepositImpactRes
       impactScore += 20;
     }
 
+    // Route liquidity depth signal (#1312) — skipped when depth or amount unknown.
+    let depthExceeded = false;
+    const depth = input.routeLiquidityDepthUsd;
+    if (
+      typeof depth === "number" &&
+      Number.isFinite(depth) &&
+      depth > 0 &&
+      input.amountUsd > 0
+    ) {
+      const utilization = input.amountUsd / depth;
+      if (utilization > MAX_DEPTH_UTILIZATION) {
+        depthExceeded = true;
+        reasons.push(
+          `Deposit exceeds ${Math.round(MAX_DEPTH_UTILIZATION * 100)}% of route liquidity depth ($${input.amountUsd.toFixed(0)} of $${depth.toFixed(0)}) — insufficient route depth for this size`,
+        );
+        impactScore += 50;
+      } else if (utilization > WARN_DEPTH_UTILIZATION) {
+        reasons.push(
+          `Deposit consumes ${Math.round(utilization * 100)}% of route liquidity depth — near the ${Math.round(MAX_DEPTH_UTILIZATION * 100)}% safety cap`,
+        );
+        impactScore += 25;
+      }
+    }
+
     // Quote quality signals
     if (input.isFallback) {
       reasons.push("Fallback quote active — actual output may differ from estimate");
@@ -128,6 +176,36 @@ export function useDepositImpact(input: UseDepositImpactInput): DepositImpactRes
         reasons.push(`Quote is ${ageSec}s old — freshness degraded`);
         impactScore += 15;
       }
+
+      // Route depth signal — multi-hop routes (more than one intermediate pool)
+      // compound slippage and execution risk beyond what the output delta alone reflects.
+      const hopCount = computeHopCount(input.quote.route);
+      if (hopCount >= CRITICAL_HOP_COUNT) {
+        reasons.push(
+          `Route spans ${hopCount} hops through multiple intermediate pools — deep multi-hop paths compound execution risk`,
+        );
+        impactScore += 30;
+      } else if (hopCount >= WARNING_HOP_COUNT) {
+        reasons.push(
+          `Route spans ${hopCount} hops through intermediate pools — execution risk increases with route depth`,
+        );
+        impactScore += 15;
+      }
+
+      // Path-change signal — a different hop sequence was selected since the
+      // last fetch. This can hide behind a stable headline output number, so
+      // it's evaluated independently of the output-delta signal above.
+      if (input.quote.prevRoute && !routesEqual(input.quote.route, input.quote.prevRoute)) {
+        if (outputDelta < NOMINAL_OUTPUT_DELTA_PCT) {
+          reasons.push(
+            `Route path changed to a different ${hopCount}-hop sequence while expected output stayed nominal — confirm the new route before proceeding`,
+          );
+          impactScore += 20;
+        } else {
+          reasons.push("Route path changed alongside the output amount — verify the new route");
+          impactScore += 10;
+        }
+      }
     }
 
     // Fragmentation signals
@@ -149,7 +227,7 @@ export function useDepositImpact(input: UseDepositImpactInput): DepositImpactRes
     const clampedScore = Math.min(100, impactScore);
 
     let severity: ImpactSeverity = "none";
-    if (clampedScore >= 60) {
+    if (clampedScore >= 60 || depthExceeded) {
       severity = "critical";
     } else if (clampedScore >= 25) {
       severity = "warning";
@@ -163,6 +241,10 @@ export function useDepositImpact(input: UseDepositImpactInput): DepositImpactRes
     if (blockStale && input.isStale) {
       shouldBlock = true;
       blockReason = "Quote is stale. Refresh to get current rates before submitting.";
+    } else if (depthExceeded) {
+      shouldBlock = true;
+      blockReason =
+        "Deposit exceeds available route liquidity depth. Split the deposit or wait for deeper liquidity.";
     } else if (severity === "critical" && clampedScore >= (input.routeImpactThreshold ?? DEFAULT_ROUTE_IMPACT_THRESHOLD)) {
       shouldBlock = true;
       blockReason = "Route impact exceeds safety threshold. Reduce amount or adjust slippage.";

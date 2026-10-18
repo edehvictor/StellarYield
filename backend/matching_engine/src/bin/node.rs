@@ -4,6 +4,7 @@
 //! Runs the Libp2p network, order matching, and settlement generation.
 
 use ed25519_dalek::SigningKey;
+use matching_engine::network::{MatchSequencer, SequenceOutcome};
 use matching_engine::{
     MatchingEngine, MatchingEngineNetwork, NetworkConfig, NetworkEvent, NetworkMessage,
     SettlementBatch, SettlementPayload,
@@ -82,6 +83,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
+    // Orders are matched in canonical (timestamp, id) order rather than
+    // arrival order so peers agree on the outcome of colliding orders.
+    let mut sequencer = MatchSequencer::default();
+    let mut sequencer_tick = tokio::time::interval(Duration::from_millis(50));
+
     log::info!("Matching Engine Node is running!");
 
     loop {
@@ -91,19 +97,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     match event {
                         NetworkEvent::OrderReceived(order) => {
                             log::info!("Received order from network: {}", order.id);
-                            let result = matching_engine.submit_order(order);
-
-                            if !result.trades.is_empty() {
-                                log::info!("Matched {} trades", result.trades.len());
-                                let _ = settlement_tx.send(result.trades.clone()).await;
-
-                                for trade in &result.trades {
-                                    let msg = NetworkMessage::TradeExecuted {
-                                        trade_id: trade.id.clone(),
-                                        data: String::new(),
-                                    };
-                                    let _ = message_tx.send(msg).await;
-                                }
+                            let order_id = order.id.clone();
+                            if sequencer.push(order) == SequenceOutcome::Late {
+                                log::warn!(
+                                    "Order {} arrived after its tie window; peers may need a resync",
+                                    order_id
+                                );
                             }
                         }
                         NetworkEvent::OrderCancelled { order_id } => {
@@ -117,6 +116,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                         NetworkEvent::TradeExecuted { trade_id } => {
                             log::info!("Trade executed notification: {}", trade_id);
+                        }
+                    }
+                }
+            }
+            _ = sequencer_tick.tick() => {
+                let now = chrono::Utc::now().timestamp_millis() as u64;
+                for order in sequencer.drain_ready(now) {
+                    let result = matching_engine.submit_order(order);
+
+                    if !result.trades.is_empty() {
+                        log::info!("Matched {} trades", result.trades.len());
+                        let _ = settlement_tx.send(result.trades.clone()).await;
+
+                        for trade in &result.trades {
+                            let msg = NetworkMessage::TradeExecuted {
+                                trade_id: trade.id.clone(),
+                                data: String::new(),
+                            };
+                            let _ = message_tx.send(msg).await;
                         }
                     }
                 }

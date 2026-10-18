@@ -1,10 +1,21 @@
 import { Router, Request, Response } from "express";
 import { getZapSupportedAssetsPayload } from "../config/zapAssetsConfig";
-import { getZapQuote, verifyZapQuote, type ZapQuoteBody } from "../services/zapQuote";
+import {
+  getZapQuote,
+  verifyZapQuote,
+  RECOVERABLE_VERIFY_ERROR_CODES,
+  type ZapQuoteBody,
+} from "../services/zapQuote";
 import { sendError } from "../utils/errorResponse";
 import { validateZapQuote } from "../middleware/validation";
+import { recordFailure, resolveNetworkLabel } from "../monitoring/prometheus";
+import { getVaultPauseState } from "../services/vaultPauseStateService";
 
 const router = Router();
+
+router.get("/pause-state", async (_req: Request, res: Response) => {
+  res.json({ vaultPauseState: await getVaultPauseState() });
+});
 
 router.get("/supported-assets", (_req: Request, res: Response) => {
   try {
@@ -31,9 +42,18 @@ router.post("/quote", validateZapQuote, async (req: Request, res: Response) => {
       inputDecimals: Number(b.inputDecimals ?? 7),
       vaultDecimals: Number(b.vaultDecimals ?? 7),
       slippageTolerance: b.slippageTolerance !== undefined ? Number(b.slippageTolerance) : undefined,
+      // Reserve check (#1148) is opt-in: only run when the caller supplies a
+      // wallet address to check against.
+      walletAddress:
+        typeof b.walletAddress === "string" && b.walletAddress.trim() !== ""
+          ? b.walletAddress.trim()
+          : undefined,
     };
 
-    const quote = await getZapQuote(body);
+    const [quote, vaultPauseState] = await Promise.all([
+      getZapQuote(body),
+      getVaultPauseState(),
+    ]);
     res.json({
       path: quote.path,
       expectedAmountOutStroops: quote.expectedAmountOutStroops,
@@ -48,14 +68,22 @@ router.post("/quote", validateZapQuote, async (req: Request, res: Response) => {
       expiresAt: quote.expiresAt,
       routeHash: quote.routeHash,
       assetConfigVersion: quote.assetConfigVersion,
+      vaultPauseState,
     });
   } catch (e) {
+    recordFailure({
+      route: "zap/quote",
+      network: resolveNetworkLabel(),
+      failure_category: "quote_failed",
+    });
     sendError(
       res,
       500,
       "QUOTE_FAILED",
       "Quote failed",
-      e instanceof Error ? e.message : undefined
+      e instanceof Error ? e.message : undefined,
+      undefined,
+      true
     );
   }
 });
@@ -67,8 +95,11 @@ router.post("/verify", (req: Request, res: Response) => {
       return sendError(
         res,
         400,
-        result.errorCode || "INVALID_QUOTE",
-        result.reason || "Invalid quote",
+        result.errorCode,
+        result.reason,
+        undefined,
+        undefined,
+        RECOVERABLE_VERIFY_ERROR_CODES.has(result.errorCode) || undefined,
       );
     }
     res.json({ success: true });

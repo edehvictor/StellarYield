@@ -12,11 +12,11 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/stellar/go/keypair"
 	"github.com/stellaryield/mpc_nodes/api"
 	"github.com/stellaryield/mpc_nodes/coordinator"
 	"github.com/stellaryield/mpc_nodes/stellar"
 	"github.com/stellaryield/mpc_nodes/storage"
-	"github.com/stellaryield/mpc_nodes/tss"
 )
 
 // Config holds all configuration for the MPC node
@@ -32,11 +32,11 @@ type Config struct {
 	EnableCORS    bool
 
 	// Storage configuration
-	StorageType        string
+	StorageType           string
 	MongoConnectionString string
-	MongoDatabase      string
-	MongoCollection    string
-	EncryptionKey      string
+	MongoDatabase         string
+	MongoCollection       string
+	EncryptionKey         string
 
 	// Stellar configuration
 	StellarNetworkPassphrase string
@@ -109,7 +109,7 @@ func main() {
 	}
 
 	if config.StellarMPCPublicKey != "" {
-		stellarConfig.MPCPublicKey, _ = stellar.ParseAddress(config.StellarMPCPublicKey)
+		stellarConfig.MPCPublicKey, _ = keypair.ParseAddress(config.StellarMPCPublicKey)
 	}
 
 	treasuryClient, err := stellar.NewTreasuryClient(stellarConfig)
@@ -128,9 +128,9 @@ func main() {
 
 	// Create API server
 	apiConfig := &api.APIConfig{
-		Port:          config.APIPort,
-		EnableMetrics: config.EnableMetrics,
-		EnableCORS:    config.EnableCORS,
+		Port:           config.APIPort,
+		EnableMetrics:  config.EnableMetrics,
+		EnableCORS:     config.EnableCORS,
 		AllowedOrigins: []string{"*"},
 	}
 
@@ -252,9 +252,4 @@ func initializeStorage(config *Config) (storage.KeyShareStorage, error) {
 	default:
 		return storage.NewMemoryStorage(), nil
 	}
-}
-
-// Helper function to parse Stellar address
-func stellar.ParseAddress(address string) (*keypair.FromAddress, error) {
-	return keypair.ParseAddress(address)
 }

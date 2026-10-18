@@ -75,9 +75,18 @@ enum DataKey {
     ExecutedAdminOp(Bytes), // Hash of (network, contract, operation, nonce)
     // Cross-contract allowlist with network binding (#905)
     AllowedContractRole(Symbol), // Role -> Address allowlist (e.g., "zap" -> ZapContract)
+    // Max single-deposit amount (route liquidity depth limit, #1312).
+    // 0 / unset means unlimited.
+    LiquidityDepthLimit,
+    /// Reentrancy guard for flash loans.  Set for the duration of a loan.
+    FlashLoanActive,
+    /// On-chain storage schema version.  Written by `migrate()`.
+    /// Absent (unwrap_or 0) on contracts deployed before versioning was introduced.
+    StorageVersion,
 }
 
 mod admin;
+mod migration;
 mod donations;
 mod emergency;
 pub mod events;
@@ -88,6 +97,7 @@ mod keeper;
 mod oracle;
 mod referrals;
 mod verification; // Versioned event schemas (#904)
+mod withdrawal_queue;
 
 // ── Errors ──────────────────────────────────────────────────────────────
 
@@ -119,6 +129,14 @@ pub enum VaultError {
     UnauthorizedContract = 2005,
     /// Fee recipient is invalid (contract self or zero-equivalent) (maps to error code 2006).
     InvalidRecipient = 2006,
+    /// Donation amount is zero or below the minimum dust threshold (maps to error code 2007).
+    DonationBelowMinimum = 2007,
+    /// Deposit amount exceeds the configured route liquidity depth limit (maps to error code 2008).
+    InsufficientLiquidityDepth = 2008,
+    /// Storage is already at the requested version — migration is a no-op (maps to error code 2009).
+    AlreadyMigrated = 2009,
+    /// Storage schema version mismatch — contract state is ahead of the expected version (maps to error code 2010).
+    StorageVersionMismatch = 2010,
 }
 
 // ── Contract ────────────────────────────────────────────────────────────
@@ -194,6 +212,7 @@ impl YieldVault {
         if amount <= 0 {
             return Err(VaultError::ZeroAmount);
         }
+        YieldVault::enforce_liquidity_depth_limit(&env, amount)?;
 
         let token_addr: Address = Self::get_storage_required(&env, &DataKey::Token)?;
         let total_shares: i128 = Self::get_storage_required(&env, &DataKey::TotalShares)?;
@@ -277,6 +296,7 @@ impl YieldVault {
         if amount <= 0 {
             return Err(VaultError::ZeroAmount);
         }
+        YieldVault::enforce_liquidity_depth_limit(&env, amount)?;
 
         let token_addr: Address = Self::get_storage_required(&env, &DataKey::Token)?;
         let total_shares: i128 = Self::get_storage_required(&env, &DataKey::TotalShares)?;
@@ -600,14 +620,12 @@ impl YieldVault {
         YieldVault::require_init(&env)?;
         caller.require_auth();
         let admin: Address = Self::get_storage_required(&env, &DataKey::Admin)?;
-        let legacy_keeper: Option<Address> = env.storage().instance().get(&DataKey::Keeper);
         let is_admin = caller == admin;
-        let is_legacy_keeper = match &legacy_keeper {
-            Some(k) => k == &caller,
-            None => false,
-        };
         let is_registered = YieldVault::is_registered_keeper(&env, &caller);
-        if !is_admin && !is_legacy_keeper && !is_registered {
+        // Keepers must be explicitly registered by the admin. The historical
+        // Keeper storage slot is configuration metadata, not an authorization
+        // bypass; accepting it allowed a stale keeper to execute strategy work.
+        if !is_admin && !is_registered {
             return Err(VaultError::Unauthorized);
         }
         let base_token: Address = Self::get_storage_required(&env, &DataKey::Token)?;
@@ -840,6 +858,45 @@ impl YieldVault {
             .ok_or(VaultError::NotInitialized)?;
         if *caller != admin {
             return Err(VaultError::Unauthorized);
+        }
+        Ok(())
+    }
+
+    /// Admin: set the max single-deposit amount (route liquidity depth limit).
+    /// `limit <= 0` disables the limit (unlimited deposits).
+    pub fn set_liquidity_depth_limit(
+        env: Env,
+        admin: Address,
+        limit: i128,
+    ) -> Result<(), VaultError> {
+        YieldVault::require_init(&env)?;
+        YieldVault::require_admin(&env, &admin)?;
+        let stored = if limit > 0 { limit } else { 0 };
+        env.storage()
+            .instance()
+            .set(&DataKey::LiquidityDepthLimit, &stored);
+        env.events().publish((symbol_short!("dep_lim"),), (stored,));
+        Ok(())
+    }
+
+    /// View: current liquidity depth limit (0 = unlimited).
+    pub fn get_liquidity_depth_limit(env: Env) -> i128 {
+        env.storage()
+            .instance()
+            .get(&DataKey::LiquidityDepthLimit)
+            .unwrap_or(0)
+    }
+
+    /// Reject deposits larger than the configured depth limit (#1312).
+    /// Limit of 0 means unlimited.
+    fn enforce_liquidity_depth_limit(env: &Env, amount: i128) -> Result<(), VaultError> {
+        let limit: i128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::LiquidityDepthLimit)
+            .unwrap_or(0);
+        if limit > 0 && amount > limit {
+            return Err(VaultError::InsufficientLiquidityDepth);
         }
         Ok(())
     }
@@ -1501,6 +1558,173 @@ mod tests {
         // Rollback to a prior recipient remains valid
         client.set_fee_recipient(&admin, &first);
         assert_eq!(client.get_fee_recipient(), first);
+    }
+
+    // ── Donation routing limits & invalid recipient handling (#1036) ─────
+
+    #[test]
+    fn test_charity_whitelist_admin_and_unauthorized() {
+        let (env, client, admin, _, _) = setup_env();
+        let charity = Address::generate(&env);
+        let impostor = Address::generate(&env);
+
+        // Unauthorized caller rejected
+        let res_unauth = client.try_set_charity_whitelist(&impostor, &charity, &true);
+        assert_eq!(res_unauth, Err(Ok(VaultError::Unauthorized)));
+
+        // Reject vault contract self
+        let res_self = client.try_set_charity_whitelist(&admin, &client.address, &true);
+        assert_eq!(res_self, Err(Ok(VaultError::InvalidRecipient)));
+
+        // Admin success
+        client.set_charity_whitelist(&admin, &charity, &true);
+
+        // Assert event
+        let events = env.events().all();
+        let (_contract, _topics, data) = events.last().unwrap();
+        let decoded: (Address, bool) = data.into_val(&env);
+        assert_eq!(decoded.0, charity);
+        assert!(decoded.1);
+    }
+
+    #[test]
+    fn test_donation_split_boundaries_and_invalid_recipient() {
+        let (env, client, admin, _, _) = setup_env();
+        let user = Address::generate(&env);
+        let charity = Address::generate(&env);
+        let unapproved = Address::generate(&env);
+
+        client.set_charity_whitelist(&admin, &charity, &true);
+
+        // Valid boundary 0 bps
+        client.set_donation_split(&user, &0, &charity);
+        assert_eq!(
+            client.get_donation_config(&user),
+            (0, Some(charity.clone()))
+        );
+
+        // Valid boundary 10_000 bps
+        client.set_donation_split(&user, &10_000, &charity);
+        assert_eq!(
+            client.get_donation_config(&user),
+            (10_000, Some(charity.clone()))
+        );
+
+        // Over-limit bps (> 10_000) fails deterministically
+        let res_over = client.try_set_donation_split(&user, &10_001, &charity);
+        assert_eq!(res_over, Err(Ok(VaultError::InvalidDonationBps)));
+
+        // Negative bps fails deterministically
+        let res_neg = client.try_set_donation_split(&user, &-1, &charity);
+        assert_eq!(res_neg, Err(Ok(VaultError::InvalidDonationBps)));
+
+        // Unapproved charity fails
+        let res_unapproved = client.try_set_donation_split(&user, &5000, &unapproved);
+        assert_eq!(res_unapproved, Err(Ok(VaultError::CharityNotWhitelisted)));
+
+        // Vault-self fails
+        let res_self = client.try_set_donation_split(&user, &5000, &client.address);
+        assert_eq!(res_self, Err(Ok(VaultError::InvalidRecipient)));
+
+        // Prior valid state remains unchanged
+        assert_eq!(client.get_donation_config(&user), (10_000, Some(charity)));
+    }
+
+    #[test]
+    fn test_apply_donation_transfers_to_whitelisted_charity() {
+        let (env, client, admin, token_addr, token_admin) = setup_env();
+        let user = Address::generate(&env);
+        let charity = Address::generate(&env);
+
+        client.set_charity_whitelist(&admin, &charity, &true);
+        client.set_donation_split(&user, &2000, &charity); // 20%
+
+        let contract_id = client.address.clone();
+        mint_tokens(&env, &token_addr, &token_admin, &contract_id, 10_000);
+
+        let gross_yield = 1000i128;
+        let net = env.as_contract(&contract_id, || {
+            YieldVault::apply_donation(&env, &user, gross_yield, &token_addr)
+        });
+
+        // Capture donated event before subsequent view/token calls clear it.
+        let events = env.events().all();
+        let (_contract, _topics, data) = events.last().unwrap();
+        let decoded: (Address, Address, i128) = data.into_val(&env);
+        assert_eq!(decoded.0, user);
+        assert_eq!(decoded.1, charity);
+        assert_eq!(decoded.2, 200);
+
+        assert_eq!(net, 800);
+        let token_client = token::Client::new(&env, &token_addr);
+        assert_eq!(token_client.balance(&charity), 200);
+        assert_eq!(client.get_total_donated(), 200);
+    }
+
+    #[test]
+    fn test_set_liquidity_depth_limit_admin_only() {
+        let (env, client, admin, _, _) = setup_env();
+        let stranger = Address::generate(&env);
+
+        assert_eq!(client.get_liquidity_depth_limit(), 0);
+
+        client.set_liquidity_depth_limit(&admin, &1_000_000);
+        assert_eq!(client.get_liquidity_depth_limit(), 1_000_000);
+
+        let res = client.try_set_liquidity_depth_limit(&stranger, &500_000);
+        assert_eq!(res, Err(Ok(VaultError::Unauthorized)));
+        assert_eq!(client.get_liquidity_depth_limit(), 1_000_000);
+    }
+
+    #[test]
+    fn test_deposit_blocked_when_over_liquidity_depth_limit() {
+        let (env, client, admin, token_addr, token_admin) = setup_env();
+        let user = Address::generate(&env);
+        mint_tokens(&env, &token_addr, &token_admin, &user, 10_000);
+
+        // Limit of 0 means unlimited — deposits succeed.
+        client.deposit(&user, &1_000, &1_000);
+
+        client.set_liquidity_depth_limit(&admin, &5_000);
+
+        // At-or-under limit succeeds.
+        client.deposit(&user, &5_000, &5_000);
+
+        // Over limit fails with InsufficientLiquidityDepth (2008).
+        let res = client.try_deposit(&user, &5_001, &5_001);
+        assert_eq!(res, Err(Ok(VaultError::InsufficientLiquidityDepth)));
+    }
+
+    #[test]
+    fn test_deposit_for_blocked_when_over_liquidity_depth_limit() {
+        let (env, client, admin, token_addr, token_admin) = setup_env();
+        let payer = Address::generate(&env);
+        let beneficiary = Address::generate(&env);
+        mint_tokens(&env, &token_addr, &token_admin, &payer, 10_000);
+
+        client.set_liquidity_depth_limit(&admin, &100);
+
+        let res = client.try_deposit_for(&payer, &beneficiary, &101, &101);
+        assert_eq!(res, Err(Ok(VaultError::InsufficientLiquidityDepth)));
+
+        let shares = client.deposit_for(&payer, &beneficiary, &100, &100);
+        assert_eq!(shares, 100);
+    }
+
+    #[test]
+    fn test_zero_or_negative_depth_limit_disables_guard() {
+        let (env, client, admin, token_addr, token_admin) = setup_env();
+        let user = Address::generate(&env);
+        mint_tokens(&env, &token_addr, &token_admin, &user, 10_000);
+
+        client.set_liquidity_depth_limit(&admin, &10);
+        let res = client.try_deposit(&user, &11, &11);
+        assert_eq!(res, Err(Ok(VaultError::InsufficientLiquidityDepth)));
+
+        client.set_liquidity_depth_limit(&admin, &0);
+        assert_eq!(client.get_liquidity_depth_limit(), 0);
+        let shares = client.deposit(&user, &11, &11);
+        assert_eq!(shares, 11);
     }
 }
 

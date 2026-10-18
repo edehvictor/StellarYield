@@ -51,3 +51,12 @@ Thumbs.db
 junit.xml
 test-results/
 *.snap
+
+# ── Misc generated / temporary files ─────────────────────────────────────────
+*.tmp
+*.temp
+.turbo/
+.cache/
+*.lock.bak
+server/dist/
+client/dist/

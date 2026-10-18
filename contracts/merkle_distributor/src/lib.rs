@@ -129,7 +129,8 @@ impl MerkleDistributor {
     /// Claim rewards by providing a Merkle proof.
     ///
     /// The caller proves they are entitled to `amount` tokens at leaf
-    /// `index` in the current Merkle tree. The contract verifies the
+    /// `index` in the current Merkle tree. The leaf is bound to the current
+    /// campaign ID (epoch) and the reward asset, and the contract verifies the
     /// proof against the stored root and transfers tokens if valid.
     ///
     /// # Arguments
@@ -168,7 +169,10 @@ impl MerkleDistributor {
             .get(&DataKey::MerkleRoot)
             .ok_or(DistributorError::NoMerkleRoot)?;
 
-        let leaf = Self::compute_leaf(&env, index, &claimant, amount);
+        let epoch: u32 = env.storage().instance().get(&DataKey::Epoch).unwrap();
+        let token_addr: Address = env.storage().instance().get(&DataKey::Token).unwrap();
+
+        let leaf = Self::compute_leaf(&env, epoch, &token_addr, index, &claimant, amount);
         if !Self::verify_proof(&env, &proof, &merkle_root, &leaf) {
             return Err(DistributorError::InvalidProof);
         }
@@ -177,7 +181,6 @@ impl MerkleDistributor {
         Self::set_claimed(&env, index);
 
         // Transfer reward tokens to claimant
-        let token_addr: Address = env.storage().instance().get(&DataKey::Token).unwrap();
         let client = token::Client::new(&env, &token_addr);
 
         let contract_balance = client.balance(&env.current_contract_address());
@@ -246,10 +249,27 @@ impl MerkleDistributor {
 
     // ── Internal: Merkle Proof Verification ─────────────────────────
 
-    /// Compute the leaf hash: keccak256(abi.encodePacked(index, account, amount)).
-    /// Uses Soroban's crypto primitives for hashing.
-    fn compute_leaf(env: &Env, index: u32, account: &Address, amount: i128) -> BytesN<32> {
+    /// Compute the leaf hash: sha256(campaign_id || asset || index || account || amount).
+    ///
+    /// The campaign ID is the distribution epoch and the asset is the reward
+    /// token, so a leaf is only valid for the campaign and asset it was built for.
+    fn compute_leaf(
+        env: &Env,
+        campaign_id: u32,
+        asset: &Address,
+        index: u32,
+        account: &Address,
+        amount: i128,
+    ) -> BytesN<32> {
         let mut data = soroban_sdk::Bytes::new(env);
+        // Encode campaign ID (epoch) as 4 bytes (big-endian)
+        data.append(&soroban_sdk::Bytes::from_array(env, &campaign_id.to_be_bytes()));
+        // Encode the asset address as UTF-8 string bytes
+        let asset_str = asset.to_string();
+        let asset_len = asset_str.len() as usize;
+        let mut asset_buf = [0u8; 56];
+        asset_str.copy_into_slice(&mut asset_buf[..asset_len]);
+        data.append(&soroban_sdk::Bytes::from_slice(env, &asset_buf[..asset_len]));
         // Encode index as 4 bytes (big-endian)
         data.append(&soroban_sdk::Bytes::from_array(env, &index.to_be_bytes()));
         // Encode the account address as UTF-8 string bytes
@@ -447,7 +467,7 @@ mod tests {
         let index: u32 = 0;
 
         // Compute the expected leaf hash
-        let leaf = compute_test_leaf(&env, index, &claimant, amount);
+        let leaf = compute_test_leaf(&env, 1, &token_addr, index, &claimant, amount);
 
         // For a single-leaf tree, the root IS the leaf
         let root = leaf.clone();
@@ -474,8 +494,8 @@ mod tests {
         let amount2: i128 = 300;
 
         // Compute leaves
-        let leaf1 = compute_test_leaf(&env, 0, &claimant1, amount1);
-        let leaf2 = compute_test_leaf(&env, 1, &claimant2, amount2);
+        let leaf1 = compute_test_leaf(&env, 1, &token_addr, 0, &claimant1, amount1);
+        let leaf2 = compute_test_leaf(&env, 1, &token_addr, 1, &claimant2, amount2);
 
         // Compute root = hash(sorted(leaf1, leaf2))
         let root = hash_pair_test(&env, &leaf1, &leaf2);
@@ -504,7 +524,7 @@ mod tests {
         let amount: i128 = 1000;
         let index: u32 = 0;
 
-        let leaf = compute_test_leaf(&env, index, &claimant, amount);
+        let leaf = compute_test_leaf(&env, 1, &token_addr, index, &claimant, amount);
         let root = leaf.clone();
         client.set_merkle_root(&admin, &root);
 
@@ -547,18 +567,69 @@ mod tests {
     #[test]
     #[should_panic(expected = "Error(Contract, #8)")]
     fn test_claim_insufficient_balance_panics() {
-        let (env, client, admin, _, _) = setup_env();
+        let (env, client, admin, token_addr, _) = setup_env();
         let claimant = Address::generate(&env);
         let amount: i128 = 1000;
         let index: u32 = 0;
 
-        let leaf = compute_test_leaf(&env, index, &claimant, amount);
+        let leaf = compute_test_leaf(&env, 1, &token_addr, index, &claimant, amount);
         let root = leaf.clone();
         client.set_merkle_root(&admin, &root);
 
         // Don't fund the contract — should fail with InsufficientBalance
         let empty_proof: Vec<BytesN<32>> = Vec::new(&env);
         client.claim(&claimant, &index, &amount, &empty_proof);
+    }
+
+    // ── Campaign / Asset Binding Tests ──────────────────────────────
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #6)")]
+    fn test_claim_rejects_leaf_from_other_campaign() {
+        let (env, client, admin, token_addr, token_admin) = setup_env();
+        let claimant = Address::generate(&env);
+
+        // A leaf built for campaign 1 is published as the root of campaign 2.
+        let campaign_1_leaf = compute_test_leaf(&env, 1, &token_addr, 0, &claimant, 1000);
+        client.set_merkle_root(&admin, &BytesN::from_array(&env, &[1u8; 32]));
+        client.set_merkle_root(&admin, &campaign_1_leaf);
+        assert_eq!(client.get_epoch(), 2);
+
+        mint_tokens(&env, &token_addr, &token_admin, &client.address, 10000);
+
+        let empty_proof: Vec<BytesN<32>> = Vec::new(&env);
+        client.claim(&claimant, &0, &1000, &empty_proof);
+    }
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #6)")]
+    fn test_claim_rejects_leaf_for_other_asset() {
+        let (env, client, admin, token_addr, token_admin) = setup_env();
+        let claimant = Address::generate(&env);
+        let other_asset = Address::generate(&env);
+
+        let other_asset_leaf = compute_test_leaf(&env, 1, &other_asset, 0, &claimant, 1000);
+        client.set_merkle_root(&admin, &other_asset_leaf);
+
+        mint_tokens(&env, &token_addr, &token_admin, &client.address, 10000);
+
+        let empty_proof: Vec<BytesN<32>> = Vec::new(&env);
+        client.claim(&claimant, &0, &1000, &empty_proof);
+    }
+
+    #[test]
+    fn test_claim_accepts_leaf_for_current_campaign_after_root_update() {
+        let (env, client, admin, token_addr, token_admin) = setup_env();
+        let claimant = Address::generate(&env);
+
+        client.set_merkle_root(&admin, &BytesN::from_array(&env, &[1u8; 32]));
+        let leaf = compute_test_leaf(&env, 2, &token_addr, 0, &claimant, 1000);
+        client.set_merkle_root(&admin, &leaf);
+
+        mint_tokens(&env, &token_addr, &token_admin, &client.address, 10000);
+
+        let empty_proof: Vec<BytesN<32>> = Vec::new(&env);
+        assert_eq!(client.claim(&claimant, &0, &1000, &empty_proof), 1000);
     }
 
     // ── Bitmap Tests ────────────────────────────────────────────────
@@ -574,8 +645,21 @@ mod tests {
 
     // ── Helper functions for tests ──────────────────────────────────
 
-    fn compute_test_leaf(env: &Env, index: u32, account: &Address, amount: i128) -> BytesN<32> {
+    fn compute_test_leaf(
+        env: &Env,
+        campaign_id: u32,
+        asset: &Address,
+        index: u32,
+        account: &Address,
+        amount: i128,
+    ) -> BytesN<32> {
         let mut data = soroban_sdk::Bytes::new(env);
+        data.append(&soroban_sdk::Bytes::from_array(env, &campaign_id.to_be_bytes()));
+        let asset_str = asset.to_string();
+        let asset_len = asset_str.len() as usize;
+        let mut asset_buf = [0u8; 56];
+        asset_str.copy_into_slice(&mut asset_buf[..asset_len]);
+        data.append(&soroban_sdk::Bytes::from_slice(env, &asset_buf[..asset_len]));
         data.append(&soroban_sdk::Bytes::from_array(env, &index.to_be_bytes()));
         let addr_str = account.to_string();
         let len = addr_str.len() as usize;

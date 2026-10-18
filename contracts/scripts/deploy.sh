@@ -151,6 +151,7 @@ cat "$OUTPUT_FILE"
 # Update contracts/registry.json with deployed IDs (#185)
 # ---------------------------------------------------------------------------
 REGISTRY_FILE="$SCRIPT_DIR/../registry.json"
+REGISTRY_CHECKSUM_FILE="$SCRIPT_DIR/../registry.sha256"
 NETWORK_KEY="testnet"
 if [[ "$STELLAR_NETWORK_PASSPHRASE" == *"mainnet"* ]] || [[ "$STELLAR_NETWORK_PASSPHRASE" == *"Public Global"* ]]; then
   NETWORK_KEY="mainnet"
@@ -179,5 +180,7 @@ if [[ ${#REGISTRY_UPDATES[@]} -gt 0 && -f "$REGISTRY_FILE" ]]; then
   JQ_FILTER=$(printf " | %s" "${REGISTRY_UPDATES[@]}")
   JQ_FILTER="${JQ_FILTER:3}" # strip leading " | "
   jq "$JQ_FILTER" "$REGISTRY_FILE" > "$REGISTRY_FILE.tmp" && mv "$REGISTRY_FILE.tmp" "$REGISTRY_FILE"
+  node -e 'const fs=require("fs"),crypto=require("crypto");const [registry,checksum]=process.argv.slice(1);fs.writeFileSync(checksum,crypto.createHash("sha256").update(fs.readFileSync(registry)).digest("hex")+"\n");' "$REGISTRY_FILE" "$REGISTRY_CHECKSUM_FILE"
   log "Registry updated at $REGISTRY_FILE (network: $NETWORK_KEY)"
+  log "Registry checksum updated at $REGISTRY_CHECKSUM_FILE"
 fi

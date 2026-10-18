@@ -1,171 +1,92 @@
-## Summary
-This PR implements critical infrastructure hardening, oracle reliability enhancements, robust data continuity checks, and four new feature implementations across the StellarYield platform:
+# feat(drift): add drift anomaly grouping across portfolio, vault, and strategy services
 
-### Previously Implemented (Issues #899, #891, #895, #888):
-1. **Oracle Staleness, TWAP Fallback, and Confidence Scoring (Issue #899)**
-2. **Indexer Continuity Checks for Ledger Gaps (Issue #891)**
-3. **Reconciliation Anomaly Workflow (Issue #895)**
-4. **Per-Contract Cursor Checkpointing for Soroban Events (Issue #888)**
+## Description
 
-### Newly Implemented:
+### Context & Problem
+Previously, drift alerts emitted by different monitoring domains (portfolio attribution, vault pressure & allocation, strategy health & execution) operated in silos. When an underlying systemic event occurred (such as high market volatility, an oracle disruption, a sudden liquidity drain, or an execution failure), each subsystem produced separate, uncoordinated warning signals. This created noisy, duplicated alerts where the same root cause appeared as multiple isolated issues without clear causal relationships.
 
-5. **Abuse-Resistant Referral and Donation Accounting Invariants (Issue #901)**:
-   - Enhanced `contracts/yield_vault/src/referrals.rs` with circular referral chain detection
-   - Prevents self-referral (A→A) and circular chains (A→B→A)
-   - Added referral reward validation: rewards cannot exceed protocol fees collected
-   - Implemented saturating arithmetic to prevent overflow
-   - Enhanced `contracts/yield_vault/src/donations.rs` with conservation invariants:
-     - Validates: yield_in = user_yield + donation_amount
-     - Ensures donation cannot exceed yield_amount
-     - Guarantees net user yield is always non-negative
-   - Added event emissions for invariant violations (`don_err`, `don_cons`, `ref_err`)
-   - Client-side referral status display already exposed contract-derived state
+### Solution Overview
+This PR introduces a unified **Drift Anomaly Grouping Engine** (`DriftAnomalyGrouper` and extended `DriftService`) that aggregates, correlates, deduplicates, and structures drift signals across portfolio, vault, and strategy services.
 
-6. **Withdrawal Queue with Bounded Liquidity and Slippage Protection (Issue #900)**:
-   - Added `WithdrawalQueueEntry` Prisma model with comprehensive queue tracking
-   - Deterministic queue ordering via `queuePosition` field for same-ledger submissions
-   - Expiry and cancellation support with audit trail
-   - Liquidity constraint fields: `liquidityRequired`, `liquidityAvailable`, `partialFillEnabled`
-   - Slippage protection: `minAmountOut`, `maxSlippageBps`, `actualSlippageBps`
-   - Queue lifecycle states: QUEUED → EXECUTABLE → EXECUTING → COMPLETED/EXPIRED/CANCELLED
-   - Added `WithdrawalQueueHistory` model for permanent audit records
-   - Foundation for client display of queue position and expected settlement time
+### Key Capabilities Implemented
 
-7. **Indexed On-Chain Positions with Stale-Data Detection (Issue #892)**:
-   - Enhanced `server/src/services/portfolioReconcileService.ts` with projection metadata:
-     - `projectionVersion` tracking which indexer rebuild created the snapshot
-     - `projectionCheckpoint` indicating last processed ledger
-     - `isStale` flag when projection age exceeds 5 minutes
-     - `staleDurationMs` showing exact staleness duration
-   - Implemented orphaned transaction detection via `detectOrphanedTransactions()`
-   - Added duplicate position detection across vaults via `detectDuplicatePositions()`
-   - Enhanced `ReconciliationResult` interface with stale-data warnings
-   - Metadata persistence in `ReconciliationHistoryEntry` with anomaly details
-   - Explicit warnings for missing/stale projections (no silent empty arrays)
+1. **Multi-Dimensional Signal Grouping**:
+   - Standardized `DriftSignal` schema with domain source (`portfolio`, `vault`, `strategy`), sub-source, asset identifier, metric, deviation, severity band (`INFO`, `LOW`, `MEDIUM`, `HIGH`, `CRITICAL`), timestamp, explicit `rootCauseId`, and hierarchical `parentSignalId`.
+   - Flexible grouping strategies: `bySourceAssetSeverity` (default), `byAssetAndProximity`, `byRootCause`, and `hierarchical`.
 
-8. **Projection Rebuild Tooling for Vault Balances and Share Supply (Issue #890)**:
-   - Added `ProjectionVersion` Prisma model tracking:
-     - Version numbers per vault and projection type
-     - Rebuild ledger range (from/to)
-     - Event count consumed
-     - Status: ACTIVE | SUPERSEDED | AUDIT_FAILED
-     - Audit results: PASSED | FAILED | DRIFT_DETECTED
-   - Added `ProjectionAuditLog` Prisma model for audit trail:
-     - Audit types: FULL_REBUILD | AUDIT_ONLY | INCREMENTAL
-     - Expected vs actual state comparison
-     - Drift detection with first divergent event tracking
-   - Foundation for CLI commands:
-     - `rebuild:vault-balances` - Rebuild vault balance projections
-     - `rebuild:share-supply` - Rebuild share supply projections
-     - `audit:projections` - Audit-only mode for drift detection
-   - No RPC calls required during rebuild (event-sourced from raw events)
-   - Operational recovery documentation foundation
+2. **Duplicate Signal Suppression**:
+   - Detects repeated signals within a configurable deduplication window (`dedupWindowMs`, default 10 minutes).
+   - Coalesces rapid polling duplicates into a single anomaly entity while tracking `duplicateCount`, `uniqueSignalCount`, and retaining the peak deviation observed.
 
-## Linked Issues
-- Closes #899
-- Closes #891
-- Closes #895
-- Closes #888
-- Closes #901
-- Closes #900
-- Closes #892
-- Closes #890
+3. **Overlapping Temporal & Multi-Metric Correlation**:
+   - Merges related multi-metric signals (e.g., allocation drift + outflow surge + low inflow) occurring on the same asset within `correlationWindowMs` (default 15 minutes).
+   - Automatically determines aggregate group severity (highest constituent severity wins) and synthesizes human-readable root cause summaries and recommended actions.
 
-## Change Type
-- [x] Bug fix (non-breaking change which fixes an issue)
+4. **Hierarchical Nested Anomalies (Causal Relationships)**:
+   - Evaluates `parentSignalId` references to construct multi-tier parent-child nested anomaly structures (e.g. Strategy failure → Vault outflow surge → Portfolio concentration drift).
+   - Preserves complete source count and severity breakdowns at every level of the hierarchy.
+
+5. **Service Signal Extractors**:
+   - `VaultPressureService`: `extractPressureDriftSignals()` transforms elevated, high, and critical flow velocities into standardized drift signals.
+   - `PortfolioAttributionService`: `extractAttributionDriftSignals()` maps low data completeness and decision confidence deficits into drift signals.
+   - `StrategyHealthService`: `extractStrategyHealthDriftSignals()` maps degraded/critical health statuses, error spikes, and provider uptime drops into drift signals.
+   - `DriftService`: `convertVaultDriftToSignals()` and `evaluateGroupedDriftEvents()` orchestrate combined evaluation and database persistence.
+
+6. **REST API & OpenAPI Documentation**:
+   - `POST /api/drift/group`: Ad-hoc grouping of arbitrary drift signal payloads.
+   - `POST /api/drift/evaluate`: Evaluates vault USD allocations and external signals, updates state, and returns grouped anomalies.
+   - `GET /api/drift/anomalies`: Queries active grouped anomalies with optional filtering by `source`, `severity`, or `asset`.
+   - Documented in `server/openapi.yaml`.
+
+---
+
+## Type of Change
 - [x] New feature (non-breaking change which adds functionality)
-- [x] Breaking change (oracle.rs PricePoint struct now includes confidence field)
-- [x] Documentation update
-- [x] Refactor
-- [x] Database migration (new Prisma models require migration)
+- [x] Bug fix / Code cleanup (fixed pre-existing compilation & route typing issues)
+- [x] Documentation update (OpenAPI spec & types)
 
-## Testing
-- **Smart Contracts**: 
-  - Oracle confidence scoring logic with TWAP fallback scenarios
-  - Referral circular chain detection and self-referral prevention
-  - Donation conservation invariant validation
-  - Referral reward overflow protection
-- **Backend Services**: 
-  - Risk scoring with oracle metadata integration
-  - Portfolio reconciliation with projection versioning and stale-data detection
-  - Orphaned transaction and duplicate position detection
-  - Withdrawal queue ordering and liquidity constraint logic
-- **Database Models**: 
-  - New Prisma schemas for reconciliation, indexer gaps, per-contract cursors
-  - Withdrawal queue models with deterministic ordering
-  - Projection version tracking and audit logs
-- **Client UI**: 
-  - Oracle status badges and confidence thresholds
-  - Referral dashboard with contract-derived state
-  - Foundation for withdrawal queue status display
+---
 
-### Checklist
-- [x] Frontend changes tested
-- [x] Backend changes tested
-- [x] Contracts changes tested
-- [x] Documentation updated
-- [x] Migrations required (Prisma schema updated)
+## Verification Commands & Results
 
-## Deployment Notes
-1. **Database Migration Required**: Run `npx prisma migrate dev` to create new tables:
-   - `ReconciliationEvent`, `ReconciliationAnomaly`
-   - `IndexerGapEvent`, `IndexerContinuityCheck`
-   - `ContractIndexerCursor`, `EventIngestionLog`
-   - `WithdrawalQueueEntry`, `WithdrawalQueueHistory`
-   - `ProjectionVersion`, `ProjectionAuditLog`
+### 1. Test Suite Execution
+```bash
+npx jest src/__tests__/duplicateOverlappingNestedSignals.test.ts src/__tests__/driftAnomalyGrouping.test.ts src/__tests__/driftService.test.ts
+```
+**Result**:
+```
+PASS src/__tests__/duplicateOverlappingNestedSignals.test.ts
+PASS src/__tests__/driftService.test.ts
+PASS src/__tests__/driftAnomalyGrouping.test.ts
 
-2. **Contract Redeployment**: 
-   - The `PricePoint` struct in `oracle.rs` now includes a `confidence` field
-   - Referral and donation modules have enhanced invariant checking
-   - Existing contracts using the old struct will need redeployment
+Test Suites: 3 passed, 3 total
+Tests:       22 passed, 22 total
+Snapshots:   0 total
+Time:        3.189 s
+```
 
-3. **Breaking Change**: Any off-chain code directly reading `PricePoint` from contract storage will need to handle the new `confidence` field.
+### 2. TypeScript Compilation & Build
+```bash
+npm run build
+```
+**Result**: Exited with code `0` (`tsc -p tsconfig.build.json` succeeded without errors).
 
-4. **Monitoring**: 
-   - New event emissions: `stale-oracle`, `twap-used`, `fallback-used`, `don_err`, `don_cons`, `ref_err`
-   - Can be monitored for oracle health, donation accounting issues, and referral anomalies
+### 3. OpenAPI Drift Verification
+```bash
+npm run check:openapi
+```
+**Result**: `/api/drift` endpoints verified and documented.
 
-5. **Indexer Enhancement**: 
-   - Existing single-cursor indexer will continue working
-   - Per-contract cursors are opt-in for multi-contract setups
-   - Projection versioning enables audit and recovery workflows
+---
 
-6. **Withdrawal Queue**: 
-   - Queue processing logic requires separate worker/keeper implementation
-   - Liquidity checks should be integrated with vault pressure service
-   - Queue expiry requires periodic cleanup job
+## UI Snapshot Checklist
+- [x] No visual changes (Backend service & API changes only)
 
-7. **Reconciliation Improvements**:
-   - Stale-data warnings surface when indexer falls behind
-   - Orphaned transaction detection helps identify ingestion issues
-   - Projection version tracking enables rollback and replay scenarios
+---
 
-## Implementation Details
-
-### Referral & Donation Invariants
-- Circular chain detection uses upstream referrer lookup to prevent A→B→A cycles
-- Reward accrual uses `saturating_add` to prevent overflow attacks
-- Donation conservation checked: `net + donation == yield_amount`
-- Event emissions for monitoring: `ref_err`, `don_err`, `don_cons`
-
-### Withdrawal Queue
-- Queue position determined by submission ledger + order within ledger
-- Deterministic ordering prevents front-running
-- Expiry checks enable automated cleanup
-- Partial fill support for large withdrawals under liquidity pressure
-- Slippage protection with configurable bounds (basis points)
-
-### Reconciliation Enhancements
-- Projection age calculated from `IndexerState.lastLedger` timestamp
-- Stale threshold: 5 minutes (configurable)
-- Orphaned transactions: positions in UserTransaction without matching Event
-- Duplicate detection: same asset+vault key appearing multiple times
-- Explicit warnings in response payload (no silent failures)
-
-### Projection Rebuild
-- Version numbers enable progressive rebuilds and rollbacks
-- Audit-only mode compares rebuilt state without committing changes
-- Drift detection identifies first divergent ledger and event
-- Foundation for CLI tooling with exit codes for automation
-- Event-sourced design ensures reproducible state reconstruction
-
+## Checklist
+- [x] My code follows the style guidelines of this project
+- [x] I have performed a self-review of my own code
+- [x] I have commented my code, particularly in hard-to-understand areas
+- [x] I have made corresponding changes to the documentation (OpenAPI spec)
+- [x] My changes generate no new warnings or leaks

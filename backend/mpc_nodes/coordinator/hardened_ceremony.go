@@ -3,8 +3,6 @@
 package coordinator
 
 import (
-	"context"
-	"crypto"
 	"crypto/ecdsa"
 	"crypto/rand"
 	"crypto/sha256"
@@ -43,29 +41,29 @@ type HardenedCeremonyMessage struct {
 type AuditEventType string
 
 const (
-	AuditPhaseTransition    AuditEventType = "PHASE_TRANSITION"
-	AuditMessageReceived    AuditEventType = "MESSAGE_RECEIVED"
-	AuditMessageValidated   AuditEventType = "MESSAGE_VALIDATED"
-	AuditReplayDetected     AuditEventType = "REPLAY_DETECTED"
-	AuditInvalidSignature   AuditEventType = "INVALID_SIGNATURE"
-	AuditTimeViolation      AuditEventType = "TIME_VIOLATION"
-	AuditPhaseViolation     AuditEventType = "PHASE_VIOLATION"
-	AuditThresholdReached   AuditEventType = "THRESHOLD_REACHED"
-	AuditCeremonyCompleted  AuditEventType = "CEREMONY_COMPLETED"
-	AuditCeremonyFailed     AuditEventType = "CEREMONY_FAILED"
-	AuditKeyShareStored     AuditEventType = "KEY_SHARE_STORED"
+	AuditPhaseTransition   AuditEventType = "PHASE_TRANSITION"
+	AuditMessageReceived   AuditEventType = "MESSAGE_RECEIVED"
+	AuditMessageValidated  AuditEventType = "MESSAGE_VALIDATED"
+	AuditReplayDetected    AuditEventType = "REPLAY_DETECTED"
+	AuditInvalidSignature  AuditEventType = "INVALID_SIGNATURE"
+	AuditTimeViolation     AuditEventType = "TIME_VIOLATION"
+	AuditPhaseViolation    AuditEventType = "PHASE_VIOLATION"
+	AuditThresholdReached  AuditEventType = "THRESHOLD_REACHED"
+	AuditCeremonyCompleted AuditEventType = "CEREMONY_COMPLETED"
+	AuditCeremonyFailed    AuditEventType = "CEREMONY_FAILED"
+	AuditKeyShareStored    AuditEventType = "KEY_SHARE_STORED"
 )
 
 // AuditEvent logs security-relevant ceremony events for compliance and forensics
 type AuditEvent struct {
-	EventType      AuditEventType `json:"event_type"`
-	SessionID      string         `json:"session_id"`
-	Timestamp      time.Time      `json:"timestamp"`
-	PartyID        string         `json:"party_id"`
-	Message        string         `json:"message,omitempty"`
-	Phase          CeremonyPhase  `json:"phase,omitempty"`
-	Details        json.RawMessage `json:"details,omitempty"`
-	Hash           []byte         `json:"hash"` // SHA256 of event for tampering detection
+	EventType AuditEventType  `json:"event_type"`
+	SessionID string          `json:"session_id"`
+	Timestamp time.Time       `json:"timestamp"`
+	PartyID   string          `json:"party_id"`
+	Message   string          `json:"message,omitempty"`
+	Phase     CeremonyPhase   `json:"phase,omitempty"`
+	Details   json.RawMessage `json:"details,omitempty"`
+	Hash      []byte          `json:"hash"` // SHA256 of event for tampering detection
 }
 
 // ReplayProtectionState tracks messages per (sender_id, session_id, phase) to prevent replays
@@ -102,7 +100,7 @@ type HardenedCeremonyCoordinator struct {
 	phaseMutex  sync.RWMutex
 
 	// Audit event log
-	auditLog []AuditEvent
+	auditLog   []AuditEvent
 	auditMutex sync.RWMutex
 
 	// Maximum time allowed between message signing and receipt (5 minutes)
@@ -125,7 +123,7 @@ func NewHardenedCeremonyCoordinator(
 	return &HardenedCeremonyCoordinator{
 		CeremonyCoordinator: baseCoordinator,
 		signerPrivateKey:    signerPrivateKey,
-		replayState:         make(map[string]map[string]map[CeremonyPhase]ReplayProtectionState]),
+		replayState:         make(map[string]map[string]map[CeremonyPhase]ReplayProtectionState),
 		phaseHashes:         make(map[CeremonyPhase][]byte),
 		auditLog:            make([]AuditEvent, 0),
 		maxClockSkew:        5 * time.Minute,
@@ -177,22 +175,22 @@ func (h *HardenedCeremonyCoordinator) SignCeremonyMessage(
 
 	// Create hardened message
 	hardenedMsg := &HardenedCeremonyMessage{
-		Message:         msg,
+		Message:          msg,
 		MessageSignature: signature,
-		SenderPublicKey: h.encodePublicKey(&h.signerPrivateKey.PublicKey),
-		ReplayNonce:     replayNonce,
-		PhaseHash:       phaseHash,
-		SignedTimestamp: time.Now().Unix(),
+		SenderPublicKey:  h.encodePublicKey(&h.signerPrivateKey.PublicKey),
+		ReplayNonce:      replayNonce,
+		PhaseHash:        phaseHash,
+		SignedTimestamp:  time.Now().Unix(),
 	}
 
 	// Log audit event
 	h.logAuditEvent(&AuditEvent{
-		EventType:   AuditMessageValidated,
-		SessionID:   msg.SessionID,
-		Timestamp:   time.Now(),
-		PartyID:     msg.SenderID,
-		Phase:       msg.Phase,
-		Message:     "Message signed and ready for broadcast",
+		EventType: AuditMessageValidated,
+		SessionID: msg.SessionID,
+		Timestamp: time.Now(),
+		PartyID:   msg.SenderID,
+		Phase:     msg.Phase,
+		Message:   "Message signed and ready for broadcast",
 	})
 
 	return hardenedMsg, nil
@@ -212,12 +210,12 @@ func (h *HardenedCeremonyCoordinator) VerifyHardenedMessage(
 	timeDiff := time.Since(time.Unix(hardenedMsg.SignedTimestamp, 0)).Abs()
 	if timeDiff > h.maxClockSkew {
 		h.logAuditEvent(&AuditEvent{
-			EventType:   AuditTimeViolation,
-			SessionID:   msg.SessionID,
-			Timestamp:   time.Now(),
-			PartyID:     msg.SenderID,
-			Phase:       msg.Phase,
-			Message:     fmt.Sprintf("Message timestamp outside acceptable window: %v", timeDiff),
+			EventType: AuditTimeViolation,
+			SessionID: msg.SessionID,
+			Timestamp: time.Now(),
+			PartyID:   msg.SenderID,
+			Phase:     msg.Phase,
+			Message:   fmt.Sprintf("Message timestamp outside acceptable window: %v", timeDiff),
 		})
 		return errors.New("message timestamp outside acceptable clock skew window")
 	}
@@ -225,12 +223,12 @@ func (h *HardenedCeremonyCoordinator) VerifyHardenedMessage(
 	// 2. Detect replay attacks (check nonce monotonicity)
 	if err := h.checkReplayNonce(msg.SenderID, msg.SessionID, msg.Phase, hardenedMsg.ReplayNonce); err != nil {
 		h.logAuditEvent(&AuditEvent{
-			EventType:   AuditReplayDetected,
-			SessionID:   msg.SessionID,
-			Timestamp:   time.Now(),
-			PartyID:     msg.SenderID,
-			Phase:       msg.Phase,
-			Message:     err.Error(),
+			EventType: AuditReplayDetected,
+			SessionID: msg.SessionID,
+			Timestamp: time.Now(),
+			PartyID:   msg.SenderID,
+			Phase:     msg.Phase,
+			Message:   err.Error(),
 		})
 		return err
 	}
@@ -239,12 +237,12 @@ func (h *HardenedCeremonyCoordinator) VerifyHardenedMessage(
 	if h.verifySignatures {
 		if err := h.verifyMessageSignature(msg, hardenedMsg); err != nil {
 			h.logAuditEvent(&AuditEvent{
-				EventType:   AuditInvalidSignature,
-				SessionID:   msg.SessionID,
-				Timestamp:   time.Now(),
-				PartyID:     msg.SenderID,
-				Phase:       msg.Phase,
-				Message:     err.Error(),
+				EventType: AuditInvalidSignature,
+				SessionID: msg.SessionID,
+				Timestamp: time.Now(),
+				PartyID:   msg.SenderID,
+				Phase:     msg.Phase,
+				Message:   err.Error(),
 			})
 			return err
 		}
@@ -253,24 +251,24 @@ func (h *HardenedCeremonyCoordinator) VerifyHardenedMessage(
 	// 4. Verify phase hash (prevents phase substitution attacks)
 	if !h.verifyPhaseHash(msg.Phase, hardenedMsg.PhaseHash) {
 		h.logAuditEvent(&AuditEvent{
-			EventType:   AuditPhaseViolation,
-			SessionID:   msg.SessionID,
-			Timestamp:   time.Now(),
-			PartyID:     msg.SenderID,
-			Phase:       msg.Phase,
-			Message:     "Phase hash mismatch - possible phase substitution attack",
+			EventType: AuditPhaseViolation,
+			SessionID: msg.SessionID,
+			Timestamp: time.Now(),
+			PartyID:   msg.SenderID,
+			Phase:     msg.Phase,
+			Message:   "Phase hash mismatch - possible phase substitution attack",
 		})
 		return errors.New("phase hash verification failed")
 	}
 
 	// 5. Log successful validation
 	h.logAuditEvent(&AuditEvent{
-		EventType:   AuditMessageReceived,
-		SessionID:   msg.SessionID,
-		Timestamp:   time.Now(),
-		PartyID:     msg.SenderID,
-		Phase:       msg.Phase,
-		Message:     fmt.Sprintf("Message verified: nonce=%d", hardenedMsg.ReplayNonce),
+		EventType: AuditMessageReceived,
+		SessionID: msg.SessionID,
+		Timestamp: time.Now(),
+		PartyID:   msg.SenderID,
+		Phase:     msg.Phase,
+		Message:   fmt.Sprintf("Message verified: nonce=%d", hardenedMsg.ReplayNonce),
 	})
 
 	return nil
@@ -311,13 +309,13 @@ func (h *HardenedCeremonyCoordinator) TransitionPhase(
 
 	details, _ := json.Marshal(transitionInfo)
 	h.logAuditEvent(&AuditEvent{
-		EventType:   AuditPhaseTransition,
-		SessionID:   sessionID,
-		Timestamp:   time.Now(),
-		PartyID:     h.config.PartyID,
-		Phase:       toPhase,
-		Message:     fmt.Sprintf("Transitioned from %s to %s", fromPhase, toPhase),
-		Details:     details,
+		EventType: AuditPhaseTransition,
+		SessionID: sessionID,
+		Timestamp: time.Now(),
+		PartyID:   h.config.PartyID,
+		Phase:     toPhase,
+		Message:   fmt.Sprintf("Transitioned from %s to %s", fromPhase, toPhase),
+		Details:   details,
 	})
 
 	return nil
@@ -329,12 +327,12 @@ func (h *HardenedCeremonyCoordinator) CeremonyCompleted(sessionID string, ceremo
 	defer h.mu.Unlock()
 
 	h.logAuditEvent(&AuditEvent{
-		EventType:   AuditCeremonyCompleted,
-		SessionID:   sessionID,
-		Timestamp:   time.Now(),
-		PartyID:     h.config.PartyID,
-		Phase:       PhaseComplete,
-		Message:     fmt.Sprintf("MPC %s ceremony completed successfully", ceremonyType),
+		EventType: AuditCeremonyCompleted,
+		SessionID: sessionID,
+		Timestamp: time.Now(),
+		PartyID:   h.config.PartyID,
+		Phase:     PhaseComplete,
+		Message:   fmt.Sprintf("MPC %s ceremony completed successfully", ceremonyType),
 	})
 
 	return nil
@@ -346,12 +344,12 @@ func (h *HardenedCeremonyCoordinator) CeremonyFailed(sessionID string, reason st
 	defer h.mu.Unlock()
 
 	h.logAuditEvent(&AuditEvent{
-		EventType:   AuditCeremonyFailed,
-		SessionID:   sessionID,
-		Timestamp:   time.Now(),
-		PartyID:     h.config.PartyID,
-		Phase:       PhaseFailed,
-		Message:     fmt.Sprintf("MPC ceremony failed: %s", reason),
+		EventType: AuditCeremonyFailed,
+		SessionID: sessionID,
+		Timestamp: time.Now(),
+		PartyID:   h.config.PartyID,
+		Phase:     PhaseFailed,
+		Message:   fmt.Sprintf("MPC ceremony failed: %s", reason),
 	})
 
 	return nil
@@ -360,11 +358,11 @@ func (h *HardenedCeremonyCoordinator) CeremonyFailed(sessionID string, reason st
 // LogKeyShareStored logs when a key share is stored (for compliance)
 func (h *HardenedCeremonyCoordinator) LogKeyShareStored(sessionID string, partyID string) error {
 	h.logAuditEvent(&AuditEvent{
-		EventType:   AuditKeyShareStored,
-		SessionID:   sessionID,
-		Timestamp:   time.Now(),
-		PartyID:     partyID,
-		Message:     fmt.Sprintf("Key share stored securely for session %s", sessionID),
+		EventType: AuditKeyShareStored,
+		SessionID: sessionID,
+		Timestamp: time.Now(),
+		PartyID:   partyID,
+		Message:   fmt.Sprintf("Key share stored securely for session %s", sessionID),
 	})
 
 	return nil
@@ -388,7 +386,7 @@ func (h *HardenedCeremonyCoordinator) GetAuditLog(sessionID string) []AuditEvent
 // GetAuditLogHash returns SHA256(all audit events) for integrity verification
 func (h *HardenedCeremonyCoordinator) GetAuditLogHash(sessionID string) ([]byte, error) {
 	auditEvents := h.GetAuditLog(sessionID)
-	
+
 	hash := sha256.New()
 	for _, event := range auditEvents {
 		eventData, err := json.Marshal(event)
@@ -575,11 +573,11 @@ func (h *HardenedCeremonyCoordinator) ExportAuditTrail(sessionID string) (string
 	auditEvents := h.GetAuditLog(sessionID)
 
 	auditTrail := struct {
-		SessionID   string       `json:"session_id"`
-		Events      []AuditEvent `json:"events"`
-		ExportedAt  time.Time    `json:"exported_at"`
-		EventCount  int          `json:"event_count"`
-		TrailHash   string       `json:"trail_hash"`
+		SessionID  string       `json:"session_id"`
+		Events     []AuditEvent `json:"events"`
+		ExportedAt time.Time    `json:"exported_at"`
+		EventCount int          `json:"event_count"`
+		TrailHash  string       `json:"trail_hash"`
 	}{
 		SessionID:  sessionID,
 		Events:     auditEvents,

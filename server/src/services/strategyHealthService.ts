@@ -645,3 +645,98 @@ export function getCriticalHealthAlerts(scores: StrategyHealthScore[]): string[]
   
   return alerts;
 }
+
+/**
+ * Extract standardized DriftSignals from strategy health scores.
+ * Maps degraded/critical health statuses and error/performance anomalies into drift signals.
+ */
+export function extractStrategyHealthDriftSignals(
+  scores: StrategyHealthScore | StrategyHealthScore[]
+): import("./driftAnomalyGrouper").DriftSignal[] {
+  const list = Array.isArray(scores) ? scores : [scores];
+  const signals: import("./driftAnomalyGrouper").DriftSignal[] = [];
+
+  for (const score of list) {
+    const timestamp = score.lastUpdated || new Date().toISOString();
+
+    // 1. Overall health score drift
+    if (score.status === "critical" || score.status === "disabled" || score.overallScore < 50) {
+      signals.push({
+        id: `strategy_health_score_${score.strategyId}_${Date.now()}`,
+        source: "strategy",
+        subSource: "strategy_health",
+        asset: score.strategyId,
+        metric: "strategy_health_score",
+        currentValue: score.overallScore,
+        expectedValue: 80,
+        deviation: score.overallScore - 80,
+        severity: score.status === "disabled" || score.overallScore < 30 ? "CRITICAL" : "HIGH",
+        timestamp,
+        metadata: {
+          strategyName: score.strategyName,
+          status: score.status,
+          trend: score.trend,
+        },
+      });
+    } else if (score.status === "degraded" || score.overallScore < 70) {
+      signals.push({
+        id: `strategy_health_score_${score.strategyId}_${Date.now()}`,
+        source: "strategy",
+        subSource: "strategy_health",
+        asset: score.strategyId,
+        metric: "strategy_health_score",
+        currentValue: score.overallScore,
+        expectedValue: 80,
+        deviation: score.overallScore - 80,
+        severity: "MEDIUM",
+        timestamp,
+        metadata: {
+          strategyName: score.strategyName,
+          status: score.status,
+          trend: score.trend,
+        },
+      });
+    }
+
+    // 2. High error rate drift
+    if (score.metrics.errorRate >= 0.05) {
+      signals.push({
+        id: `strategy_error_rate_${score.strategyId}_${Date.now()}`,
+        source: "strategy",
+        subSource: "strategy_execution",
+        asset: score.strategyId,
+        metric: "error_rate",
+        currentValue: score.metrics.errorRate,
+        expectedValue: 0.01,
+        deviation: Math.round((score.metrics.errorRate - 0.01) * 10000) / 10000,
+        severity: score.metrics.errorRate >= 0.15 ? "CRITICAL" : "HIGH",
+        timestamp,
+        metadata: {
+          strategyName: score.strategyName,
+        },
+      });
+    }
+
+    // 3. Provider uptime drop drift
+    if (score.metrics.providerUptime < 0.95) {
+      signals.push({
+        id: `strategy_provider_uptime_${score.strategyId}_${Date.now()}`,
+        source: "strategy",
+        subSource: "strategy_infrastructure",
+        asset: score.strategyId,
+        metric: "provider_uptime_drop",
+        currentValue: score.metrics.providerUptime,
+        expectedValue: 0.99,
+        deviation: Math.round((score.metrics.providerUptime - 0.99) * 100) / 100,
+        severity: score.metrics.providerUptime < 0.85 ? "HIGH" : "MEDIUM",
+        timestamp,
+        metadata: {
+          strategyName: score.strategyName,
+        },
+      });
+    }
+  }
+
+  return signals;
+}
+

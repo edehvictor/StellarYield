@@ -38,9 +38,20 @@ pub enum DataKey {
     ProtocolFeeBps,
     FeeRecipient,
     SolverCount,
+    Nonce(Address, u64),
 }
 
 // ── Data Structures ─────────────────────────────────────────────────────
+
+/// Lifecycle of an owner-scoped intent nonce. Absent means unused.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum NonceState {
+    /// Consumed by the intent with this ID.
+    Bound(u64),
+    /// Invalidated by the owner; can never back an intent or a fill.
+    Cancelled,
+}
 
 #[contracttype]
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -61,12 +72,15 @@ pub struct SwapIntent {
     pub buy_token: Address,
     pub sell_amount: i128,
     pub min_buy_amount: i128,
+    /// Owner-signed cap on protocol + solver fees, in buy-token units.
+    pub max_fee: i128,
     pub expiry: u64,
     pub status: IntentStatus,
     pub created_at: u64,
     pub partial_fill: bool,
     pub filled_sell: i128,
     pub filled_buy: i128,
+    pub fill_count: u32,
 }
 
 #[contracttype]
@@ -77,6 +91,26 @@ pub struct Solution {
     pub buy_amount: i128,
     pub sell_amount: i128,
     pub submitted_at: u64,
+}
+
+/// Stable settlement receipt, published exactly once per successful fill.
+///
+/// Contracts cannot observe their transaction hash, so the on-chain
+/// reference is `(intent_id, fill_index)` anchored at `ledger`; RPC
+/// `getEvents` returns the `txHash` alongside this event.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SettlementReceipt {
+    pub intent_id: u64,
+    pub solver: Address,
+    /// Escrowed sell tokens released to the solver.
+    pub input_amount: i128,
+    /// Buy tokens delivered to the intent owner.
+    pub output_amount: i128,
+    pub protocol_fee: i128,
+    pub solver_fee: i128,
+    pub ledger: u32,
+    pub fill_index: u32,
 }
 
 // ── Errors ──────────────────────────────────────────────────────────────
@@ -100,6 +134,8 @@ pub enum SwapError {
     SelfTrade = 13,
     PartialFillExceeded = 14,
     InvalidFee = 15,
+    NonceUsed = 16,
+    FeeCapExceeded = 17,
 }
 
 const MAX_PROTOCOL_FEE_BPS: u32 = 100;
@@ -166,8 +202,11 @@ impl IntentSwap {
     /// * `buy_token` — Token the user wants to receive
     /// * `sell_amount` — Amount of sell_token to trade
     /// * `min_buy_amount` — Minimum acceptable amount of buy_token
+    /// * `max_fee` — Maximum combined protocol + solver fee, in buy_token
+    ///   (pro-rated per partial fill; must be below `min_buy_amount`)
     /// * `expiry` — Ledger timestamp after which the intent expires
     /// * `partial_fill` — Whether partial fills are allowed
+    /// * `nonce` — Owner-scoped single-use nonce; cancellable via `cancel_nonce`
     ///
     /// # Returns
     /// The intent ID
@@ -178,8 +217,10 @@ impl IntentSwap {
         buy_token: Address,
         sell_amount: i128,
         min_buy_amount: i128,
+        max_fee: i128,
         expiry: u64,
         partial_fill: bool,
+        nonce: u64,
     ) -> Result<u64, SwapError> {
         Self::require_init(&env)?;
         owner.require_auth();
@@ -187,10 +228,18 @@ impl IntentSwap {
         if sell_amount <= 0 || min_buy_amount <= 0 {
             return Err(SwapError::ZeroAmount);
         }
+        if max_fee < 0 || max_fee >= min_buy_amount {
+            return Err(SwapError::InvalidFee);
+        }
 
         let now = env.ledger().timestamp();
         if expiry <= now {
             return Err(SwapError::InvalidExpiry);
+        }
+
+        let nonce_key = DataKey::Nonce(owner.clone(), nonce);
+        if env.storage().persistent().has(&nonce_key) {
+            return Err(SwapError::NonceUsed);
         }
 
         // Escrow sell tokens from user
@@ -210,17 +259,22 @@ impl IntentSwap {
             buy_token: buy_token.clone(),
             sell_amount,
             min_buy_amount,
+            max_fee,
             expiry,
             status: IntentStatus::Open,
             created_at: now,
             partial_fill,
             filled_sell: 0,
             filled_buy: 0,
+            fill_count: 0,
         };
 
         env.storage()
             .persistent()
             .set(&DataKey::Intent(intent_id), &intent);
+        env.storage()
+            .persistent()
+            .set(&nonce_key, &NonceState::Bound(intent_id));
         env.storage()
             .instance()
             .set(&DataKey::NextIntentId, &(intent_id + 1));
@@ -253,20 +307,48 @@ impl IntentSwap {
             return Err(SwapError::IntentNotOpen);
         }
 
-        intent.status = IntentStatus::Cancelled;
-        env.storage()
-            .persistent()
-            .set(&DataKey::Intent(intent_id), &intent);
-
-        // Return remaining escrowed sell tokens
-        let remaining = intent.sell_amount - intent.filled_sell;
-        if remaining > 0 {
-            let sell_client = token::Client::new(&env, &intent.sell_token);
-            sell_client.transfer(&env.current_contract_address(), &owner, &remaining);
-        }
+        Self::close_and_refund(&env, &mut intent, IntentStatus::Cancelled);
 
         env.events()
             .publish((symbol_short!("cancel"),), (intent_id,));
+
+        Ok(())
+    }
+
+    /// Invalidate one of the owner's nonces without affecting any other.
+    ///
+    /// An unused nonce can never back an intent afterwards. A nonce bound
+    /// to an open intent cancels that intent (rejecting later fills) and
+    /// refunds its remaining escrow. A nonce already cancelled, or bound to
+    /// a closed intent, returns `NonceUsed`.
+    pub fn cancel_nonce(env: Env, owner: Address, nonce: u64) -> Result<(), SwapError> {
+        Self::require_init(&env)?;
+        owner.require_auth();
+
+        let nonce_key = DataKey::Nonce(owner.clone(), nonce);
+        match env.storage().persistent().get(&nonce_key) {
+            None => {}
+            Some(NonceState::Bound(intent_id)) => {
+                let mut intent: SwapIntent = env
+                    .storage()
+                    .persistent()
+                    .get(&DataKey::Intent(intent_id))
+                    .ok_or(SwapError::IntentNotFound)?;
+                if intent.status != IntentStatus::Open {
+                    return Err(SwapError::NonceUsed);
+                }
+                Self::close_and_refund(&env, &mut intent, IntentStatus::Cancelled);
+                env.events()
+                    .publish((symbol_short!("cancel"),), (intent_id,));
+            }
+            Some(NonceState::Cancelled) => return Err(SwapError::NonceUsed),
+        }
+
+        env.storage()
+            .persistent()
+            .set(&nonce_key, &NonceState::Cancelled);
+        env.events()
+            .publish((symbol_short!("nonce_cxl"),), (owner, nonce));
 
         Ok(())
     }
@@ -277,19 +359,27 @@ impl IntentSwap {
     /// and receiving the escrowed sell tokens.
     ///
     /// The solver must provide at least `min_buy_amount` of buy tokens.
-    /// A protocol fee is deducted from the buy tokens before delivery.
+    /// The protocol fee and the solver fee are deducted from the buy tokens
+    /// before delivery; their sum is verified against the owner-signed
+    /// `max_fee` (pro-rated for partial fills) before any transfer.
+    ///
+    /// Settlement is atomic: if any leg fails, the host reverts every prior
+    /// leg, all state writes, and the receipt, leaving the escrow reserved
+    /// on the still-open intent (refundable via cancel/expire).
     ///
     /// # Arguments
     /// * `solver` — Registered solver address (must authorize)
     /// * `intent_id` — The intent to fill
     /// * `buy_amount` — Amount of buy tokens the solver provides
     /// * `sell_amount` — Amount of sell tokens the solver wants (for partial fills)
+    /// * `solver_fee` — Buy tokens the solver retains from `buy_amount`
     pub fn fill_intent(
         env: Env,
         solver: Address,
         intent_id: u64,
         buy_amount: i128,
         sell_amount: i128,
+        solver_fee: i128,
     ) -> Result<(), SwapError> {
         Self::require_init(&env)?;
         solver.require_auth();
@@ -309,13 +399,10 @@ impl IntentSwap {
             return Err(SwapError::IntentNotOpen);
         }
 
-        // Check expiry
+        // Check expiry. No state is written here: an error reverts the frame,
+        // and the escrow stays refundable through `expire_intent`.
         let now = env.ledger().timestamp();
         if now >= intent.expiry {
-            intent.status = IntentStatus::Expired;
-            env.storage()
-                .persistent()
-                .set(&DataKey::Intent(intent_id), &intent);
             return Err(SwapError::IntentExpired);
         }
 
@@ -335,25 +422,25 @@ impl IntentSwap {
             remaining_sell
         };
 
-        // Calculate proportional min_buy for this chunk
-        let proportional_min_buy = if intent.partial_fill {
-            (intent.min_buy_amount * fill_sell) / intent.sell_amount
-        } else {
-            intent.min_buy_amount
-        };
-
-        if buy_amount < proportional_min_buy {
+        if buy_amount < Self::fill_share(&intent, intent.min_buy_amount, fill_sell) {
             return Err(SwapError::InsufficientOutput);
         }
 
-        // Calculate protocol fee
+        // Verify actual fees against the owner-signed cap before any transfer
+        if solver_fee < 0 {
+            return Err(SwapError::InvalidFee);
+        }
         let fee_bps: u32 = env
             .storage()
             .instance()
             .get(&DataKey::ProtocolFeeBps)
             .unwrap_or(0);
         let protocol_fee = (buy_amount * fee_bps as i128) / 10_000;
-        let user_receives = buy_amount - protocol_fee;
+        // Subtraction form: a solver-supplied `solver_fee` cannot overflow the sum
+        if solver_fee > Self::fill_share(&intent, intent.max_fee, fill_sell) - protocol_fee {
+            return Err(SwapError::FeeCapExceeded);
+        }
+        let user_receives = buy_amount - protocol_fee - solver_fee;
 
         // Transfer buy tokens from solver to user
         let buy_client = token::Client::new(&env, &intent.buy_token);
@@ -376,6 +463,7 @@ impl IntentSwap {
         // Update intent state
         intent.filled_sell += fill_sell;
         intent.filled_buy += user_receives;
+        intent.fill_count += 1;
 
         if intent.filled_sell >= intent.sell_amount {
             intent.status = IntentStatus::Filled;
@@ -399,8 +487,22 @@ impl IntentSwap {
 
         env.events().publish(
             (symbol_short!("fill"),),
-            (intent_id, solver, fill_sell, user_receives),
+            (intent_id, solver.clone(), fill_sell, user_receives),
         );
+
+        // Published last, so it exists only if every leg above succeeded
+        let receipt = SettlementReceipt {
+            intent_id,
+            solver,
+            input_amount: fill_sell,
+            output_amount: user_receives,
+            protocol_fee,
+            solver_fee,
+            ledger: env.ledger().sequence(),
+            fill_index: intent.fill_count,
+        };
+        env.events()
+            .publish((symbol_short!("receipt"), intent_id), receipt);
 
         Ok(())
     }
@@ -427,17 +529,7 @@ impl IntentSwap {
             return Err(SwapError::InvalidExpiry);
         }
 
-        intent.status = IntentStatus::Expired;
-        env.storage()
-            .persistent()
-            .set(&DataKey::Intent(intent_id), &intent);
-
-        // Return remaining escrowed tokens
-        let remaining = intent.sell_amount - intent.filled_sell;
-        if remaining > 0 {
-            let sell_client = token::Client::new(&env, &intent.sell_token);
-            sell_client.transfer(&env.current_contract_address(), &intent.owner, &remaining);
-        }
+        Self::close_and_refund(&env, &mut intent, IntentStatus::Expired);
 
         env.events()
             .publish((symbol_short!("expire"),), (intent_id,));
@@ -643,6 +735,30 @@ impl IntentSwap {
             .get(&DataKey::Solver(solver.clone()))
             .unwrap_or(false)
     }
+
+    /// Share of an intent-wide amount owed for a fill of `fill_sell`.
+    /// Exact for full fills; floored (in the owner's favour for caps) otherwise.
+    fn fill_share(intent: &SwapIntent, amount: i128, fill_sell: i128) -> i128 {
+        if intent.partial_fill {
+            (amount * fill_sell) / intent.sell_amount
+        } else {
+            amount
+        }
+    }
+
+    /// Close an open intent and return its remaining escrow to the owner.
+    fn close_and_refund(env: &Env, intent: &mut SwapIntent, status: IntentStatus) {
+        intent.status = status;
+        env.storage()
+            .persistent()
+            .set(&DataKey::Intent(intent.id), intent);
+
+        let remaining = intent.sell_amount - intent.filled_sell;
+        if remaining > 0 {
+            let sell_client = token::Client::new(env, &intent.sell_token);
+            sell_client.transfer(&env.current_contract_address(), &intent.owner, &remaining);
+        }
+    }
 }
 
 // ── Tests ───────────────────────────────────────────────────────────────
@@ -650,8 +766,8 @@ impl IntentSwap {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use soroban_sdk::testutils::{Address as _, Ledger};
-    use soroban_sdk::Env;
+    use soroban_sdk::testutils::{Address as _, Events as _, IssuerFlags, Ledger};
+    use soroban_sdk::{Env, Symbol, TryFromVal};
 
     fn setup_env() -> (
         Env,
@@ -752,8 +868,9 @@ mod tests {
 
         let intent_id = client.create_intent(
             &user, &token_a, &token_b, &10_000, &9_500, // min 9500 buy tokens
+            &100,   // max combined fee
             &200,   // expires at ledger 200
-            &false,
+            &false, &1,
         );
 
         assert_eq!(intent_id, 1);
@@ -771,8 +888,9 @@ mod tests {
         mint_tokens(&env, &token_a, &user, 10_000);
 
         env.ledger().set_timestamp(100);
-        let intent_id =
-            client.create_intent(&user, &token_a, &token_b, &10_000, &9_500, &200, &false);
+        let intent_id = client.create_intent(
+            &user, &token_a, &token_b, &10_000, &9_500, &100, &200, &false, &1,
+        );
 
         client.cancel_intent(&user, &intent_id);
 
@@ -801,11 +919,12 @@ mod tests {
         assert_eq!(client.solver_count(), 1);
 
         // Create intent
-        let intent_id =
-            client.create_intent(&user, &token_a, &token_b, &10_000, &9_500, &200, &false);
+        let intent_id = client.create_intent(
+            &user, &token_a, &token_b, &10_000, &9_500, &100, &200, &false, &1,
+        );
 
         // Fill intent — solver provides 10_000 buy tokens
-        client.fill_intent(&solver_addr, &intent_id, &10_000, &10_000);
+        client.fill_intent(&solver_addr, &intent_id, &10_000, &10_000, &0);
 
         let intent = client.get_intent(&intent_id);
         assert_eq!(intent.status, IntentStatus::Filled);
@@ -831,11 +950,12 @@ mod tests {
         client.register_solver(&solver_addr, &token_a, &1_000);
 
         // Create intent with partial fill enabled
-        let intent_id =
-            client.create_intent(&user, &token_a, &token_b, &10_000, &9_500, &200, &true);
+        let intent_id = client.create_intent(
+            &user, &token_a, &token_b, &10_000, &9_500, &100, &200, &true, &1,
+        );
 
         // Partial fill — only 5000 of 10000
-        client.fill_intent(&solver_addr, &intent_id, &5_000, &5_000);
+        client.fill_intent(&solver_addr, &intent_id, &5_000, &5_000, &0);
 
         let intent = client.get_intent(&intent_id);
         assert_eq!(intent.status, IntentStatus::Open); // Still open
@@ -856,11 +976,12 @@ mod tests {
         env.ledger().set_timestamp(100);
 
         client.register_solver(&solver_addr, &token_a, &1_000);
-        let intent_id =
-            client.create_intent(&user, &token_a, &token_b, &10_000, &9_500, &200, &false);
+        let intent_id = client.create_intent(
+            &user, &token_a, &token_b, &10_000, &9_500, &100, &200, &false, &1,
+        );
 
         // Try to fill with less than min_buy_amount
-        client.fill_intent(&solver_addr, &intent_id, &5_000, &10_000);
+        client.fill_intent(&solver_addr, &intent_id, &5_000, &10_000, &0);
     }
 
     #[test]
@@ -871,8 +992,9 @@ mod tests {
         mint_tokens(&env, &token_a, &user, 10_000);
 
         env.ledger().set_timestamp(100);
-        let intent_id =
-            client.create_intent(&user, &token_a, &token_b, &10_000, &9_500, &200, &false);
+        let intent_id = client.create_intent(
+            &user, &token_a, &token_b, &10_000, &9_500, &100, &200, &false, &1,
+        );
 
         // Advance time past expiry
         env.ledger().set_timestamp(201);
@@ -897,11 +1019,12 @@ mod tests {
         mint_tokens(&env, &token_b, &rando, 20_000);
 
         env.ledger().set_timestamp(100);
-        let intent_id =
-            client.create_intent(&user, &token_a, &token_b, &10_000, &9_500, &200, &false);
+        let intent_id = client.create_intent(
+            &user, &token_a, &token_b, &10_000, &9_500, &100, &200, &false, &1,
+        );
 
         // Non-registered solver tries to fill
-        client.fill_intent(&rando, &intent_id, &10_000, &10_000);
+        client.fill_intent(&rando, &intent_id, &10_000, &10_000, &0);
     }
 
     #[test]
@@ -922,5 +1045,409 @@ mod tests {
         // Tokens returned
         let token_client = token::Client::new(&env, &token_a);
         assert_eq!(token_client.balance(&solver_addr), 2_000);
+    }
+
+    // ── Helpers for nonce, fee-cap, receipt and rollback tests ──────────
+
+    /// Registers a solver staked in `stake_token` holding `buy_balance` of `buy_token`.
+    fn funded_solver(
+        env: &Env,
+        client: &IntentSwapClient,
+        stake_token: &Address,
+        buy_token: &Address,
+        buy_balance: i128,
+    ) -> Address {
+        let solver = Address::generate(env);
+        mint_tokens(env, stake_token, &solver, 1_000);
+        mint_tokens(env, buy_token, &solver, buy_balance);
+        client.register_solver(&solver, stake_token, &1_000);
+        solver
+    }
+
+    /// Opens a 10_000 → ≥9_500 intent (nonce 1) for a fresh owner.
+    fn open_intent(
+        env: &Env,
+        client: &IntentSwapClient,
+        sell_token: &Address,
+        buy_token: &Address,
+        max_fee: i128,
+        partial_fill: bool,
+    ) -> (Address, u64) {
+        let owner = Address::generate(env);
+        mint_tokens(env, sell_token, &owner, 10_000);
+        env.ledger().set_timestamp(100);
+        let intent_id = client.create_intent(
+            &owner,
+            sell_token,
+            buy_token,
+            &10_000,
+            &9_500,
+            &max_fee,
+            &200,
+            &partial_fill,
+            &1,
+        );
+        (owner, intent_id)
+    }
+
+    /// Settlement receipts published by the last top-level invocation.
+    fn receipts(env: &Env) -> soroban_sdk::Vec<SettlementReceipt> {
+        let mut out = soroban_sdk::Vec::new(env);
+        for (_, topics, data) in env.events().all().iter() {
+            let is_receipt = Symbol::try_from_val(env, &topics.get_unchecked(0))
+                .is_ok_and(|tag| tag == symbol_short!("receipt"));
+            if is_receipt {
+                out.push_back(SettlementReceipt::try_from_val(env, &data).unwrap());
+            }
+        }
+        out
+    }
+
+    /// Must run directly after a rejected fill. Asserts it left no partial
+    /// effects (no receipt, intent untouched, no buy tokens moved) and that
+    /// the full escrow is still recoverable, i.e. no balance is stranded.
+    fn assert_rolled_back_and_refundable(
+        env: &Env,
+        client: &IntentSwapClient,
+        intent_id: u64,
+        buy_token: &Address,
+        solver: &Address,
+        solver_buy_before: i128,
+    ) {
+        assert_eq!(receipts(env).len(), 0);
+
+        let intent = client.get_intent(&intent_id);
+        assert_eq!(intent.status, IntentStatus::Open);
+        assert_eq!(intent.filled_sell, 0);
+        assert_eq!(intent.filled_buy, 0);
+        assert_eq!(intent.fill_count, 0);
+        assert!(client.try_get_solution(&intent_id).is_err());
+
+        let buy = token::Client::new(env, buy_token);
+        assert_eq!(buy.balance(&intent.owner), 0);
+        assert_eq!(buy.balance(solver), solver_buy_before);
+
+        let sell = token::Client::new(env, &intent.sell_token);
+        let contract_before = sell.balance(&client.address);
+        client.cancel_intent(&intent.owner, &intent_id);
+        assert_eq!(sell.balance(&intent.owner), intent.sell_amount);
+        assert_eq!(
+            sell.balance(&client.address),
+            contract_before - intent.sell_amount
+        );
+    }
+
+    // ── #1491 Nonce invalidation ─────────────────────────────────────────
+
+    #[test]
+    fn test_cancel_nonce_rejects_later_fills_and_refunds() {
+        let (env, client, _, _, token_a, token_b, _) = setup_env();
+        let solver = funded_solver(&env, &client, &token_a, &token_b, 20_000);
+        let (owner, intent_id) = open_intent(&env, &client, &token_a, &token_b, 100, false);
+
+        client.cancel_nonce(&owner, &1);
+
+        assert_eq!(
+            client.get_intent(&intent_id).status,
+            IntentStatus::Cancelled
+        );
+        assert_eq!(token::Client::new(&env, &token_a).balance(&owner), 10_000);
+        assert_eq!(
+            client.try_fill_intent(&solver, &intent_id, &10_000, &10_000, &0),
+            Err(Ok(SwapError::IntentNotOpen))
+        );
+        assert_eq!(
+            client.try_cancel_nonce(&owner, &1),
+            Err(Ok(SwapError::NonceUsed))
+        );
+    }
+
+    #[test]
+    fn test_nonce_replay_rejected() {
+        let (env, client, _, _, token_a, token_b, _) = setup_env();
+        let solver = funded_solver(&env, &client, &token_a, &token_b, 20_000);
+        let (owner, intent_id) = open_intent(&env, &client, &token_a, &token_b, 100, false);
+        mint_tokens(&env, &token_a, &owner, 10_000);
+
+        client.fill_intent(&solver, &intent_id, &10_000, &10_000, &0);
+
+        // A consumed nonce can neither back a new intent nor be cancelled
+        assert_eq!(
+            client.try_create_intent(
+                &owner, &token_a, &token_b, &10_000, &9_500, &100, &200, &false, &1
+            ),
+            Err(Ok(SwapError::NonceUsed))
+        );
+        assert_eq!(
+            client.try_cancel_nonce(&owner, &1),
+            Err(Ok(SwapError::NonceUsed))
+        );
+
+        // A nonce cancelled before use can never back an intent
+        client.cancel_nonce(&owner, &7);
+        assert_eq!(
+            client.try_create_intent(
+                &owner, &token_a, &token_b, &10_000, &9_500, &100, &200, &false, &7
+            ),
+            Err(Ok(SwapError::NonceUsed))
+        );
+        assert_eq!(token::Client::new(&env, &token_a).balance(&owner), 10_000);
+    }
+
+    #[test]
+    fn test_nonces_are_independent() {
+        let (env, client, _, _, token_a, token_b, _) = setup_env();
+        let solver = funded_solver(&env, &client, &token_a, &token_b, 20_000);
+        let (owner, first_id) = open_intent(&env, &client, &token_a, &token_b, 100, false);
+        mint_tokens(&env, &token_a, &owner, 10_000);
+        let second_id = client.create_intent(
+            &owner, &token_a, &token_b, &10_000, &9_500, &100, &200, &false, &2,
+        );
+
+        client.cancel_nonce(&owner, &1);
+
+        // Nonce 2 of the same owner is unaffected
+        client.fill_intent(&solver, &second_id, &10_000, &10_000, &0);
+        assert_eq!(client.get_intent(&first_id).status, IntentStatus::Cancelled);
+        assert_eq!(client.get_intent(&second_id).status, IntentStatus::Filled);
+
+        // Nonces are scoped per owner
+        let (_, other_id) = open_intent(&env, &client, &token_a, &token_b, 100, false);
+        assert_eq!(client.get_intent(&other_id).status, IntentStatus::Open);
+    }
+
+    // ── #1492 Signed fee caps ────────────────────────────────────────────
+
+    #[test]
+    fn test_protocol_fee_alone_capped_by_signed_max() {
+        let (env, client, admin, _, token_a, token_b, _) = setup_env();
+        let solver = funded_solver(&env, &client, &token_a, &token_b, 20_000);
+        let (owner, intent_id) = open_intent(&env, &client, &token_a, &token_b, 50, false);
+
+        // Admin raises the fee after signing: 51 > signed cap of 50
+        client.set_protocol_fee(&admin, &51);
+        assert_eq!(
+            client.try_fill_intent(&solver, &intent_id, &10_000, &10_000, &0),
+            Err(Ok(SwapError::FeeCapExceeded))
+        );
+
+        // Exactly at the cap settles
+        client.set_protocol_fee(&admin, &50);
+        client.fill_intent(&solver, &intent_id, &10_000, &10_000, &0);
+        assert_eq!(token::Client::new(&env, &token_b).balance(&owner), 9_950);
+    }
+
+    #[test]
+    fn test_solver_fee_alone_capped_by_signed_max() {
+        let (env, client, admin, _, token_a, token_b, _) = setup_env();
+        client.set_protocol_fee(&admin, &0);
+        let solver = funded_solver(&env, &client, &token_a, &token_b, 20_000);
+        let (owner, intent_id) = open_intent(&env, &client, &token_a, &token_b, 100, false);
+
+        for solver_fee in [101, i128::MAX] {
+            assert_eq!(
+                client.try_fill_intent(&solver, &intent_id, &10_000, &10_000, &solver_fee),
+                Err(Ok(SwapError::FeeCapExceeded))
+            );
+        }
+
+        client.fill_intent(&solver, &intent_id, &10_000, &10_000, &100);
+        let buy = token::Client::new(&env, &token_b);
+        assert_eq!(buy.balance(&owner), 9_900);
+        // Solver retains its fee: pays only 9_900 out of 20_000
+        assert_eq!(buy.balance(&solver), 10_100);
+    }
+
+    #[test]
+    fn test_combined_fees_capped_by_signed_max() {
+        let (env, client, _, _, token_a, token_b, _) = setup_env();
+        let solver = funded_solver(&env, &client, &token_a, &token_b, 20_000);
+        let (owner, intent_id) = open_intent(&env, &client, &token_a, &token_b, 100, false);
+
+        // protocol 50 and solver 51 each fit the cap of 100; their sum does not
+        assert_eq!(
+            client.try_fill_intent(&solver, &intent_id, &10_000, &10_000, &51),
+            Err(Ok(SwapError::FeeCapExceeded))
+        );
+
+        client.fill_intent(&solver, &intent_id, &10_000, &10_000, &50);
+        let buy = token::Client::new(&env, &token_b);
+        assert_eq!(buy.balance(&owner), 9_900);
+        assert_eq!(buy.balance(&solver), 20_000 - 9_900 - 50);
+    }
+
+    #[test]
+    fn test_fee_cap_pro_rated_for_partial_fill() {
+        let (env, client, _, _, token_a, token_b, _) = setup_env();
+        let solver = funded_solver(&env, &client, &token_a, &token_b, 20_000);
+        let (_, intent_id) = open_intent(&env, &client, &token_a, &token_b, 100, true);
+
+        // Half fill → cap 50; protocol 25 + solver 26 = 51
+        assert_eq!(
+            client.try_fill_intent(&solver, &intent_id, &5_000, &5_000, &26),
+            Err(Ok(SwapError::FeeCapExceeded))
+        );
+        client.fill_intent(&solver, &intent_id, &5_000, &5_000, &25);
+        assert_eq!(client.get_intent(&intent_id).filled_buy, 4_950);
+    }
+
+    #[test]
+    fn test_invalid_fee_inputs_rejected() {
+        let (env, client, _, _, token_a, token_b, _) = setup_env();
+        let solver = funded_solver(&env, &client, &token_a, &token_b, 20_000);
+        let owner = Address::generate(&env);
+        mint_tokens(&env, &token_a, &owner, 10_000);
+        env.ledger().set_timestamp(100);
+
+        for max_fee in [-1, 9_500] {
+            assert_eq!(
+                client.try_create_intent(
+                    &owner, &token_a, &token_b, &10_000, &9_500, &max_fee, &200, &false, &1
+                ),
+                Err(Ok(SwapError::InvalidFee))
+            );
+        }
+
+        let intent_id = client.create_intent(
+            &owner, &token_a, &token_b, &10_000, &9_500, &100, &200, &false, &1,
+        );
+        assert_eq!(
+            client.try_fill_intent(&solver, &intent_id, &10_000, &10_000, &-1),
+            Err(Ok(SwapError::InvalidFee))
+        );
+    }
+
+    // ── #1493 Settlement receipts ────────────────────────────────────────
+
+    #[test]
+    fn test_fill_emits_exactly_one_receipt() {
+        let (env, client, _, _, token_a, token_b, _) = setup_env();
+        let solver = funded_solver(&env, &client, &token_a, &token_b, 20_000);
+        let (_, intent_id) = open_intent(&env, &client, &token_a, &token_b, 100, false);
+
+        client.fill_intent(&solver, &intent_id, &10_000, &10_000, &20);
+
+        let receipts = receipts(&env);
+        assert_eq!(receipts.len(), 1);
+        assert_eq!(
+            receipts.get_unchecked(0),
+            SettlementReceipt {
+                intent_id,
+                solver,
+                input_amount: 10_000,
+                output_amount: 9_930,
+                protocol_fee: 50,
+                solver_fee: 20,
+                ledger: env.ledger().sequence(),
+                fill_index: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn test_each_partial_fill_emits_one_indexed_receipt() {
+        let (env, client, _, _, token_a, token_b, _) = setup_env();
+        let solver = funded_solver(&env, &client, &token_a, &token_b, 20_000);
+        let (_, intent_id) = open_intent(&env, &client, &token_a, &token_b, 100, true);
+
+        for fill_index in 1..=2u32 {
+            client.fill_intent(&solver, &intent_id, &5_000, &5_000, &0);
+            let receipts = receipts(&env);
+            assert_eq!(receipts.len(), 1);
+            assert_eq!(receipts.get_unchecked(0).fill_index, fill_index);
+        }
+        assert_eq!(client.get_intent(&intent_id).status, IntentStatus::Filled);
+    }
+
+    #[test]
+    fn test_rejected_execution_emits_no_receipt() {
+        let (env, client, _, _, token_a, token_b, _) = setup_env();
+        let solver = funded_solver(&env, &client, &token_a, &token_b, 20_000);
+        let (_, intent_id) = open_intent(&env, &client, &token_a, &token_b, 100, false);
+
+        assert_eq!(
+            client.try_fill_intent(&solver, &intent_id, &10_000, &10_000, &51),
+            Err(Ok(SwapError::FeeCapExceeded))
+        );
+        assert_rolled_back_and_refundable(&env, &client, intent_id, &token_b, &solver, 20_000);
+    }
+
+    // ── #1494 Atomic rollback on a failed settlement leg ─────────────────
+
+    // A failing token leg propagates the Stellar Asset Contract's own error
+    // code, which the typed client decodes into the `SwapError` sharing it.
+    const SAC_BALANCE_ERROR: u32 = 10;
+    const SAC_BALANCE_DEAUTHORIZED_ERROR: u32 = 11;
+
+    #[test]
+    fn test_owner_payment_leg_failure_rolls_back() {
+        let (env, client, _, _, token_a, token_b, _) = setup_env();
+        // Cannot cover the 9_950 owner payment
+        let solver = funded_solver(&env, &client, &token_a, &token_b, 9_000);
+        let (_, intent_id) = open_intent(&env, &client, &token_a, &token_b, 100, false);
+
+        let err = client
+            .try_fill_intent(&solver, &intent_id, &10_000, &10_000, &0)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err as u32, SAC_BALANCE_ERROR);
+        assert_rolled_back_and_refundable(&env, &client, intent_id, &token_b, &solver, 9_000);
+    }
+
+    #[test]
+    fn test_protocol_fee_leg_failure_rolls_back() {
+        let (env, client, _, _, token_a, token_b, _) = setup_env();
+        // Covers the 9_950 owner payment, but not the 50 protocol fee after it
+        let solver = funded_solver(&env, &client, &token_a, &token_b, 9_950);
+        let (_, intent_id) = open_intent(&env, &client, &token_a, &token_b, 100, false);
+
+        let err = client
+            .try_fill_intent(&solver, &intent_id, &10_000, &10_000, &0)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err as u32, SAC_BALANCE_ERROR);
+        // The already-executed owner payment is reverted too
+        assert_rolled_back_and_refundable(&env, &client, intent_id, &token_b, &solver, 9_950);
+    }
+
+    #[test]
+    fn test_escrow_release_leg_failure_rolls_back() {
+        let (env, client, admin, _, token_a, token_b, _) = setup_env();
+        let sell_sac = env.register_stellar_asset_contract_v2(admin.clone());
+        sell_sac.issuer().set_flag(IssuerFlags::RevocableFlag);
+        let sell_token = sell_sac.address();
+
+        let solver = funded_solver(&env, &client, &token_a, &token_b, 20_000);
+        let (_, intent_id) = open_intent(&env, &client, &sell_token, &token_b, 100, false);
+
+        // Solver cannot receive the escrowed sell tokens: final leg fails
+        soroban_sdk::token::StellarAssetClient::new(&env, &sell_token)
+            .set_authorized(&solver, &false);
+
+        let err = client
+            .try_fill_intent(&solver, &intent_id, &10_000, &10_000, &0)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err as u32, SAC_BALANCE_DEAUTHORIZED_ERROR);
+        // Both buy-side legs already executed are reverted
+        assert_rolled_back_and_refundable(&env, &client, intent_id, &token_b, &solver, 20_000);
+    }
+
+    #[test]
+    fn test_fill_after_expiry_keeps_escrow_refundable() {
+        let (env, client, _, _, token_a, token_b, _) = setup_env();
+        let solver = funded_solver(&env, &client, &token_a, &token_b, 20_000);
+        let (owner, intent_id) = open_intent(&env, &client, &token_a, &token_b, 100, false);
+
+        env.ledger().set_timestamp(200);
+        assert_eq!(
+            client.try_fill_intent(&solver, &intent_id, &10_000, &10_000, &0),
+            Err(Ok(SwapError::IntentExpired))
+        );
+        assert_eq!(client.get_intent(&intent_id).status, IntentStatus::Open);
+
+        client.expire_intent(&intent_id);
+        assert_eq!(client.get_intent(&intent_id).status, IntentStatus::Expired);
+        assert_eq!(token::Client::new(&env, &token_a).balance(&owner), 10_000);
     }
 }

@@ -57,3 +57,28 @@ export function logRouteFailure({ routeName, failureType, error }: RouteErrorCon
     stack: error.stack,
   });
 }
+
+/** Context emitted when a transaction-workflow render boundary catches an error (#1336). */
+export interface TransactionErrorContext {
+  /** Transaction workflow that failed, e.g. "deposit" | "withdraw" | "vault". */
+  workflowName: string;
+  /** Stable id shown to the user so a support ticket can be correlated to this failure. */
+  errorId: string;
+  error: Error;
+}
+
+/**
+ * Log a transaction-workflow render failure through the diagnostics channel.
+ *
+ * Mirrors `logRouteFailure` so log-aggregation tools can index the failing
+ * `workflowName` and the same `errorId` that is rendered in the boundary's
+ * fallback, while the raw stack stays attached for debugging.
+ */
+export function logTransactionFailure({ workflowName, errorId, error }: TransactionErrorContext): void {
+  console.error("[diagnostics] transaction workflow failure", {
+    workflowName,
+    errorId,
+    message: error.message,
+    stack: error.stack,
+  });
+}

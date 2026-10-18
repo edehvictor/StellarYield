@@ -6,6 +6,15 @@ export type AccountActivityEventType =
   | "alert"
   | "rebalance";
 
+export type TransactionStatus = "completed" | "pending" | "failed";
+
+export interface AccountActivityFilters {
+  types?: AccountActivityEventType[];
+  protocol?: string;
+  asset?: string;
+  status?: TransactionStatus;
+}
+
 export type AccountActivitySource =
   | "portfolio"
   | "rewards"
@@ -23,6 +32,8 @@ export interface AccountActivityEvent {
   source: AccountActivitySource;
   amountUsd?: number;
   assetSymbol?: string;
+  protocol?: string;
+  status?: TransactionStatus;
   severity?: "info" | "warning" | "critical";
   relatedVaultId?: string;
   metadata?: Record<string, string | number | boolean | null>;
@@ -183,4 +194,23 @@ export function sortAndDeduplicateTimeline(
 ): AccountActivityEvent[] {
   const deduped = deduplicateEvents(events);
   return deduped.sort((a, b) => compareEventsAscending(b, a)); // descending
+}
+
+/**
+ * Apply filters to an array of activity events.
+ * Returns events matching all provided filter criteria.
+ */
+export function filterActivityEvents(
+  events: AccountActivityEvent[],
+  filters: AccountActivityFilters,
+): AccountActivityEvent[] {
+  return events.filter((event) => {
+    if (filters.types && filters.types.length > 0) {
+      if (!filters.types.includes(event.type)) return false;
+    }
+    if (filters.protocol && event.protocol !== filters.protocol) return false;
+    if (filters.asset && event.assetSymbol !== filters.asset) return false;
+    if (filters.status && event.status !== filters.status) return false;
+    return true;
+  });
 }

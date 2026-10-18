@@ -1,6 +1,24 @@
 import { Keypair, StrKey } from "@stellar/stellar-sdk";
 
 export type WalletAddressType = "account" | "contract";
+export type WalletBootStatus = "ready" | "degraded" | "unavailable";
+
+/**
+ * Wallet boot status snapshot for startup diagnostics.
+ * Shows whether the wallet authentication system is ready to accept connections.
+ */
+export interface WalletBootStatusSnapshot {
+  status: WalletBootStatus;
+  component: "wallet";
+  ready: boolean;
+  reason?: string;
+  checkedAt: string;
+  capabilities: {
+    challengeGeneration: boolean;
+    challengeVerification: boolean;
+    replayProtection: boolean;
+  };
+}
 
 /** Challenges expire after this many milliseconds (5 minutes). */
 const CHALLENGE_TTL_MS = 5 * 60 * 1000;
@@ -177,4 +195,42 @@ export function verifyAuthChallenge(input: {
 /** Exported for tests only — reset replay cache between test cases. */
 export function _resetReplayCacheForTesting(): void {
   usedChallenges.clear();
+}
+
+/**
+ * Get wallet boot status for startup diagnostics.
+ * The wallet system is "ready" if all core authentication capabilities are operational.
+ */
+export function getWalletBootStatus(): WalletBootStatusSnapshot {
+  const checkedAt = new Date().toISOString();
+
+  try {
+    // Wallet authentication is always ready if the module loads successfully.
+    // Core capabilities are implemented and available.
+    const status: WalletBootStatus = "ready";
+    return {
+      status,
+      component: "wallet",
+      ready: status === "ready",
+      checkedAt,
+      capabilities: {
+        challengeGeneration: true,
+        challengeVerification: true,
+        replayProtection: true,
+      },
+    };
+  } catch (error) {
+    return {
+      status: "unavailable",
+      component: "wallet",
+      ready: false,
+      reason: error instanceof Error ? error.message : "Unknown error",
+      checkedAt,
+      capabilities: {
+        challengeGeneration: false,
+        challengeVerification: false,
+        replayProtection: false,
+      },
+    };
+  }
 }

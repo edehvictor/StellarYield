@@ -98,7 +98,7 @@ describe("StrategyComparison - Backend Unavailable", () => {
     render(<StrategyComparison />);
 
     await waitFor(() => {
-      expect(screen.getByText(/Failed to Load Strategy Data/i)).toBeInTheDocument();
+      expect(screen.getByText(/Strategy Comparison Temporarily Unavailable/i)).toBeInTheDocument();
     });
   });
 });
@@ -175,15 +175,7 @@ describe("Backend Config Absence - Edge Cases", () => {
     const mockUseBackendStatus = useBackendStatus as any;
     mockUseBackendStatus.mockReturnValue("checking");
 
-    global.fetch = vi.fn(() => {
-      return new Promise((resolve) => {
-        setTimeout(() => {
-          resolve(
-            new Response(JSON.stringify([]), { status: 200 })
-          );
-        }, 100);
-      });
-    });
+    global.fetch = vi.fn(() => new Promise(() => {}));
 
     render(<StrategyComparison />);
 

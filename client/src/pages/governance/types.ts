@@ -1,3 +1,13 @@
+export interface SignerQuorumProgress {
+  signed: number;
+  required: number;
+  remaining: number;
+  /** Progress toward quorum as a percentage 0–100. */
+  progressPct: number;
+  met: boolean;
+  perSigner: { address: string; signed: boolean }[];
+}
+
 export interface PendingTransaction {
   id: string;
   description: string;

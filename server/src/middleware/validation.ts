@@ -1,9 +1,14 @@
 import { Request, Response, NextFunction } from "express";
+import { StrKey } from "@stellar/stellar-sdk";
 import { sendError } from "../utils/errorResponse";
 
 export function validateWalletAddress(req: Request, res: Response, next: NextFunction): void {
   const address = req.params.address || req.params.walletAddress;
-  if (!address || typeof address !== "string" || address.length < 10 || !/^[GC][A-Z2-7]{55}$/.test(address)) {
+  if (
+    !address ||
+    typeof address !== "string" ||
+    (!StrKey.isValidEd25519PublicKey(address) && !StrKey.isValidContract(address))
+  ) {
     sendError(res, 400, "INVALID_ADDRESS", "Invalid Stellar wallet address.");
     return;
   }

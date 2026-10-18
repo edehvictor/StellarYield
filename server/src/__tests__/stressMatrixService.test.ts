@@ -119,6 +119,30 @@ describe('StressMatrixService', () => {
         expect(guardrail.ruleId).toBeDefined();
       }
     });
+
+    it('should sort scenarios deterministically before export', () => {
+      const customScenarios: StressScenario[] = [
+        { id: 'zeta-shock', name: 'Zeta Shock', description: 'Late in order', factors: { confidence: 55 } },
+        { id: 'alpha-burst', name: 'Alpha Burst', description: 'First in order', factors: { liquidity: 70 } },
+        { id: 'beta-slide', name: 'Beta Slide', description: 'Middle in order', factors: { oracle: 80 } },
+      ];
+      const service = new StressMatrixService(undefined, {}, customScenarios);
+
+      const rows = service.getComparisonRows();
+      expect(rows.map(row => row.scenarioName)).toEqual(['Alpha Burst', 'Beta Slide', 'Zeta Shock']);
+
+      const csv = service.exportScenarioComparisonTable(rows);
+      expect(csv).toContain('scenarioId,scenarioName,baseline,stressed,delta');
+      expect(csv.split('\n')[1]).toContain('alpha-burst');
+    });
+
+    it('should export an empty comparison table without crashing', () => {
+      const service = new StressMatrixService(undefined, {}, []);
+      const csv = service.exportScenarioComparisonTable();
+
+      expect(csv).toBe('scenarioId,scenarioName,baseline,stressed,delta');
+      expect(service.getComparisonRows()).toEqual([]);
+    });
   });
 
   describe('config updates', () => {

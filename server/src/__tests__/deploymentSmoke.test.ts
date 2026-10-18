@@ -10,6 +10,8 @@
 import request from "supertest";
 import { createApp } from "../app";
 
+const { resolveClientApiBaseUrl, evaluateReleaseGate } = require("../../../scripts/smoke-test.js");
+
 const app = createApp();
 
 // ── Inline port of client/src/lib/api.ts getApiBaseUrlState ─────────────────
@@ -67,6 +69,41 @@ describe("Backend runtime — startup probes", () => {
 });
 
 // ── 2. Frontend env-URL validation ──────────────────────────────────────────
+
+describe("Release gate configuration checks", () => {
+  it("fails when the deployed client API URL is missing", async () => {
+    const result = await evaluateReleaseGate({
+      env: {},
+      backendUrl: "https://backend.example.com",
+      getStatus: async () => 200,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.summary).toMatch(/Missing deployed client API URL/i);
+  });
+
+  it("fails when the backend is unreachable", async () => {
+    const result = await evaluateReleaseGate({
+      env: { VITE_API_BASE_URL: "https://backend.example.com" },
+      backendUrl: "https://backend.example.com",
+      getStatus: async (url: string) => (url.includes("/api/health") ? 0 : 200),
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.checks.some((check) => check.label === "Backend health" && check.status === "fail")).toBe(true);
+  });
+
+  it("passes when the client config and backend health are both healthy", async () => {
+    const result = await evaluateReleaseGate({
+      env: { VITE_API_BASE_URL: "https://backend.example.com" },
+      backendUrl: "https://backend.example.com",
+      getStatus: async () => 200,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.summary).toMatch(/healthy/i);
+  });
+});
 
 describe("Frontend API-URL env validation", () => {
   it("accepts a valid https URL", () => {

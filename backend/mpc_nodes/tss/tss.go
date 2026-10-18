@@ -11,6 +11,7 @@ import (
 	"sync"
 
 	"github.com/decred/dcrd/dcrec/secp256k1/v4"
+	"github.com/decred/dcrd/dcrec/secp256k1/v4/ecdsa"
 	"github.com/pkg/errors"
 )
 
@@ -59,17 +60,21 @@ func (ks *KeyShare) PublicKey() (*secp256k1.PublicKey, error) {
 		return nil, errors.New("no public keys available")
 	}
 
-	// Aggregate public keys
+	// Aggregate public keys via elliptic curve point addition
+	curve := secp256k1.S256()
 	var aggX, aggY *big.Int
-	aggX = big.NewInt(0)
-	aggY = big.NewInt(0)
-
-	for _, pk := range ks.PublicKeys {
-		aggX.Add(aggX, pk.X())
-		aggY.Add(aggY, pk.Y())
+	for i, pk := range ks.PublicKeys {
+		if i == 0 {
+			aggX, aggY = pk.X(), pk.Y()
+			continue
+		}
+		aggX, aggY = curve.Add(aggX, aggY, pk.X(), pk.Y())
 	}
 
-	return secp256k1.NewPublicKey(aggX, aggY), nil
+	var fx, fy secp256k1.FieldVal
+	fx.SetBytes(bigIntToBytes32(aggX))
+	fy.SetBytes(bigIntToBytes32(aggY))
+	return secp256k1.NewPublicKey(&fx, &fy), nil
 }
 
 // LocalSecretShare holds the local secret share with commitment
@@ -108,12 +113,12 @@ func (e *TSSError) Error() string {
 
 // Common error codes
 const (
-	ErrInvalidThreshold  = "INVALID_THRESHOLD"
-	ErrInvalidShare      = "INVALID_SHARE"
-	ErrInvalidSignature  = "INVALID_SIGNATURE"
-	ErrKeyGenFailed      = "KEYGEN_FAILED"
-	ErrSignFailed        = "SIGN_FAILED"
-	ErrVerifyFailed      = "VERIFY_FAILED"
+	ErrInvalidThreshold   = "INVALID_THRESHOLD"
+	ErrInvalidShare       = "INVALID_SHARE"
+	ErrInvalidSignature   = "INVALID_SIGNATURE"
+	ErrKeyGenFailed       = "KEYGEN_FAILED"
+	ErrSignFailed         = "SIGN_FAILED"
+	ErrVerifyFailed       = "VERIFY_FAILED"
 	ErrCommitmentMismatch = "COMMITMENT_MISMATCH"
 )
 
@@ -324,12 +329,12 @@ type TSSCoordinator struct {
 
 // SigningSession holds state for a signing operation
 type SigningSession struct {
-	ID           string
-	MessageHash  []byte
-	Shares       map[string]*SigningShare
-	Completed    bool
-	Result       *Signature
-	mu           sync.Mutex
+	ID          string
+	MessageHash []byte
+	Shares      map[string]*SigningShare
+	Completed   bool
+	Result      *Signature
+	mu          sync.Mutex
 }
 
 // NewTSSCoordinator creates a new TSS coordinator
@@ -374,7 +379,8 @@ func (c *TSSCoordinator) StartSigningSession(messageHash []byte) (*SigningSessio
 		}
 	}
 
-	sessionID := hex.EncodeToString(sha256.Sum256(messageHash))
+	sessionHash := sha256.Sum256(messageHash)
+	sessionID := hex.EncodeToString(sessionHash[:])
 
 	session := &SigningSession{
 		ID:          sessionID,
@@ -480,7 +486,23 @@ func (c *TSSCoordinator) GetSignatureResult(sessionID string) (*Signature, error
 
 // VerifySignature verifies a TSS signature
 func VerifySignature(publicKey *secp256k1.PublicKey, messageHash []byte, signature *Signature) bool {
-	return secp256k1.VerifySignature(publicKey.SerializeUncompressed(), messageHash, signature.R.Bytes(), signature.S.Bytes())
+	var r, s secp256k1.ModNScalar
+	r.SetBytes(bigIntToBytes32(signature.R))
+	s.SetBytes(bigIntToBytes32(signature.S))
+	sig := ecdsa.NewSignature(&r, &s)
+	return sig.Verify(messageHash, publicKey)
+}
+
+// bigIntToBytes32 converts a big.Int to a 32-byte big-endian array, used for
+// feeding values into the secp256k1 v4 API which expects fixed-size inputs.
+func bigIntToBytes32(n *big.Int) *[32]byte {
+	var arr [32]byte
+	b := n.Bytes()
+	if len(b) > 32 {
+		b = b[len(b)-32:]
+	}
+	copy(arr[32-len(b):], b)
+	return &arr
 }
 
 // ComputeMessageHash computes the SHA256 hash of a message for signing

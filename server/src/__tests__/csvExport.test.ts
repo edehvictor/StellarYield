@@ -2,8 +2,11 @@ import {
   generateCSV,
   createCSVStream,
   createExportFilename,
+  auditCsvRows,
   type TransactionRecord,
 } from "../services/export";
+import { exportService } from "../services/exportService";
+import { type VaultPosition } from "../services/portfolioService";
 
 // ── generateCSV ─────────────────────────────────────────────────────────
 
@@ -125,6 +128,53 @@ describe("generateCSV", () => {
     ];
     const csv = generateCSV(records);
     expect(csv).toContain("1000.00");
+  });
+});
+
+// ── auditCsvRows ─────────────────────────────────────────────────────────
+
+describe("auditCsvRows", () => {
+  it("generates a correct checksum and audit object for valid records", () => {
+    const records: TransactionRecord[] = [
+      {
+        date: "2025-01-15T00:00:00.000Z",
+        action: "DEPOSIT",
+        asset: "USDC",
+        amount: 1000,
+        usdValue: 1000,
+        txHash: "abc123",
+      },
+    ];
+    const audit = auditCsvRows(records);
+    expect(audit.rowCount).toBe(1);
+    expect(audit.schemaVersion).toBe(1);
+    expect(audit.isValid).toBe(true);
+    expect(audit.checksum).toMatch(/^[a-f0-9]{64}$/);
+  });
+
+  it("handles empty records", () => {
+    const audit = auditCsvRows([]);
+    expect(audit.rowCount).toBe(0);
+    expect(audit.isValid).toBe(true);
+    expect(audit.checksum).toMatch(/^[a-f0-9]{64}$/);
+  });
+
+  it("returns isValid false for invalid records", () => {
+    const records = [
+      {
+        date: "invalid-date",
+        action: "",
+        asset: "",
+        amount: -100,
+        usdValue: -50,
+        txHash: "",
+      },
+    ] as any;
+    
+    const audit = auditCsvRows(records);
+    expect(audit.rowCount).toBe(1);
+    expect(audit.isValid).toBe(false);
+    expect(audit.checksum).toMatch(/^[a-f0-9]{64}$/);
   });
 });
 
@@ -254,5 +304,60 @@ describe("createExportFilename", () => {
     expect(filename).not.toMatch(/[^a-zA-Z0-9._-]/);
     expect(filename).not.toContain("..");
     expect(filename).toMatch(/^stellaryield-tax-report-/);
+  });
+});
+
+describe("Portfolio Export Validation", () => {
+  const mockPositions: VaultPosition[] = [
+    { protocol: "Blend", asset: "USDC", depositedUsd: 1000, currentValueUsd: 1100 },
+    { protocol: "Soroswap", asset: "XLM", depositedUsd: 2000, currentValueUsd: 2200 },
+  ];
+
+  it("should fail clearly for empty filters (no asset class specified)", async () => {
+    await expect(exportService.exportPortfolio(mockPositions, {}))
+      .rejects.toThrow("Export filters cannot be empty. Please select at least one asset class.");
+
+    await expect(exportService.exportPortfolio(mockPositions, { assetClass: [] }))
+      .rejects.toThrow("Export filters cannot be empty. Please select at least one asset class.");
+
+    await expect(exportService.exportPortfolio(mockPositions, { assetClass: "" }))
+      .rejects.toThrow("Export filters cannot be empty. Please select at least one asset class.");
+  });
+
+  it("should fail clearly for unsupported asset classes", async () => {
+    await expect(exportService.exportPortfolio(mockPositions, { assetClass: "invalid" }))
+      .rejects.toThrow('Unsupported asset class: "invalid". Supported classes are: stablecoin, crypto.');
+
+    await expect(exportService.exportPortfolio(mockPositions, { assetClass: ["stablecoin", "invalid"] }))
+      .rejects.toThrow('Unsupported asset class: "invalid". Supported classes are: stablecoin, crypto.');
+  });
+
+  it("should fail clearly with friendly empty-result message when no rows match valid filters", async () => {
+    const stablecoinOnlyPositions = [
+      { protocol: "Blend", asset: "USDC", depositedUsd: 1000, currentValueUsd: 1100 }
+    ];
+    await expect(exportService.exportPortfolio(stablecoinOnlyPositions, { assetClass: "crypto" }))
+      .rejects.toThrow("No portfolio data matches the selected filters.");
+  });
+
+  it("should export mixed asset sets correctly when all are selected", async () => {
+    const csv = await exportService.exportPortfolio(mockPositions, { assetClass: "stablecoin,crypto" });
+    const lines = csv.split("\n");
+    expect(lines).toHaveLength(3); // Header + 2 data rows
+    expect(lines[0]).toBe("Protocol,Asset,Deposited USD,Current Value USD,Asset Class");
+    expect(lines[1]).toBe("Blend,USDC,1000.00,1100.00,stablecoin");
+    expect(lines[2]).toBe("Soroswap,XLM,2000.00,2200.00,crypto");
+  });
+
+  it("should export single asset class filters correctly", async () => {
+    const csvStablecoin = await exportService.exportPortfolio(mockPositions, { assetClass: "stablecoin" });
+    const linesStable = csvStablecoin.split("\n");
+    expect(linesStable).toHaveLength(2); // Header + 1 data row
+    expect(linesStable[1]).toBe("Blend,USDC,1000.00,1100.00,stablecoin");
+
+    const csvCrypto = await exportService.exportPortfolio(mockPositions, { assetClass: "crypto" });
+    const linesCrypto = csvCrypto.split("\n");
+    expect(linesCrypto).toHaveLength(2); // Header + 1 data row
+    expect(linesCrypto[1]).toBe("Soroswap,XLM,2000.00,2200.00,crypto");
   });
 });

@@ -85,21 +85,41 @@ impl YieldVault {
         amount: i128,
         referrer: Address,
     ) -> Result<i128, VaultError> {
-        if from != referrer {
-            // Auth will be checked by deposit() below, so skip here
-            let _ = Self::register_referral_inner(&env, &from, &referrer);
+        Self::require_init(&env)?;
 
-            let current_tvl: i128 = env
-                .storage()
-                .persistent()
-                .get(&ReferralKey::ReferredTvl(referrer.clone()))
-                .unwrap_or(0);
-            env.storage()
-                .persistent()
-                .set(&ReferralKey::ReferredTvl(referrer), &(current_tvl + amount));
-        }
+        // A wallet's referrer is bound at its first eligible deposit and can
+        // never be replaced by a later deposit.
+        let stored_referrer: Option<Address> = env
+            .storage()
+            .persistent()
+            .get(&ReferralKey::Referrer(from.clone()));
 
-        Self::deposit(env, from, amount, 0)
+        let canonical_referrer = match stored_referrer {
+            Some(stored) => {
+                if stored != referrer {
+                    return Err(VaultError::Unauthorized);
+                }
+                stored
+            }
+            None => {
+                Self::register_referral_inner(&env, &from, &referrer)?;
+                referrer
+            }
+        };
+
+        let shares = Self::deposit(env.clone(), from, amount, 0)?;
+
+        let referred_tvl: i128 = env
+            .storage()
+            .persistent()
+            .get(&ReferralKey::ReferredTvl(canonical_referrer.clone()))
+            .unwrap_or(0);
+        env.storage().persistent().set(
+            &ReferralKey::ReferredTvl(canonical_referrer),
+            &referred_tvl.saturating_add(amount),
+        );
+
+        Ok(shares)
     }
 
     pub fn claim_referral_rewards_impl(env: Env, referrer: Address) -> Result<i128, VaultError> {

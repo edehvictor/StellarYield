@@ -33,6 +33,10 @@ pub enum ZapError {
     Unauthorized = 4,
     SlippageExceeded = 5,
     SwapFailed = 6,
+    /// The ledger closed after the quote's deadline; request a fresh quote.
+    /// Uses its own range so clients can decode it without knowing which
+    /// contract failed (1–11 overlap with `VaultError`).
+    QuoteExpired = 4001,
 }
 
 // ── Contract ─────────────────────────────────────────────────────────────────
@@ -111,6 +115,86 @@ impl Zap {
         allow_partial: bool,
     ) -> Result<i128, ZapError> {
         Self::require_init(&env)?;
+        Self::execute_zap(
+            env,
+            user,
+            input_token,
+            vault_token,
+            vault,
+            amount_in,
+            min_amount_out,
+            min_shares_out,
+            expected_amount_out,
+            allow_partial,
+        )
+    }
+
+    /// [`zap_deposit`](Self::zap_deposit) bound to a quote deadline.
+    ///
+    /// Rejects the call when the ledger closes after `deadline`, so a
+    /// transaction built from a quote preview cannot execute at a price the
+    /// quote no longer covers (e.g. after sitting in a wallet prompt).
+    ///
+    /// # Arguments
+    ///
+    /// Same as [`zap_deposit`](Self::zap_deposit), plus:
+    ///
+    /// * `deadline` — Unix timestamp (seconds) of the quote's `expiresAt`. The
+    ///   boundary is inclusive: a ledger closing exactly at `deadline` succeeds,
+    ///   matching the off-chain check (expired only when `now > expiresAt`).
+    ///
+    /// # Errors
+    ///
+    /// * [`ZapError::QuoteExpired`] — `ledger.timestamp() > deadline`. Checked
+    ///   before any token moves.
+    /// * Otherwise the same errors as [`zap_deposit`](Self::zap_deposit).
+    pub fn zap_deposit_with_deadline(
+        env: Env,
+        user: Address,
+        input_token: Address,
+        vault_token: Address,
+        vault: Address,
+        amount_in: i128,
+        min_amount_out: i128,
+        min_shares_out: i128,
+        expected_amount_out: i128,
+        allow_partial: bool,
+        deadline: u64,
+    ) -> Result<i128, ZapError> {
+        Self::require_init(&env)?;
+        if env.ledger().timestamp() > deadline {
+            return Err(ZapError::QuoteExpired);
+        }
+        Self::execute_zap(
+            env,
+            user,
+            input_token,
+            vault_token,
+            vault,
+            amount_in,
+            min_amount_out,
+            min_shares_out,
+            expected_amount_out,
+            allow_partial,
+        )
+    }
+
+    // ── Internal ─────────────────────────────────────────────────────
+
+    /// Shared swap-and-deposit body behind both public entry points. Callers
+    /// must have run `require_init` and any deadline check first.
+    fn execute_zap(
+        env: Env,
+        user: Address,
+        input_token: Address,
+        vault_token: Address,
+        vault: Address,
+        amount_in: i128,
+        min_amount_out: i128,
+        min_shares_out: i128,
+        expected_amount_out: i128,
+        allow_partial: bool,
+    ) -> Result<i128, ZapError> {
         user.require_auth();
 
         if amount_in <= 0 {
@@ -118,7 +202,11 @@ impl Zap {
         }
 
         let zap_addr = env.current_contract_address();
-        let dex_router: Address = env.storage().instance().get(&DataKey::DexRouter).unwrap();
+        let dex_router: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::DexRouter)
+            .ok_or(ZapError::NotInitialized)?;
 
         // Step 1: Transfer input tokens from user to this contract
         let input_client = token::Client::new(&env, &input_token);
@@ -219,7 +307,11 @@ impl Zap {
         Self::require_init(&env)?;
         admin.require_auth();
 
-        let stored_admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(ZapError::NotInitialized)?;
         if admin != stored_admin {
             return Err(ZapError::Unauthorized);
         }
@@ -695,6 +787,36 @@ mod tests {
             &1_000,
         );
         assert_eq!(res, Err(Ok(ZapError::SwapFailed)));
+    fn test_set_dex_router_missing_admin_returns_typed_error() {
+        let t = setup_zap_env();
+        t.env.as_contract(&t.zap_id, || {
+            t.env.storage().instance().remove(&DataKey::Admin);
+        });
+
+        let new_router = Address::generate(&t.env);
+        let result = t.zap.try_set_dex_router(&t.user, &new_router);
+        assert_eq!(result, Err(Ok(ZapError::NotInitialized)));
+    }
+
+    #[test]
+    fn test_zap_deposit_missing_router_returns_typed_error() {
+        let t = setup_zap_env();
+        t.env.as_contract(&t.zap_id, || {
+            t.env.storage().instance().remove(&DataKey::DexRouter);
+        });
+
+        let result = t.zap.try_zap_deposit(
+            &t.user,
+            &t.input_token,
+            &t.vault_token,
+            &t.vault_id,
+            &1_000,
+            &500,
+            &1,
+            &900,
+            &false,
+        );
+        assert_eq!(result, Err(Ok(ZapError::NotInitialized)));
     }
 
     // ── Event assertion tests (#1045) ──────────────────────────────────
@@ -821,6 +943,7 @@ mod tests {
                 *contract == t.zap_id && event_topic(&t.env, topics) == symbol_short!("zap_part")
             })
             .map(|(_, _, data)| data.clone())
+            .map(|(_, _, data)| data)
             .unwrap();
         let decoded: (Address, Address, Address, i128, i128, i128) = part_data.into_val(&t.env);
         assert_eq!(decoded.0, t.user);
@@ -863,6 +986,7 @@ mod tests {
                 *contract == t.zap_id && event_topic(&t.env, topics) == symbol_short!("zap_ref")
             })
             .map(|(_, _, data)| data.clone())
+            .map(|(_, _, data)| data)
             .unwrap();
         let decoded: (Address, Address, i128, Symbol) = ref_data.into_val(&t.env);
         assert_eq!(decoded.0, t.user);
@@ -928,5 +1052,114 @@ mod tests {
             count_zap_events(&t.env, &t.zap_id, symbol_short!("zap_ref")),
             0
         );
+    }
+
+    // ── Quote deadline (zap_deposit_with_deadline) ───────────────────
+
+    fn set_ledger_time(env: &Env, ts: u64) {
+        use soroban_sdk::testutils::Ledger;
+        env.ledger().set_timestamp(ts);
+    }
+
+    #[test]
+    fn test_deadline_in_future_executes_swap_and_deposit() {
+        let t = setup_zap_env();
+        set_ledger_time(&t.env, 1_000);
+        t.router.configure(&t.zap_id, &900, &1_000);
+
+        let shares = t.zap.zap_deposit_with_deadline(
+            &t.user,
+            &t.input_token,
+            &t.vault_token,
+            &t.vault_id,
+            &1_000,
+            &800,
+            &1,
+            &900,
+            &false,
+            &1_060,
+        );
+
+        assert_eq!(shares, 900);
+        assert_eq!(
+            count_zap_events(&t.env, &t.zap_id, symbol_short!("zap_dep")),
+            1
+        );
+    }
+
+    #[test]
+    fn test_deadline_equal_to_ledger_time_is_still_valid() {
+        let t = setup_zap_env();
+        set_ledger_time(&t.env, 1_060);
+        StellarAssetClient::new(&t.env, &t.vault_token).mint(&t.user, &1_000);
+
+        let shares = t.zap.zap_deposit_with_deadline(
+            &t.user,
+            &t.vault_token,
+            &t.vault_token,
+            &t.vault_id,
+            &1_000,
+            &0,
+            &1,
+            &0,
+            &false,
+            &1_060,
+        );
+        assert_eq!(shares, 1_000);
+    }
+
+    #[test]
+    fn test_expired_deadline_rejected_before_any_transfer() {
+        let t = setup_zap_env();
+        set_ledger_time(&t.env, 1_061);
+        t.router.configure(&t.zap_id, &900, &1_000);
+        let input = token::Client::new(&t.env, &t.input_token);
+        let before = input.balance(&t.user);
+
+        let result = t.zap.try_zap_deposit_with_deadline(
+            &t.user,
+            &t.input_token,
+            &t.vault_token,
+            &t.vault_id,
+            &1_000,
+            &800,
+            &1,
+            &900,
+            &false,
+            &1_060,
+        );
+
+        assert_eq!(result, Err(Ok(ZapError::QuoteExpired)));
+        assert_eq!(input.balance(&t.user), before);
+        assert_eq!(
+            count_zap_events(&t.env, &t.zap_id, symbol_short!("zap_dep")),
+            0
+        );
+    }
+
+    #[test]
+    fn test_deadline_entry_point_keeps_slippage_guard() {
+        let t = setup_zap_env();
+        set_ledger_time(&t.env, 1_000);
+        t.router.configure(&t.zap_id, &700, &1_000);
+
+        let result = t.zap.try_zap_deposit_with_deadline(
+            &t.user,
+            &t.input_token,
+            &t.vault_token,
+            &t.vault_id,
+            &1_000,
+            &800,
+            &1,
+            &900,
+            &false,
+            &1_060,
+        );
+        assert_eq!(result, Err(Ok(ZapError::SlippageExceeded)));
+    }
+
+    #[test]
+    fn test_quote_expired_code_is_stable() {
+        assert_eq!(ZapError::QuoteExpired as u32, 4001);
     }
 }

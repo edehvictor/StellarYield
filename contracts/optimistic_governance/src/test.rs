@@ -484,3 +484,168 @@ fn test_before_start_execute_fails_and_after_expiry_execute_ok() {
         ProposalStatus::Executed
     );
 }
+
+// ── Execution readiness checks (#1327) ─────────────────────────────────
+
+#[test]
+fn test_is_execution_ready_true_after_window_elapses() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let ve_yield = env.register(MockVeYield, ());
+    let target = env.register(TargetContract, ());
+    let gov_id = env.register(OptimisticGovernance, ());
+    let client = OptimisticGovernanceClient::new(&env, &gov_id);
+
+    let challenge_window: u64 = 100;
+    client.initialize(&admin, &ve_yield, &challenge_window);
+
+    let args: Vec<Val> = vec![&env, 1i128.into_val(&env)];
+    let proposal_id = client.propose(&admin, &target, &Symbol::new(&env, "action"), &args);
+
+    env.ledger().with_mut(|li| li.timestamp = challenge_window);
+
+    let readiness = client.is_execution_ready(&proposal_id);
+    assert!(readiness.is_ready);
+    assert!(readiness.blocking_reasons.is_empty());
+}
+
+#[test]
+fn test_is_execution_ready_reports_challenge_window_active() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let ve_yield = env.register(MockVeYield, ());
+    let target = env.register(TargetContract, ());
+    let gov_id = env.register(OptimisticGovernance, ());
+    let client = OptimisticGovernanceClient::new(&env, &gov_id);
+
+    let challenge_window: u64 = 100;
+    client.initialize(&admin, &ve_yield, &challenge_window);
+
+    let args: Vec<Val> = vec![&env, 1i128.into_val(&env)];
+    let proposal_id = client.propose(&admin, &target, &Symbol::new(&env, "action"), &args);
+
+    // still inside the challenge window
+    env.ledger()
+        .with_mut(|li| li.timestamp = challenge_window - 1);
+
+    let readiness = client.is_execution_ready(&proposal_id);
+    assert!(!readiness.is_ready);
+    assert_eq!(readiness.blocking_reasons.len(), 1);
+    assert_eq!(
+        readiness.blocking_reasons.get(0),
+        Some(Error::ChallengeWindowActive as u32)
+    );
+}
+
+#[test]
+fn test_is_execution_ready_reports_disputed() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let ve_yield = env.register(MockVeYield, ());
+    let target = env.register(TargetContract, ());
+    let gov_id = env.register(OptimisticGovernance, ());
+    let client = OptimisticGovernanceClient::new(&env, &gov_id);
+
+    let challenge_window: u64 = 100;
+    client.initialize(&admin, &ve_yield, &challenge_window);
+
+    let args: Vec<Val> = vec![&env, 1i128.into_val(&env)];
+    let proposal_id = client.propose(&admin, &target, &Symbol::new(&env, "action"), &args);
+
+    let disputer = Address::generate(&env);
+    client.dispute(&disputer, &proposal_id);
+
+    // even after the window elapses, a disputed proposal is still blocked
+    env.ledger().with_mut(|li| li.timestamp = challenge_window);
+
+    let readiness = client.is_execution_ready(&proposal_id);
+    assert!(!readiness.is_ready);
+    assert_eq!(
+        readiness.blocking_reasons.get(0),
+        Some(Error::ProposalDisputed as u32)
+    );
+}
+
+#[test]
+fn test_is_execution_ready_reports_already_executed() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let ve_yield = env.register(MockVeYield, ());
+    let target = env.register(TargetContract, ());
+    let gov_id = env.register(OptimisticGovernance, ());
+    let client = OptimisticGovernanceClient::new(&env, &gov_id);
+
+    let challenge_window: u64 = 100;
+    client.initialize(&admin, &ve_yield, &challenge_window);
+
+    let args: Vec<Val> = vec![&env, 1i128.into_val(&env)];
+    let proposal_id = client.propose(&admin, &target, &Symbol::new(&env, "action"), &args);
+
+    env.ledger().with_mut(|li| li.timestamp = challenge_window);
+    client.execute(&proposal_id);
+
+    let readiness = client.is_execution_ready(&proposal_id);
+    assert!(!readiness.is_ready);
+    assert_eq!(
+        readiness.blocking_reasons.get(0),
+        Some(Error::ProposalAlreadyExecuted as u32)
+    );
+}
+
+#[test]
+fn test_is_execution_ready_unknown_proposal_errors() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let ve_yield = env.register(MockVeYield, ());
+    let gov_id = env.register(OptimisticGovernance, ());
+    let client = OptimisticGovernanceClient::new(&env, &gov_id);
+
+    let challenge_window: u64 = 100;
+    client.initialize(&admin, &ve_yield, &challenge_window);
+
+    let result = client.try_is_execution_ready(&999);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_execute_and_is_execution_ready_agree_on_blocking_reason() {
+    // The first reason execute() reverts with must match the first entry
+    // is_execution_ready() reports, since both share the same check order.
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let ve_yield = env.register(MockVeYield, ());
+    let target = env.register(TargetContract, ());
+    let gov_id = env.register(OptimisticGovernance, ());
+    let client = OptimisticGovernanceClient::new(&env, &gov_id);
+
+    let challenge_window: u64 = 100;
+    client.initialize(&admin, &ve_yield, &challenge_window);
+
+    let args: Vec<Val> = vec![&env, 1i128.into_val(&env)];
+    let proposal_id = client.propose(&admin, &target, &Symbol::new(&env, "action"), &args);
+
+    env.ledger()
+        .with_mut(|li| li.timestamp = challenge_window - 1);
+
+    let readiness = client.is_execution_ready(&proposal_id);
+    let execute_result = client.try_execute(&proposal_id);
+
+    let execute_error = match execute_result {
+        Err(Ok(e)) => e as u32,
+        other => panic!("expected a contract error, got {:?}", other),
+    };
+
+    assert_eq!(readiness.blocking_reasons.get(0), Some(execute_error));
+}

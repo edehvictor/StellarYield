@@ -2,45 +2,30 @@ import { PrismaClient } from '@prisma/client';
 
 const prisma = new PrismaClient();
 
-/**
- * Represents a single allocation decision for audit trails.
- * Requirements: Immutable, searchable, no secrets.
- */
 export interface AllocationProvenance {
-  decisionId: string;      // Unique UUID
-  vaultId: string;         // Target Vault
-  strategyVersion: string; // Current strategy logic version
-  timestamp: number;       // ISO or Unix timestamp for time-window lookups
-  
-  // Input triggers (e.g., APY changes, Liquidity shifts)
+  decisionId: string;
+  vaultId: string;
+  strategyVersion: string;
+  timestamp: number;
   triggerContext: {
-    condition: string;     // e.g., "MARKET_VOLATILITY_THRESHOLD"
-    rawInputs: Record<string, number>; 
+    condition: string;
+    rawInputs: Record<string, number>;
   };
-
-  // The actual change made
   allocationChange: {
     previous: Record<string, number>;
     updated: Record<string, number>;
   };
-
-  signer: string;          // Wallet address that triggered/signed the change
+  signer: string;
 }
 
 export class ProvenanceService {
-  /**
-   * Saves an allocation decision to the database.
-   * Implements immutability by preventing overrides of existing decision IDs.
-   */
   async saveDecision(provenance: AllocationProvenance): Promise<AllocationProvenance> {
     const existing = await prisma.allocationProvenance.findUnique({
       where: { decisionId: provenance.decisionId },
     });
-
     if (existing) {
       throw new Error(`Allocation record with decisionId ${provenance.decisionId} already exists and is immutable.`);
     }
-
     const created = await prisma.allocationProvenance.create({
       data: {
         decisionId: provenance.decisionId,
@@ -54,13 +39,9 @@ export class ProvenanceService {
         signer: provenance.signer,
       },
     });
-
     return this.mapToDTO(created);
   }
 
-  /**
-   * Retrieves historical allocation records with optional filters.
-   */
   async getHistory(filters: {
     vaultId?: string;
     startTime?: number;
@@ -74,13 +55,11 @@ export class ProvenanceService {
       if (filters.startTime) where.timestamp.gte = new Date(filters.startTime);
       if (filters.endTime) where.timestamp.lte = new Date(filters.endTime);
     }
-
     const records = await prisma.allocationProvenance.findMany({
       where,
       orderBy: { timestamp: 'desc' },
       take: filters.limit || 50,
     });
-
     return records.map((r) => this.mapToDTO(r));
   }
 
@@ -104,3 +83,43 @@ export class ProvenanceService {
 }
 
 export const provenanceService = new ProvenanceService();
+
+export interface BuildProvenance {
+  version: string;
+  commit: string;
+  buildTime: string;
+}
+
+const buildMetadata: Readonly<BuildProvenance> = Object.freeze({
+  version: process.env.npm_package_version ?? process.env.GIT_VERSION ?? 'unknown',
+  commit: process.env.GIT_COMMIT ?? process.env.SOURCE_VERSION ?? 'unknown',
+  buildTime: process.env.BUILD_TIME ?? process.env.BUILD_TIMESTAMP ?? 'unknown',
+});
+
+export class BuildProvenanceService {
+  getBuildProvenance(): BuildProvenance {
+    return buildMetadata;
+  }
+
+  stamp(): string {
+    return `version=${buildMetadata.version};commit=${buildMetadata.commit};buildTime=${buildMetadata.buildTime}`;
+  }
+
+  static parse(stamp: string): BuildProvenance {
+    const parts = stamp.split(';');
+    const map: Record<string, string> = {};
+    for (const part of parts) {
+      const idx = part.indexOf('=');
+      if (idx > 0) {
+        map[part.slice(0, idx)] = part.slice(idx + 1);
+      }
+    }
+    return {
+      version: map['version'] ?? 'unknown',
+      commit: map['commit'] ?? 'unknown',
+      buildTime: map['buildTime'] ?? 'unknown',
+    };
+  }
+}
+
+export const buildProvenanceService = new BuildProvenanceService();

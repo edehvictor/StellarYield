@@ -11,8 +11,106 @@ export interface FeeOracleResponse {
     congestionRatio: number;
   };
   fees: Record<FeeLevel, number>;
+  /** Buffered fees — oracle estimate + network-specific buffer applied (#1188). */
+  bufferedFees: Record<FeeLevel, number>;
+  /** The buffer configuration applied to produce bufferedFees. */
+  feeBuffer: NetworkFeeBufferConfig;
   generatedAt: string;
 }
+
+// ── Fee Buffer Configuration (#1188) ────────────────────────────────────────
+
+/**
+ * Per-network fee buffer settings. The buffer is a multiplier applied on top
+ * of the oracle estimate before presenting a quote or building a transaction.
+ *
+ * Rationale: Different Stellar networks have different fee behaviors.
+ * - Mainnet: small conservative buffer (5 %) to ensure inclusion.
+ * - Testnet: slightly larger buffer (10 %) since test fees fluctuate more.
+ * - Futurenet: aggressive buffer (20 %) for an early/volatile test chain.
+ *
+ * Override via environment variable: NETWORK_FEE_BUFFER_<NETWORK_KEY>=<pct>
+ * where <NETWORK_KEY> is one of MAINNET | TESTNET | FUTURENET | DEFAULT.
+ */
+export interface NetworkFeeBufferConfig {
+  /** Percentage buffer added to the oracle estimate (e.g. 5 = +5 %). */
+  bufferPct: number;
+  /** Minimum fee in stroops after applying the buffer. */
+  minFeeStroops: number;
+}
+
+const DEFAULT_BUFFER_PCT = 5;
+const DEFAULT_MIN_FEE_STROOPS = 100;
+
+function parseEnvBufferPct(key: string, fallback: number): number {
+  const raw = process.env[key];
+  if (!raw) return fallback;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
+}
+
+/**
+ * Built-in per-network defaults. Configurable via env vars.
+ *
+ * Network key is derived from the STELLAR_NETWORK_PASSPHRASE env var:
+ *   "Public Global Stellar Network…"  → mainnet
+ *   "Test SDF Network…"               → testnet
+ *   "Test SDF Future Network…"        → futurenet
+ */
+export const NETWORK_FEE_BUFFERS: Record<string, NetworkFeeBufferConfig> = {
+  mainnet: {
+    bufferPct: parseEnvBufferPct("NETWORK_FEE_BUFFER_MAINNET", 5),
+    minFeeStroops: DEFAULT_MIN_FEE_STROOPS,
+  },
+  testnet: {
+    bufferPct: parseEnvBufferPct("NETWORK_FEE_BUFFER_TESTNET", 10),
+    minFeeStroops: DEFAULT_MIN_FEE_STROOPS,
+  },
+  futurenet: {
+    bufferPct: parseEnvBufferPct("NETWORK_FEE_BUFFER_FUTURENET", 20),
+    minFeeStroops: DEFAULT_MIN_FEE_STROOPS,
+  },
+  default: {
+    bufferPct: parseEnvBufferPct("NETWORK_FEE_BUFFER_DEFAULT", DEFAULT_BUFFER_PCT),
+    minFeeStroops: DEFAULT_MIN_FEE_STROOPS,
+  },
+};
+
+/**
+ * Resolve the network key from a Stellar network passphrase.
+ * Falls back to "default" for any unrecognised passphrase.
+ */
+export function resolveNetworkKey(passphrase: string): string {
+  const lower = passphrase.toLowerCase();
+  if (lower.includes("public global stellar")) return "mainnet";
+  if (lower.includes("test sdf future")) return "futurenet";
+  if (lower.includes("test sdf")) return "testnet";
+  return "default";
+}
+
+/**
+ * Retrieve the fee buffer config for a given network passphrase.
+ * Missing network settings fall back to the documented default.
+ */
+export function getNetworkFeeBuffer(passphrase: string): NetworkFeeBufferConfig {
+  const key = resolveNetworkKey(passphrase);
+  return NETWORK_FEE_BUFFERS[key] ?? NETWORK_FEE_BUFFERS.default;
+}
+
+/**
+ * Apply the network fee buffer to a raw fee estimate (in stroops).
+ *
+ * @param rawFee    - The oracle-reported fee in stroops.
+ * @param passphrase - The Stellar network passphrase (used to select buffer).
+ * @returns Buffered fee in stroops, clamped to the network minimum.
+ */
+export function applyFeeBuffer(rawFee: number, passphrase: string): number {
+  const config = getNetworkFeeBuffer(passphrase);
+  const buffered = rawFee * (1 + config.bufferPct / 100);
+  return Math.max(config.minFeeStroops, Math.round(buffered));
+}
+
+// ── Oracle constants ─────────────────────────────────────────────────────────
 
 const HORIZON_URL =
   process.env.STELLAR_HORIZON_URL ?? "https://horizon-testnet.stellar.org";
@@ -54,7 +152,13 @@ export async function getFeeOracleEstimate(): Promise<FeeOracleResponse> {
 
   const records = ledgers.records;
   if (records.length === 0) {
-    const fallback = {
+    const buffer = getNetworkFeeBuffer(NETWORK_PASSPHRASE);
+    const fallbackFees = {
+      low: MIN_FEE_STROOPS,
+      average: toSafeFee(MIN_FEE_STROOPS * 1.2),
+      high: toSafeFee(MIN_FEE_STROOPS * 1.5),
+    };
+    const fallback: FeeOracleResponse = {
       networkPassphrase: NETWORK_PASSPHRASE,
       sampleSize: 0,
       utilization: {
@@ -62,11 +166,13 @@ export async function getFeeOracleEstimate(): Promise<FeeOracleResponse> {
         maxTxSetSize: 0,
         congestionRatio: 0,
       },
-      fees: {
-        low: MIN_FEE_STROOPS,
-        average: toSafeFee(MIN_FEE_STROOPS * 1.2),
-        high: toSafeFee(MIN_FEE_STROOPS * 1.5),
+      fees: fallbackFees,
+      bufferedFees: {
+        low: applyFeeBuffer(fallbackFees.low, NETWORK_PASSPHRASE),
+        average: applyFeeBuffer(fallbackFees.average, NETWORK_PASSPHRASE),
+        high: applyFeeBuffer(fallbackFees.high, NETWORK_PASSPHRASE),
       },
+      feeBuffer: buffer,
       generatedAt: new Date().toISOString(),
     };
     cachedResult = fallback;
@@ -82,6 +188,9 @@ export async function getFeeOracleEstimate(): Promise<FeeOracleResponse> {
   const congestionRatio = averageTxSetSize / maxTxSetSize;
   const averageBaseFee = baseFees.reduce((sum, fee) => sum + fee, 0) / baseFees.length;
 
+  const computedFees = computePriorityFees(averageBaseFee, congestionRatio);
+  const buffer = getNetworkFeeBuffer(NETWORK_PASSPHRASE);
+
   const result: FeeOracleResponse = {
     networkPassphrase: NETWORK_PASSPHRASE,
     sampleSize: records.length,
@@ -90,7 +199,13 @@ export async function getFeeOracleEstimate(): Promise<FeeOracleResponse> {
       maxTxSetSize,
       congestionRatio,
     },
-    fees: computePriorityFees(averageBaseFee, congestionRatio),
+    fees: computedFees,
+    bufferedFees: {
+      low: applyFeeBuffer(computedFees.low, NETWORK_PASSPHRASE),
+      average: applyFeeBuffer(computedFees.average, NETWORK_PASSPHRASE),
+      high: applyFeeBuffer(computedFees.high, NETWORK_PASSPHRASE),
+    },
+    feeBuffer: buffer,
     generatedAt: new Date().toISOString(),
   };
 

@@ -451,6 +451,17 @@
                     },
                     {
                       "key": {
+                        "symbol": "proceeds_withdrawn"
+                      },
+                      "val": {
+                        "i128": {
+                          "hi": 0,
+                          "lo": 0
+                        }
+                      }
+                    },
+                    {
+                      "key": {
                         "symbol": "start_price"
                       },
                       "val": {
@@ -474,6 +485,14 @@
                       },
                       "val": {
                         "u32": 0
+                      }
+                    },
+                    {
+                      "key": {
+                        "symbol": "unsold_withdrawn"
+                      },
+                      "val": {
+                        "bool": false
                       }
                     },
                     {

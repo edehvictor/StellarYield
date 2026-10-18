@@ -1,3 +1,8 @@
+import {
+  APY_DECIMALS,
+  roundTo as contractRoundTo,
+} from "../utils/yieldNormalizationContract";
+
 export interface NetYieldAssumptions {
   protocolFeeBps: number;
   vaultFeeBps: number;
@@ -64,9 +69,13 @@ function clampBps(value: number, min = 0, max = 3_000): number {
   return Math.min(max, Math.max(min, value));
 }
 
-function roundTo(value: number, digits = 2): number {
-  const factor = 10 ** digits;
-  return Math.round(value * factor) / factor;
+/**
+ * Emits at the yield normalization contract's APY precision and rounding rule.
+ * Kept as a local alias so every `roundTo(...)` call below reads the same, but
+ * the behaviour is now the shared one rather than a private `Math.round`.
+ */
+function roundTo(value: number, digits = APY_DECIMALS): number {
+  return contractRoundTo(value, digits);
 }
 
 function calculateFeeAttribution(

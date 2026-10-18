@@ -51,6 +51,14 @@ export interface StressMatrixConfig {
   liquidityStressMultiplier: number;
 }
 
+export interface ScenarioComparisonRow {
+  scenarioId: string;
+  scenarioName: string;
+  baseline: number;
+  stressed: number;
+  delta: number;
+}
+
 const DEFAULT_CONFIG: StressMatrixConfig = {
   trustThreshold: 30,
   confidenceThreshold: 40,
@@ -115,6 +123,20 @@ function mapStressToGuardrailContext(factors: Partial<Record<StressFactor, numbe
     liquidity: minLiquidityVal,
     isMarketPaused: trust > config.trustThreshold || oracle > config.oracleThreshold,
   };
+}
+
+function scoreStressFactors(factors: Partial<Record<StressFactor, number>>): number {
+  const liquidity = factors.liquidity ?? 0;
+  const trust = factors.trust ?? 0;
+  const confidence = factors.confidence ?? 0;
+  const oracle = factors.oracle ?? 0;
+
+  return liquidity + trust + confidence + oracle;
+}
+
+function escapeCsvValue(value: string | number): string {
+  const text = String(value);
+  return /[",\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
 }
 
 export class StressMatrixService {
@@ -225,6 +247,45 @@ export class StressMatrixService {
 
   getScenarios(): StressScenario[] {
     return [...this.scenarios];
+  }
+
+  getComparisonRows(): ScenarioComparisonRow[] {
+    const sortedScenarios = [...this.scenarios].sort((a, b) => {
+      const nameComparison = a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' });
+      if (nameComparison !== 0) return nameComparison;
+      return a.id.localeCompare(b.id, undefined, { numeric: true, sensitivity: 'base' });
+    });
+
+    return sortedScenarios.map((scenario) => {
+      const baseline = scoreStressFactors(scenario.factors);
+      const stressed = Math.round((baseline * 1.35) * 100) / 100;
+      const delta = Math.round((stressed - baseline) * 100) / 100;
+
+      return {
+        scenarioId: scenario.id,
+        scenarioName: scenario.name,
+        baseline,
+        stressed,
+        delta,
+      };
+    });
+  }
+
+  exportScenarioComparisonTable(rows: ScenarioComparisonRow[] = this.getComparisonRows()): string {
+    const header = ['scenarioId', 'scenarioName', 'baseline', 'stressed', 'delta'];
+    const lines = [header.join(',')];
+
+    for (const row of rows) {
+      lines.push([
+        escapeCsvValue(row.scenarioId),
+        escapeCsvValue(row.scenarioName),
+        escapeCsvValue(row.baseline),
+        escapeCsvValue(row.stressed),
+        escapeCsvValue(row.delta),
+      ].join(','));
+    }
+
+    return lines.join('\n');
   }
 
   updateConfig(config: Partial<StressMatrixConfig>): void {

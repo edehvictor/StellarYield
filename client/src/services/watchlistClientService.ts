@@ -1,16 +1,24 @@
 /**
  * Client-side service for managing yield opportunity watchlist.
  * Handles API communication for CRUD operations and threshold checks.
+ *
+ * Every call is scoped to a wallet address (sent as the x-wallet-address
+ * header, matching server/src/routes/watchlist.ts's getWalletAddress
+ * convention) so watchlist data never leaks across wallets on reconnect
+ * or wallet switch (#1173).
  */
 
 import { apiUrl, apiFetch } from "../lib/api";
 import type {
   YieldOpportunityWatchItem,
-  WatchlistItem,
   WatchlistResponse,
   ThresholdRule,
   ThresholdCheckResult,
 } from "../../../shared/types/watchlist";
+
+function walletHeaders(walletAddress: string): HeadersInit {
+  return { "x-wallet-address": walletAddress };
+}
 
 export class WatchlistClientService {
   private static readonly baseUrl = "/api/watchlist";
@@ -18,8 +26,10 @@ export class WatchlistClientService {
   /**
    * Get user's watchlist with summary
    */
-  static async getWatchlist(): Promise<WatchlistResponse> {
-    const response = await apiFetch(apiUrl(this.baseUrl));
+  static async getWatchlist(walletAddress: string): Promise<WatchlistResponse> {
+    const response = await apiFetch(apiUrl(this.baseUrl), {
+      headers: walletHeaders(walletAddress),
+    });
 
     if (!response.ok) {
       throw new Error(`Failed to fetch watchlist: ${response.statusText}`);
@@ -31,7 +41,7 @@ export class WatchlistClientService {
   /**
    * Get all unacknowledged alerts
    */
-  static async getAlerts(): Promise<{
+  static async getAlerts(walletAddress: string): Promise<{
     alerts: Array<{
       itemId: string;
       opportunityName: string;
@@ -43,7 +53,9 @@ export class WatchlistClientService {
     }>;
     total: number;
   }> {
-    const response = await apiFetch(apiUrl(`${this.baseUrl}/alerts`));
+    const response = await apiFetch(apiUrl(`${this.baseUrl}/alerts`), {
+      headers: walletHeaders(walletAddress),
+    });
 
     if (!response.ok) {
       throw new Error(`Failed to fetch alerts: ${response.statusText}`);
@@ -56,6 +68,7 @@ export class WatchlistClientService {
    * Add an opportunity to watchlist
    */
   static async addToWatchlist(
+    walletAddress: string,
     opportunityId: string,
     opportunityType: "protocol" | "pool" | "strategy",
     opportunityName: string,
@@ -64,7 +77,7 @@ export class WatchlistClientService {
   ): Promise<YieldOpportunityWatchItem> {
     const response = await apiFetch(apiUrl(this.baseUrl), {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", ...walletHeaders(walletAddress) },
       body: JSON.stringify({
         opportunityId,
         opportunityType,
@@ -84,9 +97,10 @@ export class WatchlistClientService {
   /**
    * Remove an opportunity from watchlist
    */
-  static async removeFromWatchlist(itemId: string): Promise<void> {
+  static async removeFromWatchlist(walletAddress: string, itemId: string): Promise<void> {
     const response = await apiFetch(apiUrl(`${this.baseUrl}/${itemId}`), {
       method: "DELETE",
+      headers: walletHeaders(walletAddress),
     });
 
     if (!response.ok) {
@@ -98,6 +112,7 @@ export class WatchlistClientService {
    * Add a threshold rule to a watchlist item
    */
   static async addThresholdRule(
+    walletAddress: string,
     itemId: string,
     type:
       | "apy_above"
@@ -110,7 +125,7 @@ export class WatchlistClientService {
   ): Promise<ThresholdRule> {
     const response = await apiFetch(apiUrl(`${this.baseUrl}/${itemId}/rules`), {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", ...walletHeaders(walletAddress) },
       body: JSON.stringify({ type, value, triggerOnce }),
     });
 
@@ -124,11 +139,16 @@ export class WatchlistClientService {
   /**
    * Remove a threshold rule
    */
-  static async removeThresholdRule(itemId: string, ruleId: string): Promise<void> {
+  static async removeThresholdRule(
+    walletAddress: string,
+    itemId: string,
+    ruleId: string
+  ): Promise<void> {
     const response = await apiFetch(
       apiUrl(`${this.baseUrl}/${itemId}/rules/${ruleId}`),
       {
         method: "DELETE",
+        headers: walletHeaders(walletAddress),
       }
     );
 
@@ -138,7 +158,9 @@ export class WatchlistClientService {
   }
 
   /**
-   * Check thresholds for a specific item
+   * Check thresholds for a specific item.
+   * Not wallet-scoped server-side (thresholds are keyed by itemId alone),
+   * so no wallet header is required here.
    */
   static async checkThresholds(
     itemId: string,
@@ -166,11 +188,16 @@ export class WatchlistClientService {
   /**
    * Acknowledge an alert
    */
-  static async acknowledgeAlert(itemId: string, ruleId: string): Promise<void> {
+  static async acknowledgeAlert(
+    walletAddress: string,
+    itemId: string,
+    ruleId: string
+  ): Promise<void> {
     const response = await apiFetch(
       apiUrl(`${this.baseUrl}/${itemId}/alerts/${ruleId}/acknowledge`),
       {
         method: "POST",
+        headers: walletHeaders(walletAddress),
       }
     );
 
@@ -180,7 +207,8 @@ export class WatchlistClientService {
   }
 
   /**
-   * Batch check thresholds for multiple items
+   * Batch check thresholds for multiple items.
+   * Not wallet-scoped server-side — see checkThresholds.
    */
   static async batchCheckThresholds(
     items: Array<{

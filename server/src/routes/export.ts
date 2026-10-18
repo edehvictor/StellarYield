@@ -9,7 +9,9 @@ import {
 } from "../services/export";
 import { exportService } from "../services/exportService";
 import { sendError } from "../utils/errorResponse";
+import { sendExportError } from "../utils/errorResponse";
 import { validateWalletAddress } from "../middleware/validation";
+import { safeWalletId } from "../utils/redact";
 
 type ExportPrismaClient = {
   userTransaction: {
@@ -121,7 +123,11 @@ exportRouter.get(
     try {
       const fetched = await fetchRawTransactions(address);
       if (fetched.status === "error") {
-        sendError(res, fetched.httpCode, fetched.errorCode, fetched.message);
+        sendExportError(res, null, {
+          statusCode: fetched.httpCode,
+          code: fetched.errorCode,
+          message: fetched.message,
+        });
         return;
       }
       const preview = buildTaxLotPreview(fetched.rawTxs);
@@ -132,12 +138,11 @@ exportRouter.get(
         encodeURIComponent(address),
         error,
       );
-      sendError(
-        res,
-        500,
-        "EXPORT_PREVIEW_FAILED",
-        "Failed to build tax export preview.",
-      );
+      sendExportError(res, error, {
+        statusCode: 500,
+        code: "EXPORT_PREVIEW_FAILED",
+        message: "Failed to build tax export preview.",
+      });
     }
   },
 );
@@ -163,18 +168,21 @@ exportRouter.get(
     try {
       const fetched = await fetchRawTransactions(address);
       if (fetched.status === "error") {
-        sendError(res, fetched.httpCode, fetched.errorCode, fetched.message);
+        sendExportError(res, null, {
+          statusCode: fetched.httpCode,
+          code: fetched.errorCode,
+          message: fetched.message,
+        });
         return;
       }
 
       const preview = buildTaxLotPreview(fetched.rawTxs);
       if (!preview.canDownload) {
-        sendError(
-          res,
-          409,
-          "PREVIEW_WARNINGS_PRESENT",
-          "Tax export has blocking warnings; resolve them via the preview endpoint before downloading.",
-        );
+        sendExportError(res, null, {
+          statusCode: 409,
+          code: "PREVIEW_WARNINGS_PRESENT",
+          message: "Tax export has blocking warnings; resolve them via the preview endpoint before downloading.",
+        });
         return;
       }
 
@@ -192,6 +200,11 @@ exportRouter.get(
             "IDEMPOTENCY_KEY_MISMATCH",
             "The idempotency key has already been used with different parameters.",
           );
+          sendExportError(res, null, {
+            statusCode: 422,
+            code: "IDEMPOTENCY_KEY_MISMATCH",
+            message: "The idempotency key has already been used with different parameters.",
+          });
           return;
         }
         if (check.status === "hit" && check.result) {
@@ -220,8 +233,12 @@ exportRouter.get(
         );
       }
     } catch (error) {
-      console.error("[export] Failed to export data for address: %s", encodeURIComponent(address), error);
-      sendError(res, 500, "EXPORT_FAILED", "Failed to generate export.");
+      console.error("[export] Failed to export data for: %s", safeWalletId(address), error);
+      sendExportError(res, error, {
+        statusCode: 500,
+        code: "EXPORT_FAILED",
+        message: "Failed to generate export.",
+      });
     }
   },
 );

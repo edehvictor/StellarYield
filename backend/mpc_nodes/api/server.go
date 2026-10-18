@@ -4,18 +4,15 @@ package api
 import (
 	"context"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/pkg/errors"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/stellaryield/mpc_nodes/coordinator"
 	"github.com/stellaryield/mpc_nodes/stellar"
 	"github.com/stellaryield/mpc_nodes/storage"
-	"github.com/stellaryield/mpc_nodes/tss"
 )
 
 // APIConfig holds API server configuration
@@ -32,17 +29,18 @@ type APIConfig struct {
 
 // MPCService provides MPC treasury operations
 type MPCService struct {
-	ceremonyCoord *coordinator.CeremonyCoordinator
+	ceremonyCoord  *coordinator.CeremonyCoordinator
 	treasuryClient *stellar.TreasuryClient
-	storage       storage.KeyShareStorage
-	audit         *storage.AuditLogger
+	storage        storage.KeyShareStorage
+	audit          *storage.AuditLogger
 }
 
 // Server is the HTTP API server
 type Server struct {
-	config  *APIConfig
-	service *MPCService
-	router  *gin.Engine
+	config    *APIConfig
+	service   *MPCService
+	router    *gin.Engine
+	readiness *ReadinessChecker
 }
 
 // APIResponse represents a standard API response
@@ -55,9 +53,9 @@ type APIResponse struct {
 
 // KeyGenRequest represents a key generation request
 type KeyGenRequest struct {
-	PartyID     string `json:"party_id" binding:"required"`
-	Threshold   int    `json:"threshold" binding:"required,min=1"`
-	TotalParties int   `json:"total_parties" binding:"required,min=1"`
+	PartyID      string `json:"party_id" binding:"required"`
+	Threshold    int    `json:"threshold" binding:"required,min=1"`
+	TotalParties int    `json:"total_parties" binding:"required,min=1"`
 }
 
 // SigningRequest represents a signing request
@@ -80,10 +78,20 @@ type TreasuryRequest struct {
 func NewServer(config *APIConfig, service *MPCService) *Server {
 	router := gin.Default()
 
+	var ks storage.KeyShareStorage
+	var horizonURL string
+	if service != nil {
+		ks = service.storage
+		if service.treasuryClient != nil {
+			horizonURL = service.treasuryClient.GetHorizonURL()
+		}
+	}
+
 	server := &Server{
-		config:  config,
-		service: service,
-		router:  router,
+		config:    config,
+		service:   service,
+		router:    router,
+		readiness: NewReadinessChecker(ks, horizonURL),
 	}
 
 	server.setupRoutes()
@@ -98,8 +106,9 @@ func (s *Server) setupRoutes() {
 		s.router.Use(corsMiddleware(s.config.AllowedOrigins))
 	}
 
-	// Health check
+	// Health check (liveness) and readiness probe
 	s.router.GET("/health", s.healthCheck)
+	s.router.GET("/ready", s.readinessCheck)
 
 	// Metrics
 	if s.config.EnableMetrics {
@@ -151,9 +160,9 @@ func (s *Server) Run(ctx context.Context) error {
 	go func() {
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			s.service.audit.Log(&storage.AuditLogEntry{
-				Timestamp:   time.Now(),
-				Action:      "SERVER_ERROR",
-				Success:     false,
+				Timestamp:    time.Now(),
+				Action:       "SERVER_ERROR",
+				Success:      false,
 				ErrorMessage: err.Error(),
 			})
 		}
@@ -484,9 +493,9 @@ func (s *Server) getTransactionStatus(c *gin.Context) {
 	c.JSON(http.StatusOK, APIResponse{
 		Success: true,
 		Data: map[string]interface{}{
-			"hash":    hash,
-			"status":  "SUCCESS",
-			"ledger":  12345,
+			"hash":   hash,
+			"status": "SUCCESS",
+			"ledger": 12345,
 		},
 	})
 }
@@ -506,7 +515,7 @@ func (s *Server) listKeys(c *gin.Context) {
 	c.JSON(http.StatusOK, APIResponse{
 		Success: true,
 		Data: map[string]interface{}{
-			"keys": keys,
+			"keys":  keys,
 			"count": len(keys),
 		},
 	})
@@ -604,9 +613,9 @@ func NewMPCService(
 	audit *storage.AuditLogger,
 ) *MPCService {
 	return &MPCService{
-		ceremonyCoord: ceremonyCoord,
+		ceremonyCoord:  ceremonyCoord,
 		treasuryClient: treasuryClient,
-		storage:       storage,
-		audit:         audit,
+		storage:        storage,
+		audit:          audit,
 	}
 }

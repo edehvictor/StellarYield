@@ -66,6 +66,7 @@ describe('CompoundWorker', () => {
       sampleJobData.vaultContractId,
       'harvest',
       expect.arrayContaining([expect.anything(), expect.anything()]),
+      undefined,
       expect.objectContaining({ workerName: 'CompoundWorker', jobId: 'job-cmp-1' }),
     );
     expect(result).toEqual({ txHash: 'COMPOUND_TX_HASH' });

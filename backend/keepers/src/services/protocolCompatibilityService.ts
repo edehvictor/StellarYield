@@ -64,6 +64,36 @@ export interface CompatibilityReport {
     nextCheckDue: string;
 }
 
+export interface FallbackCandidate {
+    providerId: string;
+    protocolName: string;
+    currentVersion: string;
+    latestVersion: string;
+    requirements: CompatibilityRequirement[];
+    priority: number;
+    parentProviderId?: string | null;
+}
+
+export type FallbackDecision = 'accepted' | 'rejected';
+
+export interface FallbackEvaluation {
+    providerId: string;
+    protocolName: string;
+    priority: number;
+    decision: FallbackDecision;
+    reason: string;
+    status: 'compatible' | 'degraded' | 'incompatible';
+    issues: CompatibilityIssue[];
+}
+
+export interface FallbackResolution {
+    selectedProviderId: string | null;
+    selectedEvaluation: FallbackEvaluation | null;
+    evaluations: FallbackEvaluation[];
+    rejectedEvaluations: FallbackEvaluation[];
+    deterministic: true;
+}
+
 export interface ProtocolFixture {
     name: string;
     protocolName: string;
@@ -303,6 +333,128 @@ export function sortIssues(issues: CompatibilityIssue[]): CompatibilityIssue[] {
         const dateB = b.lastUpdated ? new Date(b.lastUpdated).getTime() : 0;
         return dateB - dateA;
     });
+}
+
+/**
+ * Resolve a fallback tree after a primary protocol compatibility failure.
+ *
+ * Candidates are visited in deterministic depth-first order. Sibling
+ * fallbacks are ordered by priority and then providerId, so repeated runs
+ * always produce the same decision. The first compatible or degraded
+ * candidate is selected; incompatible candidates are recorded with the
+ * critical issues that caused them to be rejected.
+ */
+export function resolveFallbackTree(
+    primary: FallbackCandidate,
+    fallbacks: FallbackCandidate[] = [],
+): FallbackResolution {
+    const byParent = new Map<string | null, FallbackCandidate[]>();
+
+    const addCandidate = (candidate: FallbackCandidate, parentKey: string | null): void => {
+        const siblings = byParent.get(parentKey) ?? [];
+        siblings.push(candidate);
+        byParent.set(parentKey, siblings);
+    };
+
+    addCandidate(primary, null);
+    const knownProviderIds = new Set<string>([
+        primary.providerId,
+        ...fallbacks.map(fallback => fallback.providerId),
+    ]);
+    for (const fallback of fallbacks) {
+        const parentKey = fallback.parentProviderId != null &&
+            fallback.parentProviderId !== fallback.providerId &&
+            knownProviderIds.has(fallback.parentProviderId)
+            ? fallback.parentProviderId
+            : primary.providerId;
+        addCandidate(fallback, parentKey);
+    }
+
+    for (const siblings of byParent.values()) {
+        siblings.sort((a, b) =>
+            a.priority - b.priority ||
+            (a.providerId < b.providerId ? -1 : a.providerId > b.providerId ? 1 : 0),
+        );
+    }
+
+    const ordered: FallbackCandidate[] = [];
+    const visited = new Set<string>();
+
+    const visit = (candidate: FallbackCandidate): void => {
+        if (visited.has(candidate.providerId)) return;
+        visited.add(candidate.providerId);
+        ordered.push(candidate);
+
+        const children = byParent.get(candidate.providerId) ?? [];
+        for (const child of children) {
+            visit(child);
+        }
+    };
+
+    visit(primary);
+
+    const unvisited = fallbacks
+        .filter(fallback => !visited.has(fallback.providerId))
+        .sort((a, b) =>
+            a.priority - b.priority ||
+            (a.providerId < b.providerId ? -1 : a.providerId > b.providerId ? 1 : 0),
+        );
+
+    for (const fallback of unvisited) {
+        visit(fallback);
+    }
+
+    const evaluations: FallbackEvaluation[] = [];
+
+    for (const candidate of ordered) {
+        const status = evaluateProtocolCompatibility(
+            candidate.protocolName,
+            candidate.currentVersion,
+            candidate.latestVersion,
+            candidate.requirements,
+        );
+
+        const accepted = status.status !== 'incompatible';
+        let reason: string;
+
+        if (accepted) {
+            reason = `${candidate.providerId} is ${status.status}`;
+        } else {
+            const criticalMessages = status.issues
+                .filter(issue => issue.severity === 'critical')
+                .map(issue => issue.message)
+                .join('; ');
+            reason = criticalMessages
+                ? `${candidate.providerId} is incompatible: ${criticalMessages}`
+                : `${candidate.providerId} is incompatible`;
+        }
+
+        evaluations.push({
+            providerId: candidate.providerId,
+            protocolName: candidate.protocolName,
+            priority: candidate.priority,
+            decision: accepted ? 'accepted' : 'rejected',
+            reason,
+            status: status.status,
+            issues: status.issues,
+        });
+    }
+
+    const selectedEvaluation = evaluations.find(
+        evaluation => evaluation.decision === 'accepted',
+    ) ?? null;
+
+    const rejectedEvaluations = evaluations.filter(
+        evaluation => evaluation.decision === 'rejected',
+    );
+
+    return {
+        selectedProviderId: selectedEvaluation?.providerId ?? null,
+        selectedEvaluation,
+        evaluations,
+        rejectedEvaluations,
+        deterministic: true,
+    };
 }
 
 /**

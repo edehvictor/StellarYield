@@ -249,6 +249,16 @@ describe('Analytics Routes Contract Tests', () => {
           criticalIssues: expect.any(Array),
         });
       });
+
+      it('should set a public Cache-Control header on success', async () => {
+        const response = await request(server)
+          .get('/api/analytics/compatibility')
+          .expect(200);
+
+        expect(response.headers['cache-control']).toBe(
+          'public, max-age=60, stale-while-revalidate=30',
+        );
+      });
     });
 
     describe('GET /api/analytics/compatibility/:protocolName', () => {
@@ -636,6 +646,71 @@ describe('Analytics Routes Contract Tests', () => {
         expectErrorEnvelope(response.body, 'VALIDATION_ERROR');
         expect(response.body.error.message).toContain('Missing or invalid request body');
       });
+    });
+  });
+
+  describe('Cache-Control headers on read-only endpoints', () => {
+    beforeEach(() => {
+      (portfolioAttributionEngine.generateAttributionReport as jest.Mock).mockResolvedValue(
+        AnalyticsMockDataGenerator.createAttributionReport('GTEST123'),
+      );
+      (strategyHealthEngine.calculateHealthScore as jest.Mock).mockResolvedValue(
+        AnalyticsMockDataGenerator.createHealthScore('strategy_1', 'Test Strategy'),
+      );
+      (yieldReliabilityEngine.calculateReliabilityScore as jest.Mock).mockResolvedValue(
+        AnalyticsMockDataGenerator.createReliabilityScore('provider_1', 'Test Provider'),
+      );
+    });
+
+    it('caches GET /api/analytics/attribution/:walletAddress on success', async () => {
+      const response = await request(server)
+        .get('/api/analytics/attribution/GTEST123')
+        .query({ startTime: '2026-03-01T00:00:00Z', endTime: '2026-04-01T00:00:00Z' })
+        .expect(200);
+
+      expect(response.headers['cache-control']).toBe(
+        'public, max-age=60, stale-while-revalidate=30',
+      );
+    });
+
+    it('caches GET /api/analytics/health/:strategyId on success', async () => {
+      const response = await request(server)
+        .get('/api/analytics/health/strategy_1')
+        .expect(200);
+
+      expect(response.headers['cache-control']).toBe(
+        'public, max-age=30, stale-while-revalidate=15',
+      );
+    });
+
+    it('caches GET /api/analytics/reliability/:providerId on success', async () => {
+      const response = await request(server)
+        .get('/api/analytics/reliability/provider_1')
+        .expect(200);
+
+      expect(response.headers['cache-control']).toBe(
+        'public, max-age=60, stale-while-revalidate=30',
+      );
+    });
+
+    it('does not cache a validation error response', async () => {
+      const response = await request(server)
+        .get('/api/analytics/attribution/GTEST123')
+        .expect(400);
+
+      expect(response.headers['cache-control']).toBeUndefined();
+    });
+
+    it('does not set caching headers on mutating routes', async () => {
+      (portfolioAttributionEngine.updateConfig as jest.Mock).mockImplementation(() => {});
+      (portfolioAttributionEngine.getConfig as jest.Mock).mockReturnValue({});
+
+      const response = await request(server)
+        .post('/api/analytics/attribution/config')
+        .send({})
+        .expect(200);
+
+      expect(response.headers['cache-control']).toBeUndefined();
     });
   });
 

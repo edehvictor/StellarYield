@@ -48,3 +48,32 @@ The following endpoints are restricted to callers with the `"ADMIN"` role:
 ## Audit Logging
 
 Every successful request to an administrative endpoint is audited and cryptographically hashed in sequence (integrity verification chain), persisted, and signable by the `auditMiddleware`.
+
+### Filtering the audit log
+
+`GET /api/admin/audit-logs` and `GET /api/admin/audit-logs/export` accept the same optional filters, combined with AND. Blank values are ignored.
+
+| Parameter | Meaning |
+|---|---|
+| `wallet` | A Stellar public key (`G…`, 56 characters; matched case-insensitively). Matches entries where the wallet is the acting identity (`userId`), the target (`resourceId`), or a wallet recorded under a wallet-like key of `changes` (`wallet`, `walletAddress`, `address`, `userAddress`, `owner`, `recipient`, `account`, `actorAddress`, `targetWallet`; up to three levels deep). |
+| `action` | One action, a comma-separated list (`A,B`), or a repeated parameter (`action=A&action=B`). Matched case-insensitively; at most 20 actions. |
+| `startDate`, `endDate` | A calendar date (`2025-03-31`) or an ISO 8601 date-time **with a zone** (`2025-03-31T10:00:00Z`, `…+02:00`). A date-only `startDate` is the start of that UTC day and a date-only `endDate` is the end of that UTC day, so `startDate=endDate=2025-03-31` selects the whole day. |
+| `userId`, `resource` | Exact match, as before. |
+
+Invalid filters answer `400` with a stable code instead of returning an empty page:
+
+```json
+{
+  "error": "INVALID_DATE",
+  "message": "endDate must be a calendar date (YYYY-MM-DD) or an ISO 8601 date-time with a time zone.",
+  "details": { "field": "endDate" }
+}
+```
+
+The codes are `INVALID_WALLET`, `INVALID_ACTION`, `INVALID_DATE`, `INVALID_DATE_RANGE` (start after end) and `INVALID_FILTER` (a single-valued filter sent more than once).
+
+The list response echoes the normalised filters under `filters` (for example the upper-cased `wallet` and the resolved UTC instants), next to the usual `data` and `pagination`. Cursors keep working with filters: send the same filters with each page.
+
+The CSV export returns every matching entry up to 10,000 rows. When more match, the response carries the header `X-Audit-Export-Truncated: true`; narrow the filters to export the rest. (Previously an export silently held only the first 100 entries.)
+
+The admin UI at `/admin/audit-logs` exposes these filters, with client-side validation that mirrors the rules above.
