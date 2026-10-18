@@ -9,7 +9,10 @@ mod storage;
 mod test;
 
 use math::calculate_voting_power;
-use storage::{DataKey, UserLock, MAX_DELEGATION_DEPTH, MAX_TIME, WEEK};
+use storage::{
+    DataKey, LockCheckpoint, TotalCheckpoint, UserLock, MAX_CLAIM_EPOCHS, MAX_DELEGATION_DEPTH,
+    MAX_TIME, WEEK,
+};
 use storage_helpers::{extend_instance_ttl_default, extend_persistent_ttl_default};
 
 #[contracterror]
@@ -32,6 +35,17 @@ pub enum Error {
     DelegationTooDeep = 12,
     /// The caller has no active delegation to remove.
     NotDelegated = 13,
+    /// A historical query named a time that has not happened yet, so the answer
+    /// could still change.
+    FutureTimestamp = 14,
+    /// The epoch range is empty or longer than `MAX_CLAIM_EPOCHS`.
+    InvalidEpochRange = 15,
+    /// Fees can only be claimed for an epoch once it has ended.
+    EpochNotFinished = 16,
+    /// Every epoch in the range was already claimed, or earns the account nothing.
+    NothingToClaim = 17,
+    /// An amount calculation overflowed.
+    Overflow = 18,
 }
 
 #[contract]
@@ -101,6 +115,7 @@ impl VeTokenomics {
             end: unlock_time,
         };
 
+        Self::checkpoint_lock(&env, &from, Some(&lock));
         env.storage().persistent().set(&lock_key, &lock);
         extend_persistent_ttl_default(&env, &lock_key);
         Self::adjust_total_locked(&env, amount);
@@ -145,6 +160,7 @@ impl VeTokenomics {
         // Update lock
         lock.amount += amount;
 
+        Self::checkpoint_lock(&env, &from, Some(&lock));
         env.storage().persistent().set(&lock_key, &lock);
         extend_persistent_ttl_default(&env, &lock_key);
         Self::adjust_total_locked(&env, amount);
@@ -191,6 +207,7 @@ impl VeTokenomics {
         // the locked token total (and `TotalLocked`) stays the same.
         lock.end = unlock_time;
 
+        Self::checkpoint_lock(&env, &from, Some(&lock));
         env.storage().persistent().set(&lock_key, &lock);
         extend_persistent_ttl_default(&env, &lock_key);
 
@@ -227,6 +244,7 @@ impl VeTokenomics {
         client.transfer(&env.current_contract_address(), &from, &lock.amount);
 
         // Remove lock
+        Self::checkpoint_lock(&env, &from, None);
         env.storage().persistent().remove(&lock_key);
         Self::adjust_total_locked(&env, -lock.amount);
 
@@ -318,6 +336,193 @@ impl VeTokenomics {
             .unwrap_or(0)
     }
 
+    // ── Historical lock state ───────────────────────────────────────
+
+    /// Returns the lock `user` had at `timestamp`, as of the end of that
+    /// second: changes made at `timestamp` itself are included, later ones are
+    /// not. `timestamp` must not be in the future.
+    ///
+    /// Accounts whose lock predates checkpointing report their current lock
+    /// until they next change it.
+    pub fn get_lock_at(env: Env, user: Address, timestamp: u64) -> Result<Option<UserLock>, Error> {
+        Self::require_past(&env, timestamp)?;
+        Ok(Self::lock_at(&env, &user, timestamp))
+    }
+
+    /// Returns the veYIELD voting power `user` had at `timestamp`, computed
+    /// from the lock they held then. Token movement after `timestamp` (a
+    /// withdrawal, a bigger or longer lock) does not change the answer, which
+    /// is what lets governance fix a proposal's voting weight when it is
+    /// created. Delegation is not part of this figure.
+    pub fn get_voting_power_at(env: Env, user: Address, timestamp: u64) -> Result<i128, Error> {
+        Self::require_past(&env, timestamp)?;
+        Ok(match Self::lock_at(&env, &user, timestamp) {
+            Some(lock) => calculate_voting_power(lock.amount, lock.end, timestamp),
+            None => 0,
+        })
+    }
+
+    /// Returns the total amount locked in the contract at `timestamp`.
+    pub fn get_total_locked_at(env: Env, timestamp: u64) -> Result<i128, Error> {
+        Self::require_past(&env, timestamp)?;
+        Ok(Self::total_locked_at(&env, timestamp))
+    }
+
+    // ── Fee distribution ────────────────────────────────────────────
+
+    /// The epoch the ledger is currently in. Epochs are weeks since the Unix
+    /// epoch.
+    pub fn get_current_epoch(env: Env) -> u64 {
+        env.ledger().timestamp() / WEEK
+    }
+
+    /// Deposit $YIELD fees for the lockers of the current epoch.
+    ///
+    /// Lockers share an epoch's fees in proportion to the amount they had
+    /// locked when the epoch began, so locking after the epoch has started
+    /// earns nothing from it. The fees become claimable once the epoch ends.
+    ///
+    /// # Arguments
+    /// * `from` — The depositor (must authorize).
+    /// * `amount` — The quantity of $YIELD to distribute.
+    pub fn deposit_fees(env: Env, from: Address, amount: i128) -> Result<(), Error> {
+        Self::require_init(&env)?;
+        from.require_auth();
+
+        if amount <= 0 {
+            return Err(Error::ZeroAmount);
+        }
+
+        let epoch = env.ledger().timestamp() / WEEK;
+        let fees_key = DataKey::EpochFees(epoch);
+        let total = Self::read_i128(&env, &fees_key)
+            .checked_add(amount)
+            .ok_or(Error::Overflow)?;
+
+        let yield_token: Address = env.storage().instance().get(&DataKey::YieldToken).unwrap();
+        let client = token::Client::new(&env, &yield_token);
+        client.transfer(&from, &env.current_contract_address(), &amount);
+
+        env.storage().persistent().set(&fees_key, &total);
+        extend_persistent_ttl_default(&env, &fees_key);
+
+        env.events()
+            .publish((symbol_short!("fees"), from), (epoch, amount));
+
+        Ok(())
+    }
+
+    /// Claim `user`'s share of the fees of every epoch from `start_epoch` to
+    /// `end_epoch` (inclusive) and return the amount paid.
+    ///
+    /// Each epoch pays an account at most once: epochs that were already
+    /// claimed, for example by an earlier overlapping or partial claim, are
+    /// skipped rather than paid again. Fails with `NothingToClaim` if no epoch
+    /// in the range pays anything new.
+    ///
+    /// # Arguments
+    /// * `user` — The locker claiming (must authorize).
+    /// * `start_epoch`, `end_epoch` — The epochs to claim. All of them must
+    ///   have ended, and there can be at most `MAX_CLAIM_EPOCHS`.
+    pub fn claim_fees(
+        env: Env,
+        user: Address,
+        start_epoch: u64,
+        end_epoch: u64,
+    ) -> Result<i128, Error> {
+        Self::require_init(&env)?;
+        user.require_auth();
+        Self::check_epoch_range(start_epoch, end_epoch)?;
+
+        let current_epoch = env.ledger().timestamp() / WEEK;
+        if end_epoch >= current_epoch {
+            return Err(Error::EpochNotFinished);
+        }
+
+        let mut paid: i128 = 0;
+        for epoch in start_epoch..=end_epoch {
+            let share = Self::unclaimed_share(&env, &user, epoch)?;
+            if share == 0 {
+                continue;
+            }
+            let claimed_key = DataKey::EpochFeesClaimed(epoch);
+            let claimed = Self::read_i128(&env, &claimed_key)
+                .checked_add(share)
+                .ok_or(Error::Overflow)?;
+            // Rounding down keeps the shares within the deposit; this guards
+            // against the books ever disagreeing.
+            if claimed > Self::read_i128(&env, &DataKey::EpochFees(epoch)) {
+                return Err(Error::Overflow);
+            }
+            let fee_claim_key = DataKey::FeeClaim(user.clone(), epoch);
+            env.storage().persistent().set(&fee_claim_key, &share);
+            extend_persistent_ttl_default(&env, &fee_claim_key);
+            env.storage().persistent().set(&claimed_key, &claimed);
+            extend_persistent_ttl_default(&env, &claimed_key);
+            paid = paid.checked_add(share).ok_or(Error::Overflow)?;
+        }
+
+        if paid == 0 {
+            return Err(Error::NothingToClaim);
+        }
+
+        let yield_token: Address = env.storage().instance().get(&DataKey::YieldToken).unwrap();
+        let client = token::Client::new(&env, &yield_token);
+        client.transfer(&env.current_contract_address(), &user, &paid);
+
+        env.events().publish(
+            (symbol_short!("claim"), user),
+            (start_epoch, end_epoch, paid),
+        );
+
+        Ok(paid)
+    }
+
+    /// Returns what `user` could still claim over the epochs from
+    /// `start_epoch` to `end_epoch` (inclusive). Epochs that have not ended and
+    /// epochs already claimed count for nothing.
+    pub fn get_unclaimed_fees(
+        env: Env,
+        user: Address,
+        start_epoch: u64,
+        end_epoch: u64,
+    ) -> Result<i128, Error> {
+        Self::check_epoch_range(start_epoch, end_epoch)?;
+        let current_epoch = env.ledger().timestamp() / WEEK;
+        let mut unclaimed: i128 = 0;
+        for epoch in start_epoch..=end_epoch.min(current_epoch.saturating_sub(1)) {
+            if epoch >= current_epoch {
+                break;
+            }
+            unclaimed = unclaimed
+                .checked_add(Self::unclaimed_share(&env, &user, epoch)?)
+                .ok_or(Error::Overflow)?;
+        }
+        Ok(unclaimed)
+    }
+
+    /// Returns the fees deposited for `epoch`.
+    pub fn get_epoch_fees(env: Env, epoch: u64) -> i128 {
+        Self::read_i128(&env, &DataKey::EpochFees(epoch))
+    }
+
+    /// Returns how much of the fees of `epoch` has been claimed so far.
+    pub fn get_epoch_fees_claimed(env: Env, epoch: u64) -> i128 {
+        Self::read_i128(&env, &DataKey::EpochFeesClaimed(epoch))
+    }
+
+    /// Returns the fees `user` has claimed for `epoch`.
+    pub fn get_claimed_fees(env: Env, user: Address, epoch: u64) -> i128 {
+        Self::read_i128(&env, &DataKey::FeeClaim(user, epoch))
+    }
+
+    /// Returns whether `user` has already claimed the fees of `epoch`.
+    pub fn has_claimed_fees(env: Env, user: Address, epoch: u64) -> bool {
+        env.storage()
+            .persistent()
+            .has(&DataKey::FeeClaim(user, epoch))
+    }
+
     // ── Delegation ──────────────────────────────────────────────────
 
     /// Delegate the voting power of `from` (and everything delegated to
@@ -397,12 +602,251 @@ impl VeTokenomics {
 
     // ── Internal Helpers ────────────────────────────────────────────
 
+    fn read_i128(env: &Env, key: &DataKey) -> i128 {
+        let value: Option<i128> = env.storage().persistent().get(key);
+        match value {
+            Some(value) => {
+                extend_persistent_ttl_default(env, key);
+                value
+            }
+            None => 0,
+        }
+    }
+
+    fn require_past(env: &Env, timestamp: u64) -> Result<(), Error> {
+        if timestamp > env.ledger().timestamp() {
+            return Err(Error::FutureTimestamp);
+        }
+        Ok(())
+    }
+
+    fn check_epoch_range(start_epoch: u64, end_epoch: u64) -> Result<(), Error> {
+        if end_epoch < start_epoch || end_epoch - start_epoch >= MAX_CLAIM_EPOCHS {
+            return Err(Error::InvalidEpochRange);
+        }
+        Ok(())
+    }
+
+    /// What `user` would be paid for `epoch` if they claimed now: nothing if
+    /// they already claimed it, otherwise their share of the epoch's fees,
+    /// rounded down. The share is the amount they had locked when the epoch
+    /// began over the total locked then. Both are fixed once the epoch has
+    /// started, so the answer never changes for a finished epoch.
+    fn unclaimed_share(env: &Env, user: &Address, epoch: u64) -> Result<i128, Error> {
+        if env
+            .storage()
+            .persistent()
+            .has(&DataKey::FeeClaim(user.clone(), epoch))
+        {
+            return Ok(0);
+        }
+        let fees = Self::read_i128(env, &DataKey::EpochFees(epoch));
+        if fees == 0 {
+            return Ok(0);
+        }
+        let epoch_start = epoch.checked_mul(WEEK).ok_or(Error::Overflow)?;
+        let total = Self::total_locked_at(env, epoch_start);
+        let locked = match Self::lock_at(env, user, epoch_start) {
+            Some(lock) => lock.amount,
+            None => 0,
+        };
+        if total <= 0 || locked <= 0 {
+            return Ok(0);
+        }
+        Ok(fees.checked_mul(locked).ok_or(Error::Overflow)? / total)
+    }
+
+    /// Record `lock` (or its removal) as the account's lock from now on. Must
+    /// run before the stored lock is changed.
+    fn checkpoint_lock(env: &Env, user: &Address, lock: Option<&UserLock>) {
+        let count_key = DataKey::UserCheckpointCount(user.clone());
+        let mut count: u32 = env.storage().persistent().get(&count_key).unwrap_or(0);
+
+        // A lock made before checkpoints existed has no history. Keep what it
+        // was so far as the baseline for every earlier time.
+        if count == 0 {
+            let existing: Option<UserLock> = env
+                .storage()
+                .persistent()
+                .get(&DataKey::UserLock(user.clone()));
+            if let Some(existing) = existing {
+                let key = DataKey::UserCheckpoint(user.clone(), 0);
+                env.storage().persistent().set(
+                    &key,
+                    &LockCheckpoint {
+                        timestamp: 0,
+                        amount: existing.amount,
+                        end: existing.end,
+                    },
+                );
+                extend_persistent_ttl_default(env, &key);
+                count = 1;
+            }
+        }
+
+        let now = env.ledger().timestamp();
+        let checkpoint = LockCheckpoint {
+            timestamp: now,
+            amount: lock.map_or(0, |l| l.amount),
+            end: lock.map_or(0, |l| l.end),
+        };
+        // Several changes in the same second share one checkpoint.
+        let last_key = DataKey::UserCheckpoint(user.clone(), count.saturating_sub(1));
+        let same_second = count > 0
+            && env
+                .storage()
+                .persistent()
+                .get::<_, LockCheckpoint>(&last_key)
+                .is_some_and(|last| last.timestamp == now);
+        let index = if same_second { count - 1 } else { count };
+        let key = DataKey::UserCheckpoint(user.clone(), index);
+        env.storage().persistent().set(&key, &checkpoint);
+        extend_persistent_ttl_default(env, &key);
+        env.storage().persistent().set(&count_key, &(index + 1));
+        extend_persistent_ttl_default(env, &count_key);
+    }
+
+    /// Record `new_total` as the total locked from now on.
+    fn checkpoint_total(env: &Env, previous_total: i128, new_total: i128) {
+        let mut count: u32 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::TotalCheckpointCount)
+            .unwrap_or(0);
+
+        // Amounts locked before checkpoints existed form the baseline.
+        if count == 0 && previous_total != 0 {
+            let key = DataKey::TotalCheckpoint(0);
+            env.storage().persistent().set(
+                &key,
+                &TotalCheckpoint {
+                    timestamp: 0,
+                    total: previous_total,
+                },
+            );
+            extend_persistent_ttl_default(env, &key);
+            count = 1;
+        }
+
+        let now = env.ledger().timestamp();
+        let last_key = DataKey::TotalCheckpoint(count.saturating_sub(1));
+        let same_second = count > 0
+            && env
+                .storage()
+                .persistent()
+                .get::<_, TotalCheckpoint>(&last_key)
+                .is_some_and(|last| last.timestamp == now);
+        let index = if same_second { count - 1 } else { count };
+        let key = DataKey::TotalCheckpoint(index);
+        env.storage().persistent().set(
+            &key,
+            &TotalCheckpoint {
+                timestamp: now,
+                total: new_total,
+            },
+        );
+        extend_persistent_ttl_default(env, &key);
+        env.storage()
+            .persistent()
+            .set(&DataKey::TotalCheckpointCount, &(index + 1));
+        extend_persistent_ttl_default(env, &DataKey::TotalCheckpointCount);
+    }
+
+    /// The lock `user` had at `timestamp`: the newest checkpoint at or before
+    /// it. An account with no checkpoints at all still has its original,
+    /// never-changed lock.
+    fn lock_at(env: &Env, user: &Address, timestamp: u64) -> Option<UserLock> {
+        let count: u32 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::UserCheckpointCount(user.clone()))
+            .unwrap_or(0);
+        if count == 0 {
+            return env
+                .storage()
+                .persistent()
+                .get(&DataKey::UserLock(user.clone()));
+        }
+
+        // Binary search for the number of checkpoints at or before `timestamp`.
+        let (mut low, mut high) = (0u32, count);
+        while low < high {
+            let mid = low + (high - low) / 2;
+            let checkpoint: LockCheckpoint = env
+                .storage()
+                .persistent()
+                .get(&DataKey::UserCheckpoint(user.clone(), mid))
+                .unwrap();
+            if checkpoint.timestamp <= timestamp {
+                low = mid + 1;
+            } else {
+                high = mid;
+            }
+        }
+        if low == 0 {
+            return None;
+        }
+        let checkpoint: LockCheckpoint = env
+            .storage()
+            .persistent()
+            .get(&DataKey::UserCheckpoint(user.clone(), low - 1))
+            .unwrap();
+        if checkpoint.amount == 0 {
+            return None;
+        }
+        Some(UserLock {
+            amount: checkpoint.amount,
+            end: checkpoint.end,
+        })
+    }
+
+    /// The total locked at `timestamp`, found like [`Self::lock_at`].
+    fn total_locked_at(env: &Env, timestamp: u64) -> i128 {
+        let count: u32 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::TotalCheckpointCount)
+            .unwrap_or(0);
+        if count == 0 {
+            return env
+                .storage()
+                .instance()
+                .get(&DataKey::TotalLocked)
+                .unwrap_or(0);
+        }
+
+        let (mut low, mut high) = (0u32, count);
+        while low < high {
+            let mid = low + (high - low) / 2;
+            let checkpoint: TotalCheckpoint = env
+                .storage()
+                .persistent()
+                .get(&DataKey::TotalCheckpoint(mid))
+                .unwrap();
+            if checkpoint.timestamp <= timestamp {
+                low = mid + 1;
+            } else {
+                high = mid;
+            }
+        }
+        if low == 0 {
+            return 0;
+        }
+        let checkpoint: TotalCheckpoint = env
+            .storage()
+            .persistent()
+            .get(&DataKey::TotalCheckpoint(low - 1))
+            .unwrap();
+        checkpoint.total
+    }
+
     fn adjust_total_locked(env: &Env, delta: i128) {
         let total: i128 = env
             .storage()
             .instance()
             .get(&DataKey::TotalLocked)
             .unwrap_or(0);
+        Self::checkpoint_total(env, total, total + delta);
         env.storage()
             .instance()
             .set(&DataKey::TotalLocked, &(total + delta));

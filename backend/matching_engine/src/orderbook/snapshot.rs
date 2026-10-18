@@ -135,6 +135,7 @@ impl OrderBookSnapshot {
         for order in &self.orders {
             book.add_order(order.clone())?;
         }
+        book.sequence = self.sequence;
         Ok(book)
     }
 
@@ -155,6 +156,10 @@ impl OrderBookSnapshot {
                 });
             }
             book.apply_event(&event.event)?;
+            // Keep the replayed events so clients can still be caught up from
+            // the recovered book, and carry on numbering after the last one.
+            book.sequence = event.sequence;
+            book.journal.push(event.clone());
             expected += 1;
         }
         Ok(book)
@@ -165,6 +170,14 @@ impl OrderBook {
     /// Capture a checksummed snapshot of this book as of event `sequence`
     pub fn snapshot(&self, sequence: u64) -> Result<OrderBookSnapshot, SnapshotError> {
         OrderBookSnapshot::capture(self, sequence)
+    }
+
+    /// Snapshot the book as of its latest event and drop the events the
+    /// snapshot now covers. Recover from it with the events recorded later.
+    pub fn checkpoint(&mut self) -> Result<OrderBookSnapshot, SnapshotError> {
+        let snapshot = self.snapshot(self.sequence)?;
+        self.trim_journal(snapshot.sequence);
+        Ok(snapshot)
     }
 
     /// Apply a single recorded mutation

@@ -74,6 +74,12 @@ pub enum OrderBookError {
     /// which means the level and the orders resting in it disagree
     #[error("total quantity at price {price} is out of sync with its orders")]
     LevelOutOfSync { price: u128 },
+    /// The order would trade against a resting order of the same trader
+    #[error("order would trade against {resting_order_id}, another order of trader {trader}")]
+    SelfTrade {
+        trader: String,
+        resting_order_id: String,
+    },
     /// The fill itself was invalid
     #[error(transparent)]
     Fill(#[from] FillError),
@@ -332,6 +338,11 @@ pub struct OrderBook {
     pub bids: OrderBookSide,
     pub asks: OrderBookSide,
     pub orders: HashMap<String, Order>,
+    /// Sequence number of the last event recorded for this market. It only
+    /// ever increases, including across a snapshot restore.
+    sequence: u64,
+    /// Recorded events that have not been trimmed by a checkpoint
+    journal: Vec<SequencedEvent>,
 }
 
 impl OrderBook {
@@ -343,7 +354,74 @@ impl OrderBook {
             bids: OrderBookSide::new(Side::Buy),
             asks: OrderBookSide::new(Side::Sell),
             orders: HashMap::new(),
+            sequence: 0,
+            journal: Vec::new(),
         }
+    }
+
+    /// Sequence number of the last event recorded for this market (0 when
+    /// nothing has happened yet). Each recorded event takes the next number, so
+    /// a client that sees a gap knows it missed an update.
+    pub fn sequence(&self) -> u64 {
+        self.sequence
+    }
+
+    /// Record `event` as the next event of this market and return it.
+    pub(crate) fn record(&mut self, event: BookEvent) -> SequencedEvent {
+        self.sequence += 1;
+        let sequenced = SequencedEvent {
+            sequence: self.sequence,
+            event,
+        };
+        self.journal.push(sequenced.clone());
+        sequenced
+    }
+
+    /// Recorded events with a sequence number greater than `after`, oldest first.
+    pub fn events_since(&self, after: u64) -> Vec<SequencedEvent> {
+        self.journal
+            .iter()
+            .filter(|event| event.sequence > after)
+            .cloned()
+            .collect()
+    }
+
+    /// Drop recorded events up to and including `through`, once a snapshot
+    /// covers them.
+    pub fn trim_journal(&mut self, through: u64) {
+        self.journal.retain(|event| event.sequence > through);
+    }
+
+    /// The ID of the first resting order of `taker`'s own trader that `taker`
+    /// would trade against before it is filled, if any.
+    pub fn find_self_match(&self, taker: &Order) -> Option<&str> {
+        let mut needed = taker.remaining();
+        let queues: Box<dyn Iterator<Item = (&u128, &PriceLevel)>> = match taker.side {
+            Side::Buy => Box::new(self.asks.levels.iter()),
+            Side::Sell => Box::new(self.bids.levels.iter().rev()),
+        };
+        for (price, level) in queues {
+            if taker.order_type == OrderType::Limit {
+                let crosses = match taker.side {
+                    Side::Buy => taker.price >= *price,
+                    Side::Sell => taker.price <= *price,
+                };
+                if !crosses {
+                    return None;
+                }
+            }
+            for id in &level.orders {
+                let maker = self.orders.get(id)?;
+                if maker.trader == taker.trader {
+                    return Some(id.as_str());
+                }
+                needed = needed.saturating_sub(maker.remaining());
+                if needed == 0 {
+                    return None;
+                }
+            }
+        }
+        None
     }
 
     pub fn add_order(&mut self, order: Order) -> Result<(), OrderBookError> {

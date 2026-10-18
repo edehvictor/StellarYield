@@ -465,3 +465,508 @@ fn test_delegation_chain_depth_bounded() {
         Err(Ok(Error::DelegationTooDeep))
     );
 }
+
+// ── Historical lock state (#1513) ─────────────────────────────────
+
+const AMOUNT: i128 = 10_000_000_000;
+
+fn lock_tokens(
+    env: &Env,
+    client: &VeTokenomicsClient<'static>,
+    tokens: &token::StellarAssetClient<'static>,
+    user: &Address,
+    amount: i128,
+    weeks: u64,
+) {
+    tokens.mint(user, &amount);
+    let unlock = env.ledger().timestamp() + weeks * WEEK;
+    client.create_lock(user, &amount, &unlock);
+}
+
+#[test]
+fn test_voting_power_at_matches_the_power_held_then() {
+    let (env, client, _, _, tokens) = setup_env();
+    let user = Address::generate(&env);
+    let created = env.ledger().timestamp();
+    lock_tokens(&env, &client, &tokens, &user, AMOUNT, 52);
+    let power_then = client.get_voting_power(&user);
+
+    env.ledger().set_timestamp(created + 10 * WEEK);
+    tokens.mint(&user, &AMOUNT);
+    client.increase_amount(&user, &AMOUNT);
+
+    // History is unchanged by the later deposit.
+    assert_eq!(client.get_voting_power_at(&user, &created), power_then);
+    assert_eq!(
+        client.get_lock_at(&user, &created),
+        Some(UserLock {
+            amount: AMOUNT,
+            end: created + 52 * WEEK,
+        })
+    );
+    // Power at a time in between decays along the original lock.
+    let mid = created + 5 * WEEK;
+    assert_eq!(
+        client.get_voting_power_at(&user, &mid),
+        calculate_voting_power(AMOUNT, created + 52 * WEEK, mid)
+    );
+    // And the current figure uses the larger lock.
+    assert_eq!(
+        client.get_voting_power_at(&user, &(created + 10 * WEEK)),
+        client.get_voting_power(&user)
+    );
+}
+
+#[test]
+fn test_no_power_before_the_lock_existed() {
+    let (env, client, _, _, tokens) = setup_env();
+    let user = Address::generate(&env);
+    let before = env.ledger().timestamp();
+    env.ledger().set_timestamp(before + 100);
+    lock_tokens(&env, &client, &tokens, &user, AMOUNT, 4);
+
+    assert_eq!(client.get_voting_power_at(&user, &before), 0);
+    assert_eq!(client.get_lock_at(&user, &before), None);
+    assert_eq!(client.get_total_locked_at(&before), 0);
+    assert!(client.get_voting_power_at(&user, &(before + 100)) > 0);
+}
+
+#[test]
+fn test_power_survives_in_history_after_withdrawal() {
+    let (env, client, _, _, tokens) = setup_env();
+    let user = Address::generate(&env);
+    let created = env.ledger().timestamp();
+    lock_tokens(&env, &client, &tokens, &user, AMOUNT, 2);
+    let power_then = client.get_voting_power(&user);
+
+    env.ledger().set_timestamp(created + 2 * WEEK + 1);
+    client.withdraw(&user);
+
+    assert_eq!(client.get_voting_power(&user), 0);
+    assert_eq!(client.get_voting_power_at(&user, &created), power_then);
+    assert_eq!(client.get_lock_at(&user, &(created + 2 * WEEK + 1)), None);
+    assert_eq!(
+        client.get_voting_power_at(&user, &(created + 2 * WEEK + 1)),
+        0
+    );
+    assert_eq!(client.get_total_locked_at(&created), AMOUNT);
+    assert_eq!(client.get_total_locked_at(&(created + 2 * WEEK + 1)), 0);
+}
+
+#[test]
+fn test_extending_a_lock_does_not_change_the_past() {
+    let (env, client, _, _, tokens) = setup_env();
+    let user = Address::generate(&env);
+    let created = env.ledger().timestamp();
+    lock_tokens(&env, &client, &tokens, &user, AMOUNT, 4);
+    let power_then = client.get_voting_power_at(&user, &created);
+
+    env.ledger().set_timestamp(created + WEEK);
+    client.increase_unlock_time(&user, &(created + 40 * WEEK));
+
+    assert_eq!(client.get_voting_power_at(&user, &created), power_then);
+    assert!(client.get_voting_power_at(&user, &(created + WEEK)) > power_then / 2);
+}
+
+#[test]
+fn test_changes_within_one_second_share_a_checkpoint() {
+    let (env, client, _, _, tokens) = setup_env();
+    let user = Address::generate(&env);
+    let now = env.ledger().timestamp();
+    lock_tokens(&env, &client, &tokens, &user, AMOUNT, 4);
+    tokens.mint(&user, &AMOUNT);
+    client.increase_amount(&user, &AMOUNT);
+
+    // The state at the end of that second is what is reported.
+    assert_eq!(client.get_lock_at(&user, &now).unwrap().amount, 2 * AMOUNT);
+    assert_eq!(client.get_total_locked_at(&now), 2 * AMOUNT);
+    env.as_contract(&client.address, || {
+        let count: u32 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::UserCheckpointCount(user.clone()))
+            .unwrap();
+        assert_eq!(count, 1);
+    });
+}
+
+#[test]
+fn test_future_timestamps_are_rejected() {
+    let (env, client, _, _, _) = setup_env();
+    let user = Address::generate(&env);
+    let future = env.ledger().timestamp() + 1;
+
+    assert_eq!(
+        client.try_get_voting_power_at(&user, &future),
+        Err(Ok(Error::FutureTimestamp))
+    );
+    assert_eq!(
+        client.try_get_lock_at(&user, &future),
+        Err(Ok(Error::FutureTimestamp))
+    );
+    assert_eq!(
+        client.try_get_total_locked_at(&future),
+        Err(Ok(Error::FutureTimestamp))
+    );
+}
+
+#[test]
+fn test_total_locked_history_tracks_every_account() {
+    let (env, client, _, _, tokens) = setup_env();
+    let (a, b) = (Address::generate(&env), Address::generate(&env));
+    let t0 = env.ledger().timestamp();
+    lock_tokens(&env, &client, &tokens, &a, AMOUNT, 4);
+    env.ledger().set_timestamp(t0 + 100);
+    lock_tokens(&env, &client, &tokens, &b, 3 * AMOUNT, 4);
+
+    assert_eq!(client.get_total_locked_at(&t0), AMOUNT);
+    assert_eq!(client.get_total_locked_at(&(t0 + 99)), AMOUNT);
+    assert_eq!(client.get_total_locked_at(&(t0 + 100)), 4 * AMOUNT);
+    assert_eq!(client.get_total_locked(), 4 * AMOUNT);
+}
+
+#[test]
+fn test_a_lock_made_before_checkpoints_existed_keeps_its_history() {
+    let (env, client, _, yield_token, tokens) = setup_env();
+    let user = Address::generate(&env);
+    let created = env.ledger().timestamp();
+    let unlock = created + 20 * WEEK;
+    // Recreate the state an older version of the contract left behind: a lock
+    // and a total, but no checkpoints.
+    tokens.mint(&client.address, &AMOUNT);
+    env.as_contract(&client.address, || {
+        env.storage().persistent().set(
+            &DataKey::UserLock(user.clone()),
+            &UserLock {
+                amount: AMOUNT,
+                end: unlock,
+            },
+        );
+        env.storage().instance().set(&DataKey::TotalLocked, &AMOUNT);
+    });
+    let _ = yield_token;
+
+    // Until it changes, history is the lock as it stands.
+    assert_eq!(client.get_lock_at(&user, &created).unwrap().amount, AMOUNT);
+    assert_eq!(client.get_total_locked_at(&created), AMOUNT);
+
+    env.ledger().set_timestamp(created + WEEK);
+    tokens.mint(&user, &AMOUNT);
+    client.increase_amount(&user, &AMOUNT);
+
+    // The first change records what came before it.
+    assert_eq!(client.get_lock_at(&user, &created).unwrap().amount, AMOUNT);
+    assert_eq!(client.get_total_locked_at(&created), AMOUNT);
+    assert_eq!(
+        client.get_lock_at(&user, &(created + WEEK)).unwrap().amount,
+        2 * AMOUNT
+    );
+    assert_eq!(client.get_total_locked_at(&(created + WEEK)), 2 * AMOUNT);
+}
+
+// ── Fee distribution claims (#1514) ───────────────────────────────
+
+fn epoch_start(epoch: u64) -> u64 {
+    epoch * WEEK
+}
+
+fn go_to_epoch(env: &Env, epoch: u64) {
+    env.ledger().set_timestamp(epoch_start(epoch) + 100);
+}
+
+fn deposit(
+    env: &Env,
+    client: &VeTokenomicsClient<'static>,
+    tokens: &token::StellarAssetClient<'static>,
+    amount: i128,
+) {
+    let depositor = Address::generate(env);
+    tokens.mint(&depositor, &amount);
+    client.deposit_fees(&depositor, &amount);
+}
+
+fn balance(env: &Env, token_addr: &Address, who: &Address) -> i128 {
+    token::Client::new(env, token_addr).balance(who)
+}
+
+/// Two lockers (1:3) who locked before epoch 5 starts, with the clock in epoch 5.
+fn two_lockers() -> (
+    Env,
+    VeTokenomicsClient<'static>,
+    Address,
+    token::StellarAssetClient<'static>,
+    Address,
+    Address,
+) {
+    let (env, client, _, yield_token, tokens) = setup_env();
+    let (a, b) = (Address::generate(&env), Address::generate(&env));
+    go_to_epoch(&env, 3);
+    lock_tokens(&env, &client, &tokens, &a, AMOUNT, 100);
+    lock_tokens(&env, &client, &tokens, &b, 3 * AMOUNT, 100);
+    go_to_epoch(&env, 5);
+    (env, client, yield_token, tokens, a, b)
+}
+
+#[test]
+fn test_fees_are_shared_by_the_amount_locked_when_the_epoch_began() {
+    let (env, client, yield_token, tokens, a, b) = two_lockers();
+    deposit(&env, &client, &tokens, 4_000);
+    deposit(&env, &client, &tokens, 400);
+    assert_eq!(client.get_epoch_fees(&5), 4_400);
+
+    go_to_epoch(&env, 6);
+    assert_eq!(client.get_unclaimed_fees(&a, &5, &5), 1_100);
+    assert_eq!(client.claim_fees(&a, &5, &5), 1_100);
+    assert_eq!(client.claim_fees(&b, &5, &5), 3_300);
+
+    assert_eq!(balance(&env, &yield_token, &a), 1_100);
+    assert_eq!(balance(&env, &yield_token, &b), 3_300);
+    assert_eq!(client.get_claimed_fees(&a, &5), 1_100);
+    assert_eq!(client.get_epoch_fees_claimed(&5), 4_400);
+}
+
+#[test]
+fn test_fees_cannot_be_claimed_until_the_epoch_has_ended() {
+    let (env, client, _, tokens, a, _) = two_lockers();
+    deposit(&env, &client, &tokens, 4_000);
+
+    assert_eq!(
+        client.try_claim_fees(&a, &5, &5),
+        Err(Ok(Error::EpochNotFinished))
+    );
+    assert_eq!(client.get_unclaimed_fees(&a, &5, &5), 0);
+    go_to_epoch(&env, 6);
+    assert_eq!(client.claim_fees(&a, &5, &5), 1_000);
+}
+
+#[test]
+fn test_an_epoch_cannot_be_claimed_twice() {
+    let (env, client, yield_token, tokens, a, _) = two_lockers();
+    deposit(&env, &client, &tokens, 4_000);
+    go_to_epoch(&env, 6);
+
+    client.claim_fees(&a, &5, &5);
+
+    assert!(client.has_claimed_fees(&a, &5));
+    assert_eq!(
+        client.try_claim_fees(&a, &5, &5),
+        Err(Ok(Error::NothingToClaim))
+    );
+    assert_eq!(client.get_unclaimed_fees(&a, &5, &5), 0);
+    assert_eq!(balance(&env, &yield_token, &a), 1_000);
+}
+
+#[test]
+fn test_overlapping_claim_ranges_pay_each_epoch_once() {
+    let (env, client, yield_token, tokens, a, _) = two_lockers();
+    deposit(&env, &client, &tokens, 4_000); // epoch 5
+    go_to_epoch(&env, 6);
+    deposit(&env, &client, &tokens, 8_000); // epoch 6
+    go_to_epoch(&env, 7);
+    deposit(&env, &client, &tokens, 12_000); // epoch 7
+    go_to_epoch(&env, 8);
+
+    // Epochs 5 and 6, then 6 and 7: epoch 6 must not be paid a second time.
+    assert_eq!(client.claim_fees(&a, &5, &6), 1_000 + 2_000);
+    assert_eq!(client.get_unclaimed_fees(&a, &6, &7), 3_000);
+    assert_eq!(client.claim_fees(&a, &6, &7), 3_000);
+    // The whole range is now spent.
+    assert_eq!(client.get_unclaimed_fees(&a, &5, &7), 0);
+    assert_eq!(
+        client.try_claim_fees(&a, &5, &7),
+        Err(Ok(Error::NothingToClaim))
+    );
+    assert_eq!(balance(&env, &yield_token, &a), 1_000 + 2_000 + 3_000);
+}
+
+#[test]
+fn test_partial_claims_leave_the_rest_claimable() {
+    let (env, client, yield_token, tokens, a, _) = two_lockers();
+    deposit(&env, &client, &tokens, 4_000); // epoch 5
+    go_to_epoch(&env, 6);
+    deposit(&env, &client, &tokens, 8_000); // epoch 6
+    go_to_epoch(&env, 7);
+    deposit(&env, &client, &tokens, 12_000); // epoch 7
+    go_to_epoch(&env, 8);
+
+    // Claim only the middle epoch.
+    assert_eq!(client.claim_fees(&a, &6, &6), 2_000);
+    assert!(client.has_claimed_fees(&a, &6));
+    assert!(!client.has_claimed_fees(&a, &5));
+    assert_eq!(client.get_unclaimed_fees(&a, &5, &7), 1_000 + 3_000);
+
+    // A claim over everything pays the epochs that are left.
+    assert_eq!(client.claim_fees(&a, &5, &7), 1_000 + 3_000);
+    assert_eq!(balance(&env, &yield_token, &a), 6_000);
+}
+
+#[test]
+fn test_claims_by_one_locker_do_not_affect_another() {
+    let (env, client, _, tokens, a, b) = two_lockers();
+    deposit(&env, &client, &tokens, 4_000);
+    go_to_epoch(&env, 6);
+
+    client.claim_fees(&a, &5, &5);
+
+    assert!(!client.has_claimed_fees(&b, &5));
+    assert_eq!(client.get_unclaimed_fees(&b, &5, &5), 3_000);
+    assert_eq!(client.claim_fees(&b, &5, &5), 3_000);
+}
+
+#[test]
+fn test_locking_after_an_epoch_began_earns_nothing_from_it() {
+    let (env, client, _, tokens, a, _) = two_lockers();
+    let latecomer = Address::generate(&env);
+    // Epoch 5 is under way and the latecomer joins with a huge lock.
+    lock_tokens(&env, &client, &tokens, &latecomer, 100 * AMOUNT, 100);
+    deposit(&env, &client, &tokens, 4_000);
+    go_to_epoch(&env, 6);
+
+    assert_eq!(client.get_unclaimed_fees(&latecomer, &5, &5), 0);
+    assert_eq!(
+        client.try_claim_fees(&latecomer, &5, &5),
+        Err(Ok(Error::NothingToClaim))
+    );
+    // The existing lockers still split the whole epoch.
+    assert_eq!(client.claim_fees(&a, &5, &5), 1_000);
+
+    // From the next epoch on the latecomer shares in the fees.
+    deposit(&env, &client, &tokens, 10_400);
+    go_to_epoch(&env, 7);
+    assert_eq!(client.claim_fees(&latecomer, &6, &6), 10_000);
+}
+
+#[test]
+fn test_each_epoch_uses_the_amount_locked_at_its_own_start() {
+    let (env, client, _, tokens, a, b) = two_lockers();
+    deposit(&env, &client, &tokens, 4_000); // epoch 5: a 1/4, b 3/4
+
+    go_to_epoch(&env, 6);
+    // `a` triples their lock during epoch 6, which only counts from epoch 7.
+    tokens.mint(&a, &(2 * AMOUNT));
+    client.increase_amount(&a, &(2 * AMOUNT));
+    deposit(&env, &client, &tokens, 6_000); // epoch 6: still 1/4 and 3/4
+
+    go_to_epoch(&env, 7);
+    deposit(&env, &client, &tokens, 6_000); // epoch 7: 3/6 and 3/6
+    go_to_epoch(&env, 8);
+
+    assert_eq!(client.claim_fees(&a, &5, &7), 1_000 + 1_500 + 3_000);
+    assert_eq!(client.claim_fees(&b, &5, &7), 3_000 + 4_500 + 3_000);
+}
+
+#[test]
+fn test_fees_can_still_be_claimed_after_withdrawing_the_lock() {
+    let (env, client, _, tokens, a, _) = two_lockers();
+    deposit(&env, &client, &tokens, 4_000);
+
+    // The lock ends and is withdrawn in epoch 7, after the epoch-5 deposit.
+    env.ledger()
+        .set_timestamp(epoch_start(3) + 100 + 100 * WEEK + 1);
+    client.withdraw(&a);
+    assert_eq!(client.get_lock(&a), None);
+
+    assert_eq!(client.claim_fees(&a, &5, &5), 1_000);
+}
+
+#[test]
+fn test_rounding_never_pays_out_more_than_was_deposited() {
+    let (env, client, yield_token, tokens, a, b) = two_lockers();
+    let c = Address::generate(&env);
+    go_to_epoch(&env, 4);
+    lock_tokens(&env, &client, &tokens, &c, AMOUNT, 100);
+    go_to_epoch(&env, 5);
+    // 1 : 3 : 1 of 10 tokens is 2 / 6 / 2, but 7 does not divide evenly.
+    deposit(&env, &client, &tokens, 7);
+    go_to_epoch(&env, 6);
+
+    let paid = client.claim_fees(&a, &5, &5)
+        + client.claim_fees(&b, &5, &5)
+        + client
+            .try_claim_fees(&c, &5, &5)
+            .unwrap_or(Ok(0))
+            .unwrap_or(0);
+
+    assert!(paid <= 7);
+    assert_eq!(client.get_epoch_fees_claimed(&5), paid);
+    assert_eq!(balance(&env, &yield_token, &a), 1);
+}
+
+#[test]
+fn test_epochs_without_fees_or_lockers_pay_nothing() {
+    let (env, client, _, tokens, a, _) = two_lockers();
+    go_to_epoch(&env, 6);
+    // No fees were deposited in epoch 5.
+    assert_eq!(
+        client.try_claim_fees(&a, &5, &5),
+        Err(Ok(Error::NothingToClaim))
+    );
+
+    // Fees deposited when nobody had locked anything are not claimable.
+    let (env2, client2, _, _, tokens2) = setup_env();
+    go_to_epoch(&env2, 5);
+    deposit(&env2, &client2, &tokens2, 1_000);
+    go_to_epoch(&env2, 6);
+    let stranger = Address::generate(&env2);
+    assert_eq!(
+        client2.try_claim_fees(&stranger, &5, &5),
+        Err(Ok(Error::NothingToClaim))
+    );
+    let _ = tokens;
+}
+
+#[test]
+fn test_invalid_claim_ranges_are_rejected() {
+    let (env, client, _, _, a, _) = {
+        let (env, client, yield_token, tokens, a, b) = two_lockers();
+        (env, client, yield_token, tokens, a, b)
+    };
+    go_to_epoch(&env, 100);
+
+    assert_eq!(
+        client.try_claim_fees(&a, &6, &5),
+        Err(Ok(Error::InvalidEpochRange))
+    );
+    assert_eq!(
+        client.try_claim_fees(&a, &5, &(5 + MAX_CLAIM_EPOCHS)),
+        Err(Ok(Error::InvalidEpochRange))
+    );
+    assert_eq!(
+        client.try_get_unclaimed_fees(&a, &5, &(5 + MAX_CLAIM_EPOCHS)),
+        Err(Ok(Error::InvalidEpochRange))
+    );
+    // Exactly MAX_CLAIM_EPOCHS epochs is fine.
+    assert_eq!(
+        client.try_claim_fees(&a, &5, &(4 + MAX_CLAIM_EPOCHS)),
+        Err(Ok(Error::NothingToClaim))
+    );
+}
+
+#[test]
+fn test_deposits_must_be_positive_and_are_held_by_the_contract() {
+    let (env, client, _, yield_token, tokens) = setup_env();
+    let depositor = Address::generate(&env);
+    tokens.mint(&depositor, &500);
+
+    assert_eq!(
+        client.try_deposit_fees(&depositor, &0),
+        Err(Ok(Error::ZeroAmount))
+    );
+    client.deposit_fees(&depositor, &500);
+
+    assert_eq!(balance(&env, &yield_token, &depositor), 0);
+    assert_eq!(balance(&env, &yield_token, &client.address), 500);
+    assert_eq!(client.get_epoch_fees(&client.get_current_epoch()), 500);
+    // Fees are not counted as locked tokens.
+    assert_eq!(client.get_total_locked(), 0);
+}
+
+#[test]
+fn test_fee_claims_need_authorization() {
+    let (env, client, _, tokens, a, _) = two_lockers();
+    deposit(&env, &client, &tokens, 4_000);
+    go_to_epoch(&env, 6);
+    env.set_auths(&[]);
+
+    assert!(client.try_claim_fees(&a, &5, &5).is_err());
+}

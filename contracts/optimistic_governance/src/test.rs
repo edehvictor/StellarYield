@@ -25,6 +25,10 @@ mod mock_ve_yield {
         pub fn get_voting_power(_env: Env, _user: Address) -> i128 {
             100
         }
+
+        pub fn get_voting_power_at(_env: Env, _user: Address, _timestamp: u64) -> i128 {
+            100
+        }
     }
 }
 use mock_ve_yield::MockVeYield;
@@ -37,6 +41,10 @@ mod no_power_ve_yield {
     #[contractimpl]
     impl NoPowerVeYield {
         pub fn get_voting_power(_env: Env, _user: Address) -> i128 {
+            0
+        }
+
+        pub fn get_voting_power_at(_env: Env, _user: Address, _timestamp: u64) -> i128 {
             0
         }
     }
@@ -648,4 +656,223 @@ fn test_execute_and_is_execution_ready_agree_on_blocking_reason() {
     };
 
     assert_eq!(readiness.blocking_reasons.get(0), Some(execute_error));
+}
+
+// ── Voting weight is frozen when a proposal is created (#1513) ────────────
+
+mod snapshot_weight {
+    use super::*;
+    use soroban_sdk::token;
+    use ve_tokenomics::{VeTokenomics, VeTokenomicsClient};
+
+    const START: u64 = 1_000_000;
+    const WEEK: u64 = 7 * 24 * 60 * 60;
+    const LOCKED: i128 = 10_000_000_000;
+
+    struct Setup<'a> {
+        env: Env,
+        admin: Address,
+        target: Address,
+        gov: OptimisticGovernanceClient<'a>,
+        ve: VeTokenomicsClient<'a>,
+        token: token::StellarAssetClient<'a>,
+    }
+
+    fn setup<'a>() -> Setup<'a> {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().set_timestamp(START);
+
+        let admin = Address::generate(&env);
+        let token_admin = Address::generate(&env);
+        let token_addr = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        let token = token::StellarAssetClient::new(&env, &token_addr);
+
+        let ve_id = env.register(VeTokenomics, ());
+        let ve = VeTokenomicsClient::new(&env, &ve_id);
+        ve.initialize(&admin, &token_addr);
+
+        let target = env.register(TargetContract, ());
+        let gov_id = env.register(OptimisticGovernance, ());
+        let gov = OptimisticGovernanceClient::new(&env, &gov_id);
+        // A long window so tokens can unlock and move while the proposal is open.
+        gov.initialize(&admin, &ve_id, &(4 * WEEK));
+
+        Setup {
+            env,
+            admin,
+            target,
+            gov,
+            ve,
+            token,
+        }
+    }
+
+    impl Setup<'_> {
+        fn lock(&self, user: &Address, amount: i128, weeks: u64) {
+            self.token.mint(user, &amount);
+            let unlock = self.env.ledger().timestamp() + weeks * WEEK;
+            self.ve.create_lock(user, &amount, &unlock);
+        }
+
+        fn propose(&self) -> u64 {
+            let args: Vec<Val> = vec![&self.env, 1i128.into_val(&self.env)];
+            self.gov.propose(
+                &self.admin,
+                &self.target,
+                &Symbol::new(&self.env, "action"),
+                &args,
+            )
+        }
+
+        fn advance_to(&self, timestamp: u64) {
+            self.env.ledger().set_timestamp(timestamp);
+        }
+    }
+
+    #[test]
+    fn test_proposal_records_the_time_its_weight_is_measured_at() {
+        let t = setup();
+        let id = t.propose();
+        assert_eq!(t.gov.get_proposal_snapshot(&id), Some(START));
+        assert_eq!(t.gov.get_proposal_snapshot(&99), None);
+
+        t.advance_to(START + 500);
+        let later = t.propose();
+        assert_eq!(t.gov.get_proposal_snapshot(&later), Some(START + 500));
+        // The first proposal keeps its own snapshot.
+        assert_eq!(t.gov.get_proposal_snapshot(&id), Some(START));
+    }
+
+    #[test]
+    fn test_unlocking_and_withdrawing_after_the_snapshot_keeps_the_right_to_dispute() {
+        let t = setup();
+        let holder = Address::generate(&t.env);
+        t.lock(&holder, LOCKED, 2);
+        let id = t.propose();
+
+        // The lock expires and the holder takes the tokens out.
+        t.advance_to(START + 2 * WEEK + 10);
+        t.ve.withdraw(&holder);
+        assert_eq!(t.ve.get_voting_power(&holder), 0);
+
+        // Their weight when the proposal was created still counts.
+        assert!(t.ve.get_voting_power_at(&holder, &START) > 0);
+        t.gov.dispute(&holder, &id);
+        assert_eq!(
+            t.gov.get_proposal(&id).unwrap().status,
+            ProposalStatus::Disputed
+        );
+    }
+
+    #[test]
+    fn test_tokens_moved_to_another_account_after_the_snapshot_give_it_no_say() {
+        let t = setup();
+        let original = Address::generate(&t.env);
+        let recipient = Address::generate(&t.env);
+        t.lock(&original, LOCKED, 2);
+        let id = t.propose();
+
+        // The tokens unlock, move to another account and are locked again.
+        t.advance_to(START + 2 * WEEK + 10);
+        t.ve.withdraw(&original);
+        let token = token::Client::new(&t.env, &t.token.address);
+        token.transfer(&original, &recipient, &LOCKED);
+        let unlock = t.env.ledger().timestamp() + 2 * WEEK;
+        t.ve.create_lock(&recipient, &LOCKED, &unlock);
+
+        // The recipient holds weight now but held none when the proposal began.
+        assert!(t.ve.get_voting_power(&recipient) > 0);
+        assert_eq!(
+            t.gov.try_dispute(&recipient, &id),
+            Err(Ok(Error::InsufficientVotingPower))
+        );
+        assert_eq!(
+            t.gov.get_proposal(&id).unwrap().status,
+            ProposalStatus::Pending
+        );
+
+        // The original holder can still dispute.
+        t.gov.dispute(&original, &id);
+    }
+
+    #[test]
+    fn test_locking_after_the_proposal_was_created_does_not_grant_weight() {
+        let t = setup();
+        let id = t.propose();
+
+        t.advance_to(START + 60);
+        let latecomer = Address::generate(&t.env);
+        t.lock(&latecomer, LOCKED, 52);
+
+        assert_eq!(
+            t.gov.try_dispute(&latecomer, &id),
+            Err(Ok(Error::InsufficientVotingPower))
+        );
+    }
+
+    #[test]
+    fn test_locking_in_the_same_second_as_the_proposal_counts() {
+        let t = setup();
+        let holder = Address::generate(&t.env);
+        t.lock(&holder, LOCKED, 2);
+        let id = t.propose();
+
+        t.gov.dispute(&holder, &id);
+    }
+
+    #[test]
+    fn test_adding_to_a_lock_after_the_snapshot_does_not_raise_the_weight() {
+        let t = setup();
+        let holder = Address::generate(&t.env);
+        t.lock(&holder, LOCKED, 4);
+        let id = t.propose();
+        let snapshot = t.gov.get_proposal_snapshot(&id).unwrap();
+        let before = t.ve.get_voting_power_at(&holder, &snapshot);
+
+        t.advance_to(START + 60);
+        t.token.mint(&holder, &LOCKED);
+        t.ve.increase_amount(&holder, &LOCKED);
+
+        assert_eq!(t.ve.get_voting_power_at(&holder, &snapshot), before);
+        assert!(t.ve.get_voting_power_at(&holder, &(START + 60)) > before);
+    }
+
+    #[test]
+    fn test_proposals_without_a_snapshot_fall_back_to_current_power() {
+        let t = setup();
+        let id = t.propose();
+        // A proposal stored before snapshots were recorded has no entry.
+        t.env.as_contract(&t.gov.address, || {
+            t.env
+                .storage()
+                .persistent()
+                .remove(&DataKey::ProposalSnapshot(id));
+        });
+        assert_eq!(t.gov.get_proposal_snapshot(&id), None);
+
+        t.advance_to(START + 60);
+        let holder = Address::generate(&t.env);
+        t.lock(&holder, LOCKED, 4);
+        t.gov.dispute(&holder, &id);
+    }
+
+    #[test]
+    fn test_each_proposal_uses_its_own_snapshot() {
+        let t = setup();
+        let first = t.propose();
+
+        t.advance_to(START + 60);
+        let holder = Address::generate(&t.env);
+        t.lock(&holder, LOCKED, 4);
+        let second = t.propose();
+
+        assert_eq!(
+            t.gov.try_dispute(&holder, &first),
+            Err(Ok(Error::InsufficientVotingPower))
+        );
+        t.gov.dispute(&holder, &second);
+    }
 }

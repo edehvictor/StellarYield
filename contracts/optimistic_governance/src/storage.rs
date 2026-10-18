@@ -9,6 +9,9 @@ pub enum DataKey {
     Proposal(u64),
     ProposalCount,
     IsInitialized,
+    /// Ledger timestamp at which a proposal was created; voting weight is
+    /// measured as of this time.
+    ProposalSnapshot(u64),
 }
 
 #[contracttype]

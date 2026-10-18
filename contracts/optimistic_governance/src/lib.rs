@@ -34,6 +34,7 @@ mod ve_yield {
     #[allow(dead_code)]
     pub trait VeYieldInterface {
         fn get_voting_power(env: Env, user: Address) -> i128;
+        fn get_voting_power_at(env: Env, user: Address, timestamp: u64) -> i128;
     }
 }
 
@@ -114,6 +115,13 @@ impl OptimisticGovernance {
             .instance()
             .set(&DataKey::ProposalCount, &proposal_id);
 
+        // Voting weight for this proposal is measured as of now, so tokens
+        // moved or unlocked afterwards cannot change who may dispute it.
+        let snapshot_key = DataKey::ProposalSnapshot(proposal_id);
+        env.storage()
+            .persistent()
+            .set(&snapshot_key, &env.ledger().timestamp());
+
         // Indexer-friendly history: status Pending + window bounds
         env.events().publish(
             (symbol_short!("propose"), proposer),
@@ -129,7 +137,8 @@ impl OptimisticGovernance {
     }
 
     /// Dispute a proposal, freezing its execution.
-    /// Requires non-zero veYIELD voting power.
+    /// Requires non-zero veYIELD voting power as of the time the proposal was
+    /// created (proposals created before snapshots existed use current power).
     pub fn dispute(env: Env, disputer: Address, proposal_id: u64) -> Result<(), Error> {
         Self::require_init(&env)?;
         disputer.require_auth();
@@ -156,7 +165,14 @@ impl OptimisticGovernance {
             .get(&DataKey::VeYieldToken)
             .unwrap();
         let client = ve_yield::VeYieldClient::new(&env, &ve_yield_token);
-        let voting_power = client.get_voting_power(&disputer);
+        let snapshot: Option<u64> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::ProposalSnapshot(proposal_id));
+        let voting_power = match snapshot {
+            Some(timestamp) => client.get_voting_power_at(&disputer, &timestamp),
+            None => client.get_voting_power(&disputer),
+        };
 
         if voting_power <= 0 {
             return Err(Error::InsufficientVotingPower);
@@ -234,6 +250,14 @@ impl OptimisticGovernance {
         env.storage()
             .persistent()
             .get(&DataKey::Proposal(proposal_id))
+    }
+
+    /// The ledger timestamp at which a proposal's voting weight is measured,
+    /// or `None` for proposals created before snapshots were recorded.
+    pub fn get_proposal_snapshot(env: Env, proposal_id: u64) -> Option<u64> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::ProposalSnapshot(proposal_id))
     }
 
     pub fn get_proposal_count(env: Env) -> u64 {

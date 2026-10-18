@@ -243,6 +243,23 @@ each attempt's outcome. `reconcile(now_ms)` lists trades that are matched but no
 exponential backoff. The ledger serialises with `to_json` / `from_json`, so a crash between match and
 settlement is recovered by reloading it and retrying whatever is still pending.
 
+## 🛡️ Self-trade prevention and sequence numbers
+
+**Self-trades.** An order never trades against a resting order with the same `trader`. When the incoming order would meet one, the engine applies its `SelfTradePolicy` (`MatchingEngine::with_self_trade_policy`):
+
+| Policy | Result |
+| --- | --- |
+| `CancelNewest` (default) | Matching stops and the rest of the incoming order is cancelled. Trades already made against other traders stand. |
+| `CancelOldest` | The resting order is cancelled and matching carries on. |
+| `CancelBoth` | The resting order and the rest of the incoming order are cancelled. |
+| `RejectIncoming` | The incoming order is refused before anything trades (`MatchResult.error` is `OrderBookError::SelfTrade`). |
+
+Cancelled order IDs are listed in `MatchResult.self_trade_cancelled`. Trader names are compared exactly.
+
+**Sequence numbers.** Every market (pair) numbers its book events 1, 2, 3, … without gaps: a resting order added, an order removed, a resting order filled. `MatchResult.ack` and `MatchingEngine::cancel_order_acked` return an `OrderAck` with the market's sequence number after the operation, so a client that sees a jump knows it missed an update and can ask for `OrderBook::events_since(seq)`.
+
+**Restart recovery.** `MatchingEngine::checkpoint(pair)` takes a checksummed snapshot at the current sequence and trims the events it covers. After a restart, `MatchingEngine::recover_book(&snapshot, &events)` rebuilds the book and carries on numbering after the last replayed event, so no number is reused. Keep the events recorded after the snapshot (`events_since(snapshot.sequence)`) somewhere durable; recovery fails with `SequenceGap` if one is missing. Changes made by calling `OrderBook` methods directly, rather than through the engine, are not sequenced.
+
 ## 📊 Performance Considerations
 
 ### Order Book

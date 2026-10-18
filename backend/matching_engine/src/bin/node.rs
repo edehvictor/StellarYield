@@ -125,6 +125,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 for order in sequencer.drain_ready(now) {
                     let result = matching_engine.submit_order(order);
 
+                    if let Some(ack) = &result.ack {
+                        log::info!(
+                            "Order {} acknowledged at sequence {} on {} ({:?})",
+                            ack.order_id,
+                            ack.sequence,
+                            ack.pair_id,
+                            ack.status
+                        );
+                    }
+                    for cancelled in &result.self_trade_cancelled {
+                        log::warn!("Order {} cancelled to prevent a self-trade", cancelled);
+                    }
+
                     if !result.trades.is_empty() {
                         log::info!("Matched {} trades", result.trades.len());
                         let _ = settlement_tx.send(result.trades.clone()).await;

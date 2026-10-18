@@ -3,7 +3,42 @@
 //! Implements the core order matching algorithm with price-time priority.
 //! Matches buy and sell orders and generates trade executions.
 
-use crate::orderbook::{Order, OrderBook, OrderBookError, OrderStatus, OrderType, Side, Trade};
+use crate::orderbook::{
+    BookEvent, Order, OrderBook, OrderBookError, OrderBookSnapshot, OrderStatus, OrderType,
+    SequencedEvent, Side, SnapshotError, Trade,
+};
+
+/// What the engine does when an incoming order would trade against a resting
+/// order placed by the same trader.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SelfTradePolicy {
+    /// Cancel what is left of the incoming order. Trades already made against
+    /// other traders stand and the resting order is untouched.
+    #[default]
+    CancelNewest,
+    /// Cancel the resting order and carry on matching the incoming order.
+    CancelOldest,
+    /// Cancel the resting order and what is left of the incoming order.
+    CancelBoth,
+    /// Refuse the incoming order before anything trades if any part of it
+    /// would meet one of the trader's own resting orders.
+    RejectIncoming,
+}
+
+/// Acknowledgment of an order operation.
+///
+/// `sequence` is the market's sequence number once the operation has been
+/// applied. Every event the operation produced has a sequence number no
+/// greater than it, so a client that has applied all events up to `sequence`
+/// is in step with the book.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OrderAck {
+    pub order_id: String,
+    pub pair_id: String,
+    pub sequence: u64,
+    /// State of the order after the operation
+    pub status: OrderStatus,
+}
 
 /// Matching engine result
 #[derive(Debug, Clone)]
@@ -19,6 +54,12 @@ pub struct MatchResult {
     /// order book whose totals disagree with its orders). Trades executed
     /// before the failure are still reported and the book is left consistent.
     pub error: Option<OrderBookError>,
+    /// Orders cancelled to prevent a trade between orders of the same trader
+    pub self_trade_cancelled: Vec<String>,
+    /// Book events this submission caused, in sequence order
+    pub events: Vec<SequencedEvent>,
+    /// Acknowledgment carrying the market sequence number after this order
+    pub ack: Option<OrderAck>,
 }
 
 impl MatchResult {
@@ -28,6 +69,9 @@ impl MatchResult {
             remaining_order: None,
             filled_orders: Vec::new(),
             error: None,
+            self_trade_cancelled: Vec::new(),
+            events: Vec::new(),
+            ack: None,
         }
     }
 }
@@ -42,13 +86,54 @@ impl Default for MatchResult {
 pub struct MatchingEngine {
     /// Order books by pair ID
     order_books: std::collections::HashMap<String, OrderBook>,
+    self_trade_policy: SelfTradePolicy,
 }
 
 impl MatchingEngine {
     pub fn new() -> Self {
+        Self::with_self_trade_policy(SelfTradePolicy::default())
+    }
+
+    /// Create an engine that handles self-trades with `policy`
+    pub fn with_self_trade_policy(policy: SelfTradePolicy) -> Self {
         Self {
             order_books: std::collections::HashMap::new(),
+            self_trade_policy: policy,
         }
+    }
+
+    pub fn self_trade_policy(&self) -> SelfTradePolicy {
+        self.self_trade_policy
+    }
+
+    pub fn set_self_trade_policy(&mut self, policy: SelfTradePolicy) {
+        self.self_trade_policy = policy;
+    }
+
+    /// Sequence number of the last event of `pair_id`'s market
+    pub fn sequence(&self, pair_id: &str) -> Option<u64> {
+        self.get_book(pair_id).map(OrderBook::sequence)
+    }
+
+    /// Snapshot a market at its current sequence and trim the events the
+    /// snapshot covers.
+    pub fn checkpoint(&mut self, pair_id: &str) -> Result<OrderBookSnapshot, SnapshotError> {
+        self.get_book_mut(pair_id)
+            .ok_or_else(|| OrderBookError::OrderNotFound(pair_id.to_string()))?
+            .checkpoint()
+    }
+
+    /// Rebuild a market after a restart from its last snapshot and the events
+    /// recorded after it. Sequence numbers carry on from the last replayed
+    /// event, so none is ever handed out twice.
+    pub fn recover_book(
+        &mut self,
+        snapshot: &OrderBookSnapshot,
+        events: &[SequencedEvent],
+    ) -> Result<(), SnapshotError> {
+        let book = snapshot.recover(events)?;
+        self.order_books.insert(book.pair_id.clone(), book);
+        Ok(())
     }
 
     /// Get or create order book for a pair
@@ -82,26 +167,55 @@ impl MatchingEngine {
         // Ensure the order book exists before matching
         self.get_or_create_book(pair_id.clone(), order.token0.clone(), order.token1.clone());
 
-        // Try to match the order
-        let mut result = self.match_order(&mut order);
+        // Refuse the order up front when the policy says a self-trade must not
+        // even start; nothing is traded or recorded.
+        let refusal = if self.self_trade_policy == SelfTradePolicy::RejectIncoming {
+            self.reject_if_self_trade(&pair_id, &order)
+        } else {
+            None
+        };
+        let mut result = match refusal {
+            Some(refusal) => {
+                order.status = OrderStatus::Cancelled;
+                refusal
+            }
+            None => self.match_order(&mut order),
+        };
 
-        // If there's remaining amount, add to order book
-        if order.remaining() > 0 && order.order_type == OrderType::Limit {
+        // If there's remaining amount, add to order book. An order cancelled to
+        // prevent a self-trade never rests.
+        if order.remaining() > 0
+            && order.order_type == OrderType::Limit
+            && order.status != OrderStatus::Cancelled
+        {
             if let Some(book) = self.get_book_mut(&pair_id) {
                 order.status = if order.filled > 0 {
                     OrderStatus::PartiallyFilled
                 } else {
                     OrderStatus::Pending
                 };
-                if let Err(error) = book.add_order(order.clone()) {
-                    result.error.get_or_insert(error);
+                match book.add_order(order.clone()) {
+                    Ok(()) => {
+                        let event = book.record(BookEvent::OrderAdded(order.clone()));
+                        result.events.push(event);
+                    }
+                    Err(error) => {
+                        result.error.get_or_insert(error);
+                    }
                 }
             }
         } else if order.remaining() == 0 {
             order.status = OrderStatus::Filled;
         }
 
-        result.remaining_order = if order.remaining() > 0 {
+        result.ack = Some(OrderAck {
+            order_id: order.id.clone(),
+            sequence: self.sequence(&pair_id).unwrap_or(0),
+            pair_id,
+            status: order.status,
+        });
+        result.remaining_order = if order.remaining() > 0 && order.status != OrderStatus::Cancelled
+        {
             Some(order)
         } else {
             None
@@ -109,10 +223,24 @@ impl MatchingEngine {
         result
     }
 
+    /// Under [`SelfTradePolicy::RejectIncoming`], a result refusing `order` if
+    /// it would meet one of its own trader's resting orders.
+    fn reject_if_self_trade(&mut self, pair_id: &str, order: &Order) -> Option<MatchResult> {
+        let book = self.get_book(pair_id)?;
+        let resting_order_id = book.find_self_match(order)?.to_string();
+        let mut result = MatchResult::new();
+        result.error = Some(OrderBookError::SelfTrade {
+            trader: order.trader.clone(),
+            resting_order_id,
+        });
+        Some(result)
+    }
+
     /// Match an order against the order book
     fn match_order(&mut self, order: &mut Order) -> MatchResult {
         let pair_id = format!("{}-{}", order.token0, order.token1);
         let mut result = MatchResult::new();
+        let policy = self.self_trade_policy;
 
         let book = match self.get_book_mut(&pair_id) {
             Some(b) => b,
@@ -151,6 +279,32 @@ impl MatchingEngine {
                 None => break,
             };
 
+            // The incoming order meets one of its own trader's resting orders.
+            if book
+                .get_order(&maker_order_id)
+                .is_some_and(|maker| maker.trader == order.trader)
+            {
+                let cancel_resting = matches!(
+                    policy,
+                    SelfTradePolicy::CancelOldest | SelfTradePolicy::CancelBoth
+                );
+                let cancel_incoming = !matches!(policy, SelfTradePolicy::CancelOldest);
+                if cancel_resting {
+                    book.remove_order(&maker_order_id);
+                    let event = book.record(BookEvent::OrderRemoved {
+                        order_id: maker_order_id.clone(),
+                    });
+                    result.events.push(event);
+                    result.self_trade_cancelled.push(maker_order_id);
+                }
+                if cancel_incoming {
+                    order.status = OrderStatus::Cancelled;
+                    result.self_trade_cancelled.push(order.id.clone());
+                    break;
+                }
+                continue;
+            }
+
             // A resting order with nothing left to fill should not be in the
             // book; drop it rather than producing a zero-quantity trade.
             if maker_remaining == 0 {
@@ -169,12 +323,20 @@ impl MatchingEngine {
                     break;
                 }
             };
-            let trade = match book.get_order(&maker_order_id) {
-                Some(maker) => Trade::new(maker, order, match_amount, match_price),
+            let (trade, maker_filled_after) = match book.get_order(&maker_order_id) {
+                Some(maker) => (
+                    Trade::new(maker, order, match_amount, match_price),
+                    maker.filled.saturating_add(match_amount),
+                ),
                 None => break,
             };
             match book.fill_order(&maker_order_id, match_amount) {
                 Ok(maker_filled) => {
+                    let event = book.record(BookEvent::OrderFilled {
+                        order_id: maker_order_id.clone(),
+                        filled: maker_filled_after,
+                    });
+                    result.events.push(event);
                     if maker_filled {
                         result.filled_orders.push(maker_order_id);
                     }
@@ -202,9 +364,8 @@ impl MatchingEngine {
         order_id: &str,
         expected_version: u64,
     ) -> Result<Order, OrderBookError> {
-        self.get_book_mut(pair_id)
-            .ok_or_else(|| OrderBookError::OrderNotFound(order_id.to_string()))?
-            .cancel_versioned(order_id, expected_version)
+        self.cancel_order_acked(pair_id, order_id, Some(expected_version))
+            .map(|(order, _)| order)
     }
 
     /// Replace a resting order (same ID, next version) with `replacement`,
@@ -220,22 +381,60 @@ impl MatchingEngine {
         expected_version: u64,
         mut replacement: Order,
     ) -> Result<(Order, MatchResult), OrderBookError> {
-        let (old, next_version) = self
+        let book = self
             .get_book_mut(pair_id)
-            .ok_or_else(|| OrderBookError::OrderNotFound(order_id.to_string()))?
-            .detach_for_replacement(order_id, expected_version, &replacement.trader)?;
+            .ok_or_else(|| OrderBookError::OrderNotFound(order_id.to_string()))?;
+        let (old, next_version) =
+            book.detach_for_replacement(order_id, expected_version, &replacement.trader)?;
+        let removal = book.record(BookEvent::OrderRemoved {
+            order_id: order_id.to_string(),
+        });
         replacement.id = order_id.to_string();
         replacement.version = next_version;
         replacement.filled = 0;
         replacement.status = OrderStatus::Pending;
         replacement.token0 = old.token0.clone();
         replacement.token1 = old.token1.clone();
-        Ok((old, self.submit_order(replacement)))
+        let mut result = self.submit_order(replacement);
+        result.events.insert(0, removal);
+        Ok((old, result))
     }
 
     /// Cancel an order
     pub fn cancel_order(&mut self, pair_id: &str, order_id: &str) -> Option<Order> {
-        self.get_book_mut(pair_id)?.remove_order(order_id)
+        self.cancel_order_acked(pair_id, order_id, None)
+            .ok()
+            .map(|(order, _)| order)
+    }
+
+    /// Cancel an order and acknowledge it with the market's new sequence
+    /// number. With `expected_version` the cancel is only applied if the order
+    /// is still at that version (see [`Self::cancel_order_versioned`]).
+    pub fn cancel_order_acked(
+        &mut self,
+        pair_id: &str,
+        order_id: &str,
+        expected_version: Option<u64>,
+    ) -> Result<(Order, OrderAck), OrderBookError> {
+        let book = self
+            .get_book_mut(pair_id)
+            .ok_or_else(|| OrderBookError::OrderNotFound(order_id.to_string()))?;
+        let order = match expected_version {
+            Some(version) => book.cancel_versioned(order_id, version)?,
+            None => book
+                .remove_order(order_id)
+                .ok_or_else(|| OrderBookError::OrderNotFound(order_id.to_string()))?,
+        };
+        book.record(BookEvent::OrderRemoved {
+            order_id: order_id.to_string(),
+        });
+        let ack = OrderAck {
+            order_id: order_id.to_string(),
+            pair_id: pair_id.to_string(),
+            sequence: book.sequence(),
+            status: OrderStatus::Cancelled,
+        };
+        Ok((order, ack))
     }
 
     /// Get all trades for a user
@@ -266,9 +465,14 @@ mod tests {
     use super::*;
     use crate::orderbook::FillError;
 
+    /// Buys and sells come from different traders so they can trade.
     fn create_test_order(side: Side, price: u128, amount: u128) -> Order {
         Order::new(
-            "test_trader".to_string(),
+            match side {
+                Side::Buy => "test_buyer",
+                Side::Sell => "test_seller",
+            }
+            .to_string(),
             side,
             OrderType::Limit,
             price,
@@ -854,5 +1058,524 @@ mod tests {
             decoded.version, 0,
             "orders encoded before versions existed decode as 0"
         );
+    }
+
+    // ── Self-trade prevention (#1516) ────────────────────────────────────────
+
+    fn engine_with(policy: SelfTradePolicy) -> MatchingEngine {
+        MatchingEngine::with_self_trade_policy(policy)
+    }
+
+    fn resting_ids(engine: &MatchingEngine) -> Vec<String> {
+        let mut ids: Vec<String> = engine
+            .get_book(PAIR)
+            .unwrap()
+            .orders
+            .keys()
+            .cloned()
+            .collect();
+        ids.sort();
+        ids
+    }
+
+    #[test]
+    fn test_default_policy_cancels_the_newest_order() {
+        assert_eq!(
+            MatchingEngine::new().self_trade_policy(),
+            SelfTradePolicy::CancelNewest
+        );
+        let mut engine = MatchingEngine::new();
+        let resting = order_at(Side::Sell, 100, 1_000, 1, "alice");
+        let resting_id = resting.id.clone();
+        engine.submit_order(resting);
+
+        let incoming = order_at(Side::Buy, 100, 400, 2, "alice");
+        let incoming_id = incoming.id.clone();
+        let result = engine.submit_order(incoming);
+
+        assert!(result.trades.is_empty());
+        assert!(result.error.is_none());
+        assert_eq!(result.self_trade_cancelled, vec![incoming_id.clone()]);
+        assert!(result.remaining_order.is_none());
+        assert_eq!(result.ack.as_ref().unwrap().status, OrderStatus::Cancelled);
+        // The resting order is untouched and the incoming one never rested.
+        assert_eq!(resting_ids(&engine), vec![resting_id]);
+        assert_eq!(engine.get_book(PAIR).unwrap().best_bid(), None);
+        assert_eq!(engine.get_depth(PAIR, 5).unwrap().asks, vec![(100, 1_000)]);
+    }
+
+    #[test]
+    fn test_distinct_accounts_still_trade() {
+        for policy in [
+            SelfTradePolicy::CancelNewest,
+            SelfTradePolicy::CancelOldest,
+            SelfTradePolicy::CancelBoth,
+            SelfTradePolicy::RejectIncoming,
+        ] {
+            let mut engine = engine_with(policy);
+            engine.submit_order(order_at(Side::Sell, 100, 1_000, 1, "alice"));
+            let result = engine.submit_order(order_at(Side::Buy, 100, 400, 2, "bob"));
+
+            assert_eq!(result.trades.len(), 1, "{policy:?}");
+            assert_eq!(result.trades[0].maker, "alice");
+            assert_eq!(result.trades[0].taker, "bob");
+            assert!(result.self_trade_cancelled.is_empty());
+            assert!(result.error.is_none());
+        }
+    }
+
+    #[test]
+    fn test_trader_names_are_compared_exactly() {
+        let mut engine = MatchingEngine::new();
+        engine.submit_order(order_at(Side::Sell, 100, 1_000, 1, "alice"));
+        let result = engine.submit_order(order_at(Side::Buy, 100, 400, 2, "Alice"));
+        assert_eq!(result.trades.len(), 1);
+    }
+
+    #[test]
+    fn test_orders_that_do_not_cross_are_not_a_self_trade() {
+        let mut engine = MatchingEngine::new();
+        engine.submit_order(order_at(Side::Sell, 105, 1_000, 1, "alice"));
+        let result = engine.submit_order(order_at(Side::Buy, 100, 400, 2, "alice"));
+
+        assert!(result.trades.is_empty());
+        assert!(result.self_trade_cancelled.is_empty());
+        assert!(result.remaining_order.is_some());
+        let book = engine.get_book(PAIR).unwrap();
+        assert_eq!((book.best_bid(), book.best_ask()), (Some(100), Some(105)));
+    }
+
+    #[test]
+    fn test_cancel_newest_keeps_trades_made_before_the_own_order() {
+        let mut engine = MatchingEngine::new();
+        engine.submit_order(order_at(Side::Sell, 100, 10, 1, "bob"));
+        let own = order_at(Side::Sell, 101, 50, 2, "alice");
+        let own_id = own.id.clone();
+        engine.submit_order(own);
+
+        let incoming = order_at(Side::Buy, 101, 30, 3, "alice");
+        let incoming_id = incoming.id.clone();
+        let result = engine.submit_order(incoming);
+
+        assert_eq!(result.trades.len(), 1);
+        assert_eq!(result.trades[0].maker, "bob");
+        assert_eq!(result.trades[0].amount, 10);
+        assert_eq!(result.self_trade_cancelled, vec![incoming_id]);
+        assert!(result.remaining_order.is_none());
+        assert_eq!(resting_ids(&engine), vec![own_id]);
+    }
+
+    #[test]
+    fn test_sell_side_taker_is_covered_too() {
+        let mut engine = MatchingEngine::new();
+        let own = order_at(Side::Buy, 100, 500, 1, "alice");
+        let own_id = own.id.clone();
+        engine.submit_order(own);
+
+        let result = engine.submit_order(order_at(Side::Sell, 90, 200, 2, "alice"));
+
+        assert!(result.trades.is_empty());
+        assert_eq!(result.self_trade_cancelled.len(), 1);
+        assert_eq!(resting_ids(&engine), vec![own_id]);
+    }
+
+    #[test]
+    fn test_market_orders_are_covered_too() {
+        let mut engine = MatchingEngine::new();
+        engine.submit_order(order_at(Side::Sell, 100, 500, 1, "alice"));
+        let mut market = order_at(Side::Buy, 0, 200, 2, "alice");
+        market.order_type = OrderType::Market;
+
+        let result = engine.submit_order(market);
+
+        assert!(result.trades.is_empty());
+        assert_eq!(result.self_trade_cancelled.len(), 1);
+        assert!(result.remaining_order.is_none());
+    }
+
+    #[test]
+    fn test_cancel_oldest_removes_the_resting_order_and_keeps_matching() {
+        let mut engine = engine_with(SelfTradePolicy::CancelOldest);
+        let own = order_at(Side::Sell, 100, 50, 1, "alice");
+        let own_id = own.id.clone();
+        engine.submit_order(own);
+        engine.submit_order(order_at(Side::Sell, 100, 30, 2, "bob"));
+
+        let result = engine.submit_order(order_at(Side::Buy, 100, 30, 3, "alice"));
+
+        assert_eq!(result.self_trade_cancelled, vec![own_id.clone()]);
+        assert_eq!(result.trades.len(), 1);
+        assert_eq!(result.trades[0].maker, "bob");
+        assert!(result.remaining_order.is_none());
+        assert!(!engine.get_book(PAIR).unwrap().orders.contains_key(&own_id));
+        assert_eq!(engine.get_book(PAIR).unwrap().best_ask(), None);
+    }
+
+    #[test]
+    fn test_cancel_oldest_rests_the_remainder_when_nothing_else_matches() {
+        let mut engine = engine_with(SelfTradePolicy::CancelOldest);
+        engine.submit_order(order_at(Side::Sell, 100, 50, 1, "alice"));
+
+        let result = engine.submit_order(order_at(Side::Buy, 100, 30, 2, "alice"));
+
+        assert!(result.trades.is_empty());
+        assert_eq!(result.self_trade_cancelled.len(), 1);
+        assert_eq!(result.remaining_order.as_ref().unwrap().remaining(), 30);
+        let book = engine.get_book(PAIR).unwrap();
+        assert_eq!((book.best_bid(), book.best_ask()), (Some(100), None));
+    }
+
+    #[test]
+    fn test_cancel_both_removes_the_resting_and_the_incoming_order() {
+        let mut engine = engine_with(SelfTradePolicy::CancelBoth);
+        let own = order_at(Side::Sell, 100, 50, 1, "alice");
+        let own_id = own.id.clone();
+        engine.submit_order(own);
+        engine.submit_order(order_at(Side::Sell, 100, 30, 2, "bob"));
+        let incoming = order_at(Side::Buy, 100, 30, 3, "alice");
+        let incoming_id = incoming.id.clone();
+
+        let result = engine.submit_order(incoming);
+
+        assert!(result.trades.is_empty());
+        assert_eq!(
+            result.self_trade_cancelled,
+            vec![own_id.clone(), incoming_id]
+        );
+        assert!(result.remaining_order.is_none());
+        assert!(!engine.get_book(PAIR).unwrap().orders.contains_key(&own_id));
+        // Bob's order is still there.
+        assert_eq!(engine.get_depth(PAIR, 5).unwrap().asks, vec![(100, 30)]);
+    }
+
+    #[test]
+    fn test_reject_incoming_refuses_the_whole_order_before_anything_trades() {
+        let mut engine = engine_with(SelfTradePolicy::RejectIncoming);
+        engine.submit_order(order_at(Side::Sell, 100, 10, 1, "bob"));
+        let own = order_at(Side::Sell, 101, 50, 2, "alice");
+        let own_id = own.id.clone();
+        engine.submit_order(own);
+        let before = engine.sequence(PAIR).unwrap();
+
+        let result = engine.submit_order(order_at(Side::Buy, 101, 30, 3, "alice"));
+
+        assert!(result.trades.is_empty());
+        assert_eq!(
+            result.error,
+            Some(OrderBookError::SelfTrade {
+                trader: "alice".to_string(),
+                resting_order_id: own_id,
+            })
+        );
+        assert!(result.remaining_order.is_none());
+        assert!(result.events.is_empty());
+        assert_eq!(engine.sequence(PAIR), Some(before));
+        assert_eq!(result.ack.unwrap().sequence, before);
+        // Bob's order was not touched either.
+        assert_eq!(
+            engine.get_depth(PAIR, 5).unwrap().asks,
+            vec![(100, 10), (101, 50)]
+        );
+    }
+
+    #[test]
+    fn test_reject_incoming_allows_orders_filled_before_the_own_order() {
+        let mut engine = engine_with(SelfTradePolicy::RejectIncoming);
+        engine.submit_order(order_at(Side::Sell, 100, 10, 1, "bob"));
+        engine.submit_order(order_at(Side::Sell, 101, 50, 2, "alice"));
+
+        let result = engine.submit_order(order_at(Side::Buy, 101, 10, 3, "alice"));
+
+        assert!(result.error.is_none());
+        assert_eq!(result.trades.len(), 1);
+        assert_eq!(result.trades[0].maker, "bob");
+    }
+
+    #[test]
+    fn test_replacing_an_order_cannot_trade_against_the_same_account() {
+        let mut engine = MatchingEngine::new();
+        engine.submit_order(order_at(Side::Sell, 100, 50, 1, "alice"));
+        let bid = order_at(Side::Buy, 90, 50, 2, "alice");
+        let bid_id = bid.id.clone();
+        engine.submit_order(bid);
+
+        // Raising the bid to cross alice's own ask must not trade.
+        let (_, result) = engine
+            .replace_order(PAIR, &bid_id, 0, order_at(Side::Buy, 100, 50, 3, "alice"))
+            .unwrap();
+
+        assert!(result.trades.is_empty());
+        assert_eq!(result.self_trade_cancelled, vec![bid_id.clone()]);
+        assert!(!engine.get_book(PAIR).unwrap().orders.contains_key(&bid_id));
+    }
+
+    // ── Sequence numbers (#1515) ─────────────────────────────────────────────
+
+    /// Everything that matters about a book, for comparing two of them
+    type BookState = (Vec<(u128, u128)>, Vec<(u128, u128)>, Vec<String>);
+
+    fn book_state(engine: &MatchingEngine) -> BookState {
+        let book = engine.get_book(PAIR).unwrap();
+        let depth = book.depth(usize::MAX);
+        let mut orders: Vec<String> = book
+            .orders
+            .values()
+            .map(|o| format!("{}:{}:{}:{}", o.id, o.price, o.filled, o.version))
+            .collect();
+        orders.sort();
+        (depth.bids, depth.asks, orders)
+    }
+
+    #[test]
+    fn test_insertions_get_consecutive_sequence_numbers() {
+        let mut engine = MatchingEngine::new();
+        assert_eq!(engine.sequence(PAIR), None);
+
+        for expected in 1..=3u64 {
+            let order = order_at(Side::Buy, 100 - expected as u128, 10, expected, "alice");
+            let id = order.id.clone();
+            let result = engine.submit_order(order);
+
+            let ack = result.ack.unwrap();
+            assert_eq!(ack.sequence, expected);
+            assert_eq!(ack.order_id, id);
+            assert_eq!(ack.pair_id, PAIR);
+            assert_eq!(ack.status, OrderStatus::Pending);
+            assert_eq!(result.events.len(), 1);
+            assert_eq!(result.events[0].sequence, expected);
+        }
+        assert_eq!(engine.sequence(PAIR), Some(3));
+    }
+
+    #[test]
+    fn test_a_trade_is_acknowledged_with_every_event_it_caused() {
+        let mut engine = MatchingEngine::new();
+        engine.submit_order(order_at(Side::Sell, 100, 10, 1, "alice")); // 1
+        engine.submit_order(order_at(Side::Sell, 100, 10, 2, "bob")); // 2
+
+        // Fills both makers (events 3 and 4) and rests the remainder (event 5).
+        let result = engine.submit_order(order_at(Side::Buy, 100, 25, 3, "carol"));
+
+        let sequences: Vec<u64> = result.events.iter().map(|e| e.sequence).collect();
+        assert_eq!(sequences, vec![3, 4, 5]);
+        assert!(matches!(
+            result.events[0].event,
+            BookEvent::OrderFilled { filled: 10, .. }
+        ));
+        assert!(matches!(result.events[2].event, BookEvent::OrderAdded(_)));
+        let ack = result.ack.unwrap();
+        assert_eq!(ack.sequence, 5);
+        assert_eq!(ack.status, OrderStatus::PartiallyFilled);
+    }
+
+    #[test]
+    fn test_a_fully_filled_taker_is_acknowledged_with_the_last_fill() {
+        let mut engine = MatchingEngine::new();
+        engine.submit_order(order_at(Side::Sell, 100, 10, 1, "alice")); // 1
+
+        let result = engine.submit_order(order_at(Side::Buy, 100, 10, 2, "bob"));
+
+        let ack = result.ack.unwrap();
+        assert_eq!(ack.sequence, 2);
+        assert_eq!(ack.status, OrderStatus::Filled);
+    }
+
+    #[test]
+    fn test_cancellation_takes_the_next_sequence_number() {
+        let mut engine = MatchingEngine::new();
+        let order = order_at(Side::Buy, 100, 10, 1, "alice");
+        let id = order.id.clone();
+        engine.submit_order(order); // 1
+
+        let (cancelled, ack) = engine.cancel_order_acked(PAIR, &id, None).unwrap();
+
+        assert_eq!(cancelled.id, id);
+        assert_eq!(ack.sequence, 2);
+        assert_eq!(ack.status, OrderStatus::Cancelled);
+        assert_eq!(engine.sequence(PAIR), Some(2));
+        let events = engine.get_book(PAIR).unwrap().events_since(1);
+        assert_eq!(events.len(), 1);
+        assert!(
+            matches!(&events[0].event, BookEvent::OrderRemoved { order_id } if *order_id == id)
+        );
+    }
+
+    #[test]
+    fn test_plain_cancel_is_sequenced_too() {
+        let mut engine = MatchingEngine::new();
+        let order = order_at(Side::Buy, 100, 10, 1, "alice");
+        let id = order.id.clone();
+        engine.submit_order(order);
+
+        assert!(engine.cancel_order(PAIR, &id).is_some());
+        assert_eq!(engine.sequence(PAIR), Some(2));
+    }
+
+    #[test]
+    fn test_failed_cancels_do_not_consume_a_sequence_number() {
+        let mut engine = MatchingEngine::new();
+        let order = order_at(Side::Buy, 100, 10, 1, "alice");
+        let id = order.id.clone();
+        engine.submit_order(order); // 1
+
+        assert!(engine.cancel_order(PAIR, "unknown").is_none());
+        assert_eq!(
+            engine.cancel_order_acked(PAIR, &id, Some(7)).unwrap_err(),
+            OrderBookError::StaleVersion {
+                order_id: id.clone(),
+                requested: 7,
+                current: 0,
+            }
+        );
+        assert!(engine.cancel_order("no-such-pair", &id).is_none());
+        assert_eq!(engine.sequence(PAIR), Some(1));
+    }
+
+    #[test]
+    fn test_replacement_records_the_removal_and_the_new_order() {
+        let mut engine = MatchingEngine::new();
+        let order = order_at(Side::Buy, 100, 10, 1, "alice");
+        let id = order.id.clone();
+        engine.submit_order(order); // 1
+
+        let (_, result) = engine
+            .replace_order(PAIR, &id, 0, order_at(Side::Buy, 99, 10, 2, "alice"))
+            .unwrap();
+
+        let sequences: Vec<u64> = result.events.iter().map(|e| e.sequence).collect();
+        assert_eq!(sequences, vec![2, 3]);
+        assert!(matches!(
+            result.events[0].event,
+            BookEvent::OrderRemoved { .. }
+        ));
+        assert!(matches!(result.events[1].event, BookEvent::OrderAdded(_)));
+        assert_eq!(result.ack.unwrap().sequence, 3);
+    }
+
+    #[test]
+    fn test_markets_are_numbered_independently() {
+        let mut engine = MatchingEngine::new();
+        engine.submit_order(order_at(Side::Buy, 100, 10, 1, "alice"));
+        engine.submit_order(order_at(Side::Buy, 99, 10, 2, "alice"));
+        let mut other = order_at(Side::Buy, 100, 10, 3, "alice");
+        other.token1 = "token2".to_string();
+
+        let result = engine.submit_order(other);
+
+        assert_eq!(result.ack.unwrap().sequence, 1);
+        assert_eq!(engine.sequence(PAIR), Some(2));
+        assert_eq!(engine.sequence("token0-token2"), Some(1));
+    }
+
+    #[test]
+    fn test_restart_recovers_the_book_and_keeps_numbering() {
+        let mut live = MatchingEngine::new();
+        let resting = order_at(Side::Sell, 100, 40, 1, "alice");
+        let resting_id = resting.id.clone();
+        live.submit_order(resting); // 1
+        live.submit_order(order_at(Side::Buy, 90, 20, 2, "bob")); // 2
+        let snapshot = live.checkpoint(PAIR).unwrap();
+        assert_eq!(snapshot.sequence, 2);
+        assert!(live.get_book(PAIR).unwrap().events_since(0).is_empty());
+
+        // After the snapshot: a partial fill, a new resting order, a cancel.
+        live.submit_order(order_at(Side::Buy, 100, 15, 3, "carol")); // 3
+        let later = order_at(Side::Sell, 120, 5, 4, "dave");
+        let later_id = later.id.clone();
+        live.submit_order(later); // 4
+        live.cancel_order(PAIR, &later_id).unwrap(); // 5
+        let events = live.get_book(PAIR).unwrap().events_since(snapshot.sequence);
+        assert_eq!(events.len(), 3);
+
+        // "Restart": a new engine rebuilt from the snapshot and the events.
+        let mut restarted = MatchingEngine::new();
+        restarted.recover_book(&snapshot, &events).unwrap();
+
+        assert_eq!(book_state(&restarted), book_state(&live));
+        assert_eq!(restarted.sequence(PAIR), Some(5));
+        assert_eq!(
+            restarted
+                .get_book(PAIR)
+                .unwrap()
+                .get_order(&resting_id)
+                .unwrap()
+                .filled,
+            15
+        );
+
+        // New work continues the numbering on both engines, with no reuse.
+        let next = order_at(Side::Buy, 80, 1, 5, "erin");
+        let live_ack = live.submit_order(next.clone()).ack.unwrap();
+        let restarted_ack = restarted.submit_order(next).ack.unwrap();
+        assert_eq!(live_ack.sequence, 6);
+        assert_eq!(restarted_ack.sequence, 6);
+        assert_eq!(book_state(&restarted), book_state(&live));
+    }
+
+    #[test]
+    fn test_restart_from_a_snapshot_alone_resumes_after_its_sequence() {
+        let mut live = MatchingEngine::new();
+        live.submit_order(order_at(Side::Buy, 100, 10, 1, "alice"));
+        live.submit_order(order_at(Side::Buy, 99, 10, 2, "alice"));
+        let snapshot = live.checkpoint(PAIR).unwrap();
+
+        let mut restarted = MatchingEngine::new();
+        restarted.recover_book(&snapshot, &[]).unwrap();
+
+        assert_eq!(restarted.sequence(PAIR), Some(2));
+        let ack = restarted
+            .submit_order(order_at(Side::Buy, 98, 10, 3, "alice"))
+            .ack
+            .unwrap();
+        assert_eq!(ack.sequence, 3);
+    }
+
+    #[test]
+    fn test_recovered_events_can_still_catch_clients_up() {
+        let mut live = MatchingEngine::new();
+        live.submit_order(order_at(Side::Buy, 100, 10, 1, "alice"));
+        let snapshot = live.checkpoint(PAIR).unwrap();
+        live.submit_order(order_at(Side::Buy, 99, 10, 2, "alice"));
+        live.submit_order(order_at(Side::Buy, 98, 10, 3, "alice"));
+        let events = live.get_book(PAIR).unwrap().events_since(snapshot.sequence);
+
+        let mut restarted = MatchingEngine::new();
+        restarted.recover_book(&snapshot, &events).unwrap();
+
+        let catch_up = restarted.get_book(PAIR).unwrap().events_since(2);
+        assert_eq!(catch_up.len(), 1);
+        assert_eq!(catch_up[0].sequence, 3);
+    }
+
+    #[test]
+    fn test_recovery_rejects_a_gap_in_the_events() {
+        let mut live = MatchingEngine::new();
+        live.submit_order(order_at(Side::Buy, 100, 10, 1, "alice"));
+        let snapshot = live.checkpoint(PAIR).unwrap();
+        live.submit_order(order_at(Side::Buy, 99, 10, 2, "alice"));
+        live.submit_order(order_at(Side::Buy, 98, 10, 3, "alice"));
+        let mut events = live.get_book(PAIR).unwrap().events_since(snapshot.sequence);
+        events.remove(0); // lose event 2
+
+        let mut restarted = MatchingEngine::new();
+        let error = restarted.recover_book(&snapshot, &events).unwrap_err();
+
+        assert_eq!(
+            error,
+            SnapshotError::SequenceGap {
+                expected: 2,
+                found: 3
+            }
+        );
+        assert!(restarted.get_book(PAIR).is_none());
+    }
+
+    #[test]
+    fn test_checkpoint_of_an_unknown_market_is_an_error() {
+        let mut engine = MatchingEngine::new();
+        assert!(matches!(
+            engine.checkpoint("nope"),
+            Err(SnapshotError::Book(OrderBookError::OrderNotFound(_)))
+        ));
     }
 }
