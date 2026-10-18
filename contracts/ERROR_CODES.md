@@ -86,6 +86,7 @@ Source: `contracts/isolated_lending/src/lib.rs`
 | 8    | `InsufficientCollateral` | Collateral below required ratio      | Add more collateral                            |
 | 9    | `PositionStillBacked`    | Position cannot be liquidated yet    | Wait until health factor drops below threshold |
 | 10   | `MathOverflow`           | Arithmetic overflow                  | Reduce input amounts                           |
+| 11   | `AlreadyLiquidated`      | Liquidation id already used for this borrower | Use a new liquidation id               |
 
 ---
 
