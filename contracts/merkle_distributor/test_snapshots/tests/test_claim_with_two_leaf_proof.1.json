@@ -38,7 +38,7 @@
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
                 },
                 {
-                  "bytes": "d399aa0f0e0f5a183ff0e028ac19b0b4877fe27b0178e6ba11f8b243e35f32cf"
+                  "bytes": "8cd3c75a68a79c49ffacea5e1f62263a6c546fc0f52671997b2a5cd9a631900c"
                 }
               ]
             }
@@ -96,7 +96,7 @@
                 {
                   "vec": [
                     {
-                      "bytes": "50071fd4ec3b9b3548ae6c84dacb668cd936af91540c2daf00321dae4517f124"
+                      "bytes": "bf77219d51e3e4e493bf3bbd459e4bc23cee41ab9c4858f26a47b2ab91fa91a6"
                     }
                   ]
                 }
@@ -131,7 +131,7 @@
                 {
                   "vec": [
                     {
-                      "bytes": "798c8634c1bab5c4647729e4f2c3a29745cf79dfa5ee228621d68c01454fee18"
+                      "bytes": "e5031174504e7fc8deeb308949f8578212d5bdf19512d96ff77aa6f25d5fae9b"
                     }
                   ]
                 }
@@ -313,6 +313,18 @@
                         "key": {
                           "vec": [
                             {
+                              "symbol": "Expiry"
+                            }
+                          ]
+                        },
+                        "val": {
+                          "u64": 0
+                        }
+                      },
+                      {
+                        "key": {
+                          "vec": [
+                            {
                               "symbol": "Initialized"
                             }
                           ]
@@ -330,7 +342,7 @@
                           ]
                         },
                         "val": {
-                          "bytes": "d399aa0f0e0f5a183ff0e028ac19b0b4877fe27b0178e6ba11f8b243e35f32cf"
+                          "bytes": "8cd3c75a68a79c49ffacea5e1f62263a6c546fc0f52671997b2a5cd9a631900c"
                         }
                       },
                       {
