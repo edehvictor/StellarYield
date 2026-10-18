@@ -4,6 +4,8 @@ import type {
   ApiCacheEntry,
   ApiCacheStore,
   ApiConfig,
+  ApiCursorPage,
+  ApiPaginateOptions,
   ApiRequestOptions,
   ApiVaultData,
   HistoricalDataPoint,
@@ -12,6 +14,7 @@ import {
   ApiCancelledError,
   ApiHttpError,
   ApiNetworkError,
+  ApiPaginationError,
   ApiTimeoutError,
 } from "../errors";
 
@@ -43,6 +46,7 @@ const DEFAULT_MAX_RETRIES = 2;
 const DEFAULT_RETRY_DELAY_MS = 250;
 const DEFAULT_RETRYABLE_STATUSES = [408, 429, 500, 502, 503, 504];
 const DEFAULT_CACHE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+const DEFAULT_MAX_PAGES = 50;
 
 /**
  * Simple in-process cache store for environments without durable storage.
@@ -85,6 +89,27 @@ function createAbortError(): Error {
   const err = new Error("The operation was aborted");
   err.name = "AbortError";
   return err;
+}
+
+function withQueryParam(path: string, key: string, value: string): string {
+  const separator = path.includes("?") ? "&" : "?";
+  return `${path}${separator}${encodeURIComponent(key)}=${encodeURIComponent(value)}`;
+}
+
+function parseCursorPage<T>(path: string, body: unknown): ApiCursorPage<T> {
+  if (typeof body !== "object" || body === null || Array.isArray(body)) {
+    throw new ApiPaginationError(path, "expected an object with an `items` array");
+  }
+  const { items, nextCursor } = body as { items?: unknown; nextCursor?: unknown };
+  if (!Array.isArray(items)) {
+    throw new ApiPaginationError(path, "`items` is not an array");
+  }
+  if (nextCursor !== undefined && nextCursor !== null) {
+    if (typeof nextCursor !== "string" || nextCursor.length === 0) {
+      throw new ApiPaginationError(path, "`nextCursor` must be a non-empty string or null");
+    }
+  }
+  return { items: items as T[], nextCursor: nextCursor as string | null | undefined };
 }
 
 function isIdempotentMethod(method: string | undefined): boolean {
@@ -429,6 +454,61 @@ export class ApiClient {
       undefined,
       requestOptions
     );
+  }
+
+  /**
+   * Follow a cursor-paginated GET endpoint page by page.
+   *
+   * Each response must be `{ items: T[], nextCursor?: string | null }`; the
+   * cursor is sent back as a query parameter until a page has no cursor.
+   * Stops after `maxPages` (default 50) or once `maxItems` have been yielded.
+   * Malformed pages and repeated cursors throw {@link ApiPaginationError}.
+   */
+  async *paginate<T>(
+    path: string,
+    options?: ApiPaginateOptions
+  ): AsyncGenerator<ApiCursorPage<T>, void, undefined> {
+    const maxPages = options?.maxPages ?? DEFAULT_MAX_PAGES;
+    const maxItems = options?.maxItems;
+    const cursorParam = options?.cursorParam ?? "cursor";
+    const requestOptions: ApiRequestOptions = {
+      retrySafe: options?.retrySafe,
+      signal: options?.signal,
+    };
+
+    const seenCursors = new Set<string>();
+    let cursor: string | null | undefined;
+    let yielded = 0;
+
+    for (let page = 0; page < maxPages; page++) {
+      const pagePath = cursor ? withQueryParam(path, cursorParam, cursor) : path;
+      const body = await this.request<unknown>(pagePath, undefined, requestOptions);
+      const parsed = parseCursorPage<T>(pagePath, body);
+
+      let items = parsed.items;
+      if (maxItems !== undefined && yielded + items.length > maxItems) {
+        items = items.slice(0, Math.max(0, maxItems - yielded));
+      }
+      yielded += items.length;
+      yield { items, nextCursor: parsed.nextCursor ?? null };
+
+      cursor = parsed.nextCursor;
+      if (!cursor || (maxItems !== undefined && yielded >= maxItems)) return;
+      // A server that hands back a cursor it already gave us would page forever.
+      if (seenCursors.has(cursor)) {
+        throw new ApiPaginationError(pagePath, `cursor '${cursor}' was returned twice`);
+      }
+      seenCursors.add(cursor);
+    }
+  }
+
+  /** Collect every item from {@link ApiClient.paginate} into one array. */
+  async getAllPages<T>(path: string, options?: ApiPaginateOptions): Promise<T[]> {
+    const all: T[] = [];
+    for await (const page of this.paginate<T>(path, options)) {
+      all.push(...page.items);
+    }
+    return all;
   }
 
   /**

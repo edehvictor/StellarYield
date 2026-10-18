@@ -290,6 +290,20 @@ export class ApiNetworkError extends SorobanSdkError {
   }
 }
 
+/**
+ * A paginated response did not match the expected `{ items, nextCursor }`
+ * shape, or its cursor would loop. Not retryable: the same request would
+ * return the same malformed page.
+ */
+export class ApiPaginationError extends SorobanSdkError {
+  public readonly path: string;
+
+  constructor(path: string, reason: string) {
+    super(`Malformed paginated response at '${path}': ${reason}`, undefined, false);
+    this.path = path;
+  }
+}
+
 /** Non-OK HTTP response from the backend API. */
 export class ApiHttpError extends SorobanSdkError {
   public readonly path: string;

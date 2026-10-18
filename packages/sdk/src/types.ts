@@ -63,6 +63,25 @@ export interface ApiCachedGetOptions extends ApiRequestOptions {
   maxAgeMs?: number;
 }
 
+/**
+ * One page of a cursor-paginated API response. A missing or null
+ * `nextCursor` marks the final page.
+ */
+export interface ApiCursorPage<T> {
+  items: T[];
+  nextCursor?: string | null;
+}
+
+/** Options for {@link ApiClient.paginate} and {@link ApiClient.getAllPages}. */
+export interface ApiPaginateOptions extends ApiRequestOptions {
+  /** Maximum number of pages to request (default: 50). */
+  maxPages?: number;
+  /** Stop once this many items have been collected; extra items are dropped. */
+  maxItems?: number;
+  /** Query parameter used to send the cursor (default: "cursor"). */
+  cursorParam?: string;
+}
+
 /** Result of {@link ApiClient.cachedGet}. */
 export interface ApiCachedGetResult<T> {
   /** Fresh or cached payload; null when nothing could be loaded. */
