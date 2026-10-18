@@ -127,6 +127,23 @@ fn test_withdraw_lifecycle() {
 }
 
 #[test]
+fn test_expired_lock_has_zero_power_at_later_ledgers() {
+    let (env, client, _, _, yield_token_client) = setup_env();
+    let user = Address::generate(&env);
+    let amount = 10_000_000_000i128;
+    yield_token_client.mint(&user, &amount);
+
+    let start = env.ledger().timestamp();
+    let unlock_time = start + WEEK * 10;
+    client.create_lock(&user, &amount, &unlock_time);
+
+    env.ledger().set_timestamp(unlock_time + 1);
+    assert_eq!(client.get_voting_power(&user), 0);
+
+    env.ledger().set_timestamp(unlock_time + WEEK * 52);
+    assert_eq!(client.get_voting_power(&user), 0);
+}
+#[test]
 fn test_voting_decay() {
     let (env, client, _, _, yield_token_client) = setup_env();
     let user = Address::generate(&env);
