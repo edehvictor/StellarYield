@@ -78,6 +78,8 @@ enum DataKey {
     // Max single-deposit amount (route liquidity depth limit, #1312).
     // 0 / unset means unlimited.
     LiquidityDepthLimit,
+    /// Reentrancy guard for flash loans.  Set for the duration of a loan.
+    FlashLoanActive,
     /// On-chain storage schema version.  Written by `migrate()`.
     /// Absent (unwrap_or 0) on contracts deployed before versioning was introduced.
     StorageVersion,
