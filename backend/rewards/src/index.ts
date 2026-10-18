@@ -8,6 +8,7 @@ export {
 } from "./merkleTree";
 export type {
   RewardEntry,
+  LeafContext,
   MerkleTreeResult,
   RewardCampaignInfo,
   ClaimPreviewInput,
