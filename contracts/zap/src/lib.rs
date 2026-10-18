@@ -230,6 +230,95 @@ impl Zap {
         Ok(())
     }
 
+    /// Dry-run invoke a candidate router to verify it conforms to the DEX router interface
+    /// before performing any upgrade.
+    ///
+    /// # Arguments
+    ///
+    /// * `router` — Candidate DEX router address to invoke.
+    /// * `token_in` — Input token address.
+    /// * `token_out` — Target output token address.
+    /// * `amount_in` — Test amount to dry-run (must be > 0).
+    ///
+    /// # Errors
+    ///
+    /// * [`ZapError::ZeroAmount`] — If test amount is zero or negative.
+    /// * [`ZapError::SwapFailed`] — If router returns zero or fails swap.
+    pub fn dry_run_router(
+        env: Env,
+        router: Address,
+        token_in: Address,
+        token_out: Address,
+        amount_in: i128,
+    ) -> Result<i128, ZapError> {
+        if amount_in <= 0 {
+            return Err(ZapError::ZeroAmount);
+        }
+
+        let swap_fn = Symbol::new(&env, "swap");
+        let swap_args: soroban_sdk::Vec<Val> =
+            (&token_in, &token_out, amount_in, 0i128).into_val(&env);
+
+        let amount_out: i128 = env.invoke_contract(&router, &swap_fn, swap_args);
+        if amount_out <= 0 {
+            return Err(ZapError::SwapFailed);
+        }
+
+        Ok(amount_out)
+    }
+
+    /// Perform a contract invocation dry-run on a new DEX router and upgrade it if successful.
+    ///
+    /// # Arguments
+    ///
+    /// * `admin` — Must match the admin set in [`initialize`].
+    /// * `new_router` — Candidate DEX router implementing `swap`.
+    /// * `token_in` — Test token in for dry-run invocation.
+    /// * `token_out` — Test token out for dry-run invocation.
+    /// * `test_amount` — Test amount to dry-run (must be > 0).
+    ///
+    /// # Errors
+    ///
+    /// * [`ZapError::Unauthorized`] — Caller is not the stored admin.
+    /// * [`ZapError::ZeroAmount`] — If test amount is zero or negative.
+    /// * [`ZapError::SwapFailed`] — If candidate router dry-run produces zero output or fails.
+    pub fn set_dex_router_with_dry_run(
+        env: Env,
+        admin: Address,
+        new_router: Address,
+        token_in: Address,
+        token_out: Address,
+        test_amount: i128,
+    ) -> Result<i128, ZapError> {
+        Self::require_init(&env)?;
+        admin.require_auth();
+
+        let stored_admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+        if admin != stored_admin {
+            return Err(ZapError::Unauthorized);
+        }
+
+        // Dry-run invocation of candidate router before committing upgrade
+        let simulated_out = Self::dry_run_router(
+            env.clone(),
+            new_router.clone(),
+            token_in,
+            token_out,
+            test_amount,
+        )?;
+
+        env.storage()
+            .instance()
+            .set(&DataKey::DexRouter, &new_router);
+
+        env.events().publish(
+            (symbol_short!("zap_rtr"),),
+            (admin, new_router, simulated_out),
+        );
+
+        Ok(simulated_out)
+    }
+
     // ── Internal ─────────────────────────────────────────────────────
 
     fn require_init(env: &Env) -> Result<(), ZapError> {
@@ -284,19 +373,15 @@ mod tests {
             env.storage()
                 .instance()
                 .set(&RouterKey::ZapCaller, &zap_caller);
-            env.storage().instance().set(&RouterKey::Output, &amount_out);
+            env.storage()
+                .instance()
+                .set(&RouterKey::Output, &amount_out);
             env.storage()
                 .instance()
                 .set(&RouterKey::InputUsed, &input_used);
         }
 
-        pub fn swap(
-            env: Env,
-            from: Address,
-            to: Address,
-            amount_in: i128,
-            min_out: i128,
-        ) -> i128 {
+        pub fn swap(env: Env, from: Address, to: Address, amount_in: i128, min_out: i128) -> i128 {
             let router = env.current_contract_address();
             let zap: Address = env
                 .storage()
@@ -478,6 +563,140 @@ mod tests {
         assert_eq!(result, Err(Ok(ZapError::Unauthorized)));
     }
 
+    #[test]
+    fn test_dry_run_router_success() {
+        let t = setup_zap_env();
+        let candidate_router_id = t.env.register(MockDexRouter, ());
+        let candidate_router = MockDexRouterClient::new(&t.env, &candidate_router_id);
+        candidate_router.configure(&t.zap_id, &4_500, &5_000);
+
+        StellarAssetClient::new(&t.env, &t.vault_token).mint(&candidate_router_id, &10_000);
+
+        let out =
+            t.zap
+                .dry_run_router(&candidate_router_id, &t.input_token, &t.vault_token, &5_000);
+        assert_eq!(out, 4_500);
+    }
+
+    #[test]
+    fn test_dry_run_router_zero_amount() {
+        let t = setup_zap_env();
+        let candidate_router_id = t.env.register(MockDexRouter, ());
+
+        let res =
+            t.zap
+                .try_dry_run_router(&candidate_router_id, &t.input_token, &t.vault_token, &0);
+        assert_eq!(res, Err(Ok(ZapError::ZeroAmount)));
+    }
+
+    #[test]
+    fn test_dry_run_router_reverts_on_zero_output() {
+        let t = setup_zap_env();
+        let candidate_router_id = t.env.register(MockDexRouter, ());
+        let candidate_router = MockDexRouterClient::new(&t.env, &candidate_router_id);
+        candidate_router.configure(&t.zap_id, &0, &5_000);
+
+        let res =
+            t.zap
+                .try_dry_run_router(&candidate_router_id, &t.input_token, &t.vault_token, &5_000);
+        assert_eq!(res, Err(Ok(ZapError::SwapFailed)));
+    }
+
+    #[test]
+    fn test_set_dex_router_with_dry_run_success() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+
+        let zap_id = env.register(Zap, ());
+        let zap = ZapClient::new(&env, &zap_id);
+
+        let admin = Address::generate(&env);
+        let initial_router = Address::generate(&env);
+        zap.initialize(&admin, &initial_router);
+
+        let input_admin = Address::generate(&env);
+        let input_sac = env.register_stellar_asset_contract_v2(input_admin);
+        let input_token = input_sac.address();
+
+        let vault_admin = Address::generate(&env);
+        let vault_sac = env.register_stellar_asset_contract_v2(vault_admin);
+        let vault_token = vault_sac.address();
+
+        let candidate_router_id = env.register(MockDexRouter, ());
+        let candidate_router = MockDexRouterClient::new(&env, &candidate_router_id);
+        candidate_router.configure(&zap_id, &9_500, &10_000);
+        StellarAssetClient::new(&env, &vault_token).mint(&candidate_router_id, &20_000);
+
+        let out = zap.set_dex_router_with_dry_run(
+            &admin,
+            &candidate_router_id,
+            &input_token,
+            &vault_token,
+            &10_000,
+        );
+        assert_eq!(out, 9_500);
+
+        // Verify zap_rtr event was emitted
+        let events = env.events().all();
+        let (_, topics, data) = events.last().unwrap();
+        assert_eq!(event_topic(&env, &topics), symbol_short!("zap_rtr"));
+        let decoded: (Address, Address, i128) = data.clone().into_val(&env);
+        assert_eq!(decoded.0, admin);
+        assert_eq!(decoded.1, candidate_router_id);
+        assert_eq!(decoded.2, 9_500);
+    }
+
+    #[test]
+    fn test_set_dex_router_with_dry_run_unauthorized() {
+        let t = setup_zap_env();
+        let attacker = Address::generate(&t.env);
+        let candidate_router = Address::generate(&t.env);
+
+        let res = t.zap.try_set_dex_router_with_dry_run(
+            &attacker,
+            &candidate_router,
+            &t.input_token,
+            &t.vault_token,
+            &1_000,
+        );
+        assert_eq!(res, Err(Ok(ZapError::Unauthorized)));
+    }
+
+    #[test]
+    fn test_set_dex_router_with_dry_run_aborts_on_failure() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+
+        let zap_id = env.register(Zap, ());
+        let zap = ZapClient::new(&env, &zap_id);
+
+        let admin = Address::generate(&env);
+        let initial_router = Address::generate(&env);
+        zap.initialize(&admin, &initial_router);
+
+        let input_admin = Address::generate(&env);
+        let input_sac = env.register_stellar_asset_contract_v2(input_admin);
+        let input_token = input_sac.address();
+
+        let vault_admin = Address::generate(&env);
+        let vault_sac = env.register_stellar_asset_contract_v2(vault_admin);
+        let vault_token = vault_sac.address();
+
+        // Candidate router that returns 0 (fails dry-run)
+        let broken_router_id = env.register(MockDexRouter, ());
+        let broken_router = MockDexRouterClient::new(&env, &broken_router_id);
+        broken_router.configure(&zap_id, &0, &1_000);
+
+        let res = zap.try_set_dex_router_with_dry_run(
+            &admin,
+            &broken_router_id,
+            &input_token,
+            &vault_token,
+            &1_000,
+        );
+        assert_eq!(res, Err(Ok(ZapError::SwapFailed)));
+    }
+
     // ── Event assertion tests (#1045) ──────────────────────────────────
 
     #[test]
@@ -507,19 +726,17 @@ mod tests {
         let t = setup_zap_env();
         StellarAssetClient::new(&t.env, &t.vault_token).mint(&t.user, &1_000);
 
-        let shares = t
-            .zap
-            .zap_deposit(
-                &t.user,
-                &t.vault_token,
-                &t.vault_token,
-                &t.vault_id,
-                &1_000,
-                &0,
-                &1,
-                &0,
-                &false,
-            );
+        let shares = t.zap.zap_deposit(
+            &t.user,
+            &t.vault_token,
+            &t.vault_token,
+            &t.vault_id,
+            &1_000,
+            &0,
+            &1,
+            &0,
+            &false,
+        );
 
         assert_eq!(shares, 1_000);
         assert_eq!(
@@ -547,22 +764,19 @@ mod tests {
     #[test]
     fn test_zap_deposit_swap_full_emits_zap_dep() {
         let t = setup_zap_env();
-        t.router
-            .configure(&t.zap_id, &900, &1_000);
+        t.router.configure(&t.zap_id, &900, &1_000);
 
-        let shares = t
-            .zap
-            .zap_deposit(
-                &t.user,
-                &t.input_token,
-                &t.vault_token,
-                &t.vault_id,
-                &1_000,
-                &800,
-                &1,
-                &900,
-                &false,
-            );
+        let shares = t.zap.zap_deposit(
+            &t.user,
+            &t.input_token,
+            &t.vault_token,
+            &t.vault_id,
+            &1_000,
+            &800,
+            &1,
+            &900,
+            &false,
+        );
 
         assert_eq!(shares, 900);
         assert_eq!(
@@ -580,19 +794,17 @@ mod tests {
         let t = setup_zap_env();
         t.router.configure(&t.zap_id, &600, &1_000);
 
-        let shares = t
-            .zap
-            .zap_deposit(
-                &t.user,
-                &t.input_token,
-                &t.vault_token,
-                &t.vault_id,
-                &1_000,
-                &500,
-                &1,
-                &900,
-                &true,
-            );
+        let shares = t.zap.zap_deposit(
+            &t.user,
+            &t.input_token,
+            &t.vault_token,
+            &t.vault_id,
+            &1_000,
+            &500,
+            &1,
+            &900,
+            &true,
+        );
 
         assert_eq!(shares, 600);
         assert_eq!(
@@ -610,8 +822,7 @@ mod tests {
             })
             .map(|(_, _, data)| data.clone())
             .unwrap();
-        let decoded: (Address, Address, Address, i128, i128, i128) =
-            part_data.into_val(&t.env);
+        let decoded: (Address, Address, Address, i128, i128, i128) = part_data.into_val(&t.env);
         assert_eq!(decoded.0, t.user);
         assert_eq!(decoded.1, t.input_token);
         assert_eq!(decoded.2, t.vault_token);
@@ -626,18 +837,17 @@ mod tests {
         // Router consumes only 600 of 1000 input; 400 should be refunded.
         t.router.configure(&t.zap_id, &900, &600);
 
-        t.zap
-            .zap_deposit(
-                &t.user,
-                &t.input_token,
-                &t.vault_token,
-                &t.vault_id,
-                &1_000,
-                &800,
-                &1,
-                &900,
-                &false,
-            );
+        t.zap.zap_deposit(
+            &t.user,
+            &t.input_token,
+            &t.vault_token,
+            &t.vault_id,
+            &1_000,
+            &800,
+            &1,
+            &900,
+            &false,
+        );
 
         assert_eq!(
             count_zap_events(&t.env, &t.zap_id, symbol_short!("zap_ref")),
@@ -670,18 +880,17 @@ mod tests {
         let t = setup_zap_env();
         t.router.configure(&t.zap_id, &600, &600);
 
-        t.zap
-            .zap_deposit(
-                &t.user,
-                &t.input_token,
-                &t.vault_token,
-                &t.vault_id,
-                &1_000,
-                &500,
-                &1,
-                &900,
-                &true,
-            );
+        t.zap.zap_deposit(
+            &t.user,
+            &t.input_token,
+            &t.vault_token,
+            &t.vault_id,
+            &1_000,
+            &500,
+            &1,
+            &900,
+            &true,
+        );
 
         let topics = zap_event_topics(&t.env, &t.zap_id);
         assert_eq!(topics.len(), 3);

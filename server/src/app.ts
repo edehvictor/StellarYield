@@ -56,6 +56,7 @@ import momentumRouter from "./routes/momentum";
 import queueRouter from "./routes/queue";
 import vaultActivityRouter from "./routes/vaultActivity";
 import watchlistRouter from "./routes/watchlist";
+import routerUpgradeRouter from "./routes/routerUpgrade";
 
 import { createAuthChallenge, verifyAuthChallenge } from "./utils/stellarAuth";
 import {
@@ -164,6 +165,7 @@ export function createApp() {
   app.use("/api/queue", queueRouter);
   app.use("/api/vaults/activity", vaultActivityRouter);
   app.use("/api/watchlist", watchlistRouter);
+  app.use("/api/router-upgrade", routerUpgradeRouter);
   app.use("/api/google-sheets", googleSheetsRouter);
   app.use("/api", googleSheetsRouter);
 

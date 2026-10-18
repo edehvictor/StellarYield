@@ -73,8 +73,66 @@ tags:
     description: Fiat onramp provider webhook integration
   - name: Deposits
     description: Multi-asset deposit routing recommendations
+  - name: RouterUpgrade
+    description: Contract invocation dry-run and validation for candidate DEX routers prior to on-chain upgrade
 
 paths:
+  /api/router-upgrade/dry-run:
+    post:
+      summary: Dry-run candidate router invocation
+      description: |
+        Performs a simulated contract call against the candidate DEX router contract
+        before executing an upgrade, verifying interface conformance and projected output.
+      tags:
+        - RouterUpgrade
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - candidateRouterAddress
+              properties:
+                candidateRouterAddress:
+                  type: string
+                  description: Candidate Soroban DEX router contract ID
+                currentRouterAddress:
+                  type: string
+                  description: Currently active router contract ID
+                testTokenIn:
+                  type: string
+                  description: Input token contract ID for dry-run invocation
+                testTokenOut:
+                  type: string
+                  description: Output token contract ID for dry-run invocation
+                testAmountStroops:
+                  type: string
+                  description: Input amount in stroops for dry-run swap
+                network:
+                  type: string
+                  enum: [testnet, mainnet, local]
+                mockSimulate:
+                  type: boolean
+                  description: Run deterministic mock simulation (for sandbox/testing)
+      responses:
+        '200':
+          description: Dry-run completed (either READY or BLOCKED)
+        '400':
+          description: Invalid request parameters or address format
+        '500':
+          description: Internal dry-run simulation error
+
+  /api/router-upgrade/status:
+    get:
+      summary: Get active router upgrade status
+      description: Returns currently configured active DEX router contract ID and network status.
+      tags:
+        - RouterUpgrade
+      responses:
+        '200':
+          description: Router status retrieved successfully
+
   /api/health:
     get:
       summary: Check system health status
