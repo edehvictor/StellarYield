@@ -7,6 +7,7 @@ import {
 import { RebalanceQueueEntryDTO } from '../services/rebalanceQueueService';
 import { EXECUTION_TYPE, REBALANCE_STATUS } from '../queues/types';
 import { NONCE_CONFLICT_CODE } from '../relayer/nonceConflict';
+import type { RebalanceExecutionStrategy } from '../services/vaultStrategyCompatibilityService';
 
 function buildBadSeqTransactionResult(): StellarSdk.xdr.TransactionResult {
   return new StellarSdk.xdr.TransactionResult({
@@ -127,6 +128,75 @@ describe('RebalanceExecutorService', () => {
       const result = await executor.dryRun(entry);
       expect(result.viable).toBe(true);
     });
+
+    it('allows compatible active strategies before rebalance', async () => {
+      const entry = baseEntry();
+      entry.executionStrategy = {
+        strategyCompatibility: {
+          strategies: [
+            {
+              id: 'stable',
+              compatibilityTags: ['stablecoin-only'],
+              isActive: true,
+            },
+            {
+              id: 'managed',
+              compatibilityTags: ['automated-rebalancing'],
+              isActive: true,
+            },
+          ],
+        },
+      };
+
+      await expect(executor.dryRun(entry)).resolves.toMatchObject({
+        viable: true,
+        estimatedFill: 100,
+      });
+    });
+
+    it('blocks incompatible active strategies before rebalance', async () => {
+      const entry = baseEntry();
+      entry.executionStrategy = {
+        strategyCompatibility: {
+          strategies: [
+            {
+              id: 'stable',
+              compatibilityTags: ['stablecoin-only'],
+              isActive: true,
+            },
+            {
+              id: 'volatile',
+              compatibilityTags: ['volatile-assets'],
+              isActive: true,
+            },
+          ],
+        },
+      };
+
+      await expect(executor.dryRun(entry)).resolves.toMatchObject({
+        viable: false,
+        estimatedFill: 0,
+        reason: expect.stringContaining('Incompatible strategy tags'),
+      });
+    });
+
+    it('fails closed when strategy compatibility metadata is empty or malformed', async () => {
+      const entry = baseEntry();
+      entry.executionStrategy = { strategyCompatibility: { strategies: [] } };
+
+      const emptyResult = await executor.dryRun(entry);
+      expect(emptyResult.viable).toBe(false);
+      expect(emptyResult.reason).toContain('metadata is invalid');
+
+      entry.executionStrategy = {
+        strategyCompatibility: {
+          strategies: [{ id: 'missing-tags', isActive: true }],
+        },
+      } as unknown as RebalanceExecutionStrategy;
+      const malformedResult = await executor.dryRun(entry);
+      expect(malformedResult.viable).toBe(false);
+      expect(malformedResult.reason).toContain('metadata is invalid');
+    });
   });
 
   // ── Error classification ─────────────────────────────────────────────────
@@ -223,6 +293,37 @@ describe('RebalanceExecutorService', () => {
 
       await expect(executor.execute(entry, attempt)).rejects.toThrow(/dry-run/i);
       expect(attempt.failureClass).toBe(FAILURE_CLASS.STALE_INTENT);
+    });
+
+    it('does not submit a rebalance with incompatible strategies', async () => {
+      const entry = baseEntry();
+      entry.executionStrategy = {
+        strategyCompatibility: {
+          strategies: [
+            {
+              id: 'manual',
+              compatibilityTags: ['manual-execution'],
+              isActive: true,
+            },
+            {
+              id: 'automated',
+              compatibilityTags: ['automated-rebalancing'],
+              isActive: true,
+            },
+          ],
+        },
+      };
+      const attempt = {
+        entryId: entry.id,
+        attemptNumber: 1,
+        startedAt: new Date(),
+        status: 'pending' as const,
+      };
+
+      await expect(executor.execute(entry, attempt)).rejects.toThrow(
+        /strategy compatibility check failed/i,
+      );
+      expect(attempt.failureClass).toBe(FAILURE_CLASS.CONSTRAINT);
     });
   });
 

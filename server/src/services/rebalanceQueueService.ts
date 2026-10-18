@@ -1,6 +1,7 @@
 import { PrismaClient } from '@prisma/client';
 import crypto from 'crypto';
 import { EXECUTION_TYPE, ExecutionType, REBALANCE_STATUS, RebalanceStatus } from '../queues/types';
+import type { RebalanceExecutionStrategy } from './vaultStrategyCompatibilityService';
 
 const prisma = new PrismaClient();
 
@@ -15,7 +16,7 @@ export interface RebalanceQueueEntryDTO {
   executionType: ExecutionType;
   targetAllocations: Record<string, number>;
   currentAllocations: Record<string, number>;
-  executionStrategy: Record<string, unknown>;
+  executionStrategy: RebalanceExecutionStrategy;
   partiallyExecuted: boolean;
   partialFillAmount: number;
   intentHash: string;
@@ -175,7 +176,7 @@ export class RebalanceQueueService {
     vaultId: string,
     targetAllocations: Record<string, number>,
     currentAllocations: Record<string, number>,
-    executionStrategy: Record<string, unknown>,
+    executionStrategy: RebalanceExecutionStrategy,
     options?: {
       triggeredBy?: string;
       intentValidUntil?: Date;
@@ -614,7 +615,7 @@ export class RebalanceQueueService {
       executionType: entry.executionType,
       targetAllocations: entry.targetAllocations as Record<string, number>,
       currentAllocations: entry.currentAllocations as Record<string, number>,
-      executionStrategy: entry.executionStrategy as Record<string, unknown>,
+      executionStrategy: entry.executionStrategy as RebalanceExecutionStrategy,
       partiallyExecuted: entry.partiallyExecuted,
       partialFillAmount: entry.partialFillAmount,
       intentHash: entry.intentHash,

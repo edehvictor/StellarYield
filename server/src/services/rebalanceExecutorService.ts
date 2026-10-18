@@ -14,6 +14,10 @@ import * as StellarSdk from '@stellar/stellar-sdk';
 import { RebalanceExecutionResult } from './rebalanceQueueService';
 import { RebalanceQueueEntryDTO } from './rebalanceQueueService';
 import {
+  checkStrategyCompatibility,
+  type RebalanceExecutionStrategy,
+} from './vaultStrategyCompatibilityService';
+import {
   isNonceConflictError,
   isSafeToRetryAfterNonceConflict,
   submitWithNonceConflictHandling,
@@ -160,7 +164,18 @@ export class RebalanceExecutorService {
     }
 
     // Check intent expiry via executionStrategy metadata
-    const strategy = entry.executionStrategy as Record<string, unknown>;
+    const strategy = entry.executionStrategy;
+    if (strategy.strategyCompatibility !== undefined) {
+      const compatibility = checkStrategyCompatibility(strategy.strategyCompatibility);
+      if (!compatibility.compatible) {
+        return {
+          viable: false,
+          estimatedFill: 0,
+          reason: `Strategy compatibility check failed: ${compatibility.issues.join('; ')}`,
+        };
+      }
+    }
+
     if (strategy.intentValidUntil) {
       const expiry = new Date(strategy.intentValidUntil as string).getTime();
       if (Date.now() > expiry) {
@@ -262,7 +277,7 @@ export class RebalanceExecutorService {
     entry: RebalanceQueueEntryDTO,
   ): Promise<string> {
     // Derive the vault contract address from the execution strategy metadata.
-    const strategy = entry.executionStrategy as Record<string, unknown>;
+    const strategy: RebalanceExecutionStrategy = entry.executionStrategy;
     const vaultContractId =
       (strategy.vaultContractId as string | undefined) ??
       process.env.VAULT_CONTRACT_ID;

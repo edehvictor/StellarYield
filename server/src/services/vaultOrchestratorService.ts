@@ -12,6 +12,7 @@ import {
   type LiquidityBand,
   type RouteRiskLevel,
 } from "./liquidityBufferService";
+import { checkStrategyCompatibility } from "./vaultStrategyCompatibilityService";
 
 export interface StrategyModule {
   id: string;
@@ -186,46 +187,19 @@ export class VaultOrchestrator {
 
     // Compatibility checks
     if (this.config.requireCompatibilityCheck) {
-      const allTags = new Set<string>();
-      for (const strategy of this.config.strategies) {
-        strategy.compatibilityTags.forEach((tag) => allTags.add(tag));
-      }
-
-      // Ensure no conflicting tags
-      const conflicts = this.detectCompatibilityConflicts();
-      errors.push(...conflicts);
+      const compatibility = checkStrategyCompatibility({
+        strategies: this.config.strategies.map(
+          ({ id, compatibilityTags, isActive }) => ({
+            id,
+            compatibilityTags,
+            isActive,
+          }),
+        ),
+      });
+      errors.push(...compatibility.issues);
     }
 
     return errors;
-  }
-
-  /**
-   * Detect compatibility conflicts between strategies.
-   */
-  private detectCompatibilityConflicts(): string[] {
-    const conflicts: string[] = [];
-    const conflictingPairs = [
-      ["stablecoin-only", "volatile-assets"],
-      ["manual-execution", "automated-rebalancing"],
-      ["high-frequency", "low-frequency"],
-    ];
-
-    for (const [tag1, tag2] of conflictingPairs) {
-      const hasTag1 = this.config.strategies.some((s) =>
-        s.compatibilityTags.includes(tag1),
-      );
-      const hasTag2 = this.config.strategies.some((s) =>
-        s.compatibilityTags.includes(tag2),
-      );
-
-      if (hasTag1 && hasTag2) {
-        conflicts.push(
-          `Incompatible strategies: detected both "${tag1}" and "${tag2}"`,
-        );
-      }
-    }
-
-    return conflicts;
   }
 
   /**
