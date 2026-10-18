@@ -87,6 +87,9 @@ Source: `contracts/isolated_lending/src/lib.rs`
 | 9    | `PositionStillBacked`    | Position cannot be liquidated yet    | Wait until health factor drops below threshold |
 | 10   | `MathOverflow`           | Arithmetic overflow                  | Reduce input amounts                           |
 | 11   | `AlreadyLiquidated`      | Liquidation id already used for this borrower | Use a new liquidation id               |
+| 12   | `OracleQuoteMissing`     | Oracle policy set but no quote pushed | Have the configured oracle push a quote       |
+| 13   | `OracleQuoteStale`       | Oracle quote older than the policy allows | Push a fresh quote                         |
+| 14   | `OracleConfidenceTooLow` | Oracle quote confidence below the policy | Wait for a higher-confidence quote          |
 
 ---
 

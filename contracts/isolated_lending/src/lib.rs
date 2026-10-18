@@ -5,6 +5,10 @@ use soroban_sdk::{
 };
 
 const BPS_DENOMINATOR: i128 = 10_000;
+/// Fixed-point scale of the borrow index (1.0 = `INDEX_SCALE`).
+const INDEX_SCALE: i128 = 1_000_000_000;
+/// Interest rates are parts per billion of the index, per ledger.
+const RATE_SCALE: i128 = 1_000_000_000;
 
 #[contracttype]
 #[derive(Clone)]
@@ -22,6 +26,23 @@ pub struct PairConfig {
     pub collateral_token: Address,
     pub debt_token: Address,
     pub collateral_factor_bps: u32,
+}
+
+/// Borrow eligibility policy for oracle quotes.
+#[contracttype]
+#[derive(Clone)]
+pub struct OraclePolicyConfig {
+    pub min_confidence_bps: u32,
+    pub max_age_ledgers: u32,
+}
+
+/// Latest quote pushed by the configured oracle.
+#[contracttype]
+#[derive(Clone)]
+pub struct OracleQuoteData {
+    pub price_bps: u32,
+    pub confidence_bps: u32,
+    pub ledger: u32,
 }
 
 #[contracttype]
@@ -48,6 +69,22 @@ pub enum PairDataKey {
     PendingWithdrawal(Address),
     /// Marks a (borrower, liquidation id) pair as already settled.
     Liquidation(Address, u64),
+    /// Max share of a borrower's debt one liquidation may repay, in bps.
+    CloseFactorBps,
+    /// Global borrow index; debts are scaled by it (see `DebtIndex`).
+    BorrowIndex,
+    LastAccrualLedger,
+    /// Interest per ledger in parts per billion of the borrow index.
+    InterestRatePerLedger,
+    /// Borrow index at the time a borrower's debt was last written.
+    DebtIndex(Address),
+    /// Share of accrued interest owed to the protocol, in bps.
+    ProtocolFeeBps,
+    /// Accrued protocol fees not yet claimed (debt-token units).
+    ProtocolFees,
+    Oracle,
+    OraclePolicy,
+    OracleQuote,
 }
 
 #[contracterror]
@@ -65,6 +102,9 @@ pub enum IsolatedLendingError {
     PositionStillBacked = 9,
     MathOverflow = 10,
     AlreadyLiquidated = 11,
+    OracleQuoteMissing = 12,
+    OracleQuoteStale = 13,
+    OracleConfidenceTooLow = 14,
 }
 
 #[contract]
@@ -254,9 +294,15 @@ impl IsolatedLendingPair {
         }
         Self::require_init(&env)?;
 
+        Self::accrue(&env)?;
+
         let key = PairDataKey::Supply(user.clone());
         let old_supply: i128 = env.storage().persistent().get(&key).unwrap_or(0);
         if old_supply < amount {
+            return Err(IsolatedLendingError::InsufficientLiquidity);
+        }
+        // Accrued protocol fees are owed to the protocol, not to suppliers.
+        if Self::redeemable_cash(&env)? < amount {
             return Err(IsolatedLendingError::InsufficientLiquidity);
         }
         env.storage().persistent().set(&key, &(old_supply - amount));
@@ -325,6 +371,8 @@ impl IsolatedLendingPair {
             return Err(IsolatedLendingError::InvalidAmount);
         }
         Self::require_init(&env)?;
+        Self::check_oracle(&env)?;
+        let index = Self::accrue(&env)?;
 
         let collateral_factor_bps: u32 = env
             .storage()
@@ -336,11 +384,7 @@ impl IsolatedLendingPair {
             .persistent()
             .get(&PairDataKey::Collateral(user.clone()))
             .unwrap_or(0);
-        let current_debt: i128 = env
-            .storage()
-            .persistent()
-            .get(&PairDataKey::Debt(user.clone()))
-            .unwrap_or(0);
+        let current_debt = Self::debt_at(&env, &user, index)?;
 
         let new_debt = current_debt
             .checked_add(amount)
@@ -364,9 +408,7 @@ impl IsolatedLendingPair {
             return Err(IsolatedLendingError::InsufficientLiquidity);
         }
 
-        env.storage()
-            .persistent()
-            .set(&PairDataKey::Debt(user.clone()), &new_debt);
+        Self::store_debt(&env, &user, new_debt, index);
         env.storage().instance().set(
             &PairDataKey::TotalDebt,
             &total_debt
@@ -422,11 +464,8 @@ impl IsolatedLendingPair {
             return Err(IsolatedLendingError::InsufficientCollateral);
         }
 
-        let current_debt: i128 = env
-            .storage()
-            .persistent()
-            .get(&PairDataKey::Debt(user.clone()))
-            .unwrap_or(0);
+        let index = Self::accrue(&env)?;
+        let current_debt = Self::debt_at(&env, &user, index)?;
         let remaining_collateral = old_collateral - amount;
         let collateral_factor_bps: u32 = env
             .storage()
@@ -570,6 +609,7 @@ impl IsolatedLendingPair {
             return Err(IsolatedLendingError::InvalidAmount);
         }
         Self::require_init(&env)?;
+        let index = Self::accrue(&env)?;
 
         let liquidation_key = PairDataKey::Liquidation(borrower.clone(), liquidation_id);
         if env.storage().persistent().has(&liquidation_key) {
@@ -577,9 +617,8 @@ impl IsolatedLendingPair {
         }
 
         let collateral_key = PairDataKey::Collateral(borrower.clone());
-        let debt_key = PairDataKey::Debt(borrower.clone());
         let collateral: i128 = env.storage().persistent().get(&collateral_key).unwrap_or(0);
-        let debt: i128 = env.storage().persistent().get(&debt_key).unwrap_or(0);
+        let debt = Self::debt_at(&env, &borrower, index)?;
         let collateral_factor_bps: u32 = env
             .storage()
             .instance()
@@ -601,7 +640,22 @@ impl IsolatedLendingPair {
             return Err(IsolatedLendingError::PositionStillBacked);
         }
 
-        let mut repaid = if repay_amount < debt { repay_amount } else { debt };
+        // One liquidation may repay at most the close factor's share of the debt.
+        let close_factor_bps: i128 = env
+            .storage()
+            .instance()
+            .get::<_, u32>(&PairDataKey::CloseFactorBps)
+            .unwrap_or(10_000) as i128;
+        let max_repay = debt
+            .checked_mul(close_factor_bps)
+            .and_then(|v| v.checked_add(BPS_DENOMINATOR - 1))
+            .and_then(|v| v.checked_div(BPS_DENOMINATOR))
+            .ok_or(IsolatedLendingError::MathOverflow)?;
+        let mut repaid = if repay_amount < max_repay {
+            repay_amount
+        } else {
+            max_repay
+        };
         let mut seized = repaid
             .checked_mul(BPS_DENOMINATOR)
             .ok_or(IsolatedLendingError::MathOverflow)?
@@ -660,20 +714,172 @@ impl IsolatedLendingPair {
         env.storage()
             .persistent()
             .set(&collateral_key, &remaining_collateral);
-        env.storage().persistent().set(&debt_key, &remaining_debt);
-        let total_debt: i128 = env
-            .storage()
-            .instance()
-            .get(&PairDataKey::TotalDebt)
-            .unwrap_or(0);
-        env.storage().instance().set(
-            &PairDataKey::TotalDebt,
-            &total_debt
-                .checked_sub(total_debt_reduction)
-                .ok_or(IsolatedLendingError::MathOverflow)?,
-        );
+        Self::store_debt(&env, &borrower, remaining_debt, index);
+        Self::reduce_total_debt(&env, total_debt_reduction);
         env.storage().persistent().set(&liquidation_key, &true);
         Ok(seized)
+    }
+
+    /// Cap the share of a borrower's debt one liquidation may repay (bps,
+    /// default 10_000 = the whole debt). Admin only.
+    pub fn set_close_factor(
+        env: Env,
+        admin: Address,
+        close_factor_bps: u32,
+    ) -> Result<(), IsolatedLendingError> {
+        Self::require_admin(&env, &admin)?;
+        if close_factor_bps == 0 || close_factor_bps > 10_000 {
+            return Err(IsolatedLendingError::InvalidConfig);
+        }
+        env.storage()
+            .instance()
+            .set(&PairDataKey::CloseFactorBps, &close_factor_bps);
+        Ok(())
+    }
+
+    /// Set the interest rate per ledger, in parts per billion of the borrow
+    /// index. Interest up to this ledger accrues at the old rate. Admin only.
+    pub fn set_interest_rate(
+        env: Env,
+        admin: Address,
+        rate_per_ledger: u32,
+    ) -> Result<(), IsolatedLendingError> {
+        Self::require_admin(&env, &admin)?;
+        Self::accrue(&env)?;
+        env.storage()
+            .instance()
+            .set(&PairDataKey::InterestRatePerLedger, &rate_per_ledger);
+        Ok(())
+    }
+
+    /// Set the share of accrued interest (bps) owed to the protocol. Admin only.
+    pub fn set_protocol_fee_bps(
+        env: Env,
+        admin: Address,
+        fee_bps: u32,
+    ) -> Result<(), IsolatedLendingError> {
+        Self::require_admin(&env, &admin)?;
+        if fee_bps > 10_000 {
+            return Err(IsolatedLendingError::InvalidConfig);
+        }
+        Self::accrue(&env)?;
+        env.storage()
+            .instance()
+            .set(&PairDataKey::ProtocolFeeBps, &fee_bps);
+        Ok(())
+    }
+
+    /// Pay accrued protocol fees to `to`, limited by the pair's token balance.
+    /// Admin only. Returns the amount paid.
+    pub fn claim_protocol_fees(
+        env: Env,
+        admin: Address,
+        to: Address,
+    ) -> Result<i128, IsolatedLendingError> {
+        Self::require_admin(&env, &admin)?;
+        Self::accrue(&env)?;
+        let fees: i128 = env
+            .storage()
+            .instance()
+            .get(&PairDataKey::ProtocolFees)
+            .unwrap_or(0);
+        let debt_token: Address = env
+            .storage()
+            .instance()
+            .get(&PairDataKey::DebtToken)
+            .unwrap();
+        let token_client = token::Client::new(&env, &debt_token);
+        let cash = token_client.balance(&env.current_contract_address());
+        let paid = if fees < cash { fees } else { cash };
+        if paid > 0 {
+            env.storage()
+                .instance()
+                .set(&PairDataKey::ProtocolFees, &(fees - paid));
+            token_client.transfer(&env.current_contract_address(), &to, &paid);
+        }
+        Ok(paid)
+    }
+
+    /// Configure the oracle allowed to push quotes. Admin only.
+    pub fn set_oracle(
+        env: Env,
+        admin: Address,
+        oracle: Address,
+    ) -> Result<(), IsolatedLendingError> {
+        Self::require_admin(&env, &admin)?;
+        env.storage().instance().set(&PairDataKey::Oracle, &oracle);
+        Ok(())
+    }
+
+    /// Require borrows to be backed by an oracle quote with at least
+    /// `min_confidence_bps` confidence that is at most `max_age_ledgers` old.
+    /// Admin only. Until set, borrowing does not consult the oracle.
+    pub fn set_oracle_policy(
+        env: Env,
+        admin: Address,
+        min_confidence_bps: u32,
+        max_age_ledgers: u32,
+    ) -> Result<(), IsolatedLendingError> {
+        Self::require_admin(&env, &admin)?;
+        if min_confidence_bps > 10_000 {
+            return Err(IsolatedLendingError::InvalidConfig);
+        }
+        env.storage().instance().set(
+            &PairDataKey::OraclePolicy,
+            &OraclePolicyConfig {
+                min_confidence_bps,
+                max_age_ledgers,
+            },
+        );
+        Ok(())
+    }
+
+    /// Record a quote observed at the current ledger. Only the configured oracle may call.
+    pub fn push_oracle_quote(
+        env: Env,
+        oracle: Address,
+        price_bps: u32,
+        confidence_bps: u32,
+    ) -> Result<(), IsolatedLendingError> {
+        Self::require_init(&env)?;
+        oracle.require_auth();
+        let configured: Option<Address> = env.storage().instance().get(&PairDataKey::Oracle);
+        if configured != Some(oracle) {
+            return Err(IsolatedLendingError::Unauthorized);
+        }
+        if price_bps == 0 || confidence_bps > 10_000 {
+            return Err(IsolatedLendingError::InvalidConfig);
+        }
+        env.storage().instance().set(
+            &PairDataKey::OracleQuote,
+            &OracleQuoteData {
+                price_bps,
+                confidence_bps,
+                ledger: env.ledger().sequence(),
+            },
+        );
+        Ok(())
+    }
+
+    /// Protocol fees accrued up to the current ledger and not yet claimed.
+    pub fn get_protocol_fees(env: Env) -> Result<i128, IsolatedLendingError> {
+        Self::require_init(&env)?;
+        let (_, _, interest) = Self::pending_interest(&env)?;
+        let fee_bps: u32 = env
+            .storage()
+            .instance()
+            .get(&PairDataKey::ProtocolFeeBps)
+            .unwrap_or(0);
+        let fees: i128 = env
+            .storage()
+            .instance()
+            .get(&PairDataKey::ProtocolFees)
+            .unwrap_or(0);
+        interest
+            .checked_mul(fee_bps as i128)
+            .and_then(|v| v.checked_div(BPS_DENOMINATOR))
+            .and_then(|v| v.checked_add(fees))
+            .ok_or(IsolatedLendingError::MathOverflow)
     }
 
     /// Liquidity available to borrow: supply minus debt, queued withdrawals
@@ -695,15 +901,13 @@ impl IsolatedLendingPair {
     /// Returns `(collateral, debt)` for a borrower.
     pub fn get_position(env: Env, user: Address) -> Result<(i128, i128), IsolatedLendingError> {
         Self::require_init(&env)?;
+        let (_, index, _) = Self::pending_interest(&env)?;
         Ok((
             env.storage()
                 .persistent()
                 .get(&PairDataKey::Collateral(user.clone()))
                 .unwrap_or(0),
-            env.storage()
-                .persistent()
-                .get(&PairDataKey::Debt(user))
-                .unwrap_or(0),
+            Self::debt_at(&env, &user, index)?,
         ))
     }
 
@@ -714,10 +918,7 @@ impl IsolatedLendingPair {
                 .instance()
                 .get(&PairDataKey::TotalSupplied)
                 .unwrap_or(0),
-            env.storage()
-                .instance()
-                .get(&PairDataKey::TotalDebt)
-                .unwrap_or(0),
+            Self::total_debt_now(&env)?,
         ))
     }
 
@@ -745,11 +946,7 @@ impl IsolatedLendingPair {
             .instance()
             .get(&PairDataKey::TotalSupplied)
             .unwrap_or(0);
-        let total_debt: i128 = env
-            .storage()
-            .instance()
-            .get(&PairDataKey::TotalDebt)
-            .unwrap_or(0);
+        let total_debt = Self::total_debt_now(env)?;
         let pending: i128 = env
             .storage()
             .instance()
@@ -801,9 +998,9 @@ impl IsolatedLendingPair {
             return Err(IsolatedLendingError::InvalidAmount);
         }
         Self::require_init(env)?;
+        let index = Self::accrue(env)?;
 
-        let debt_key = PairDataKey::Debt(borrower.clone());
-        let old_debt: i128 = env.storage().persistent().get(&debt_key).unwrap_or(0);
+        let old_debt = Self::debt_at(env, borrower, index)?;
         if old_debt < amount {
             return Err(IsolatedLendingError::InvalidAmount);
         }
@@ -819,20 +1016,193 @@ impl IsolatedLendingPair {
             &amount,
         );
 
-        env.storage()
-            .persistent()
-            .set(&debt_key, &(old_debt - amount));
+        Self::store_debt(env, borrower, old_debt - amount, index);
+        Self::reduce_total_debt(env, amount);
+        Ok(())
+    }
+
+    /// Interest accrued since the last touch, as `(old_index, new_index, interest)`.
+    /// Simple interest on the index for the elapsed ledgers; nothing accrues
+    /// within the same ledger, so repeated touches are idempotent.
+    fn pending_interest(env: &Env) -> Result<(i128, i128, i128), IsolatedLendingError> {
+        let now = env.ledger().sequence();
+        let index: i128 = env
+            .storage()
+            .instance()
+            .get(&PairDataKey::BorrowIndex)
+            .unwrap_or(INDEX_SCALE);
+        let last: u32 = env
+            .storage()
+            .instance()
+            .get(&PairDataKey::LastAccrualLedger)
+            .unwrap_or(now);
+        let rate: u32 = env
+            .storage()
+            .instance()
+            .get(&PairDataKey::InterestRatePerLedger)
+            .unwrap_or(0);
+        let elapsed = now.saturating_sub(last) as i128;
+        let growth = index
+            .checked_mul(rate as i128)
+            .and_then(|v| v.checked_mul(elapsed))
+            .and_then(|v| v.checked_div(RATE_SCALE))
+            .ok_or(IsolatedLendingError::MathOverflow)?;
+        let new_index = index
+            .checked_add(growth)
+            .ok_or(IsolatedLendingError::MathOverflow)?;
         let total_debt: i128 = env
             .storage()
             .instance()
             .get(&PairDataKey::TotalDebt)
             .unwrap_or(0);
-        env.storage().instance().set(
-            &PairDataKey::TotalDebt,
-            &total_debt
-                .checked_sub(amount)
-                .ok_or(IsolatedLendingError::MathOverflow)?,
-        );
+        let interest = total_debt
+            .checked_mul(new_index - index)
+            .and_then(|v| v.checked_div(index))
+            .ok_or(IsolatedLendingError::MathOverflow)?;
+        Ok((index, new_index, interest))
+    }
+
+    /// Apply pending interest to the market totals and protocol fees, and
+    /// return the current borrow index.
+    fn accrue(env: &Env) -> Result<i128, IsolatedLendingError> {
+        let (index, new_index, interest) = Self::pending_interest(env)?;
+        if new_index != index {
+            let total_debt: i128 = env
+                .storage()
+                .instance()
+                .get(&PairDataKey::TotalDebt)
+                .unwrap_or(0);
+            env.storage().instance().set(
+                &PairDataKey::TotalDebt,
+                &total_debt
+                    .checked_add(interest)
+                    .ok_or(IsolatedLendingError::MathOverflow)?,
+            );
+            let fee_bps: u32 = env
+                .storage()
+                .instance()
+                .get(&PairDataKey::ProtocolFeeBps)
+                .unwrap_or(0);
+            let fee = interest
+                .checked_mul(fee_bps as i128)
+                .and_then(|v| v.checked_div(BPS_DENOMINATOR))
+                .ok_or(IsolatedLendingError::MathOverflow)?;
+            let fees: i128 = env
+                .storage()
+                .instance()
+                .get(&PairDataKey::ProtocolFees)
+                .unwrap_or(0);
+            env.storage().instance().set(
+                &PairDataKey::ProtocolFees,
+                &fees
+                    .checked_add(fee)
+                    .ok_or(IsolatedLendingError::MathOverflow)?,
+            );
+            env.storage()
+                .instance()
+                .set(&PairDataKey::BorrowIndex, &new_index);
+        }
+        env.storage()
+            .instance()
+            .set(&PairDataKey::LastAccrualLedger, &env.ledger().sequence());
+        Ok(new_index)
+    }
+
+    fn total_debt_now(env: &Env) -> Result<i128, IsolatedLendingError> {
+        let (_, _, interest) = Self::pending_interest(env)?;
+        let total_debt: i128 = env
+            .storage()
+            .instance()
+            .get(&PairDataKey::TotalDebt)
+            .unwrap_or(0);
+        total_debt
+            .checked_add(interest)
+            .ok_or(IsolatedLendingError::MathOverflow)
+    }
+
+    /// A borrower's debt grown to `index`.
+    fn debt_at(env: &Env, user: &Address, index: i128) -> Result<i128, IsolatedLendingError> {
+        let debt: i128 = env
+            .storage()
+            .persistent()
+            .get(&PairDataKey::Debt(user.clone()))
+            .unwrap_or(0);
+        if debt == 0 {
+            return Ok(0);
+        }
+        let snapshot: i128 = env
+            .storage()
+            .persistent()
+            .get(&PairDataKey::DebtIndex(user.clone()))
+            .unwrap_or(INDEX_SCALE);
+        debt.checked_mul(index)
+            .and_then(|v| v.checked_div(snapshot))
+            .ok_or(IsolatedLendingError::MathOverflow)
+    }
+
+    fn store_debt(env: &Env, user: &Address, debt: i128, index: i128) {
+        env.storage()
+            .persistent()
+            .set(&PairDataKey::Debt(user.clone()), &debt);
+        env.storage()
+            .persistent()
+            .set(&PairDataKey::DebtIndex(user.clone()), &index);
+    }
+
+    /// Per-borrower rounding can leave the total a few units below the sum of
+    /// debts, so the total floors at zero instead of reverting.
+    fn reduce_total_debt(env: &Env, amount: i128) {
+        let total_debt: i128 = env
+            .storage()
+            .instance()
+            .get(&PairDataKey::TotalDebt)
+            .unwrap_or(0);
+        let remaining = if total_debt > amount {
+            total_debt - amount
+        } else {
+            0
+        };
+        env.storage()
+            .instance()
+            .set(&PairDataKey::TotalDebt, &remaining);
+    }
+
+    /// Debt-token balance held by the pair, less fees owed to the protocol.
+    fn redeemable_cash(env: &Env) -> Result<i128, IsolatedLendingError> {
+        let debt_token: Address = env
+            .storage()
+            .instance()
+            .get(&PairDataKey::DebtToken)
+            .unwrap();
+        let cash = token::Client::new(env, &debt_token).balance(&env.current_contract_address());
+        let fees: i128 = env
+            .storage()
+            .instance()
+            .get(&PairDataKey::ProtocolFees)
+            .unwrap_or(0);
+        cash.checked_sub(fees)
+            .ok_or(IsolatedLendingError::MathOverflow)
+    }
+
+    /// Borrowing is allowed only against a fresh, confident oracle quote when
+    /// an oracle policy is configured.
+    fn check_oracle(env: &Env) -> Result<(), IsolatedLendingError> {
+        let policy: Option<OraclePolicyConfig> =
+            env.storage().instance().get(&PairDataKey::OraclePolicy);
+        let Some(policy) = policy else {
+            return Ok(());
+        };
+        let quote: OracleQuoteData = env
+            .storage()
+            .instance()
+            .get(&PairDataKey::OracleQuote)
+            .ok_or(IsolatedLendingError::OracleQuoteMissing)?;
+        if env.ledger().sequence().saturating_sub(quote.ledger) > policy.max_age_ledgers {
+            return Err(IsolatedLendingError::OracleQuoteStale);
+        }
+        if quote.confidence_bps < policy.min_confidence_bps {
+            return Err(IsolatedLendingError::OracleConfidenceTooLow);
+        }
         Ok(())
     }
 
@@ -847,7 +1217,7 @@ impl IsolatedLendingPair {
 #[cfg(test)]
 mod test {
     use super::*;
-    use soroban_sdk::testutils::Address as _;
+    use soroban_sdk::testutils::{Address as _, Ledger as _};
     use soroban_sdk::token::{Client as TokenClient, StellarAssetClient};
 
     struct Setup {
@@ -1087,5 +1457,284 @@ mod test {
         assert_eq!(s.pair.get_bad_debt(), 30);
         assert_eq!(s.pair.get_totals(), (1_000, 0));
         assert_eq!(balance(&s.env, &s.debt_token, &s.lender), 0);
+    }
+
+    fn set_ledger(env: &Env, sequence: u32) {
+        env.ledger().with_mut(|l| l.sequence_number = sequence);
+    }
+
+    /// 12.5% per ledger: the setup's 80 of debt grows by 10 each ledger.
+    const RATE: u32 = 125_000_000;
+
+    // ── Liquidation close factor ────────────────────────────────────
+
+    fn unhealthy_with_close_factor(s: &Setup) -> Address {
+        s.pair.set_collateral_factor(&s.admin, &4_000);
+        s.pair.set_close_factor(&s.admin, &5_000);
+        let liquidator = Address::generate(&s.env);
+        mint(&s.env, &s.debt_token, &liquidator, 80);
+        liquidator
+    }
+
+    #[test]
+    fn liquidation_below_the_close_factor_repays_what_was_asked() {
+        let s = setup();
+        let liquidator = unhealthy_with_close_factor(&s);
+
+        assert_eq!(s.pair.liquidate(&liquidator, &s.borrower, &1, &20), 20);
+        assert_eq!(s.pair.get_position(&s.borrower), (80, 60));
+    }
+
+    #[test]
+    fn liquidation_at_the_close_factor_is_allowed() {
+        let s = setup();
+        let liquidator = unhealthy_with_close_factor(&s);
+
+        assert_eq!(s.pair.liquidate(&liquidator, &s.borrower, &1, &40), 40);
+        assert_eq!(s.pair.get_position(&s.borrower), (60, 40));
+    }
+
+    #[test]
+    fn liquidation_above_the_close_factor_is_capped() {
+        let s = setup();
+        let liquidator = unhealthy_with_close_factor(&s);
+
+        // Asked for 80 of 80, but only half the debt may be repaid at once.
+        assert_eq!(s.pair.liquidate(&liquidator, &s.borrower, &1, &80), 40);
+        assert_eq!(s.pair.get_position(&s.borrower), (60, 40));
+        assert_eq!(balance(&s.env, &s.debt_token, &liquidator), 40);
+        assert_eq!(balance(&s.env, &s.collateral_token, &liquidator), 40);
+    }
+
+    #[test]
+    fn close_factor_must_be_a_valid_share_set_by_the_admin() {
+        let s = setup();
+        assert_eq!(
+            s.pair.try_set_close_factor(&s.admin, &0),
+            Err(Ok(IsolatedLendingError::InvalidConfig))
+        );
+        assert_eq!(
+            s.pair.try_set_close_factor(&s.admin, &10_001),
+            Err(Ok(IsolatedLendingError::InvalidConfig))
+        );
+        let outsider = Address::generate(&s.env);
+        assert_eq!(
+            s.pair.try_set_close_factor(&outsider, &5_000),
+            Err(Ok(IsolatedLendingError::Unauthorized))
+        );
+    }
+
+    // ── Interest accrual ────────────────────────────────────────────
+
+    #[test]
+    fn interest_does_not_accrue_within_the_same_ledger() {
+        let s = setup();
+        s.pair.set_interest_rate(&s.admin, &RATE);
+
+        assert_eq!(s.pair.get_position(&s.borrower), (100, 80));
+        let payer = Address::generate(&s.env);
+        mint(&s.env, &s.debt_token, &payer, 1);
+        s.pair.repay_for(&payer, &s.borrower, &1);
+        assert_eq!(s.pair.get_position(&s.borrower), (100, 79));
+        assert_eq!(s.pair.get_totals(), (1_000, 79));
+    }
+
+    #[test]
+    fn interest_accrues_for_one_ledger() {
+        let s = setup();
+        s.pair.set_interest_rate(&s.admin, &RATE);
+
+        set_ledger(&s.env, 1);
+
+        assert_eq!(s.pair.get_position(&s.borrower), (100, 90));
+        assert_eq!(s.pair.get_totals(), (1_000, 90));
+    }
+
+    #[test]
+    fn interest_accrues_over_a_long_gap_in_one_step() {
+        let s = setup();
+        s.pair.set_interest_rate(&s.admin, &RATE);
+
+        set_ledger(&s.env, 100);
+
+        // 80 + 80 * 12.5% * 100 ledgers.
+        assert_eq!(s.pair.get_position(&s.borrower), (100, 1_080));
+        assert_eq!(s.pair.get_totals(), (1_000, 1_080));
+    }
+
+    #[test]
+    fn touching_a_position_twice_in_a_ledger_accrues_once() {
+        let s = setup();
+        s.pair.set_interest_rate(&s.admin, &RATE);
+        let payer = Address::generate(&s.env);
+        mint(&s.env, &s.debt_token, &payer, 20);
+
+        set_ledger(&s.env, 1);
+        s.pair.repay_for(&payer, &s.borrower, &10);
+        s.pair.repay_for(&payer, &s.borrower, &10);
+
+        // 80 + 10 interest - 20 repaid.
+        assert_eq!(s.pair.get_position(&s.borrower), (100, 70));
+        assert_eq!(s.pair.get_totals(), (1_000, 70));
+    }
+
+    #[test]
+    fn rate_change_settles_interest_at_the_old_rate() {
+        let s = setup();
+        s.pair.set_interest_rate(&s.admin, &RATE);
+
+        set_ledger(&s.env, 1);
+        s.pair.set_interest_rate(&s.admin, &0);
+        set_ledger(&s.env, 50);
+
+        assert_eq!(s.pair.get_position(&s.borrower), (100, 90));
+    }
+
+    // ── Protocol fees ───────────────────────────────────────────────
+
+    #[test]
+    fn protocol_fees_are_a_share_of_accrued_interest() {
+        let s = setup();
+        s.pair.set_interest_rate(&s.admin, &RATE);
+        s.pair.set_protocol_fee_bps(&s.admin, &5_000);
+
+        set_ledger(&s.env, 1);
+
+        // 10 of interest, half owed to the protocol.
+        assert_eq!(s.pair.get_protocol_fees(), 5);
+    }
+
+    #[test]
+    fn suppliers_cannot_withdraw_funds_owed_to_the_protocol() {
+        let s = setup();
+        s.pair.set_interest_rate(&s.admin, &RATE);
+        s.pair.set_protocol_fee_bps(&s.admin, &5_000);
+        let payer = Address::generate(&s.env);
+        mint(&s.env, &s.debt_token, &payer, 10);
+
+        set_ledger(&s.env, 1);
+        s.pair.repay_for(&payer, &s.borrower, &10);
+
+        // 920 + 10 repaid = 930 in the pair, 5 of it owed to the protocol.
+        assert_eq!(
+            s.pair.try_withdraw(&s.lender, &926),
+            Err(Ok(IsolatedLendingError::InsufficientLiquidity))
+        );
+        s.pair.withdraw(&s.lender, &925);
+
+        let treasury = Address::generate(&s.env);
+        assert_eq!(s.pair.claim_protocol_fees(&s.admin, &treasury), 5);
+        assert_eq!(balance(&s.env, &s.debt_token, &treasury), 5);
+        assert_eq!(s.pair.get_protocol_fees(), 0);
+    }
+
+    #[test]
+    fn full_redemption_after_interest_leaves_the_protocol_fees() {
+        let s = setup();
+        s.pair.set_interest_rate(&s.admin, &RATE);
+        s.pair.set_protocol_fee_bps(&s.admin, &5_000);
+        let payer = Address::generate(&s.env);
+        mint(&s.env, &s.debt_token, &payer, 90);
+
+        set_ledger(&s.env, 1);
+        s.pair.repay_for(&payer, &s.borrower, &90);
+        assert_eq!(s.pair.get_position(&s.borrower), (100, 0));
+
+        // The lender redeems the whole deposit; the interest stays in the pair.
+        s.pair.withdraw(&s.lender, &1_000);
+        assert_eq!(balance(&s.env, &s.debt_token, &s.lender), 1_000);
+
+        let treasury = Address::generate(&s.env);
+        assert_eq!(s.pair.claim_protocol_fees(&s.admin, &treasury), 5);
+        assert_eq!(balance(&s.env, &s.debt_token, &treasury), 5);
+    }
+
+    #[test]
+    fn protocol_fee_share_must_be_valid_and_set_by_the_admin() {
+        let s = setup();
+        assert_eq!(
+            s.pair.try_set_protocol_fee_bps(&s.admin, &10_001),
+            Err(Ok(IsolatedLendingError::InvalidConfig))
+        );
+        let outsider = Address::generate(&s.env);
+        assert_eq!(
+            s.pair.try_claim_protocol_fees(&outsider, &outsider),
+            Err(Ok(IsolatedLendingError::Unauthorized))
+        );
+    }
+
+    // ── Oracle policy ───────────────────────────────────────────────
+
+    /// Gives the borrower enough collateral to borrow 10 more and applies a
+    /// policy of at least 80% confidence on quotes no older than 10 ledgers.
+    fn with_oracle_policy(s: &Setup) -> Address {
+        mint(&s.env, &s.collateral_token, &s.borrower, 100);
+        s.pair.post_collateral(&s.borrower, &100);
+        let oracle = Address::generate(&s.env);
+        s.pair.set_oracle(&s.admin, &oracle);
+        s.pair.set_oracle_policy(&s.admin, &8_000, &10);
+        oracle
+    }
+
+    #[test]
+    fn borrow_with_a_fresh_confident_quote_is_accepted() {
+        let s = setup();
+        let oracle = with_oracle_policy(&s);
+
+        s.pair.push_oracle_quote(&oracle, &10_000, &9_000);
+        set_ledger(&s.env, 10);
+
+        s.pair.borrow(&s.borrower, &10);
+        assert_eq!(s.pair.get_position(&s.borrower), (200, 90));
+    }
+
+    #[test]
+    fn borrow_with_a_low_confidence_quote_is_rejected() {
+        let s = setup();
+        let oracle = with_oracle_policy(&s);
+
+        s.pair.push_oracle_quote(&oracle, &10_000, &7_999);
+
+        assert_eq!(
+            s.pair.try_borrow(&s.borrower, &10),
+            Err(Ok(IsolatedLendingError::OracleConfidenceTooLow))
+        );
+    }
+
+    #[test]
+    fn borrow_with_a_stale_quote_is_rejected() {
+        let s = setup();
+        let oracle = with_oracle_policy(&s);
+
+        s.pair.push_oracle_quote(&oracle, &10_000, &9_000);
+        set_ledger(&s.env, 11);
+
+        assert_eq!(
+            s.pair.try_borrow(&s.borrower, &10),
+            Err(Ok(IsolatedLendingError::OracleQuoteStale))
+        );
+    }
+
+    #[test]
+    fn borrow_without_a_quote_is_rejected_once_a_policy_is_set() {
+        let s = setup();
+        with_oracle_policy(&s);
+
+        assert_eq!(
+            s.pair.try_borrow(&s.borrower, &10),
+            Err(Ok(IsolatedLendingError::OracleQuoteMissing))
+        );
+    }
+
+    #[test]
+    fn only_the_configured_oracle_can_push_quotes() {
+        let s = setup();
+        with_oracle_policy(&s);
+        let impostor = Address::generate(&s.env);
+
+        assert_eq!(
+            s.pair.try_push_oracle_quote(&impostor, &10_000, &9_000),
+            Err(Ok(IsolatedLendingError::Unauthorized))
+        );
     }
 }
