@@ -12,7 +12,7 @@ import {
   CHART_PANEL_LABEL,
 } from "../../components/charts/darkModeContrast";
 import { useCachedFetch } from "../../hooks/useCachedFetch";
-import { FreshnessBanner } from "../dashboard/FreshnessBanner";
+import { FreshnessBanner } from "../../components/dashboard/FreshnessBanner";
 
 // ── Types ───────────────────────────────────────────────────────────────
 

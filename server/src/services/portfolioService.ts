@@ -6,6 +6,11 @@ import {
   type ConcentrationThresholdsInput,
   type ConcentrationWarning,
 } from "../../../shared/types/exposureConcentration";
+import {
+  computePortfolioValuationSummary,
+  type PortfolioValuationSummary,
+  type ValuationPriceStatus,
+} from "../../../shared/types/portfolioValuation";
 import { readConcentrationThresholdOverrides } from "../config/concentrationThresholds";
 import {
   computeFreshnessStatus,
@@ -17,9 +22,13 @@ export interface VaultPosition {
   protocol: string;
   asset: string;
   depositedUsd: number;
-  currentValueUsd: number;
+  /** Current valuation in USD, or null if price is unavailable (#1660). */
+  currentValueUsd: number | null;
   /** ISO-8601 timestamp of when this position's source data was last fetched (#1107). */
   fetchedAt?: string | null;
+  /** Explicit valuation price status (#1660). */
+  priceStatus?: ValuationPriceStatus;
+  isPriceUnavailable?: boolean;
 }
 
 /** A holding with its source-freshness metadata attached (#1107). */
@@ -43,7 +52,7 @@ export class PortfolioService {
 
   /**
    * Aggregates positions by asset, protocol, and strategy, then grades the
-   * asset and protocol buckets for concentration risk.
+   * asset and protocol buckets for concentration risk. Excludes unpriced holdings.
    */
   public static async getExposureMap(
     positions: VaultPosition[],
@@ -55,6 +64,15 @@ export class PortfolioService {
     let totalValueUsd = 0;
 
     for (const pos of positions) {
+      if (
+        pos.currentValueUsd === null ||
+        pos.currentValueUsd === undefined ||
+        pos.isPriceUnavailable === true ||
+        pos.priceStatus === "unpriced"
+      ) {
+        continue;
+      }
+
       totalValueUsd += pos.currentValueUsd;
       byAsset[pos.asset] = (byAsset[pos.asset] || 0) + pos.currentValueUsd;
       byProtocol[pos.protocol] = (byProtocol[pos.protocol] || 0) + pos.currentValueUsd;
@@ -156,19 +174,48 @@ export class PortfolioService {
       "Source Freshness",
       "Last Updated",
     ];
-    const rows = holdings.map((holding) =>
-      [
+    const rows = holdings.map((holding) => {
+      const isUnpriced =
+        holding.currentValueUsd === null ||
+        holding.currentValueUsd === undefined ||
+        holding.isPriceUnavailable === true ||
+        holding.priceStatus === "unpriced";
+
+      const formattedCurrentValue = isUnpriced
+        ? "UNAVAILABLE"
+        : holding.currentValueUsd.toFixed(2);
+
+      return [
         holding.protocol,
         holding.asset,
         holding.depositedUsd.toFixed(2),
-        holding.currentValueUsd.toFixed(2),
+        formattedCurrentValue,
         holding.freshness.status,
         holding.freshness.fetchedAt ?? "unknown",
       ]
         .map(escapeCsvField)
-        .join(","),
-    );
+        .join(",");
+    });
     return [headers.join(","), ...rows].join("\n");
+  }
+
+  /**
+   * Computes valuation completeness, unpriced holdings count, and fair yield metrics (#1660).
+   */
+  public static computeValuationSummary(
+    positions: VaultPosition[],
+  ): PortfolioValuationSummary {
+    return computePortfolioValuationSummary(
+      positions.map((p) => ({
+        protocol: p.protocol,
+        asset: p.asset,
+        deposited: p.depositedUsd,
+        currentValue: p.currentValueUsd,
+        fetchedAt: p.fetchedAt,
+        isPriceUnavailable: p.isPriceUnavailable,
+        priceStatus: p.priceStatus,
+      })),
+    );
   }
 
   private static getStrategyForProtocol(protocol: string): string {

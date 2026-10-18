@@ -5,7 +5,7 @@ import { EMPTY_STATE_PROVIDER_UPTIME } from "../../utils/emptyStateCopy";
 import { apiUrl } from "../../lib/api";
 import { stableSort } from "../../lib/stableSort";
 import { useCachedFetch } from "../../hooks/useCachedFetch";
-import { FreshnessBanner } from "../dashboard/FreshnessBanner";
+import { FreshnessBanner } from "../../components/dashboard/FreshnessBanner";
 
 interface OutageWindow {
   startedAt: string;

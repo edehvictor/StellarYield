@@ -25,18 +25,36 @@ import {
   buildExposureBuckets,
   formatSharePct,
 } from "../../../../shared/types/exposureConcentration";
+import {
+  computePortfolioValuationSummary,
+  resolvePositionValuation,
+  type ValuationPriceStatus,
+} from "../../../../shared/types/portfolioValuation";
+import {
+  describeValuationFailure,
+  type PortfolioValuationFailure,
+} from "../../portfolio/portfolioValuationErrors";
 
 // ── Types ───────────────────────────────────────────────────────────────
 
-interface VaultPosition {
+export interface VaultPosition {
   protocol: string;
   asset: string;
   deposited: number;
-  currentValue: number;
+  /**
+   * Current valuation in USD.
+   * `null` or `undefined` indicates price/valuation is unavailable (not zero!).
+   * A value of `0` indicates a genuine zero balance (#1660).
+   */
+  currentValue: number | null;
   apy: number;
   shares: number;
   /** ISO-8601 timestamp of when this position's source data was last fetched (#1107). */
   fetchedAt?: string | null;
+  /** Explicit price unavailability override (#1660). */
+  isPriceUnavailable?: boolean;
+  /** Explicit valuation price status (#1660). */
+  priceStatus?: ValuationPriceStatus;
 }
 
 interface Transaction {
@@ -140,19 +158,32 @@ function formatDate(iso: string): string {
 
 interface PortfolioDashboardProps {
   walletAddress: string;
+  initialPositions?: VaultPosition[];
+  onRefresh?: () => Promise<VaultPosition[]>;
 }
 
 export default function PortfolioDashboard({
   walletAddress,
+  initialPositions,
+  onRefresh,
 }: PortfolioDashboardProps) {
-  const [positions, setPositions] = useState<VaultPosition[]>([]);
+  const [positions, setPositions] = useState<VaultPosition[]>(initialPositions ?? []);
   const [transactions, setTransactions] = useState<Transaction[]>([]);
-  const [isLoading, setIsLoading] = useState(true);
+  const [isLoading, setIsLoading] = useState(!initialPositions);
+  const [isRefreshing, setIsRefreshing] = useState(false);
+  const [refreshError, setRefreshError] = useState<PortfolioValuationFailure | null>(null);
 
   // Fetch daily movement data
   const { movement } = useDailyMovement({ walletAddress, enabled: true });
 
   useEffect(() => {
+    if (initialPositions) {
+      setPositions(initialPositions);
+      setTransactions(MOCK_TRANSACTIONS);
+      setIsLoading(false);
+      return;
+    }
+
     // Simulate loading from chain / backend
     const timer = setTimeout(() => {
       setPositions(MOCK_POSITIONS);
@@ -160,37 +191,84 @@ export default function PortfolioDashboard({
       setIsLoading(false);
     }, 800);
     return () => clearTimeout(timer);
-  }, [walletAddress]);
+  }, [walletAddress, initialPositions]);
 
-  const totalDeposited = positions.reduce((s, p) => s + p.deposited, 0);
-  const totalValue = positions.reduce((s, p) => s + p.currentValue, 0);
-  const totalYield = totalValue - totalDeposited;
+  const valuationSummary = useMemo(
+    () =>
+      computePortfolioValuationSummary(
+        positions.map((p) => ({
+          protocol: p.protocol,
+          asset: p.asset,
+          deposited: p.deposited,
+          currentValue: p.currentValue,
+          shares: p.shares,
+          apy: p.apy,
+          fetchedAt: p.fetchedAt,
+          isPriceUnavailable: p.isPriceUnavailable,
+          priceStatus: p.priceStatus,
+        })),
+      ),
+    [positions],
+  );
+
   const avgApy = positions.length
-    ? positions.reduce((s, p) => s + p.apy, 0) / positions.length
+    ? positions.reduce((s, p) => s + (p.apy || 0), 0) / positions.length
     : 0;
 
   const exposure = useMemo(
     () =>
-      buildExposureBuckets(positions, (p) => ({
-        asset: p.asset,
-        protocol: p.protocol,
-        valueUsd: p.currentValue,
-      })),
+      buildExposureBuckets(
+        positions.filter(
+          (p) =>
+            p.currentValue !== null &&
+            p.currentValue !== undefined &&
+            !p.isPriceUnavailable &&
+            p.priceStatus !== "unpriced",
+        ),
+        (p) => ({
+          asset: p.asset,
+          protocol: p.protocol,
+          valueUsd: p.currentValue ?? 0,
+        }),
+      ),
     [positions],
   );
+
   const concentration = useMemo(
     () => analyzeConcentration(exposure),
     [exposure],
   );
 
-  // Issue #1151: positions/transactions loading is scoped to the sections
-  // that actually depend on it (stats cards, exposure map, positions table,
-  // transaction history) rather than gating the entire dashboard behind a
-  // single full-page spinner. Independently-fetching widgets below —
-  // RiskScoreBreakdownPanel, UnifiedActivityTimeline, the daily movement
-  // panel — manage their own loading/error/retry state and render
-  // immediately, regardless of this fetch's outcome.
+  const handleRefresh = async () => {
+    setIsRefreshing(true);
+    try {
+      if (onRefresh) {
+        const updated = await onRefresh();
+        setPositions(updated);
+        setRefreshError(null);
+      } else {
+        await new Promise((resolve) => setTimeout(resolve, 400));
+        setRefreshError(null);
+      }
+    } catch (err) {
+      // PRESERVE existing positions in state on failure (#1660)
+      const failure = describeValuationFailure(err);
+      setRefreshError(failure);
+    } finally {
+      setIsRefreshing(false);
+    }
+  };
+
   const showEmptyState = !isLoading && positions.length === 0;
+
+  const canvasPositions = useMemo(
+    () =>
+      positions.map((p) => ({
+        ...p,
+        currentValue: p.currentValue ?? p.deposited,
+      })),
+    [positions],
+  );
 
   return (
     <div className="space-y-8">
@@ -206,16 +284,47 @@ export default function PortfolioDashboard({
           <PortfolioImport />
           <PortfolioExport walletAddress={walletAddress} />
           <button
-            onClick={() => {
-              setIsLoading(true);
-              setTimeout(() => setIsLoading(false), 500);
-            }}
-            className="btn-secondary flex items-center gap-2 text-sm"
+            onClick={() => void handleRefresh()}
+            disabled={isRefreshing}
+            className="btn-secondary flex items-center gap-2 text-sm disabled:opacity-50"
+            data-testid="refresh-portfolio-button"
           >
-            <RefreshCw size={14} /> Refresh
+            <RefreshCw size={14} className={isRefreshing ? "animate-spin" : ""} /> Refresh
           </button>
         </div>
       </div>
+
+      {/* State-preserving refresh failure alert (#1660) */}
+      {refreshError && (
+        <div
+          className="glass-panel p-4 border-l-4 border-red-500 bg-red-500/10 flex items-center justify-between"
+          role="alert"
+          data-testid="valuation-refresh-error-banner"
+        >
+          <div className="flex items-center gap-2 text-sm text-red-200">
+            <AlertTriangle size={16} className="text-red-400 shrink-0" />
+            <span>{refreshError.message}</span>
+          </div>
+          <div className="flex items-center gap-3">
+            {refreshError.retryable && (
+              <button
+                onClick={() => void handleRefresh()}
+                className="text-xs bg-white/10 hover:bg-white/20 text-white px-2.5 py-1 rounded transition-colors"
+                data-testid="retry-refresh-button"
+              >
+                Retry
+              </button>
+            )}
+            <button
+              onClick={() => setRefreshError(null)}
+              className="text-xs text-gray-400 hover:text-white"
+              aria-label="Dismiss error"
+            >
+              ✕
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Position-dependent section (issue #1151): scoped loading/empty
           states so a slow or failed position fetch never blocks the
@@ -245,23 +354,90 @@ export default function PortfolioDashboard({
               <div className="flex items-center gap-2 text-gray-400 text-xs font-semibold uppercase tracking-wider mb-2">
                 <Wallet size={14} /> Total Deposited
               </div>
-              <p className="text-2xl font-bold">{formatCurrency(totalDeposited)}</p>
+              <p className="text-2xl font-bold">{formatCurrency(valuationSummary.totalDepositedUsd)}</p>
             </div>
 
-            <div className="glass-card p-5">
-              <div className="flex items-center gap-2 text-gray-400 text-xs font-semibold uppercase tracking-wider mb-2">
-                <TrendingUp size={14} /> Current Value
+            <div className="glass-card p-5" data-testid="current-value-card">
+              <div className="flex items-center justify-between mb-2">
+                <div className="flex items-center gap-2 text-gray-400 text-xs font-semibold uppercase tracking-wider">
+                  <TrendingUp size={14} /> Current Value
+                </div>
+                {valuationSummary.completeness === "partial" && (
+                  <span
+                    className="text-[10px] font-semibold px-2 py-0.5 rounded bg-amber-500/20 text-amber-300 border border-amber-500/30"
+                    data-testid="incomplete-valuation-badge"
+                  >
+                    Incomplete
+                  </span>
+                )}
               </div>
-              <p className="text-2xl font-bold">{formatCurrency(totalValue)}</p>
+              {valuationSummary.completeness === "unavailable" ? (
+                <div>
+                  <p className="text-2xl font-bold text-gray-400" data-testid="total-value-unavailable">
+                    Unavailable
+                  </p>
+                  <p className="text-xs text-amber-400/90 mt-1 flex items-center gap-1">
+                    <AlertTriangle size={12} /> Prices offline
+                  </p>
+                </div>
+              ) : (
+                <div>
+                  <p
+                    className="text-2xl font-bold"
+                    data-testid={
+                      valuationSummary.completeness === "partial"
+                        ? "total-value-partial"
+                        : "total-value-complete"
+                    }
+                  >
+                    {formatCurrency(valuationSummary.pricedValueUsd)}
+                    {valuationSummary.completeness === "partial" ? "*" : ""}
+                  </p>
+                  {valuationSummary.completeness === "partial" ? (
+                    <p className="text-xs text-amber-400/90 mt-1" data-testid="partial-valuation-notice">
+                      Excludes {valuationSummary.unpricedCount} unpriced holding{valuationSummary.unpricedCount > 1 ? "s" : ""}
+                    </p>
+                  ) : (
+                    <p className="text-xs text-gray-500 mt-1">Fully priced</p>
+                  )}
+                </div>
+              )}
             </div>
 
-            <div className="glass-card p-5">
+            <div className="glass-card p-5" data-testid="yield-earned-card">
               <div className="flex items-center gap-2 text-gray-400 text-xs font-semibold uppercase tracking-wider mb-2">
                 <ArrowUpFromLine size={14} /> Yield Earned
               </div>
-              <p className="text-2xl font-bold text-[#3EAC75]">
-                +{formatCurrency(totalYield)}
-              </p>
+              {valuationSummary.completeness === "unavailable" ? (
+                <div>
+                  <p className="text-2xl font-bold text-gray-400" data-testid="yield-earned-unavailable">
+                    —
+                  </p>
+                  <p className="text-xs text-gray-500 mt-1">Valuation unavailable</p>
+                </div>
+              ) : (
+                <div>
+                  <p
+                    className={`text-2xl font-bold ${
+                      (valuationSummary.yieldEarnedUsd ?? 0) >= 0 ? "text-[#3EAC75]" : "text-[#FF5E5E]"
+                    }`}
+                    data-testid={
+                      valuationSummary.completeness === "partial"
+                        ? "yield-earned-partial"
+                        : "yield-earned-complete"
+                    }
+                  >
+                    {(valuationSummary.yieldEarnedUsd ?? 0) >= 0 ? "+" : ""}
+                    {formatCurrency(valuationSummary.yieldEarnedUsd ?? 0)}
+                    {valuationSummary.completeness === "partial" ? "*" : ""}
+                  </p>
+                  <p className="text-xs text-gray-500 mt-1">
+                    {valuationSummary.completeness === "partial"
+                      ? "On priced holdings"
+                      : "Across all holdings"}
+                  </p>
+                </div>
+              )}
             </div>
 
             <div className="glass-card p-5">
@@ -298,6 +474,53 @@ export default function PortfolioDashboard({
               </p>
             </div>
           </div>
+
+          {/* Incomplete / Unavailable Valuation Notice (#1660) */}
+          {valuationSummary.completeness === "partial" && (
+            <div
+              className="glass-panel p-4 border-l-4 border-amber-500 bg-amber-500/5 flex items-center justify-between gap-3"
+              role="alert"
+              data-testid="valuation-incomplete-banner"
+            >
+              <div className="flex items-center gap-3">
+                <AlertTriangle size={18} className="text-amber-400 shrink-0" />
+                <div>
+                  <h4 className="font-semibold text-amber-300 text-sm">
+                    Incomplete Portfolio Valuation
+                  </h4>
+                  <p className="text-xs text-gray-300 mt-0.5">
+                    Live market prices are unavailable for {valuationSummary.unpricedAssets.join(", ")}.
+                    Stated totals and yield reflect priced assets only.
+                  </p>
+                </div>
+              </div>
+              <span className="text-xs px-2.5 py-1 rounded bg-amber-500/20 text-amber-300 font-mono whitespace-nowrap">
+                {valuationSummary.unpricedCount} unpriced
+              </span>
+            </div>
+          )}
+          {valuationSummary.completeness === "unavailable" && (
+            <div
+              className="glass-panel p-4 border-l-4 border-amber-500 bg-amber-500/5 flex items-center justify-between gap-3"
+              role="alert"
+              data-testid="valuation-incomplete-banner"
+            >
+              <div className="flex items-center gap-3">
+                <AlertTriangle size={18} className="text-amber-400 shrink-0" />
+                <div>
+                  <h4 className="font-semibold text-amber-300 text-sm">
+                    Valuations Temporarily Unavailable
+                  </h4>
+                  <p className="text-xs text-gray-300 mt-0.5">
+                    Pricing feeds for all active holdings are currently unreachable. Deposited balances remain intact.
+                  </p>
+                </div>
+              </div>
+              <span className="text-xs px-2.5 py-1 rounded bg-amber-500/20 text-amber-300 font-mono whitespace-nowrap">
+                All unpriced
+              </span>
+            </div>
+          )}
 
           {/* Concentration summary */}
           {concentration.warnings.length > 0 && (
@@ -340,7 +563,7 @@ export default function PortfolioDashboard({
               <div className="glass-card animate-pulse" style={{ height: 400 }} />
             }
           >
-            <YieldFlowCanvas scene="portfolio" positions={positions} />
+            <YieldFlowCanvas scene="portfolio" positions={canvasPositions} />
           </Suspense>
 
           {/* Exposure Map */}
@@ -349,6 +572,14 @@ export default function PortfolioDashboard({
               byAsset: exposure.byAsset,
               byProtocol: exposure.byProtocol,
               totalValue: exposure.totalValueUsd,
+              warnings:
+                valuationSummary.unpricedCount > 0
+                  ? [
+                      `Exposure calculation excludes ${valuationSummary.unpricedCount} unpriced holding${
+                        valuationSummary.unpricedCount > 1 ? "s" : ""
+                      } (${valuationSummary.unpricedAssets.join(", ")})`,
+                    ]
+                  : undefined,
             }}
           />
 
@@ -373,29 +604,70 @@ export default function PortfolioDashboard({
                 </thead>
                 <tbody>
                   {positions.map((pos, i) => {
-                    const pnl = pos.currentValue - pos.deposited;
+                    const resolved = resolvePositionValuation({
+                      protocol: pos.protocol,
+                      asset: pos.asset,
+                      deposited: pos.deposited,
+                      currentValue: pos.currentValue,
+                      shares: pos.shares,
+                      apy: pos.apy,
+                      fetchedAt: pos.fetchedAt,
+                      isPriceUnavailable: pos.isPriceUnavailable,
+                      priceStatus: pos.priceStatus,
+                    });
                     const freshness = computeHoldingFreshness(pos.fetchedAt);
                     return (
                       <tr
                         key={i}
                         className="border-b border-white/5 hover:bg-white/5 transition-colors"
+                        data-testid={`position-row-${pos.asset}`}
                       >
                         <td className="py-4 font-medium">{pos.protocol}</td>
                         <td className="py-4 text-gray-300">{pos.asset}</td>
                         <td className="py-4 text-right">
-                          {formatCurrency(pos.deposited)}
+                          {formatCurrency(resolved.deposited)}
                         </td>
                         <td className="py-4 text-right font-medium">
-                          {formatCurrency(pos.currentValue)}
+                          {resolved.isUnpriced ? (
+                            <span
+                              className="inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded bg-amber-500/15 text-amber-300 font-medium"
+                              data-testid="unpriced-holding-value"
+                            >
+                              Price unavailable
+                            </span>
+                          ) : resolved.isZeroBalance ? (
+                            <span className="text-gray-400" data-testid="zero-holding-value">
+                              $0.00
+                            </span>
+                          ) : (
+                            <span data-testid="priced-holding-value">
+                              {formatCurrency(resolved.currentValue!)}
+                            </span>
+                          )}
                         </td>
                         <td className="py-4 text-right text-[#3EAC75]">
                           {pos.apy}%
                         </td>
-                        <td
-                          className={`py-4 text-right font-medium ${pnl >= 0 ? "text-[#3EAC75]" : "text-[#FF5E5E]"}`}
-                        >
-                          {pnl >= 0 ? "+" : ""}
-                          {formatCurrency(pnl)}
+                        <td className="py-4 text-right font-medium">
+                          {resolved.isUnpriced ? (
+                            <span className="text-gray-500" data-testid="unpriced-holding-pnl">
+                              —
+                            </span>
+                          ) : resolved.isZeroBalance ? (
+                            <span className="text-gray-400" data-testid="zero-holding-pnl">
+                              $0.00
+                            </span>
+                          ) : (
+                            <span
+                              className={
+                                resolved.pnlUsd! >= 0 ? "text-[#3EAC75]" : "text-[#FF5E5E]"
+                              }
+                              data-testid="priced-holding-pnl"
+                            >
+                              {resolved.pnlUsd! >= 0 ? "+" : ""}
+                              {formatCurrency(resolved.pnlUsd!)}
+                            </span>
+                          )}
                         </td>
                         <td className="py-4 text-right">
                           <FreshnessBadge status={freshness.status} ageSeconds={freshness.ageSeconds} />
