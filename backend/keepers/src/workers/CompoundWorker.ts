@@ -12,6 +12,9 @@ import {
   classifyFailure,
   quarantineJob,
   createCompoundQueue,
+  compoundPeriodKey,
+  getCompoundBroadcastRecord,
+  recordCompoundBroadcast,
 } from '../queues';
 
 /**
@@ -34,6 +37,15 @@ import {
  * #907 Poison isolation:
  *  - Non-retryable failures are classified and moved to the poison queue.
  *  - Retryable failures are re-queued by BullMQ with exponential backoff.
+ *
+ * #1533 Crash-safe idempotency:
+ *  - A stable vault + period key is derived from the schedule window.
+ *  - Before broadcasting, the worker checks for an existing broadcast record
+ *    for that period; if found, the job is skipped so a restart or retry
+ *    cannot double-compound.
+ *  - The broadcast record is persisted immediately after the transaction hash
+ *    is returned, so a crash between broadcast and confirmation still leaves
+ *    a durable mark.
  */
 export class CompoundWorker {
   private readonly worker: Worker<CompoundJobData>;
@@ -73,6 +85,21 @@ export class CompoundWorker {
       { jobId: job.id, vaultContractId, fencingToken, requiredSequence },
       '[CompoundWorker] Processing compound job',
     );
+
+    // #1533: Compute the stable vault + period key for this schedule window.
+    const periodKey = job.data.periodKey ?? compoundPeriodKey(vaultContractId);
+
+    // #1533: Idempotency guard — if a broadcast already happened for this
+    // period (e.g., a previous attempt crashed after the transaction was
+    // sent), skip without re-broadcasting to avoid double-compounding.
+    const priorRecord = await getCompoundBroadcastRecord(periodKey);
+    if (priorRecord) {
+      logger.warn(
+        { jobId: job.id, vaultContractId, periodKey, priorTxHash: priorRecord.txHash },
+        '[CompoundWorker] Compound already broadcast for this period — skipping duplicate',
+      );
+      return { txHash: priorRecord.txHash };
+    }
 
     // #906: Reject stale jobs whose fencing token no longer matches
     if (!validateFencingToken(QUEUE_NAMES.COMPOUND, vaultContractId, fencingToken)) {
@@ -128,6 +155,18 @@ export class CompoundWorker {
         { workerName: 'CompoundWorker', jobId: job.id, policyVersion: 'v1' },
       );
 
+      // #1533: Persist the broadcast record for this period key immediately,
+      // before any other bookkeeping, so a crash right after the transaction
+      // hash is returned still leaves a durable idempotency mark that a
+      // subsequent restart will detect.
+      await recordCompoundBroadcast({
+        vaultContractId,
+        periodKey,
+        txHash,
+        jobId: job.id,
+        recordedAt: new Date().toISOString(),
+      });
+
       // Persist submitted state
       await persistJobRecord({
         jobId: job.id!,
@@ -151,7 +190,7 @@ export class CompoundWorker {
     }
 
     logger.info(
-      { jobId: job.id, vaultContractId, txHash },
+      { jobId: job.id, vaultContractId, periodKey, txHash },
       '[CompoundWorker] Compound submitted successfully',
     );
 

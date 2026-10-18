@@ -7,15 +7,14 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"fmt"
 	"math/big"
 	"sync"
 	"time"
 
 	"github.com/decred/dcrd/dcrec/secp256k1/v4"
 	"github.com/pkg/errors"
-	"github.com/stellaryield/mpc_nodes/tss"
 	"github.com/stellaryield/mpc_nodes/storage"
+	"github.com/stellaryield/mpc_nodes/tss"
 )
 
 // CeremonyType represents the type of ceremony
@@ -32,38 +31,38 @@ const (
 type CeremonyPhase string
 
 const (
-	PhaseInit       CeremonyPhase = "INIT"
-	PhaseCommit     CeremonyPhase = "COMMIT"
-	PhaseReveal     CeremonyPhase = "REVEAL"
-	PhaseVerify     CeremonyPhase = "VERIFY"
-	PhaseComplete   CeremonyPhase = "COMPLETE"
-	PhaseFailed     CeremonyPhase = "FAILED"
+	PhaseInit     CeremonyPhase = "INIT"
+	PhaseCommit   CeremonyPhase = "COMMIT"
+	PhaseReveal   CeremonyPhase = "REVEAL"
+	PhaseVerify   CeremonyPhase = "VERIFY"
+	PhaseComplete CeremonyPhase = "COMPLETE"
+	PhaseFailed   CeremonyPhase = "FAILED"
 )
 
 // CeremonyMessage represents a message exchanged during ceremony
 type CeremonyMessage struct {
-	Type        CeremonyType    `json:"type"`
-	Phase       CeremonyPhase   `json:"phase"`
-	SessionID   string          `json:"session_id"`
-	SenderID    string          `json:"sender_id"`
-	Payload     json.RawMessage `json:"payload,omitempty"`
-	Signature   []byte          `json:"signature,omitempty"`
-	Timestamp   int64           `json:"timestamp"`
+	Type      CeremonyType    `json:"type"`
+	Phase     CeremonyPhase   `json:"phase"`
+	SessionID string          `json:"session_id"`
+	SenderID  string          `json:"sender_id"`
+	Payload   json.RawMessage `json:"payload,omitempty"`
+	Signature []byte          `json:"signature,omitempty"`
+	Timestamp int64           `json:"timestamp"`
 }
 
 // KeyGenCommitPayload contains commitment data for key generation
 type KeyGenCommitPayload struct {
-	PartyID    string   `json:"party_id"`
-	Commitment []byte   `json:"commitment"`
-	Nonce      []byte   `json:"nonce"`
+	PartyID    string `json:"party_id"`
+	Commitment []byte `json:"commitment"`
+	Nonce      []byte `json:"nonce"`
 }
 
 // KeyGenRevealPayload contains reveal data for key generation
 type KeyGenRevealPayload struct {
-	PartyID     string   `json:"party_id"`
-	Share       *big.Int `json:"share"`
-	Nonce       []byte   `json:"nonce"`
-	PublicKey   []byte   `json:"public_key"`
+	PartyID   string   `json:"party_id"`
+	Share     *big.Int `json:"share"`
+	Nonce     []byte   `json:"nonce"`
+	PublicKey []byte   `json:"public_key"`
 }
 
 // SigningCommitPayload contains commitment data for signing
@@ -119,17 +118,20 @@ func (c *CeremonyConfig) Validate() error {
 
 // CeremonyCoordinator coordinates MPC ceremonies
 type CeremonyCoordinator struct {
-	config        *CeremonyConfig
-	tssCoordinator *tss.TSSCoordinator
-	currentPhase  CeremonyPhase
-	sessionID     string
-	participants  map[string]bool
+	config          *CeremonyConfig
+	tssCoordinator  *tss.TSSCoordinator
+	currentPhase    CeremonyPhase
+	sessionID       string
+	participants    map[string]bool
 	receivedCommits map[string]*CeremonyMessage
 	receivedReveals map[string]*CeremonyMessage
-	mu            sync.RWMutex
-	messageChan   chan *CeremonyMessage
-	errorChan     chan error
-	resultChan    chan interface{}
+	mu              sync.RWMutex
+	messageChan     chan *CeremonyMessage
+	errorChan       chan error
+	resultChan      chan interface{}
+	// transcript records deterministic hashes of round messages without
+	// storing secret shares, providing a tamper-evident audit trail (#1531).
+	transcript *TranscriptRecorder
 }
 
 // NewCeremonyCoordinator creates a new ceremony coordinator
@@ -139,9 +141,9 @@ func NewCeremonyCoordinator(config *CeremonyConfig) (*CeremonyCoordinator, error
 	}
 
 	tssConfig := &tss.TSSConfig{
-		Threshold:   config.Threshold,
+		Threshold:    config.Threshold,
 		TotalParties: config.TotalParties,
-		PartyID:     config.PartyID,
+		PartyID:      config.PartyID,
 	}
 
 	tssCoord, err := tss.NewTSSCoordinator(tssConfig)
@@ -150,15 +152,16 @@ func NewCeremonyCoordinator(config *CeremonyConfig) (*CeremonyCoordinator, error
 	}
 
 	return &CeremonyCoordinator{
-		config:         config,
-		tssCoordinator: tssCoord,
-		currentPhase:   PhaseInit,
-		participants:   make(map[string]bool),
+		config:          config,
+		tssCoordinator:  tssCoord,
+		currentPhase:    PhaseInit,
+		participants:    make(map[string]bool),
 		receivedCommits: make(map[string]*CeremonyMessage),
 		receivedReveals: make(map[string]*CeremonyMessage),
-		messageChan:    make(chan *CeremonyMessage, 100),
-		errorChan:      make(chan error, 10),
-		resultChan:     make(chan interface{}, 10),
+		messageChan:     make(chan *CeremonyMessage, 100),
+		errorChan:       make(chan error, 10),
+		resultChan:      make(chan interface{}, 10),
+		transcript:      NewTranscriptRecorder(),
 	}, nil
 }
 
@@ -189,7 +192,7 @@ func (c *CeremonyCoordinator) StartKeyGenCeremony(ctx context.Context) (*tss.Key
 		Phase:     PhaseCommit,
 		SessionID: c.sessionID,
 		SenderID:  c.config.PartyID,
-		Payload:   mustMarshal(KeyGenCommitPayload{
+		Payload: mustMarshal(KeyGenCommitPayload{
 			PartyID:    c.config.PartyID,
 			Commitment: localShare.Commitment.Bytes(),
 		}),
@@ -210,10 +213,10 @@ func (c *CeremonyCoordinator) StartKeyGenCeremony(ctx context.Context) (*tss.Key
 		Phase:     PhaseReveal,
 		SessionID: c.sessionID,
 		SenderID:  c.config.PartyID,
-		Payload:   mustMarshal(KeyGenRevealPayload{
-			PartyID:     c.config.PartyID,
-			Share:       localShare.SecretShare,
-			Nonce:       localShare.Commitment.Bytes(),
+		Payload: mustMarshal(KeyGenRevealPayload{
+			PartyID: c.config.PartyID,
+			Share:   localShare.SecretShare,
+			Nonce:   localShare.Commitment.Bytes(),
 		}),
 		Timestamp: time.Now().Unix(),
 	}
@@ -273,7 +276,7 @@ func (c *CeremonyCoordinator) StartSigningCeremony(ctx context.Context, messageH
 		Phase:     PhaseCommit,
 		SessionID: c.sessionID,
 		SenderID:  c.config.PartyID,
-		Payload:   mustMarshal(SigningCommitPayload{
+		Payload: mustMarshal(SigningCommitPayload{
 			PartyID:    c.config.PartyID,
 			SessionID:  c.sessionID,
 			Commitment: commitment,
@@ -319,7 +322,7 @@ func (c *CeremonyCoordinator) StartSigningCeremony(ctx context.Context, messageH
 		Phase:     PhaseReveal,
 		SessionID: c.sessionID,
 		SenderID:  c.config.PartyID,
-		Payload:   mustMarshal(SigningRevealPayload{
+		Payload: mustMarshal(SigningRevealPayload{
 			PartyID:   c.config.PartyID,
 			SessionID: c.sessionID,
 			R:         r,
@@ -349,6 +352,11 @@ func (c *CeremonyCoordinator) StartSigningCeremony(ctx context.Context, messageH
 
 // HandleMessage processes an incoming ceremony message
 func (c *CeremonyCoordinator) HandleMessage(msg *CeremonyMessage) error {
+	// Record a digest-only transcript entry for the received round message
+	// before any processing so the audit trail captures every message the
+	// node observes, without ever storing secret shares (#1531).
+	c.transcript.Record(msg, TranscriptDirectionReceived)
+
 	select {
 	case c.messageChan <- msg:
 		return nil
@@ -472,11 +480,10 @@ func (c *CeremonyCoordinator) computeAggregatedPublicKey() (*secp256k1.PublicKey
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
-	var aggX, aggY *big.Int
-	aggX = big.NewInt(0)
-	aggY = big.NewInt(0)
-
 	curve := secp256k1.S256()
+
+	var aggX, aggY *big.Int
+	first := true
 
 	for _, msg := range c.receivedReveals {
 		var reveal KeyGenRevealPayload
@@ -484,21 +491,33 @@ func (c *CeremonyCoordinator) computeAggregatedPublicKey() (*secp256k1.PublicKey
 			return nil, errors.Wrap(err, "failed to unmarshal reveal")
 		}
 
-		// Compute public key from share
+		// Compute public key from share and add it to the aggregate via
+		// elliptic curve point addition
 		x, y := curve.ScalarBaseMult(reveal.Share.Bytes())
-		aggX.Add(aggX, x)
-		aggY.Add(aggY, y)
+		if first {
+			aggX, aggY = x, y
+			first = false
+			continue
+		}
+		aggX, aggY = curve.Add(aggX, aggY, x, y)
 	}
 
-	// Reduce modulo P
-	aggX.Mod(aggX, curve.P)
-	aggY.Mod(aggY, curve.P)
+	if first {
+		return nil, errors.New("no reveals available to aggregate")
+	}
 
-	return secp256k1.NewPublicKey(aggX, aggY), nil
+	var fx, fy secp256k1.FieldVal
+	fx.SetBytes(bigIntToBytes32(aggX))
+	fy.SetBytes(bigIntToBytes32(aggY))
+	return secp256k1.NewPublicKey(&fx, &fy), nil
 }
 
 // broadcastMessage broadcasts a message to all parties
 func (c *CeremonyCoordinator) broadcastMessage(msg *CeremonyMessage) {
+	// Record a digest-only transcript entry for the outgoing round message
+	// so every broadcast is covered by the tamper-evident audit trail (#1531).
+	c.transcript.Record(msg, TranscriptDirectionSent)
+
 	// In production, this would send via Libp2p/gossipsub
 	// For now, we just send to our own channel
 	c.messageChan <- msg
@@ -516,6 +535,12 @@ func (c *CeremonyCoordinator) GetSessionID() string {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return c.sessionID
+}
+
+// GetTranscript returns the ceremony transcript recorder, which holds
+// deterministic, secret-free hashes of all round messages for audit (#1531).
+func (c *CeremonyCoordinator) GetTranscript() *TranscriptRecorder {
+	return c.transcript
 }
 
 // GetCurrentPhase returns the current ceremony phase
@@ -542,6 +567,18 @@ func generateSessionID() string {
 	b := make([]byte, 32)
 	rand.Read(b)
 	return hex.EncodeToString(b)
+}
+
+// bigIntToBytes32 converts a big.Int to a 32-byte big-endian array, used for
+// feeding values into the secp256k1 v4 API which expects fixed-size inputs.
+func bigIntToBytes32(n *big.Int) *[32]byte {
+	var arr [32]byte
+	b := n.Bytes()
+	if len(b) > 32 {
+		b = b[len(b)-32:]
+	}
+	copy(arr[32-len(b):], b)
+	return &arr
 }
 
 // mustMarshal marshals data to JSON, panicking on error

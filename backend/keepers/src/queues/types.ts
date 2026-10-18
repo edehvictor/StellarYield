@@ -59,6 +59,12 @@ export interface CompoundJobData {
   fencingToken?: number;
   /** #906: Sequence number required before submission */
   requiredSequence?: number;
+  /**
+   * #1533: Stable vault + period key derived from the 4h compound window.
+   * Used to deduplicate compounding across worker restarts and retries.
+   * When omitted, the worker derives it from the current clock.
+   */
+  periodKey?: string;
 }
 
 /**
