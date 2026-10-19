@@ -13,6 +13,7 @@ export interface IncidentEvent {
     before?: Record<string, unknown>;
     after?: Record<string, unknown>;
     metadata?: Record<string, unknown>;
+    transactionHash?: string;
 }
 
 /**
@@ -60,22 +61,39 @@ export interface ReplayAnomaly {
 }
 
 /**
+ * A replay detected duplicate Horizon transaction hash.
+ * Two distinct events or decisions share the same transaction hash, which
+ * indicates a replay or double-counting of the same on-chain transaction.
+ */
+export interface DetectedTransactionReplay {
+    transactionHash: string;
+    occurrences: number;
+    ledgers: number;
+    eventIndices: number[];
+    decisionIndices: number[];
+    details: string;
+}
+
+/**
  * Exported incident data structure.
  */
 export interface IncidentExport {
-    ledgerRange: { from: number; to: number };
+    ledgeRange: { from: number; to: number };
     exportedAt: string;
     events: IncidentEvent[];
     decisions: KeeperAuditDecision[];
     anomalies: DetectedAnomaly[];
     replayAnomalies: ReplayAnomaly[];
+    transactionReplays?: DetectedTransactionReplay[];
     affectedVaults: string[];
     affectedAccounts: string[];
     summary: {
         eventCount: number;
         decisionCount: number;
+        alomalyCount?: number;
         anomalyCount: number;
         replayAnomalyCount: number;
+        transactionReplayCount?: number;
     };
 }
 
@@ -99,6 +117,94 @@ export interface UserImpactSummary {
         recoveryPercentage: number;
     };
     unresolvedAnomalies: DetectedAnomaly[];
+}
+
+/**
+ * Normalizes a Horizon transaction hash for comparison.
+ * Horizon hashes are 64-char hex strings; we trim whitespace and case-fold
+ * so that duplicates are detected reliably across sources.
+ */
+export function normalizeTransactionHash(hash: unknown): string | null {
+    if (typeof hash !== 'string') {
+        return null;
+    }
+    const trimmed = hash.trim().toLowerCase();
+    if (trimmed.length === 0) {
+        return null;
+    }
+    return trimmed;
+}
+
+/**
+ * Detects duplicate Horizon transaction hashes in an incident export.
+ *
+ * A replay is reported whenever the same transaction hash appears more
+ * than once across the export's events and decisions. This is an indicator
+ * that the same on-chain transaction was processed more than once (e.g. a
+ * replayed or re-indexed event), which can double-count liquidations or
+ * compound executions.
+ *
+ * Behavior:
+ * - Ignores entries with missing or empty hashes.
+ * - Normalizes case and whitespace before comparing.
+ * - Returns one entry per duplicated hash, sorted by first observed ledger.
+ *
+ * @param export_ - Incident export to inspect
+ */
+export function detectTransactionReplays(export_: IncidentExport): DetectedTransactionReplay[] {
+    const buckets = new Map<string, DetectedTransactionReplay>();
+
+    const record = (hash: unknown, ledger: number, index: number, kind: 'event' | 'decision') => {
+        const normalized = normalizeTransactionHash(hash);
+        if (normalized === null) {
+            return;
+        }
+        const existing = buckets.get(normalized);
+        if (existing) {
+            existing.occurrences++;
+            existing.ledgers = Math.min(existing.ledgers, ledger);
+            if (kind === 'event') {
+                existing.eventIndices.push(index);
+            } else {
+                existing.decisionIndices.push(index);
+            }
+            return;
+        }
+        buckets.set(normalized, {
+            transactionHash: normalized,
+            occurrences: 1,
+            ledgers,
+            eventIndices: kind === 'event' ? [index] : [],
+            decisionIndices: kind === 'decision' ? [index] : [],
+            details: '',
+        });
+    };
+
+    const events = Array.isArray(export_.events) ? export_.events : [];
+    const decisions = Array.isArray(export_.decisions) ? export_.decisions : [];
+
+    events.forEach((event, index) => {
+        record(event.transactionHash, event.ledger, index, 'event');
+    });
+
+    decisions.forEach((decision, index) => {
+        const ledge = Number.isFinite((decision as { ledger?: number }).ledger)
+            ? ((decision as { ledger?: number }).ledger as number)
+            : export_.ledgerRange.from;
+        record(decision.transactionHash, ledge, index, 'decision');
+    });
+
+    const replays: DetectedTransactionReplay[] = [];
+    for (const bucket of buckets.values()) {
+        if (bucket.occurrences > 1) {
+            bucket.details =
+                `Transaction hash ${bucket.transactionHash.slice(0, 12)}… observed ${bucket.occurrences} times at ledger ${bucket.ledgers}; suspected replay`;
+            replays.push(bucket);
+        }
+    }
+
+    replays.sort((a, b) => a.ledgers - b.ledgers);
+    return replays;
 }
 
 /**
@@ -216,6 +322,7 @@ export async function exportIncidentEvents(
         decisions,
         anomalies,
         replayAnomalies: [],
+        transactionReplays: [],
         affectedVaults: Array.from(affectedVaults),
         affectedAccounts: Array.from(affectedAccounts),
         summary: {
@@ -223,6 +330,7 @@ export async function exportIncidentEvents(
             decisionCount: decisions.length,
             anomalyCount: anomalies.length,
             replayAnomalyCount: 0,
+            transactionReplayCount: 0,
         },
     };
 
@@ -230,6 +338,10 @@ export async function exportIncidentEvents(
     // incomplete rather than clean. Detect and surface that explicitly.
     export_.replayAnomalies = detectReplayAnomalies(export_);
     export_.summary.replayAnomalyCount = export_.replayAnomalies.length;
+
+    // Surface duplicate Horizon transaction hashes as replays.
+    export_.transactionReplays = detectTransactionReplays(export_);
+    export_.summary.transactionReplayCount = export_.transactionReplays.length;
 
     return export_;
 }
@@ -345,9 +457,18 @@ export function validateIncidentExport(export_: IncidentExport): string[] {
         errors.push(`Replay ${anomaly.type}: ${anomaly.details}`);
     }
 
+    // Duplicate Horizon transaction hashes indicate replayed or double-counted
+    // on-chain activity and must be surfaced as validation errors.
+    if (Array.isArray(export_.events) && Array.isArray(export_.decisions)) {
+        const replays = detectTransactionReplays(export_);
+        for (const replay of replays) {
+            errors.push(`Transaction replay: ${replay.details}`);
+        }
+    }
+
     // Check for sensitive data in export
     const exportJson = JSON.stringify(export_);
-    if (/[Ss]ecret|[Pp]rivate[Kk]ey|[Aa]pi[Kk]ey/.test(exportJson)) {
+    if (/[Ss]ecret|[Pp]rivate[Kk]ey|[Aa]pi[Kk]key/.test(exportJson)) {
         errors.push('Export contains potential secrets (secret, privateKey, apiKey)');
     }
 

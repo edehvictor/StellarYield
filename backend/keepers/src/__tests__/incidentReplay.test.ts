@@ -5,6 +5,7 @@ import {
     validateIncidentExport,
     detectReplayAnomalies,
     type IncidentExport,
+    type ReplayAnomaly,
 } from '../utils/incidentReplay';
 import cleanReplayFixture from './fixtures/incidents/clean-replay.json';
 import missingCheckpointFixture from './fixtures/incidents/missing-checkpoint.json';
@@ -268,6 +269,7 @@ describe('Incident Replay', () => {
             expect(anomalies.some((a) => a.type === 'incomplete-sequence')).toBe(true);
             expect(anomalies.some((a) => a.details.includes('Replay starts at ledger 101'))).toBe(true);
             expect(anomalies.some((a) => a.details.includes('Replay ends at ledger 103'))).toBe(true);
+            expect(anomalies.every((a: ReplayAnomaly) => a.details.length > 0)).toBe(true);
         });
 
         it('flags an export with no events as incomplete', () => {
@@ -287,6 +289,7 @@ describe('Incident Replay', () => {
             expect(anomalies).toHaveLength(1);
             expect(anomalies[0].type).toBe('incomplete-sequence');
             expect(anomalies[0].details).toMatch(/No events recorded/);
+            expect(anomalies[0].details.length).toBeGreaterThan(0);
         });
     });
 
@@ -296,7 +299,7 @@ describe('Incident Replay', () => {
 
             expect(export_.replayAnomalies.length).toBeGreaterThan(0);
             expect(export_.summary.replayAnomalyCount).toBe(export_.replayAnomalies.length);
-            expect(export_.replayAnomalies.every((a) => a.details.length > 0)).toBe(true);
+            expect(export_.replayAnomalies.every((a: ReplayAnomaly) => a.details.length > 0)).toBe(true);
         });
 
         it('validateIncidentExport rejects broken replay chains explicitly', () => {
