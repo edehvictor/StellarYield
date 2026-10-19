@@ -29,11 +29,15 @@ export interface ZapQuoteResponse {
   issuedAt: string;
   expiresAt: string;
   routeHash: string;
-  assetConfigVersion: number;
+  assetConfigVersion: number | string;
   vaultPauseState?: {
     status: "active" | "paused" | "unknown";
     checkedAt: string;
   };
+  /** Cryptographic fingerprint binding all mathematical assumptions of this quote (#1366). */
+  assumptionFingerprint?: string;
+  /** Explicit snapshot of assumptions used to compute the fingerprint (#1366). */
+  assumptions?: import("../../../../shared/types/quoteAssumptionFingerprint").QuoteAssumptions;
 }
 
 /** Asset the user can select as zap input (Soroban SAC contract id). */

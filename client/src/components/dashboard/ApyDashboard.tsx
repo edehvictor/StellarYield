@@ -311,18 +311,6 @@ export default function ApyDashboard() {
 
     try {
       setError(null);
-      const res = await fetch(apiUrl("/api/yields"));
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const data: unknown = await res.json();
-      if (!isCurrent(token)) return;
-      const rows = Array.isArray(data) ? data : [];
-      const augmented: ApyEntry[] = rows.map((row) => {
-        const entry = normalizeApyEntry(row as ApiApyEntry);
-        const fetchedTime = entry.fetchedAt
-          ? new Date(entry.fetchedAt).getTime()
-          : Date.now();
-        const freshness = computeDecayedFreshnessConfidence(
-          Date.now() - fetchedTime,
       const result = await cachedFetch<unknown>(apiUrl("/api/yields"));
       if (!isCurrent(token)) return;
       if (result.data == null) {

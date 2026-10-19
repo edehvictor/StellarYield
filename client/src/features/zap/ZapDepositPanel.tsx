@@ -29,6 +29,12 @@ import {
 } from "./assets";
 import type { ZapAssetOption, ZapQuoteResponse, FeeDriftWarning } from "./types";
 import { detectClientFeeDrift } from "./types";
+import { QuoteAssumptionFingerprintDisplay } from "../../components/transaction/QuoteAssumptionFingerprintDisplay";
+import {
+  computeQuoteAssumptionFingerprint,
+  verifyQuoteAssumptionFingerprint,
+  type QuoteAssumptions,
+} from "../../../../shared/types/quoteAssumptionFingerprint";
 import { useSettings } from "../settings/SettingsContext";
 import { resolveSlippage } from "../settings/types";
 import DepositRouteMaterialImpactWarning from "./DepositRouteMaterialImpactWarning";
@@ -376,6 +382,65 @@ export default function ZapDepositPanel({ walletAddress }: ZapDepositPanelProps)
     routeLiquidityDepthUsd: routeLiquidityDepthUsd,
   });
 
+  // Quote assumptions snapshot and cryptographic fingerprint (#1366)
+  const currentAssumptions: QuoteAssumptions | null = useMemo(() => {
+    if (!inputAsset || !amount || parseFloat(amount) <= 0) return null;
+
+    if (!needsSwap) {
+      if (!expectedOut || expectedOut <= 0n) return null;
+      return {
+        inputTokenContract: inputAsset.contractId,
+        inputTokenSymbol: inputAsset.symbol,
+        vaultTokenContract: vaultToken.contractId,
+        vaultTokenSymbol: vaultToken.symbol,
+        amountInStroops: expectedOut.toString(),
+        expectedAmountOutStroops: expectedOut.toString(),
+        minAmountOutStroops: expectedOut.toString(),
+        slippageTolerancePct: 0,
+        routeHash: "direct",
+        path: [inputAsset.contractId],
+        source: "direct",
+        assetConfigVersion: "direct",
+        quotedAt: new Date(quoteNowMs).toISOString(),
+        expiresAt: new Date(quoteNowMs + 60_000).toISOString(),
+        reserveSafe: true,
+      };
+    }
+
+    if (!quoteData) return null;
+
+    if (quoteData.assumptions) {
+      return quoteData.assumptions;
+    }
+
+    return {
+      inputTokenContract: inputAsset.contractId,
+      inputTokenSymbol: inputAsset.symbol,
+      vaultTokenContract: vaultToken.contractId,
+      vaultTokenSymbol: vaultToken.symbol,
+      amountInStroops: expectedOut ? expectedOut.toString() : quoteData.amountOutAfterSlippage,
+      expectedAmountOutStroops: quoteData.expectedAmountOutStroops,
+      minAmountOutStroops: minOut !== null ? minOut.toString() : quoteData.minAmountOutStroops,
+      slippageTolerancePct: slippageTolerance,
+      routeHash: quoteData.routeHash,
+      path: quoteData.path.map((h) => h.contractId),
+      source: quoteData.source,
+      assetConfigVersion: String(quoteData.assetConfigVersion),
+      quotedAt: quoteData.quotedAt,
+      expiresAt: quoteData.expiresAt,
+    };
+  }, [inputAsset, amount, needsSwap, expectedOut, vaultToken, quoteNowMs, quoteData, minOut, slippageTolerance]);
+
+  const activeFingerprint = useMemo(() => {
+    if (quoteData?.assumptionFingerprint) {
+      return quoteData.assumptionFingerprint;
+    }
+    if (currentAssumptions) {
+      return computeQuoteAssumptionFingerprint(currentAssumptions).fingerprint;
+    }
+    return undefined;
+  }, [quoteData?.assumptionFingerprint, currentAssumptions]);
+
   const emitPhase = useCallback((p: TxPhase) => {
     setTxPhase(p);
     if (p !== "success" && p !== "failure") {
@@ -440,6 +505,15 @@ export default function ZapDepositPanel({ walletAddress }: ZapDepositPanelProps)
         }
       }
       if (quoteData) {
+        if (currentAssumptions && activeFingerprint) {
+          const fpVerdict = verifyQuoteAssumptionFingerprint(currentAssumptions, activeFingerprint);
+          if (!fpVerdict.valid) {
+            setError(fpVerdict.message);
+            setStatus("idle");
+            return;
+          }
+        }
+
         try {
           const isValid = await verifySwapQuote(quoteData);
           if (!isValid) {
@@ -552,6 +626,7 @@ export default function ZapDepositPanel({ walletAddress }: ZapDepositPanelProps)
     inputAsset,
     vaultContractId,
     vaultToken.contractId,
+    vaultToken.symbol,
     amount,
     minOut,
     expectedOut,
@@ -559,6 +634,8 @@ export default function ZapDepositPanel({ walletAddress }: ZapDepositPanelProps)
     settings,
     quoteData,
     invalidatePreview,
+    currentAssumptions,
+    activeFingerprint,
   ]);
 
   // Issue #1152: wallet sessions can expire mid-flow. Rather than letting
@@ -1057,6 +1134,17 @@ export default function ZapDepositPanel({ walletAddress }: ZapDepositPanelProps)
         onRetry={txPhase === "failure" ? retryZap : undefined}
         className="mb-4"
       />
+
+      {/* Quote Assumption Fingerprint Display (#1366) */}
+      <div className="mb-4">
+        <QuoteAssumptionFingerprintDisplay
+          assumptions={currentAssumptions}
+          fingerprint={activeFingerprint}
+          isLoading={quoteLoading}
+          isStale={isStale}
+          onRefresh={() => void refreshQuote()}
+        />
+      </div>
 
       {/* Blocked state banner */}
       {depositImpact.shouldBlock && (

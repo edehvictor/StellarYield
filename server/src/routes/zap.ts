@@ -10,6 +10,7 @@ import { sendError } from "../utils/errorResponse";
 import { validateZapQuote } from "../middleware/validation";
 import { recordFailure, resolveNetworkLabel } from "../monitoring/prometheus";
 import { getVaultPauseState } from "../services/vaultPauseStateService";
+import { computeQuoteAssumptionFingerprint } from "../../../shared/types/quoteAssumptionFingerprint";
 
 const router = Router();
 
@@ -69,6 +70,9 @@ router.post("/quote", validateZapQuote, async (req: Request, res: Response) => {
       routeHash: quote.routeHash,
       assetConfigVersion: quote.assetConfigVersion,
       vaultPauseState,
+      assumptionFingerprint: quote.assumptionFingerprint,
+      assumptions: quote.assumptions,
+      ...(quote.reserveCheck ? { reserveCheck: quote.reserveCheck } : {}),
     });
   } catch (e) {
     recordFailure({
@@ -109,6 +113,25 @@ router.post("/verify", (req: Request, res: Response) => {
       500,
       "VERIFY_FAILED",
       "Failed to verify quote",
+      e instanceof Error ? e.message : undefined
+    );
+  }
+});
+
+router.post("/fingerprint", (req: Request, res: Response) => {
+  try {
+    const body = req.body;
+    if (!body || typeof body !== "object") {
+      return sendError(res, 400, "INVALID_ASSUMPTIONS", "Invalid assumptions payload");
+    }
+    const result = computeQuoteAssumptionFingerprint(body);
+    res.json(result);
+  } catch (e) {
+    sendError(
+      res,
+      500,
+      "FINGERPRINT_FAILED",
+      "Failed to compute quote assumption fingerprint",
       e instanceof Error ? e.message : undefined
     );
   }

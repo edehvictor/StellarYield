@@ -3,6 +3,14 @@ export default {
     projects: [
       {
         test: {
+          name: 'shared',
+          environment: 'node',
+          include: ['shared/**/*.{test,spec}.ts'],
+          globals: true,
+        },
+      },
+      {
+        test: {
           name: 'sdk',
           environment: 'node',
           include: ['packages/sdk/**/*.{test,spec}.ts'],

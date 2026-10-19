@@ -11,6 +11,11 @@ import {
   fetchWalletReserveSnapshot,
   type ZapReserveCheckResult,
 } from "./stellarReserveService";
+import {
+  computeQuoteAssumptionFingerprint,
+  verifyQuoteAssumptionFingerprint,
+  type QuoteAssumptions,
+} from "../../../shared/types/quoteAssumptionFingerprint";
 
 export interface ZapQuoteBody {
   inputTokenContract: string;
@@ -91,6 +96,14 @@ export interface ZapQuoteResult {
   expiresAt: string;
   routeHash: string;
   assetConfigVersion: string;
+  /**
+   * Cryptographic fingerprint binding all mathematical assumptions of this quote (#1366).
+   */
+  assumptionFingerprint?: string;
+  /**
+   * Explicit snapshot of assumptions used to compute the fingerprint (#1366).
+   */
+  assumptions?: QuoteAssumptions;
   /**
    * Minimum-balance reserve check result (#1148), present only when the
    * request included `walletAddress`. `safe: false` means executing this
@@ -388,6 +401,25 @@ export async function getZapQuote(body: ZapQuoteBody): Promise<ZapQuoteResult> {
 
   const reserveCheck = await computeReserveCheck(body);
 
+  const assumptions: QuoteAssumptions = {
+    inputTokenContract: body.inputTokenContract,
+    vaultTokenContract: body.vaultTokenContract,
+    amountInStroops: body.amountInStroops,
+    expectedAmountOutStroops: sim.expectedAmountOutStroops,
+    minAmountOutStroops: outAfterSlippage.toString(),
+    slippageTolerancePct: effectiveSlippage * 100,
+    routeHash,
+    path: sim.path.map((p) => p.contractId),
+    source: sim.source,
+    assetConfigVersion,
+    quotedAt,
+    expiresAt,
+    protocol,
+    reserveSafe: reserveCheck ? reserveCheck.safe : undefined,
+  };
+
+  const { fingerprint: assumptionFingerprint } = computeQuoteAssumptionFingerprint(assumptions);
+
   return {
     ...sim,
     slippageApplied: effectiveSlippage,
@@ -400,6 +432,8 @@ export async function getZapQuote(body: ZapQuoteBody): Promise<ZapQuoteResult> {
     expiresAt,
     routeHash,
     assetConfigVersion,
+    assumptionFingerprint,
+    assumptions,
     ...(reserveCheck ? { reserveCheck } : {}),
   };
 }
@@ -516,5 +550,40 @@ export function verifyZapQuote(quote: unknown): ZapQuoteVerification {
   if (typeof q.slippageApplied === "number" && q.slippageApplied > 0.15) {
     return { valid: false, reason: `Slippage ${(q.slippageApplied * 100).toFixed(2)}% exceeds maximum allowed threshold of 15%`, errorCode: "SLIPPAGE_EXCEEDED" };
   }
+
+  // Check cryptographic assumption fingerprint (#1366)
+  if (quote.assumptionFingerprint) {
+    const assumptionsToCheck: QuoteAssumptions = quote.assumptions || {
+      inputTokenContract: quote.inputTokenContract || (quote.path?.[0]?.contractId ?? ""),
+      vaultTokenContract: quote.vaultTokenContract || (quote.path?.[quote.path.length - 1]?.contractId ?? ""),
+      amountInStroops: quote.amountInStroops || "",
+      expectedAmountOutStroops: quote.expectedAmountOutStroops || "",
+      minAmountOutStroops: quote.minAmountOutStroops || quote.amountOutAfterSlippage || "",
+      slippageTolerancePct: typeof quote.slippageApplied === "number" ? quote.slippageApplied * 100 : 0,
+      routeHash: quote.routeHash || currentRouteHash,
+      path: quote.path.map((h: any) => (typeof h === "string" ? h : h.contractId)),
+      source: quote.source || "router_simulation",
+      assetConfigVersion: quote.assetConfigVersion || currentVersion,
+      quotedAt: quote.quotedAt || "",
+      expiresAt: quote.expiresAt || "",
+      protocol: quote.protocol,
+      reserveSafe: quote.reserveCheck ? quote.reserveCheck.safe : undefined,
+    };
+
+    const fpResult = verifyQuoteAssumptionFingerprint(
+      assumptionsToCheck,
+      quote.assumptionFingerprint,
+      { nowMs: now },
+    );
+
+    if (!fpResult.valid) {
+      return {
+        valid: false,
+        reason: fpResult.message,
+        errorCode: fpResult.code,
+      };
+    }
+  }
+
   return { valid: true };
 }
