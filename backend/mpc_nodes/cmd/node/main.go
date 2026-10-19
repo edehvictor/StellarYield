@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -13,6 +14,7 @@ import (
 	"time"
 
 	"github.com/stellar/go/keypair"
+	"github.com/stellar/go/network"
 	"github.com/stellaryield/mpc_nodes/api"
 	"github.com/stellaryield/mpc_nodes/coordinator"
 	"github.com/stellaryield/mpc_nodes/stellar"
@@ -31,12 +33,17 @@ type Config struct {
 	EnableMetrics bool
 	EnableCORS    bool
 
+	// ParticipantsFile lists the MPC participant identities (JSON)
+	ParticipantsFile string
+
 	// Storage configuration
 	StorageType           string
 	MongoConnectionString string
 	MongoDatabase         string
 	MongoCollection       string
 	EncryptionKey         string
+	EncryptionKeyFile     string
+	StorageDir            string
 
 	// Stellar configuration
 	StellarNetworkPassphrase string
@@ -109,7 +116,10 @@ func main() {
 	}
 
 	if config.StellarMPCPublicKey != "" {
-		stellarConfig.MPCPublicKey, _ = keypair.ParseAddress(config.StellarMPCPublicKey)
+		stellarConfig.MPCPublicKey, err = keypair.ParseAddress(config.StellarMPCPublicKey)
+		if err != nil {
+			log.Fatalf("Invalid stellar-public-key: %v", err)
+		}
 	}
 
 	treasuryClient, err := stellar.NewTreasuryClient(stellarConfig)
@@ -132,6 +142,16 @@ func main() {
 		EnableMetrics:  config.EnableMetrics,
 		EnableCORS:     config.EnableCORS,
 		AllowedOrigins: []string{"*"},
+	}
+
+	if config.ParticipantsFile != "" {
+		apiConfig.Participants, err = api.LoadParticipantRegistry(config.ParticipantsFile)
+		if err != nil {
+			log.Fatalf("Failed to load participant set: %v", err)
+		}
+		log.Printf("Participant set loaded from %s", config.ParticipantsFile)
+	} else {
+		log.Println("WARNING: no -participants-file set; ceremony messages will be rejected")
 	}
 
 	server := api.NewServer(apiConfig, mpcService)
@@ -164,16 +184,19 @@ func parseFlags() *Config {
 	flag.IntVar(&config.APIPort, "api-port", 8080, "HTTP API port")
 	flag.BoolVar(&config.EnableMetrics, "metrics", true, "Enable Prometheus metrics")
 	flag.BoolVar(&config.EnableCORS, "cors", true, "Enable CORS")
+	flag.StringVar(&config.ParticipantsFile, "participants-file", "", "JSON file listing MPC participants ({id, public_key, revoked}); ceremony messages are rejected without it")
 
 	// Storage configuration
 	flag.StringVar(&config.StorageType, "storage", "memory", "Storage type (memory, mongodb, encrypted_file)")
 	flag.StringVar(&config.MongoConnectionString, "mongo-uri", "", "MongoDB connection string")
 	flag.StringVar(&config.MongoDatabase, "mongo-db", "mpc_treasury", "MongoDB database name")
 	flag.StringVar(&config.MongoCollection, "mongo-collection", "key_shares", "MongoDB collection name")
-	flag.StringVar(&config.EncryptionKey, "encryption-key", "", "AES-256 encryption key (hex)")
+	flag.StringVar(&config.EncryptionKey, "encryption-key", "", "AES-256 key share encryption key (hex); prefer -encryption-key-file or "+storage.EncryptionKeyEnv)
+	flag.StringVar(&config.EncryptionKeyFile, "encryption-key-file", "", "Path to a file holding the hex AES-256 key share encryption key")
+	flag.StringVar(&config.StorageDir, "storage-dir", "./data/key_shares", "Directory for encrypted_file storage")
 
 	// Stellar configuration
-	flag.StringVar(&config.StellarNetworkPassphrase, "stellar-network", "Stellar Test Network ; September 2015", "Stellar network passphrase")
+	flag.StringVar(&config.StellarNetworkPassphrase, "stellar-network", network.TestNetworkPassphrase, "Stellar network passphrase")
 	flag.StringVar(&config.StellarHorizonURL, "stellar-horizon", "https://horizon-testnet.stellar.org", "Stellar Horizon URL")
 	flag.StringVar(&config.StellarMPCPublicKey, "stellar-public-key", "", "MPC treasury public key")
 
@@ -207,23 +230,27 @@ func validateConfig(config *Config) error {
 	return nil
 }
 
-// initializeStorage initializes the key share storage
+// initializeStorage initializes the key share storage. Persistent backends
+// require an externally configured encryption key; startup fails without one
+// instead of generating a throwaway key.
 func initializeStorage(config *Config) (storage.KeyShareStorage, error) {
-	var encryptionKey []byte
-	var err error
+	switch config.StorageType {
+	case "mongodb", "encrypted_file":
+	default:
+		// In-memory shares are never persisted, so no at-rest key is needed.
+		return storage.NewMemoryStorage(), nil
+	}
 
-	if config.EncryptionKey != "" {
-		encryptionKey, err = storage.KeyFromHex(config.EncryptionKey)
-		if err != nil {
-			return nil, fmt.Errorf("invalid encryption key: %w", err)
+	encryptionKey, err := storage.ResolveEncryptionKey(storage.EncryptionKeySource{
+		KeyFile: config.EncryptionKeyFile,
+		Env:     os.Getenv(storage.EncryptionKeyEnv),
+		FlagHex: config.EncryptionKey,
+	})
+	if err != nil {
+		if errors.Is(err, storage.ErrEncryptionKeyMissing) {
+			return nil, fmt.Errorf("%s storage requires an encryption key: set -encryption-key-file or %s", config.StorageType, storage.EncryptionKeyEnv)
 		}
-	} else {
-		// Generate random key for testing (in production, use secure key management)
-		encryptionKey, err = storage.GenerateEncryptionKey()
-		if err != nil {
-			return nil, fmt.Errorf("failed to generate encryption key: %w", err)
-		}
-		log.Printf("Generated encryption key: %s", storage.KeyToHex(encryptionKey))
+		return nil, err
 	}
 
 	storageConfig := &storage.StorageConfig{
@@ -231,6 +258,7 @@ func initializeStorage(config *Config) (storage.KeyShareStorage, error) {
 		ConnectionString: config.MongoConnectionString,
 		Database:         config.MongoDatabase,
 		Collection:       config.MongoCollection,
+		Directory:        config.StorageDir,
 		EncryptionKey:    encryptionKey,
 	}
 
@@ -242,14 +270,5 @@ func initializeStorage(config *Config) (storage.KeyShareStorage, error) {
 		}
 	}
 
-	switch config.StorageType {
-	case "memory":
-		return storage.NewMemoryStorage(), nil
-	case "mongodb":
-		return storage.NewEncryptedStorage(storageConfig)
-	case "encrypted_file":
-		return storage.NewEncryptedStorage(storageConfig)
-	default:
-		return storage.NewMemoryStorage(), nil
-	}
+	return storage.NewEncryptedStorage(storageConfig)
 }

@@ -4,6 +4,7 @@ package stellar
 import (
 	"context"
 	"math/big"
+	"net/http"
 	"time"
 
 	"github.com/pkg/errors"
@@ -22,6 +23,8 @@ type Config struct {
 	MPCPublicKey *keypair.FromAddress
 	// FeeMultiplier is the fee multiplier for transactions
 	FeeMultiplier int64
+	// HTTPClient is used to probe Horizon before broadcasting (optional)
+	HTTPClient *http.Client
 }
 
 // TreasuryClient provides Stellar treasury operations
@@ -277,11 +280,19 @@ func (c *TreasuryClient) verifyTSSAgainstAccount(messageHash []byte, signature *
 	return true, nil
 }
 
-// SubmitTransaction submits a signed transaction to Stellar
+// SubmitTransaction submits a group-signed transaction to Stellar. Before
+// broadcasting it verifies that the caller's expected network (if given), the
+// group signature, and the Horizon endpoint all match the configured network
+// passphrase, returning ErrNetworkMismatch otherwise.
 func (c *TreasuryClient) SubmitTransaction(
 	ctx context.Context,
 	signedTxXDR string,
+	expectedNetworkPassphrase string,
 ) (*TransactionResult, error) {
+	if err := c.verifyBroadcastNetwork(ctx, signedTxXDR, expectedNetworkPassphrase); err != nil {
+		return nil, err
+	}
+
 	// In production, submit to Horizon API
 	// For now, return a mock result
 
