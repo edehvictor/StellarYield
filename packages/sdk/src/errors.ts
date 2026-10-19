@@ -113,6 +113,22 @@ export class SpecMismatchError extends SorobanSdkError {
   }
 }
 
+/**
+ * Raised when a token amount cannot be represented exactly in base units,
+ * e.g. an unsafe JavaScript integer or a fractional number.
+ */
+export class InvalidAmountError extends SorobanSdkError {
+  public readonly code = "invalid_amount" as const;
+  public readonly field: string;
+  public readonly value: unknown;
+
+  constructor(field: string, value: unknown, reason: string) {
+    super(`Invalid ${field}: ${reason}`, "simulate", false);
+    this.field = field;
+    this.value = value;
+  }
+}
+
 export class StaleSimulationError extends SorobanSdkError {
   public readonly currentLedger: number;
   public readonly validUntilLedger: number;
@@ -165,4 +181,246 @@ export class InvalidXdrError extends SorobanSdkError {
 export class MissingAuthError extends SorobanSdkError {
   public readonly requiredAddress: string;
 
-  constructor(requiredAddress: string)
+  constructor(requiredAddress: string) {
+    super(
+      `Transaction simulation requires authorization entry for '${requiredAddress}'`,
+      "simulate",
+      false
+    );
+    this.requiredAddress = requiredAddress;
+  }
+}
+
+/** HTTP / fetch request timed out before a response arrived. */
+export class ApiTimeoutError extends SorobanSdkError {
+  public readonly timeoutMs: number;
+  public readonly path: string;
+
+  constructor(path: string, timeoutMs: number) {
+    super(`API request to '${path}' timed out after ${timeoutMs}ms`, undefined, true);
+    this.path = path;
+    this.timeoutMs = timeoutMs;
+  }
+}
+
+/**
+ * Caller-initiated cancellation via AbortSignal (route change, input edit, unmount).
+ * Distinct from {@link ApiTimeoutError}; not retryable.
+ */
+export class ApiCancelledError extends SorobanSdkError {
+  public readonly path: string;
+  public readonly cancelled = true as const;
+
+  constructor(path: string, reason?: string) {
+    super(
+      reason
+        ? `API request to '${path}' was cancelled: ${reason}`
+        : `API request to '${path}' was cancelled`,
+      undefined,
+      false
+    );
+    this.path = path;
+  }
+}
+
+export class ProviderConnectionError extends SorobanSdkError {
+  constructor(public readonly providerName: string, reason?: string) {
+    super(
+      reason
+        ? `Failed to connect to '${providerName}': ${reason}`
+        : `Failed to connect to '${providerName}'`,
+      "sign",
+      false
+    );
+    this.providerName = providerName;
+  }
+}
+
+export class ProviderMethodError extends SorobanSdkError {
+  constructor(
+    public readonly providerName: string,
+    public readonly method: string,
+    reason?: string
+  ) {
+    super(
+      reason
+        ? `Provider '${providerName}' does not support method '${method}': ${reason}`
+        : `Provider '${providerName}' does not support method '${method}'`,
+      "sign",
+      false
+    );
+    this.providerName = providerName;
+    this.method = method;
+  }
+}
+
+export class ProviderPermissionError extends SorobanSdkError {
+  constructor(public readonly providerName: string, reason?: string) {
+    super(
+      reason
+        ? `Permission denied by '${providerName}': ${reason}`
+        : `Permission denied by '${providerName}'`,
+      "sign",
+      true
+    );
+    this.providerName = providerName;
+  }
+}
+
+/** True when an error represents intentional request cancellation (not a timeout). */
+export function isApiCancellation(error: unknown): boolean {
+  if (error instanceof ApiCancelledError) return true;
+  if (
+    typeof error === "object" &&
+    error !== null &&
+    (error as { cancelled?: boolean }).cancelled === true
+  ) {
+    return true;
+  }
+  return false;
+}
+
+/** Underlying network failure (DNS, connection reset, offline, etc.). */
+export class ApiNetworkError extends SorobanSdkError {
+  public readonly path: string;
+  public readonly cause?: unknown;
+
+  constructor(path: string, cause?: unknown) {
+    const detail = cause instanceof Error ? cause.message : cause != null ? String(cause) : "unknown";
+    super(`API network error at '${path}': ${detail}`, undefined, true);
+    this.path = path;
+    this.cause = cause;
+  }
+}
+
+/**
+ * A paginated response did not match the expected `{ items, nextCursor }`
+ * shape, or its cursor would loop. Not retryable: the same request would
+ * return the same malformed page.
+ */
+export class ApiPaginationError extends SorobanSdkError {
+  public readonly path: string;
+
+  constructor(path: string, reason: string) {
+    super(`Malformed paginated response at '${path}': ${reason}`, undefined, false);
+    this.path = path;
+  }
+}
+
+/** Non-OK HTTP response from the backend API. */
+export class ApiHttpError extends SorobanSdkError {
+  public readonly path: string;
+  public readonly status: number;
+  public readonly statusText: string;
+
+  constructor(path: string, status: number, statusText: string, retryable: boolean) {
+    super(`API error (${status} ${statusText}) at ${path}`, undefined, retryable);
+    this.path = path;
+    this.status = status;
+    this.statusText = statusText;
+  }
+}
+
+/** HTTP 429 from the backend API; `retryAfterMs` mirrors the `Retry-After` header when present. */
+export class ApiRateLimitError extends ApiHttpError {
+  public readonly retryAfterMs?: number;
+
+  constructor(path: string, retryAfterMs?: number, statusText = "Too Many Requests") {
+    super(path, 429, statusText, true);
+    this.retryAfterMs = retryAfterMs;
+  }
+}
+
+/** HTTP 5xx from the backend API; treated as a transient, retryable failure. */
+export class ApiServerError extends ApiHttpError {
+  constructor(path: string, status: number, statusText: string) {
+    super(path, status, statusText, true);
+  }
+}
+
+/**
+ * Restore preamble data returned by a `SimulateTransactionRestoreResponse`.
+ * `transactionData` is a `SorobanDataBuilder` instance from `@stellar/stellar-sdk`
+ * (kept as `unknown` here so `errors.ts` has no dependency on that package's types).
+ */
+export interface RestorePreambleInfo {
+  minResourceFee: string;
+  transactionData: unknown;
+}
+
+export class RestoreRequiredError extends SorobanSdkError {
+  public readonly minResourceFee: string;
+  public readonly restorePreamble?: RestorePreambleInfo;
+
+  constructor(minResourceFee: string, restorePreamble?: RestorePreambleInfo) {
+    super(
+      `Simulation indicates expired ledger entries requiring a restore footprint operation (min resource fee ${minResourceFee})`,
+      "restore",
+      true
+    );
+    this.minResourceFee = minResourceFee;
+    this.restorePreamble = restorePreamble;
+  }
+}
+
+/**
+ * Normalized finality classification for a submitted transaction's poll
+ * result, so callers can branch on a small stable set of outcomes instead of
+ * raw RPC status strings.
+ */
+export interface FinalityResult {
+  status: "success" | "failed" | "timeout" | "unknown";
+  retryable: boolean;
+}
+
+export function classifyFinality(
+  rpcStatus: string | undefined,
+  timedOut: boolean
+): FinalityResult {
+  if (rpcStatus === "SUCCESS") {
+    return { status: "success", retryable: false };
+  }
+  if (rpcStatus === "FAILED") {
+    return { status: "failed", retryable: false };
+  }
+  if (rpcStatus === "NOT_FOUND" && timedOut) {
+    return { status: "timeout", retryable: true };
+  }
+  return { status: "unknown", retryable: true };
+}
+
+export function decodeVaultError(code: number): { name: string; message: string } {
+  const generatedMeta = (VaultError as Record<number, { message: string }>)[code];
+  const name = generatedMeta ? generatedMeta.message : `UnknownError_${code}`;
+  const message = VAULT_ERROR_MESSAGES[code] || `Contract error code ${code}`;
+  return { name, message };
+}
+
+export function parseContractError(
+  error: unknown,
+  rawResultXdr?: string,
+  diagnosticEvents?: string[],
+  phase: SdkErrorPhase = "submit"
+): SorobanSdkError {
+  if (error instanceof SorobanSdkError) {
+    return error;
+  }
+
+  const errString = String(error);
+  // Match numeric contract error code patterns e.g. Error(Contract, #5) or ErrorCode(5)
+  const codeMatch = errString.match(/(?:Error\(Contract,\s*#(\d+)\)|ErrorCode\((\d+)\)|Error\s*(\d+))/i);
+  if (codeMatch) {
+    const codeNum = parseInt(codeMatch[1] || codeMatch[2] || codeMatch[3], 10);
+    const { name, message } = decodeVaultError(codeNum);
+    return new ContractExecutionError(codeNum, name, message, rawResultXdr, diagnosticEvents, phase);
+  }
+
+  return new ContractExecutionError(
+    999,
+    "GenericSorobanError",
+    errString || "Unknown Soroban contract execution failure",
+    rawResultXdr,
+    diagnosticEvents,
+    phase
+  );
+}
