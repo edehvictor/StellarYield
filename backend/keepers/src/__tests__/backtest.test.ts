@@ -55,3 +55,117 @@ describe("Backtest API", () => {
         expect(value).toBeLessThan(1110000000n);
     });
 });
+
+describe("Option assignment", () => {
+    interface WriterPosition {
+        writer: string;
+        collateral: bigint;
+        createdAt: number;
+    }
+
+    interface Assignment {
+        writer: string;
+        amount: bigint;
+    }
+
+    /**
+     * Deterministically select and settle eligible writer positions.
+     * Positions are ordered by createdAt ascending, then writer address
+     * lexicographically, so assignment is stable across runs.
+     */
+    function assignWriters(
+        positions: WriterPosition[],
+        exerciseAmount: bigint,
+    ): { assignments: Assignment[]; remaining: bigint } {
+        const ordered = [...positions].sort((a, b) => {
+            if (a.createdAt !== b.createdAt) return a.createdAt - b.createdAt;
+            return a.writer < b.writer ? -1 : a.writer > b.writer ? 1 : 0;
+        });
+
+        const assignments: Assignment[] = [];
+        let remaining = exerciseAmount;
+
+        for (const position of ordered) {
+            if (remaining <= 0n) break;
+            if (position.collateral <= 0n) continue;
+
+            const amount =
+                position.collateral < remaining ? position.collateral : remaining;
+            assignments.push({ writer: position.writer, amount });
+            remaining -= amount;
+        }
+
+        return { assignments, remaining };
+    }
+
+    it("should assign across multiple writers deterministically", () => {
+        const positions: WriterPosition[] = [
+            { writer: "0xbbb", collateral: 500n, createdAt: 2 },
+            { writer: "0xaaa", collateral: 500n, createdAt: 1 },
+            { writer: "0xccc", collateral: 500n, createdAt: 3 },
+        ];
+
+        const { assignments, remaining } = assignWriters(positions, 1200n);
+
+        expect(remaining).toBe(0n);
+        expect(assignments).toEqual([
+            { writer: "0xaaa", amount: 500n },
+            { writer: "0xbbb", amount: 500n },
+            { writer: "0xccc", amount: 200n },
+        ]);
+    });
+
+    it("should partially assign a single writer position", () => {
+        const positions: WriterPosition[] = [
+            { writer: "0xaaa", collateral: 1000n, createdAt: 1 },
+        ];
+
+        const { assignments, remaining } = assignWriters(positions, 400n);
+
+        expect(remaining).toBe(0n);
+        expect(assignments).toEqual([{ writer: "0xaaa", amount: 400n }]);
+    });
+
+    it("should exhaust available collateral and report remaining amount", () => {
+        const positions: WriterPosition[] = [
+            { writer: "0xaaa", collateral: 300n, createdAt: 1 },
+            { writer: "0xbbb", collateral: 200n, createdAt: 2 },
+        ];
+
+        const { assignments, remaining } = assignWriters(positions, 1000n);
+
+        expect(remaining).toBe(500n);
+        expect(assignments).toEqual([
+            { writer: "0xaaa", amount: 300n },
+            { writer: "0xbbb", amount: 200n },
+        ]);
+    });
+
+    it("should skip writers with no collateral", () => {
+        const positions: WriterPosition[] = [
+            { writer: "0xaaa", collateral: 0n, createdAt: 1 },
+            { writer: "0xbbb", collateral: 250n, createdAt: 2 },
+        ];
+
+        const { assignments, remaining } = assignWriters(positions, 250n);
+
+        expect(remaining).toBe(0n);
+        expect(assignments).toEqual([{ writer: "0xbbb", amount: 250n }]);
+    });
+
+    it("should produce stable ordering for equal timestamps", () => {
+        const positions: WriterPosition[] = [
+            { writer: "0xbbb", collateral: 100n, createdAt: 1 },
+            { writer: "0xaaa", collateral: 100n, createdAt: 1 },
+        ];
+
+        const first = assignWriters(positions, 150n);
+        const second = assignWriters([...positions].reverse(), 150n);
+
+        expect(first).toEqual(second);
+        expect(first.assignments).toEqual([
+            { writer: "0xaaa", amount: 100n },
+            { writer: "0xbbb", amount: 50n },
+        ]);
+    });
+});

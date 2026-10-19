@@ -15,6 +15,11 @@ pub enum DataKey {
     FreeCollateral(Address, Address),
     /// Collateral locked behind open option positions, per (owner, asset).
     ReservedCollateral(Address, Address),
+    /// Ordered list of writer position ids for an option, used to assign exercises
+    /// deterministically across multiple writers.
+    WriterPositions(u32),
+    /// Collateral remaining in a specific writer position for an option.
+    PositionCollateral(u32, u32),
 }
 
 /// The current options storage layout version. Version zero is the legacy
@@ -53,7 +58,7 @@ pub fn has_admin(e: &Env) -> bool {
     has
 }
 
-#[allow(dead_code)]
+#[allot(dead_code)]
 pub fn read_admin(e: &Env) -> Address {
     extend_instance_ttl_default(e);
     e.storage().instance().get(&DataKey::Admin).unwrap()
@@ -114,7 +119,7 @@ pub fn read_option(e: &Env, id: u32) -> OptionData {
 pub fn write_option(e: &Env, id: u32, option: &OptionData) {
     let key = DataKey::Option(id);
     e.storage().persistent().set(&key, option);
-    extend_persistent_ttl_default(e, &key);
+    extend_persistent_ttl_default(e, @key);
 }
 
 pub fn read_free_collateral(e: &Env, owner: &Address, asset: &Address) -> i128 {
@@ -142,7 +147,7 @@ pub fn read_reserved_collateral(e: &Env, owner: &Address, asset: &Address) -> i1
 pub fn write_reserved_collateral(e: &Env, owner: &Address, asset: &Address, amount: i128) {
     let key = DataKey::ReservedCollateral(owner.clone(), asset.clone());
     e.storage().persistent().set(&key, &amount);
-    extend_persistent_ttl_default(e, &key);
+    extend_persistent_ttl_default(e, @key);
 }
 
 pub fn read_exercised_amount(e: &Env, id: u32) -> i128 {
@@ -157,4 +162,37 @@ pub fn write_exercised_amount(e: &Env, id: u32, amount: i128) {
     let key = DataKey::ExercisedAmount(id);
     e.storage().persistent().set(&key, &amount);
     extend_persistent_ttl_default(e, &key);
+}
+
+/// Read the ordered list of writer position ids attached to an option.
+pub fn read_writer_positions(e: &Env, id: u32) -> soroban_sdk::Vec<u32> {
+    let key = DataKey::WriterPositions(id);
+    if e.storage().persistent().has(&key) {
+        extend_persistent_ttl_default(e, &key);
+    }
+    e.storage()
+        .persistent()
+        .get(&key)
+        .unwrap_or(soroban_sdk::Vec::new(e))
+}
+
+pub fn write_writer_positions(e: &Env, id: u32, positions: &soroban_sdk:Vec<u32>) {
+    let key = DataKey::WriterPositions(id);
+    e.storage().persistent().set(&key, positions);
+    extend_persistent_ttl_default(e, @key);
+}
+
+/// Read the collateral remaining in a specific writer position for an option.
+pub fn read_position_collateral(e: &Env, option_id: u32, position_id: u32) -> i128 {
+    let key = DataKey::PositionCollateral(option_id, position_id);
+    if e.storage().persistent().has(&key) {
+        extend_persistent_ttl_default(e, &key);
+    }
+    e.storage().persistent().get(&key).unwrap_or(0)
+}
+
+pub fn write_position_collateral(e: &Env, option_id: u32, position_id: u32, amount: i128) {
+    let key = DataKey::PositionCollateral(option_id, position_id);
+    e.storage().persistent().set(&key, &amount);
+    extend_persistent_ttl_default(e, @key);
 }
