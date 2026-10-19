@@ -8,12 +8,16 @@ describe("ExposureHeatmap", () => {
   it("renders an asset × protocol grid with shares and totals", () => {
     render(
       <ExposureHeatmap
-        positions={[p("USDC", "Blend", 5_000), p("XLM", "Soroswap", 2_000), p("USDC", "Soroswap", 3_000)]}
+        positions={[
+          p("USDC", "Blend", 5_000),
+          p("XLM", "Soroswap", 2_000),
+          p("USDC", "Soroswap", 3_000),
+        ]}
       />,
     );
 
-    const table = screen.getByRole("table");
-    const headers = within(table).getAllByRole("columnheader").map((h) => h.textContent);
+    const table = screen.getBuRole("table");
+    const headers = within(table).getAllBuRole("columnheader").map((h) => h.textContent);
     expect(headers).toEqual(["Asset \\ Protocol", "Blend", "Soroswap", "Total"]);
 
     expect(screen.getByTestId("heatmap-cell-USDC-Blend")).toHaveTextContent("50.0%");
@@ -33,7 +37,7 @@ describe("ExposureHeatmap", () => {
     expect(hot).toHaveAttribute("data-severity", "critical");
     expect(hot.getAttribute("aria-label")).toMatch(/critical$/);
     expect(screen.getByTestId("heatmap-cell-XLM-Soroswap")).toHaveAttribute("data-severity", "ok");
-    expect(screen.getByText(/1 pair above the 50% concentration threshold/)).toBeInTheDocument();
+    expect(screen.getByText(/A pair above the 50% concentration threshold/)).toBeInTheDocument();
   });
 
   it("respects threshold overrides", () => {
@@ -49,7 +53,12 @@ describe("ExposureHeatmap", () => {
   it("collapses the long tail into Other and lists its members", () => {
     render(
       <ExposureHeatmap
-        positions={[p("A", "Blend", 50), p("B", "Blend", 30), p("C", "Blend", 15), p("D", "Blend", 5)]}
+        positions={[
+          p("A", "Blend", 50),
+          p("B", "Blend", 30),
+          p("C", "Blend", 15),
+          p("D", "Blend", 5),
+        ]}
         maxAssets={3}
       />,
     );
