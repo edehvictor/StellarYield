@@ -56,6 +56,128 @@ describe("Backtest API", () => {
     });
 });
 
+describe("Stealth deposit announcements", () => {
+    interface Transfer {
+        id: string;
+        token: string;
+        amount: bigint;
+    }
+
+    interface Announcement {
+        transferId: string;
+        token: string;
+        amount: bigint;
+    }
+
+    /**
+     * Bind an announcement to a unique asset transfer. Announcements must
+     * reference an existing transfer and match its token and amount exactly.
+     * Failed operations return an error and leave state untouched.
+     */
+    function announce(
+        transfers: Map<string, Transfer>,
+        announcements: Announcement[],
+        transferId: string,
+        token: string,
+        amount: bigint,
+    ): { ok: true } | { ok: false; error: string } {
+        const transfer = transfers.get(transferId);
+        if (!transfer) {
+            return { ok: false, error: "UNBACKED_TRANSFER" };
+        }
+        if (transfer.token !== token) {
+            return { ok: false, error: "TOKEN_MISMATCH" };
+        }
+        if (transfer.amount !== amount) {
+            return { ok: false, error: "AMOUNT_MISMATCH" };
+        }
+        if (announcements.some((a) => a.transferId === transferId)) {
+            return { ok: false, error: "DUPLICATE_ANNOUNCEMENT" };
+        }
+        announcements.push({ transferId, token, amount });
+        return { ok: true };
+    }
+
+    function makeTransfers(): Map<string, Transfer> {
+        return new Map<string, Transfer>([
+            ["tx-1", { id: "tx-1", token: "USDC", amount: 100n }],
+            ["tx-2", { id: "tx-2", token: "USDC", amount: 100n }],
+            ["tx-3", { id: "tx-3", token: "DAI", amount: 100n }],
+        ]);
+    }
+
+    it("should bind announcement to transfer identity and token context", () => {
+        const transfers = makeTransfers();
+        const announcements: Announcement[] = [];
+
+        const result = announce(transfers, announcements, "tx-1", "USDC", 100n);
+
+        expect(result).toEqual({ ok: true });
+        expect(announcements).toEqual([
+            { transferId: "tx-1", token: "USDC", amount: 100n },
+        ]);
+    });
+
+    it("should reject repeated announcements for the same transfer", () => {
+        const transfers = makeTransfers();
+        const announcements: Announcement[] = [];
+
+        expect(announce(transfers, announcements, "tx-1", "USDC", 100n)).toEqual({
+            ok: true,
+        });
+        const before = [...announcements];
+
+        expect(announce(transfers, announcements, "tx-1", "USDC", 100n)).toEqual({
+            ok: false,
+            error: "DUPLICATE_ANNOUNCEMENT",
+        });
+        expect(announcements).toEqual(before);
+    });
+
+    it("should distinguish distinct same-value transfers", () => {
+        const transfers = makeTransfers();
+        const announcements: Announcement[] = [];
+
+        expect(announce(transfers, announcements, "tx-1", "USDC", 100n)).toEqual({
+            ok: true,
+        });
+        expect(announce(transfers, announcements, "tx-2", "USDC", 100n)).toEqual({
+            ok: true,
+        });
+
+        expect(announcements).toEqual([
+            { transferId: "tx-1", token: "USDC", amount: 100n },
+            { transferId: "tx-2", token: "USDC", amount: 100n },
+        ]);
+    });
+
+    it("should reject unbacked messages and preserve state", () => {
+        const transfers = makeTransfers();
+        const announcements: Announcement[] = [];
+
+        expect(announce(transfers, announcements, "tx-missing", "USDC", 100n)).toEqual({
+            ok: false,
+            error: "UNBACKED_TRANSFER",
+        });
+        expect(announcements).toEqual([]);
+    });
+
+    it("should reject token or amount mismatches and preserve state", () => {
+        const transfers = makeTransfers();
+        const announcements: Announcement[] = [];
+
+        expect(announce(transfers, announcements, "tx-1", "DAI", 100n)).toEqual({
+            ok: false,
+            error: "TOKEN_MISMATCH",
+        });
+        expect(announce(transfers, announcements, "tx-1", "USDC", 99n)).toEqual({
+            ok: false,
+            error: "AMOUNT_MISMATCH",
+        });
+        expect(announcements).toEqual([]);
+    });
+});
+
 describe("Option assignment", () => {
     interface WriterPosition {
         writer: string;
