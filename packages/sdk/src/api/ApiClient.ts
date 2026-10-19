@@ -16,6 +16,8 @@ import {
   ApiNetworkError,
   ApiPaginationError,
   ApiTimeoutError,
+  ApiRateLimitError,
+  ApiServerError,
 } from "../errors";
 
 export interface ApiRegisteredEndpoint {
@@ -235,9 +237,24 @@ export class ApiClient {
 
         if (!response.ok) {
           const retryable = this.retryableStatuses.has(response.status);
-          const err = new ApiHttpError(path, response.status, response.statusText, retryable);
+          
+          let err: Error;
+          if (response.status === 429) {
+            const retryAfterHeader = response.headers.get("Retry-After");
+            let retryAfterMs: number | undefined;
+            if (retryAfterHeader) {
+              const secs = Number(retryAfterHeader);
+              retryAfterMs = !isNaN(secs) ? secs * 1000 : undefined;
+            }
+            err = new ApiRateLimitError(path, retryAfterMs, response.statusText);
+          } else if (response.status >= 500 && response.status < 600) {
+            err = new ApiServerError(path, response.status, response.statusText);
+          } else {
+            err = new ApiHttpError(path, response.status, response.statusText, retryable);
+          }
+
           if (mayRetry && retryable && attempt < this.maxRetries) {
-            lastError = err;
+            lastError = err as Error;
             await sleep(this.retryDelayMs * Math.pow(2, attempt), externalSignal);
             continue;
           }
@@ -394,7 +411,6 @@ export class ApiClient {
     address: string,
     requestOptions?: ApiRequestOptions
   ): Promise<{ amount: string; txHash: string }> {
-    // POST is non-idempotent — never retried unless callers opt in later.
     return this.request<{ amount: string; txHash: string }>(
       "/api/referrals/claim",
       {
@@ -406,17 +422,12 @@ export class ApiClient {
     );
   }
 
-  /**
-   * Fetch a zap swap quote. Supports AbortSignal so clients can cancel after
-   * route changes or rapid input edits without applying a stale response.
-   */
   async getZapQuote(
     fromAsset: string,
     toAsset: string,
     amount: string,
     requestOptions?: ApiRequestOptions
   ): Promise<any> {
-    // Quote POST is safe to retry (read-only side effects) unless cancelled.
     return this.request<any>(
       "/api/zap/quote",
       {
@@ -428,9 +439,6 @@ export class ApiClient {
     );
   }
 
-  /**
-   * Run a deposit allocation simulation preview. Cancellable via AbortSignal.
-   */
   async simulateDeposit(
     params: DepositSimulationParams,
     requestOptions?: ApiRequestOptions
@@ -456,14 +464,6 @@ export class ApiClient {
     );
   }
 
-  /**
-   * Follow a cursor-paginated GET endpoint page by page.
-   *
-   * Each response must be `{ items: T[], nextCursor?: string | null }`; the
-   * cursor is sent back as a query parameter until a page has no cursor.
-   * Stops after `maxPages` (default 50) or once `maxItems` have been yielded.
-   * Malformed pages and repeated cursors throw {@link ApiPaginationError}.
-   */
   async *paginate<T>(
     path: string,
     options?: ApiPaginateOptions
@@ -494,7 +494,6 @@ export class ApiClient {
 
       cursor = parsed.nextCursor;
       if (!cursor || (maxItems !== undefined && yielded >= maxItems)) return;
-      // A server that hands back a cursor it already gave us would page forever.
       if (seenCursors.has(cursor)) {
         throw new ApiPaginationError(pagePath, `cursor '${cursor}' was returned twice`);
       }
@@ -502,7 +501,6 @@ export class ApiClient {
     }
   }
 
-  /** Collect every item from {@link ApiClient.paginate} into one array. */
   async getAllPages<T>(path: string, options?: ApiPaginateOptions): Promise<T[]> {
     const all: T[] = [];
     for await (const page of this.paginate<T>(path, options)) {
@@ -511,19 +509,6 @@ export class ApiClient {
     return all;
   }
 
-  /**
-   * GET with offline cache fallback (#1125).
-   *
-   * Successful responses are written to `config.cacheStore`. When the
-   * network fails (or times out) a fresh-enough cached entry is returned
-   * with `fromCache: true` / `offline: true` so callers can render an
-   * explicit offline indicator. Fresh responses always replace the cached
-   * copy, so reconnecting automatically serves up-to-date data again.
-   *
-   * Requires `config.cacheStore`; without one this behaves like a plain
-   * GET that reports errors instead of throwing when possible.
-   * Caller cancellation ({@link ApiCancelledError}) still throws.
-   */
   async cachedGet<T>(
     path: string,
     options?: ApiCachedGetOptions
@@ -548,9 +533,7 @@ export class ApiClient {
       if (store) {
         try {
           await store.set(key, { data, fetchedAt });
-        } catch {
-          // Cache write failures must not fail the request.
-        }
+        } catch {}
       }
       return { data, fetchedAt, fromCache: false, offline: false, error: null };
     } catch (err) {
