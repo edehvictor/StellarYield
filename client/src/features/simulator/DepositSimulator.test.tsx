@@ -5,9 +5,13 @@ import { vi } from "vitest";
 import { DepositSimulator } from "./DepositSimulator";
 import { fetchDepositSimulation } from "./simulationService";
 
-vi.mock("./simulationService", () => ({
-  fetchDepositSimulation: vi.fn(),
-}));
+vi.mock("./simulationService", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./simulationService")>();
+  return {
+    ...actual,
+    fetchDepositSimulation: vi.fn(),
+  };
+});
 
 const mockFetch = fetchDepositSimulation as any;
 
@@ -77,4 +81,48 @@ describe("DepositSimulator", () => {
       expect(screen.getByText(/Error: Network Error/i)).toBeInTheDocument();
     });
   });
+
+  it("should discard stale out-of-order responses and render only latest amount result", async () => {
+    mockFetch.mockImplementation(async (params: any) => {
+      if (params.amount === 100) {
+        // Slower response for older amount 100
+        await new Promise((r) => setTimeout(r, 200));
+        return {
+          isSimulationOnly: true,
+          allocations: [{ protocol: "Lend", amount: 100, percentage: 100 }],
+          expectedShares: 100,
+          fees: [],
+          postDepositExposure: { expectedApy: 0.05 },
+          routing: { path: ["Lend"], expectedOutput: 100 },
+          warnings: [],
+        };
+      } else {
+        // Faster response for newer amount 500
+        return {
+          isSimulationOnly: true,
+          allocations: [{ protocol: "Lend", amount: 500, percentage: 100 }],
+          expectedShares: 500,
+          fees: [],
+          postDepositExposure: { expectedApy: 0.10 },
+          routing: { path: ["Lend"], expectedOutput: 500 },
+          warnings: [],
+        };
+      }
+    });
+
+    const { rerender } = render(
+      <DepositSimulator strategyId="Conservative" amount={100} token="USDC" />
+    );
+
+    // Rapidly edit amount to 500
+    rerender(<DepositSimulator strategyId="Conservative" amount={500} token="USDC" />);
+
+    await waitFor(() => {
+      expect(screen.getByText("500")).toBeInTheDocument();
+    });
+
+    // Make sure stale 100 result was not rendered
+    expect(screen.queryByText("100")).not.toBeInTheDocument();
+  });
 });
+

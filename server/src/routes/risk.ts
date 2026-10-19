@@ -3,6 +3,13 @@ import rateLimit from "express-rate-limit";
 import { riskPreferenceDriftService, type RiskPreference, type UserRiskProfile, type PortfolioBehavior } from "../services/riskPreferenceDriftService";
 import { stressMatrixService } from "../services/stressMatrixService";
 import { apyDispersionService, type ProviderApyInput } from "../services/apyDispersionService";
+import { buildRegimeBreakdownSnapshots } from "../services/riskScoreBreakdownSnapshotService";
+import {
+  evaluateAllocationChange,
+  RiskRuleEngineError,
+  type AllocationChange,
+  type RiskRuleEngineConfig,
+} from "../services/riskRuleEngine";
 
 const router = Router();
 
@@ -220,6 +227,75 @@ router.delete("/stress-matrix/scenarios/:scenarioId", (req: Request, res: Respon
   }
 
   res.json({ success: true, message: `Scenario ${scenarioId} removed` });
+});
+
+/**
+ * GET /api/risk/breakdown-snapshots
+ * Deterministic risk score breakdown snapshots for reference portfolio regimes.
+ */
+router.get("/breakdown-snapshots", (_req: Request, res: Response) => {
+  res.json({ snapshots: buildRegimeBreakdownSnapshots() });
+});
+
+/**
+ * POST /api/risk/allocation-change
+ *
+ * Evaluate a proposed strategy allocation change against the risk rule engine
+ * before it is submitted. Returns typed per-rule verdicts; `allowed: false`
+ * when any blocking rule is violated.
+ *
+ * Request body:
+ *   changes — array of { vaultId, beforePct, afterPct }
+ *   rules   — optional rule overrides (maxAllocationPct, maxStepChangePct,
+ *             minNonZeroPct, warnOnly)
+ *
+ * Example:
+ *   { "changes": [ { "vaultId": "v1", "beforePct": 10, "afterPct": 55 } ] }
+ */
+router.post("/allocation-change", riskAnalysisLimiter, (req: Request, res: Response) => {
+  try {
+    const { changes, rules } = req.body as {
+      changes?: AllocationChange[];
+      rules?: RiskRuleEngineConfig;
+    };
+
+    if (!Array.isArray(changes) || changes.length === 0) {
+      res.status(400).json({
+        error: "changes must be a non-empty array of allocation changes.",
+      });
+      return;
+    }
+
+    if (changes.some((c) => !c || typeof c.vaultId !== "string")) {
+      res.status(400).json({
+        error: "Each change must have a string vaultId.",
+      });
+      return;
+    }
+
+    const result = evaluateAllocationChange({ changes, rules });
+    res.json({
+      success: true,
+      data: {
+        allowed: result.allowed,
+        verdicts: result.verdicts,
+        evaluatedAt: new Date().toISOString(),
+      },
+    });
+  } catch (error) {
+    if (error instanceof RiskRuleEngineError) {
+      res.status(400).json({
+        error: error.message,
+        code: error.code,
+        details: error.meta,
+      });
+      return;
+    }
+    res.status(500).json({
+      error: "Failed to evaluate allocation change",
+      message: error instanceof Error ? error.message : "Unknown error",
+    });
+  }
 });
 
 export default router;

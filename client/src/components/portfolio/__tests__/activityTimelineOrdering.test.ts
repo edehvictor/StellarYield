@@ -271,3 +271,67 @@ describe("sortAndDeduplicateTimeline", () => {
     expect(result[1].id).toBe("e1");
   });
 });
+
+// ── filterActivityEvents (#1178) ─────────────────────────────────────────────
+
+import { filterActivityEvents, type AccountActivityFilters } from "../activityTimelineTypes";
+
+describe("filterActivityEvents (#1178)", () => {
+  const events: AccountActivityEvent[] = [
+    makeEvent({ id: "d1", type: "deposit", protocol: "Blend", assetSymbol: "USDC", status: "completed" }),
+    makeEvent({ id: "w1", type: "withdrawal", protocol: "Soroswap", assetSymbol: "XLM", status: "completed" }),
+    makeEvent({ id: "r1", type: "reward", protocol: "Blend", assetSymbol: "YIELD", status: "pending" }),
+    makeEvent({ id: "a1", type: "alert", protocol: "Yield Index", assetSymbol: "USDC", status: "failed" }),
+  ];
+
+  it("returns all events when filters object is empty", () => {
+    expect(filterActivityEvents(events, {})).toHaveLength(4);
+  });
+
+  it("filters by single type", () => {
+    const result = filterActivityEvents(events, { types: ["deposit"] });
+    expect(result).toHaveLength(1);
+    expect(result[0].id).toBe("d1");
+  });
+
+  it("filters by multiple types", () => {
+    const result = filterActivityEvents(events, { types: ["deposit", "reward"] });
+    expect(result).toHaveLength(2);
+    expect(result.map((e) => e.id)).toEqual(["d1", "r1"]);
+  });
+
+  it("filters by protocol", () => {
+    const result = filterActivityEvents(events, { protocol: "Blend" });
+    expect(result).toHaveLength(2);
+    expect(result.map((e) => e.id)).toEqual(["d1", "r1"]);
+  });
+
+  it("filters by asset", () => {
+    const result = filterActivityEvents(events, { asset: "USDC" });
+    expect(result).toHaveLength(2);
+    expect(result.map((e) => e.id)).toEqual(["d1", "a1"]);
+  });
+
+  it("filters by status", () => {
+    const result = filterActivityEvents(events, { status: "pending" });
+    expect(result).toHaveLength(1);
+    expect(result[0].id).toBe("r1");
+  });
+
+  it("applies combined filters (protocol + asset)", () => {
+    const result = filterActivityEvents(events, { protocol: "Blend", asset: "USDC" });
+    expect(result).toHaveLength(1);
+    expect(result[0].id).toBe("d1");
+  });
+
+  it("applies combined filters (type + status)", () => {
+    const result = filterActivityEvents(events, { types: ["reward", "alert"], status: "failed" });
+    expect(result).toHaveLength(1);
+    expect(result[0].id).toBe("a1");
+  });
+
+  it("returns empty array when no events match filters", () => {
+    const result = filterActivityEvents(events, { protocol: "NonExistent" });
+    expect(result).toHaveLength(0);
+  });
+});

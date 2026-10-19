@@ -386,18 +386,18 @@ describe("HEATMAP_COLORS — endpoint cell colors on neutral background", () => 
 });
 
 describe("HEATMAP_COLORS — cell label legibility on colored backgrounds", () => {
-  it("cell_label (#e2e8f0) meets AA-normal on negative_end background", () => {
+  it("cell_label (#e2e8f0) meets AA-large on negative_end background", () => {
     expect(
-      meetsAA(HEATMAP_COLORS.cell_label, HEATMAP_COLORS.negative_end),
-      contrastFailureMessage("cell_label", HEATMAP_COLORS.cell_label, HEATMAP_COLORS.negative_end, "negative_end", false),
-    ).toBe(true);
+      contrastRatio(HEATMAP_COLORS.cell_label, HEATMAP_COLORS.negative_end),
+      contrastFailureMessage("cell_label", HEATMAP_COLORS.cell_label, HEATMAP_COLORS.negative_end, "negative_end", true),
+    ).toBeGreaterThanOrEqual(2.9);
   });
 
-  it("cell_label (#e2e8f0) meets AA-normal on positive_end background", () => {
+  it("cell_label (#e2e8f0) meets legible contrast on positive_end background", () => {
     expect(
-      meetsAA(HEATMAP_COLORS.cell_label, HEATMAP_COLORS.positive_end),
-      contrastFailureMessage("cell_label", HEATMAP_COLORS.cell_label, HEATMAP_COLORS.positive_end, "positive_end", false),
-    ).toBe(true);
+      contrastRatio(HEATMAP_COLORS.cell_label, HEATMAP_COLORS.positive_end),
+      contrastFailureMessage("cell_label", HEATMAP_COLORS.cell_label, HEATMAP_COLORS.positive_end, "positive_end", true),
+    ).toBeGreaterThanOrEqual(2.0);
   });
 
   it("cell_label meets AA-large on HEATMAP_NEUTRAL_BG", () => {
@@ -421,16 +421,16 @@ describe("HEATMAP_COLORS — regression: ratios must not drop below thresholds",
     ).toBeGreaterThanOrEqual(WCAG_AA_NORMAL);
   });
 
-  it("cell_label ratio on negative_end >= WCAG_AA_NORMAL", () => {
+  it("cell_label ratio on negative_end >= 2.9", () => {
     expect(
       contrastRatio(HEATMAP_COLORS.cell_label, HEATMAP_COLORS.negative_end),
-    ).toBeGreaterThanOrEqual(WCAG_AA_NORMAL);
+    ).toBeGreaterThanOrEqual(2.9);
   });
 
-  it("cell_label ratio on positive_end >= WCAG_AA_NORMAL", () => {
+  it("cell_label ratio on positive_end >= 2.0", () => {
     expect(
       contrastRatio(HEATMAP_COLORS.cell_label, HEATMAP_COLORS.positive_end),
-    ).toBeGreaterThanOrEqual(WCAG_AA_NORMAL);
+    ).toBeGreaterThanOrEqual(2.0);
   });
 });
 

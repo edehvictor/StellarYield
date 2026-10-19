@@ -334,3 +334,245 @@ describe("Singleton instance", () => {
     expect(adaptiveThresholdController).toBeInstanceOf(AdaptiveThresholdController);
   });
 });
+
+describe("Deterministic Threshold Recommendations & Normalization", () => {
+  const {
+    normalizeSystemConditions,
+    recommendThreshold,
+    saveThresholdRecommendation,
+    getLatestThresholdRecommendation,
+    getThresholdRecommendationHistory,
+    resetThresholdRecommendationStore,
+    ADAPTIVE_THRESHOLD_REASON_DESCRIPTIONS,
+  } = require("../services/adaptiveThresholdService");
+
+  beforeEach(() => {
+    resetThresholdRecommendationStore();
+  });
+
+  describe("Determinism across repeated runs", () => {
+    it("should produce identical recommendation output for 100 identical runs", () => {
+      const input = {
+        healthScore: 72.5,
+        volatilityIndex: 0.65,
+        providerReliability: 65,
+        activeIncidents: 2,
+        systemLoad: 0.85,
+        hoursSinceLastIncident: 12,
+      };
+
+      const baseline = recommendThreshold(input);
+
+      for (let i = 0; i < 100; i++) {
+        const current = recommendThreshold(input);
+        expect(current.recommendedThreshold).toBe(baseline.recommendedThreshold);
+        expect(current.primaryReasonCode).toBe(baseline.primaryReasonCode);
+        expect(current.reasonCodes).toEqual(baseline.reasonCodes);
+        expect(current.reason).toBe(baseline.reason);
+        expect(current.penalties).toEqual(baseline.penalties);
+        expect(current.atSafetyFloor).toBe(baseline.atSafetyFloor);
+        expect(current.atCeiling).toBe(baseline.atCeiling);
+      }
+    });
+
+    it("should produce identical output for normal baseline conditions", () => {
+      const normalInput = {
+        healthScore: 90,
+        volatilityIndex: 0.25,
+        providerReliability: 85,
+        activeIncidents: 0,
+        systemLoad: 0.40,
+        hoursSinceLastIncident: 200,
+      };
+
+      const result1 = recommendThreshold(normalInput);
+      const result2 = recommendThreshold(normalInput);
+
+      expect(result1.recommendedThreshold).toBe(0.75);
+      expect(result1.primaryReasonCode).toBe("NORMAL_CONDITIONS");
+      expect(result1.reasonCodes).toEqual(["NORMAL_CONDITIONS"]);
+      expect(result1.penalties.totalPenalty).toBe(0);
+      expect(result1.recommendedThreshold).toBe(result2.recommendedThreshold);
+      expect(result1.reasonCodes).toEqual(result2.reasonCodes);
+    });
+  });
+
+  describe("Jittery input normalization", () => {
+    it("should normalize floating point jitter to produce identical recommendations", () => {
+      const cleanInput = {
+        healthScore: 75.0,
+        volatilityIndex: 0.55,
+        providerReliability: 80.0,
+        activeIncidents: 1,
+        systemLoad: 0.70,
+        hoursSinceLastIncident: 48.0,
+      };
+
+      const jitteryInput = {
+        healthScore: 75.00000000000001,
+        volatilityIndex: 0.5500000000000002,
+        providerReliability: 80.000000000004,
+        activeIncidents: 1,
+        systemLoad: 0.7000000000000001,
+        hoursSinceLastIncident: 48.00000000002,
+      };
+
+      const cleanRec = recommendThreshold(cleanInput);
+      const jitteryRec = recommendThreshold(jitteryInput);
+
+      expect(jitteryRec.recommendedThreshold).toBe(cleanRec.recommendedThreshold);
+      expect(jitteryRec.primaryReasonCode).toBe(cleanRec.primaryReasonCode);
+      expect(jitteryRec.reasonCodes).toEqual(cleanRec.reasonCodes);
+      expect(jitteryRec.penalties).toEqual(cleanRec.penalties);
+    });
+
+    it("should normalize slight perturbations near boundary without flip-flopping", () => {
+      const norm1 = normalizeSystemConditions({ volatilityIndex: 0.3000000001 });
+      const norm2 = normalizeSystemConditions({ volatilityIndex: 0.3000000002 });
+
+      expect(norm1.volatilityIndex).toBe(norm2.volatilityIndex);
+    });
+  });
+
+  describe("Boundary conditions & clamping", () => {
+    it("should clamp extreme and negative values safely", () => {
+      const extremeInput = {
+        healthScore: -50,
+        volatilityIndex: 5.5,
+        providerReliability: -20,
+        activeIncidents: -5,
+        systemLoad: 10.0,
+        hoursSinceLastIncident: -100,
+      };
+
+      const normalized = normalizeSystemConditions(extremeInput);
+      expect(normalized.healthScore).toBe(0);
+      expect(normalized.volatilityIndex).toBe(1);
+      expect(normalized.providerReliability).toBe(0);
+      expect(normalized.activeIncidents).toBe(0);
+      expect(normalized.systemLoad).toBe(1);
+      expect(normalized.hoursSinceLastIncident).toBe(0);
+    });
+
+    it("should handle NaN, null, and undefined values with fallback defaults", () => {
+      const invalidInput = {
+        healthScore: NaN,
+        volatilityIndex: (null as unknown) as number,
+        providerReliability: (undefined as unknown) as number,
+        activeIncidents: ("invalid" as unknown) as number,
+        systemLoad: Infinity,
+        hoursSinceLastIncident: -Infinity,
+      };
+
+      const normalized = normalizeSystemConditions(invalidInput);
+      expect(normalized.healthScore).toBe(85);
+      expect(normalized.volatilityIndex).toBe(0.30);
+      expect(normalized.providerReliability).toBe(80);
+      expect(normalized.activeIncidents).toBe(0);
+      expect(normalized.systemLoad).toBe(0.65);
+      expect(normalized.hoursSinceLastIncident).toBe(168);
+    });
+
+    it("should strictly enforce minimum safety floor (0.60)", () => {
+      // Even with custom config that tries to set a lower threshold, floor is kept
+      const rec = recommendThreshold(
+        { healthScore: 100, volatilityIndex: 0, providerReliability: 100, activeIncidents: 0, systemLoad: 0 },
+        { defaultThreshold: 0.55, absoluteMinimum: 0.60 },
+      );
+
+      expect(rec.recommendedThreshold).toBeGreaterThanOrEqual(0.60);
+      expect(rec.atSafetyFloor).toBe(true);
+      expect(rec.reasonCodes).toContain("SAFETY_FLOOR_ENFORCED");
+    });
+
+    it("should strictly enforce maximum threshold ceiling (0.95)", () => {
+      const extremeBadConditions = {
+        healthScore: 10,
+        volatilityIndex: 1.0,
+        providerReliability: 10,
+        activeIncidents: 10,
+        systemLoad: 1.0,
+        hoursSinceLastIncident: 0,
+      };
+
+      const rec = recommendThreshold(extremeBadConditions);
+      expect(rec.recommendedThreshold).toBe(0.95);
+      expect(rec.atCeiling).toBe(true);
+      expect(rec.reasonCodes).toContain("MAX_THRESHOLD_ENFORCED");
+    });
+  });
+
+  describe("Reason codes and explanatory output", () => {
+    it("should assign HEALTH_DEGRADATION when health is below 80", () => {
+      const rec = recommendThreshold({ healthScore: 70, volatilityIndex: 0.20, providerReliability: 80, activeIncidents: 0, systemLoad: 0.5 });
+      expect(rec.reasonCodes).toContain("HEALTH_DEGRADATION");
+      expect(rec.reason).toContain("Health degradation");
+    });
+
+    it("should assign HEALTH_CRITICAL when health is below critical threshold 50", () => {
+      const rec = recommendThreshold({ healthScore: 40, volatilityIndex: 0.20, providerReliability: 80, activeIncidents: 0, systemLoad: 0.5 });
+      expect(rec.reasonCodes).toContain("HEALTH_CRITICAL");
+      expect(rec.reason).toContain("Critical health status");
+    });
+
+    it("should assign HIGH_VOLATILITY when volatility exceeds 0.50", () => {
+      const rec = recommendThreshold({ healthScore: 85, volatilityIndex: 0.70, providerReliability: 80, activeIncidents: 0, systemLoad: 0.5 });
+      expect(rec.reasonCodes).toContain("HIGH_VOLATILITY");
+      expect(rec.reason).toContain("High volatility");
+    });
+
+    it("should assign POOR_PROVIDER_QUALITY when reliability is below 70", () => {
+      const rec = recommendThreshold({ healthScore: 85, volatilityIndex: 0.20, providerReliability: 55, activeIncidents: 0, systemLoad: 0.5 });
+      expect(rec.reasonCodes).toContain("POOR_PROVIDER_QUALITY");
+      expect(rec.reason).toContain("Poor provider quality");
+    });
+
+    it("should assign ACTIVE_INCIDENTS when incidents > 0", () => {
+      const rec = recommendThreshold({ healthScore: 85, volatilityIndex: 0.20, providerReliability: 80, activeIncidents: 3, systemLoad: 0.5 });
+      expect(rec.reasonCodes).toContain("ACTIVE_INCIDENTS");
+      expect(rec.reason).toContain("Active incidents (3)");
+    });
+
+    it("should assign HIGH_SYSTEM_LOAD when load > 0.80", () => {
+      const rec = recommendThreshold({ healthScore: 85, volatilityIndex: 0.20, providerReliability: 80, activeIncidents: 0, systemLoad: 0.90 });
+      expect(rec.reasonCodes).toContain("HIGH_SYSTEM_LOAD");
+      expect(rec.reason).toContain("High system load");
+    });
+
+    it("should have valid reason descriptions in dictionary", () => {
+      const rec = recommendThreshold({ healthScore: 60, volatilityIndex: 0.60 });
+      for (const code of rec.reasonCodes) {
+        expect(ADAPTIVE_THRESHOLD_REASON_DESCRIPTIONS[code]).toBeDefined();
+        expect(typeof ADAPTIVE_THRESHOLD_REASON_DESCRIPTIONS[code]).toBe("string");
+      }
+    });
+  });
+
+  describe("Persistence & History Store", () => {
+    it("should persist and retrieve threshold recommendations", () => {
+      const rec1 = recommendThreshold({ healthScore: 85 });
+      const rec2 = recommendThreshold({ healthScore: 65 });
+
+      saveThresholdRecommendation("strategy_alpha", rec1);
+      saveThresholdRecommendation("strategy_alpha", rec2);
+
+      const latest = getLatestThresholdRecommendation("strategy_alpha");
+      expect(latest?.recommendedThreshold).toBe(rec2.recommendedThreshold);
+
+      const history = getThresholdRecommendationHistory("strategy_alpha");
+      expect(history).toHaveLength(2);
+      expect(history[0].recommendedThreshold).toBe(rec2.recommendedThreshold);
+      expect(history[1].recommendedThreshold).toBe(rec1.recommendedThreshold);
+    });
+
+    it("should clear history on reset", () => {
+      const rec = recommendThreshold({ healthScore: 85 });
+      saveThresholdRecommendation("strategy_alpha", rec);
+      resetThresholdRecommendationStore();
+
+      expect(getLatestThresholdRecommendation("strategy_alpha")).toBeUndefined();
+      expect(getThresholdRecommendationHistory("strategy_alpha")).toEqual([]);
+    });
+  });
+});
+

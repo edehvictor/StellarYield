@@ -1,4 +1,5 @@
 import { Horizon } from "@stellar/stellar-sdk";
+import { enqueueAdapterRequest } from "../agents/adapterRetryQueue";
 
 export interface NetworkSnapshot {
   ledgerSequence: number;
@@ -13,85 +14,38 @@ const networkLabel = HORIZON_URL.includes("testnet") ? "testnet" : "mainnet";
 
 const horizonServer = new Horizon.Server(HORIZON_URL);
 
-function isRetryableError(error: unknown): boolean {
-  if (typeof error !== 'object' || error === null) return false;
-  const err = error as Record<string, unknown>;
-  
-  // Network errors
-  if (err.code === 'ECONNREFUSED' || err.code === 'ENOTFOUND' || err.code === 'ETIMEDOUT') {
-    return true;
-  }
-  // HTTP 5xx errors
-  if (err.response && typeof err.response === 'object' && err.response !== null) {
-    const response = err.response as Record<string, unknown>;
-    if (typeof response.status === 'number') {
-      return response.status >= 500;
-    }
-  }
-  return false;
-}
-
-async function retryWithBackoff<T>(
-  fn: () => Promise<T>,
-  maxRetries: number,
-  baseDelay: number,
-  timeoutMs: number
-): Promise<T> {
-  let lastError: unknown;
-  for (let attempt = 0; attempt <= maxRetries; attempt++) {
-    let timeoutId: ReturnType<typeof setTimeout> | undefined;
-    try {
-      const result = await Promise.race([
-        fn(),
-        new Promise<never>((_, reject) => {
-          timeoutId = setTimeout(() => reject(new Error("Timeout")), timeoutMs);
-        }),
-      ]);
-      return result;
-    } catch (error) {
-      lastError = error;
-      if (attempt < maxRetries && isRetryableError(error)) {
-        const delay = Math.min(baseDelay * Math.pow(2, attempt), 30000); // cap at 30s
-        await new Promise((resolve) => setTimeout(resolve, delay));
-      } else {
-        throw error;
-      }
-    } finally {
-      if (timeoutId !== undefined) {
-        clearTimeout(timeoutId);
-      }
-    }
-  }
-  throw lastError;
-}
-
 export async function fetchNetworkSnapshot(): Promise<NetworkSnapshot> {
   // STELLAR_SKIP_RETRIES can be set in smoke/integration tests to avoid long
   // retry delays when there is no real Horizon endpoint available.
   const skipRetries = process.env.STELLAR_SKIP_RETRIES === "true";
   const maxRetries = skipRetries ? 0 : 3;
-  const baseDelay = skipRetries ? 50 : 1000;
+  const initialDelayMs = skipRetries ? 50 : 1000;
   const timeoutMs = skipRetries
     ? 300
     : parseInt(process.env.STELLAR_HORIZON_TIMEOUT_MS ?? "10000", 10);
 
-  return retryWithBackoff(
+  return enqueueAdapterRequest(
     async () => {
-      const response = await horizonServer.ledgers().order("desc").limit(1).call();
-      const latestLedger = response.records[0];
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), timeoutMs);
+      try {
+        const response = await horizonServer.ledgers().order("desc").limit(1).call();
+        const latestLedger = response.records[0];
 
-      if (!latestLedger) {
-        throw new Error("No Stellar ledger data returned from Horizon.");
+        if (!latestLedger) {
+          throw new Error("No Stellar ledger data returned from Horizon.");
+        }
+
+        return {
+          ledgerSequence: latestLedger.sequence,
+          closedAt: latestLedger.closed_at,
+          network: networkLabel,
+        };
+      } finally {
+        clearTimeout(timer);
       }
-
-      return {
-        ledgerSequence: latestLedger.sequence,
-        closedAt: latestLedger.closed_at,
-        network: networkLabel,
-      };
     },
-    maxRetries,
-    baseDelay,
-    timeoutMs
+    "horizon-network",
+    { maxRetries, initialDelayMs, maxDelayMs: 30_000 },
   );
 }

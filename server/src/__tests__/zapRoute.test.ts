@@ -1,6 +1,7 @@
 import crypto from "crypto";
 import request from "supertest";
 import { createApp } from "../app";
+import { ZAP_QUOTE_EXPIRY_MS } from "../services/zapQuote";
 
 // Mock yieldService to prevent real Stellar network calls during CI
 jest.mock("../services/yieldService", () => ({
@@ -18,6 +19,26 @@ jest.mock("../services/freezeService", () => ({
   freezeService: {
     isFrozen: jest.fn().mockReturnValue(false),
   },
+}));
+
+// Mock feeOracleService's getFeeOracleEstimate (#1148) so the reserve-check
+// pass-through tests below don't make a real Horizon network call —
+// feeOracleService is only reached by getZapQuote when a walletAddress is
+// supplied, so this has no effect on the rest of this file's tests (none of
+// which pass one). Other exports (used by the unrelated /api/fees routes
+// registered by createApp()) are passed through from the real module so
+// mounting those routes still works.
+jest.mock("../services/feeOracleService", () => ({
+  ...jest.requireActual("../services/feeOracleService"),
+  getFeeOracleEstimate: jest.fn().mockResolvedValue({
+    networkPassphrase: "Test SDF Network ; September 2015",
+    sampleSize: 20,
+    utilization: { averageTxSetSize: 1, maxTxSetSize: 2, congestionRatio: 0.1 },
+    fees: { low: 100, average: 200, high: 400 },
+    bufferedFees: { low: 105, average: 210, high: 420 },
+    feeBuffer: { network: "testnet", multiplier: 1.05 },
+    generatedAt: "2026-01-01T00:00:00.000Z",
+  }),
 }));
 
 const SAME_TOKEN = "CDSAMEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
@@ -143,6 +164,24 @@ describe("POST /api/zap/quote", () => {
     expect(res.body.issuedAt).toBeDefined();
     expect(res.body.expiresAt).toBeDefined();
   });
+
+  it("sets expiresAt exactly ZAP_QUOTE_EXPIRY_MS after quotedAt", async () => {
+    const res = await request(createApp())
+      .post("/api/zap/quote")
+      .send({
+        inputTokenContract: SAME_TOKEN,
+        vaultTokenContract: SAME_TOKEN,
+        amountInStroops: "1000",
+        inputDecimals: 7,
+        vaultDecimals: 7,
+      });
+
+    expect(res.status).toBe(200);
+    const delta =
+      new Date(res.body.expiresAt).getTime() -
+      new Date(res.body.quotedAt).getTime();
+    expect(delta).toBe(ZAP_QUOTE_EXPIRY_MS);
+  });
 });
 
 // ── POST /api/zap/verify ───────────────────────────────────────────────
@@ -239,6 +278,31 @@ describe("POST /api/zap/verify", () => {
     expect(res.body).toMatchObject(OPENAPI_ERROR_EXAMPLE_SHAPE);
     expect(res.body.error).toBe("STALE_QUOTE");
     expect(res.body.message).toMatch(/expired/i);
+    // Refreshing recovers from an expired quote, so it is flagged recoverable.
+    expect(res.body.recoverable).toBe(true);
+  });
+
+  it("returns 400 with STALE_QUOTE when expiresAt is missing", async () => {
+    const quote = validQuote();
+    delete (quote as { expiresAt?: string }).expiresAt;
+
+    const res = await request(createApp())
+      .post("/api/zap/verify")
+      .send(quote);
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe("STALE_QUOTE");
+    expect(res.body.recoverable).toBe(true);
+  });
+
+  it("does not mark SLIPPAGE_EXCEEDED as recoverable", async () => {
+    const res = await request(createApp())
+      .post("/api/zap/verify")
+      .send(validQuote({ slippageApplied: 0.185 }));
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe("SLIPPAGE_EXCEEDED");
+    expect(res.body.recoverable).toBeUndefined();
   });
 
   it("returns 400 with UNSUPPORTED_ASSET when path contains an unknown contract", async () => {
@@ -354,5 +418,72 @@ describe("GET /api/zap/supported-assets", () => {
     if (origJson === undefined) delete process.env.ZAP_ASSETS_JSON;
     else process.env.ZAP_ASSETS_JSON = origJson;
     resetZapSupportedAssetsCache();
+  });
+});
+
+// ── POST /api/zap/quote — reserve check pass-through (#1148) ───────────
+
+describe("POST /api/zap/quote — reserve check pass-through (#1148)", () => {
+  const originalFetch = global.fetch;
+
+  afterEach(() => {
+    global.fetch = originalFetch;
+  });
+
+  it("omits reserveCheck when no walletAddress is supplied (unchanged existing behavior)", async () => {
+    const res = await request(createApp())
+      .post("/api/zap/quote")
+      .send({
+        inputTokenContract: SAME_TOKEN,
+        vaultTokenContract: SAME_TOKEN,
+        amountInStroops: "1000",
+        inputDecimals: 7,
+        vaultDecimals: 7,
+      });
+
+    expect(res.status).toBe(200);
+    expect(res.body.reserveCheck).toBeUndefined();
+  });
+
+  it("attaches a reserveCheck verdict to the quote response when walletAddress is supplied", async () => {
+    global.fetch = jest.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        subentry_count: 0,
+        balances: [{ asset_type: "native", balance: "1000.0000000" }],
+      }),
+    }) as unknown as typeof fetch;
+
+    const res = await request(createApp())
+      .post("/api/zap/quote")
+      .send({
+        inputTokenContract: SAME_TOKEN,
+        vaultTokenContract: SAME_TOKEN,
+        amountInStroops: "1000",
+        inputDecimals: 7,
+        vaultDecimals: 7,
+        walletAddress: "GWALLETADDRESSFORRESERVECHECK",
+      });
+
+    expect(res.status).toBe(200);
+    expect(res.body.reserveCheck).toBeDefined();
+    expect(typeof res.body.reserveCheck.safe).toBe("boolean");
+    expect(typeof res.body.reserveCheck.requiredReserveXlm).toBe("number");
+  });
+
+  it("ignores a blank walletAddress the same as an absent one", async () => {
+    const res = await request(createApp())
+      .post("/api/zap/quote")
+      .send({
+        inputTokenContract: SAME_TOKEN,
+        vaultTokenContract: SAME_TOKEN,
+        amountInStroops: "1000",
+        inputDecimals: 7,
+        vaultDecimals: 7,
+        walletAddress: "   ",
+      });
+
+    expect(res.status).toBe(200);
+    expect(res.body.reserveCheck).toBeUndefined();
   });
 });

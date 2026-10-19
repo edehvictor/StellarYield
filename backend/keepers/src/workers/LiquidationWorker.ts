@@ -3,7 +3,7 @@ import { Address, nativeToScVal } from '@stellar/stellar-sdk';
 import { getRedis } from '../utils/redis';
 import { config } from '../config';
 import { logger } from '../utils/logger';
-import { KeeperSigner } from '../signer/KeeperSigner';
+import { KeeperSigner, type DryRunPayloadPreview } from '../signer/KeeperSigner';
 import { QUEUE_NAMES, LiquidationJobData, JOB_STATES } from '../queues/types';
 import {
   validateFencingToken,
@@ -17,29 +17,51 @@ import {
 /** Maximum age of the oracle price backing `currentCrBps` before it's considered stale. */
 export const MAX_PRICE_AGE_MS = 5 * 60 * 1000; // 5 minutes
 
-export type DryRunBlockReason = 'missing_oracle' | 'stale_price' | 'healthy_position';
+export type DryRunBlockReason =
+  | 'missing_oracle'
+  | 'stale_price'
+  | 'healthy_position'
+  | 'slippage_exceeded';
 
 export type LiquidationDryRunResult =
-  | { safe: true }
-  | { safe: false; reason: DryRunBlockReason };
+  | { safe: true; expectedSeizedCollateral?: bigint; currentSeizedCollateral?: bigint; slippageBps?: number }
+  | { safe: false; reason: DryRunBlockReason; details?: string };
 
 /**
- * Re-verify an undercollateralized job against unsafe-state fixtures before
- * live submission. Called by `process()` immediately before invoking the
- * on-chain `liquidate` transaction.
+ * Calculates expected seized collateral for a given debt amount and oracle price (#1539).
+ * Default liquidation incentive is 110% (11,000 bps) -> 10% bonus collateral seized.
+ * Seized collateral = (debtAmount * liquidationIncentiveBps) / (oraclePrice * 10,000)
+ */
+export function calculateExpectedSeizedCollateral(
+  debtAmount: string | bigint,
+  oraclePriceUsd: string | bigint | number,
+  incentiveBps: number = 11_000,
+): bigint {
+  const debt = BigInt(debtAmount);
+  const price = typeof oraclePriceUsd === 'number'
+    ? BigInt(Math.floor(oraclePriceUsd))
+    : BigInt(oraclePriceUsd);
+  if (price <= 0n) {
+    throw new Error('Oracle price must be positive');
+  }
+  return (debt * BigInt(incentiveBps)) / (price * 10_000n);
+}
+
+/**
+ * Re-verify an undercollateralized job against unsafe-state fixtures and slippage bounds
+ * before live submission (#1535, #1539).
  *
  * Blocks (returns `safe: false`) when:
  *  - `oracleAvailable === false` — no oracle price was confirmed at scan time.
  *  - The price backing `currentCrBps` is older than `MAX_PRICE_AGE_MS`.
  *  - `currentCrBps` is at or above the configured MCR (position healthy —
  *    covers race conditions where the position recovered since the scan).
- *
- * A missing `priceTimestampMs` does not itself block; it means the caller
- * didn't attach price provenance, so only the other two checks apply.
+ *  - Seized collateral falls outside configured slippage bounds due to changing oracle values.
  */
 export function evaluateLiquidationDryRun(
   job: LiquidationJobData,
   nowMs: number = Date.now(),
+  currentOraclePrice?: number | string,
 ): LiquidationDryRunResult {
   if (job.oracleAvailable === false) {
     return { safe: false, reason: 'missing_oracle' };
@@ -54,6 +76,44 @@ export function evaluateLiquidationDryRun(
 
   if (job.currentCrBps >= config.keeper.mcrBps) {
     return { safe: false, reason: 'healthy_position' };
+  }
+
+  // #1539: Calculate expected seized collateral and reject execution outside slippage bounds
+  const effectiveCurrentPrice = currentOraclePrice ?? job.currentOraclePriceUsd;
+  const maxSlippageBps = job.maxSlippageBps ?? 300; // 3% default
+
+  // Check 1: If minSeizedCollateral is specified, verify current seized collateral meets the floor
+  if (job.minSeizedCollateral !== undefined && effectiveCurrentPrice !== undefined) {
+    const currentSeized = calculateExpectedSeizedCollateral(job.debtAmount, effectiveCurrentPrice);
+    const minSeized = BigInt(job.minSeizedCollateral);
+    if (currentSeized < minSeized) {
+      return {
+        safe: false,
+        reason: 'slippage_exceeded',
+        details: `Seized collateral ${currentSeized} is below minimum bound ${minSeized}`,
+      };
+    }
+  }
+
+  // Check 2: If changing oracle values are provided (scan price vs current oracle price)
+  if (job.oraclePriceUsd !== undefined && effectiveCurrentPrice !== undefined) {
+    const scanPrice = BigInt(job.oraclePriceUsd);
+    const currPrice = BigInt(effectiveCurrentPrice);
+    const expectedSeized = job.expectedSeizedCollateral !== undefined
+      ? BigInt(job.expectedSeizedCollateral)
+      : calculateExpectedSeizedCollateral(job.debtAmount, scanPrice);
+    const currentSeized = calculateExpectedSeizedCollateral(job.debtAmount, currPrice);
+
+    if (currentSeized < expectedSeized) {
+      const slippageBps = Number(((expectedSeized - currentSeized) * 10_000n) / expectedSeized);
+      if (slippageBps > maxSlippageBps) {
+        return {
+          safe: false,
+          reason: 'slippage_exceeded',
+          details: `Slippage ${slippageBps} bps exceeds max configured ${maxSlippageBps} bps`,
+        };
+      }
+    }
   }
 
   return { safe: true };
@@ -104,7 +164,9 @@ export class LiquidationWorker {
    * @param job - BullMQ Job containing LiquidationJobData
    */
   async process(job: Job<LiquidationJobData>): Promise<{ txHash: string }> {
-    const { accountAddress, fencingToken, requiredSequence } = job.data;
+    const { accountAddress } = job.data;
+    const fencingToken = job.data.fencingToken ?? 0;
+    const requiredSequence = job.data.requiredSequence ?? 0;
 
     logger.info(
       { jobId: job.id, accountAddress, crBps: job.data.currentCrBps, fencingToken, requiredSequence },
@@ -200,6 +262,54 @@ export class LiquidationWorker {
     );
 
     return { txHash };
+  }
+
+  /**
+   * Dry-run mode for liquidation job (#1542):
+   * Performs validation, sequence checks, risk checks, and generates a signed payload
+   * preview without broadcasting to the network or mutating job state.
+   */
+  async dryRun(job: Job<LiquidationJobData>): Promise<DryRunPayloadPreview> {
+    const { accountAddress } = job.data;
+    const fencingToken = job.data.fencingToken ?? 0;
+    const requiredSequence = job.data.requiredSequence ?? 0;
+
+    logger.info(
+      { jobId: job.id, accountAddress, crBps: job.data.currentCrBps, fencingToken, requiredSequence },
+      '[LiquidationWorker] [DryRun] Processing dry-run preview',
+    );
+
+    if (!validateFencingToken(QUEUE_NAMES.LIQUIDATION, accountAddress, fencingToken)) {
+      throw new Error(`FENCING_VIOLATION: stale fencing token for account ${accountAddress}`);
+    }
+
+    const account = await this.signer['server'].getAccount(this.signer.publicKey);
+    const currentSequence = parseInt((account as any).sequence, 10);
+    if (currentSequence !== requiredSequence) {
+      throw new Error(
+        `SEQUENCE_MISMATCH: expected sequence ${requiredSequence}, got ${currentSequence}`,
+      );
+    }
+
+    const dryRunPolicy = evaluateLiquidationDryRun(job.data);
+    if (!dryRunPolicy.safe) {
+      logger.warn(
+        { jobId: job.id, accountAddress, reason: dryRunPolicy.reason },
+        '[LiquidationWorker] [DryRun] Policy blocked liquidation',
+      );
+      throw new Error(`Liquidation blocked by dry-run policy: ${dryRunPolicy.reason}`);
+    }
+
+    const liquidatorScVal = new Address(this.signer.publicKey).toScVal();
+    const userScVal = new Address(accountAddress).toScVal();
+
+    return this.signer.dryRunInvokeContract(
+      config.contracts.stablecoinManager,
+      'liquidate',
+      [liquidatorScVal, userScVal],
+      { requiredSequence, fencingToken },
+      { workerName: 'LiquidationWorker', jobId: job.id, policyVersion: 'v1' },
+    );
   }
 
   /** Gracefully close the worker (finishes in-flight jobs). */

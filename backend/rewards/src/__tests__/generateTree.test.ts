@@ -5,6 +5,8 @@ import {
   getUserProof,
   buildArtifactManifest,
   validateArtifactManifest,
+  normalizeUserRewardInputs,
+  DuplicateRecipientError,
   type UserRewardInput,
   type RewardArtifactManifest,
 } from "../generateTree";
@@ -365,5 +367,62 @@ describe("generateWeeklyDistributionWithManifest", () => {
     );
     // 2 users with equal shares get 5000 each → total 10000
     expect(manifest.totalAmount).toBe("10000");
+  });
+});
+
+// ── Deterministic Ordering and Deduplication (#1506) ───────────────────
+
+describe("deterministic ordering and deduplication (#1506)", () => {
+  const baseUsers: UserRewardInput[] = [
+    { address: "GADDR_ALICE", shares: "400", totalShares: "1000" },
+    { address: "GADDR_BOB", shares: "350", totalShares: "1000" },
+    { address: "GADDR_CHARLIE", shares: "250", totalShares: "1000" },
+  ];
+
+  it("produces identical Merkle roots regardless of recipient input order", () => {
+    const originalOrder = [...baseUsers];
+    const shuffledOrder = [baseUsers[1], baseUsers[2], baseUsers[0]];
+    const reverseOrder = [...baseUsers].reverse();
+
+    const distOriginal = generateWeeklyDistribution(originalOrder, "10000");
+    const distShuffled = generateWeeklyDistribution(shuffledOrder, "10000");
+    const distReverse = generateWeeklyDistribution(reverseOrder, "10000");
+
+    expect(distShuffled.root).toBe(distOriginal.root);
+    expect(distReverse.root).toBe(distOriginal.root);
+  });
+
+  it("produces identical proofs and claims for shuffled inputs", () => {
+    const originalOrder = [...baseUsers];
+    const shuffledOrder = [baseUsers[2], baseUsers[0], baseUsers[1]];
+
+    const dist1 = generateWeeklyDistribution(originalOrder, "10000");
+    const dist2 = generateWeeklyDistribution(shuffledOrder, "10000");
+
+    expect(dist1.claims).toEqual(dist2.claims);
+  });
+
+  it("rejects duplicate recipient addresses with DuplicateRecipientError", () => {
+    const duplicateUsers: UserRewardInput[] = [
+      { address: "GADDR_ALICE", shares: "400", totalShares: "1000" },
+      { address: "GADDR_BOB", shares: "350", totalShares: "1000" },
+      { address: "GADDR_ALICE", shares: "250", totalShares: "1000" },
+    ];
+
+    expect(() => calculateRewards(duplicateUsers, "10000")).toThrow(DuplicateRecipientError);
+    expect(() => generateWeeklyDistribution(duplicateUsers, "10000")).toThrow(
+      /Duplicate recipient identity rejected: GADDR_ALICE/,
+    );
+  });
+
+  it("normalizeUserRewardInputs sorts addresses lexicographically and preserves data", () => {
+    const unordered: UserRewardInput[] = [
+      { address: "G_ZULU", shares: "100", totalShares: "300" },
+      { address: "G_ALPHA", shares: "100", totalShares: "300" },
+      { address: "G_BRAVO", shares: "100", totalShares: "300" },
+    ];
+
+    const normalized = normalizeUserRewardInputs(unordered);
+    expect(normalized.map((u) => u.address)).toEqual(["G_ALPHA", "G_BRAVO", "G_ZULU"]);
   });
 });

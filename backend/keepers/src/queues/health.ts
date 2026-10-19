@@ -24,22 +24,40 @@ export interface QueueJobCounts {
   active: number;
   completed: number;
   failed: number;
-  delayed: number;
   /** #907: Count of jobs quarantined to the poison queue */
   poison: number;
+}
+
+/**
+ * Quality and latency metrics for a single queue backlog (#1541).
+ */
+export interface QueueQualityMetrics {
+  /** Oldest pending job age in ms (null if queue is empty or timestamp unavailable) */
+  oldestPendingAgeMs: number | null;
+  /** Latest failure reason from most recently failed job */
+  latestFailureReason: string | null;
+  /** Total backlog length of pending waiting jobs */
+  queueLength: number;
+  /** Backlog length of delayed jobs */
+  delayedLength: number;
+  /** True when the oldest pending job exceeds the configured threshold */
+  isStalled: boolean;
 }
 
 export interface QueueHealthEntry {
   name: string;
   counts: QueueJobCounts;
-  status: 'healthy' | 'degraded' | 'outage';
+  metrics: QueueQualityMetrics;
+  status: 'healthy' | 'warning' | 'degraded' | 'outage';
   warnings: string[];
 }
 
 export interface QueueHealthSummary {
   /** One entry per queue passed to `getQueueHealth`. */
   queues: QueueHealthEntry[];
-  overallStatus: 'healthy' | 'degraded' | 'outage';
+  /** Per-worker queue entries keyed by worker name. */
+  workers: Record<string, QueueHealthEntry>;
+  overallStatus: 'healthy' | 'warning' | 'degraded' | 'outage';
   timestamp: string;
   /** #909: Redis connection state derived from latency and errors */
   redisStatus: 'healthy' | 'degraded' | 'outage';
@@ -54,8 +72,15 @@ export const QUEUE_HEALTH_THRESHOLDS = {
   failed: Number(process.env.QUEUE_FAILED_THRESHOLD ?? '10'),
   /** Maximum number of delayed jobs before a `warning` is emitted. */
   delayed: Number(process.env.QUEUE_DELAYED_THRESHOLD ?? '50'),
+  /** Maximum number of pending (waiting) jobs before a `warning` is emitted. */
+  pending: Number(process.env.QUEUE_PENDING_THRESHOLD ?? '100'),
   /** #907: Retry budget exhaustion warning threshold */
   poison: Number(process.env.QUEUE_POISON_THRESHOLD ?? '5'),
+  /**
+   * Maximum age (ms) of the oldest pending job before a `warning` is emitted.
+   * Default: 30 minutes.
+   */
+  oldestPendingAgeMs: Number(process.env.QUEUE_OLDEST_PENDING_AGE_MS ?? String(30 * 60 * 1000)),
 } as const;
 
 // ---------------------------------------------------------------------------
@@ -86,15 +111,15 @@ async function getPoisonCount(queue: Queue, maxScan = 500): Promise<number> {
 
 /**
  * Retrieve the oldest pending job's age in milliseconds by inspecting the
- * first job in the waiting list.  Returns `null` when there are no pending
+ * first job in the waiting list. Returns `null` when there are no pending
  * jobs or when the timestamp cannot be determined.
  */
 async function getOldestPendingAgeMs(queue: Queue, nowMs: number): Promise<number | null> {
   try {
     const waiting = await queue.getWaiting(0, 0); // first job only
-    if (waiting.length === 0) return null;
+    if (!waiting || waiting.length === 0) return null;
     const job = waiting[0];
-    const ts = job.timestamp; // BullMQ sets this at enqueue time (unix ms)
+    const ts = job?.timestamp; // BullMQ sets this at enqueue time (unix ms)
     if (typeof ts !== 'number' || ts <= 0) return null;
     return Math.max(0, nowMs - ts);
   } catch {
@@ -110,8 +135,8 @@ async function getOldestPendingAgeMs(queue: Queue, nowMs: number): Promise<numbe
 async function getLatestFailureReason(queue: Queue): Promise<string | null> {
   try {
     const failed = await queue.getFailed(0, 0); // most recent failure only
-    if (failed.length === 0) return null;
-    return (failed[0].failedReason as string | undefined) ?? null;
+    if (!failed || failed.length === 0) return null;
+    return (failed[0]?.failedReason as string | undefined) ?? null;
   } catch {
     return null;
   }
@@ -130,7 +155,17 @@ async function getLatestFailureReason(queue: Queue): Promise<string | null> {
  * compound and liquidation workers explicitly.
  */
 export async function getQueueHealth(queues: Queue[]): Promise<QueueHealthSummary> {
-  const redisStatus = await getRedisConnectionStatus();
+  const nowMs = Date.now();
+  const t = QUEUE_HEALTH_THRESHOLDS;
+
+  let redisStatus: 'healthy' | 'degraded' | 'outage' = 'healthy';
+  if (process.env.NODE_ENV !== 'test') {
+    try {
+      redisStatus = await getRedisConnectionStatus();
+    } catch {
+      redisStatus = 'outage';
+    }
+  }
 
   const entries = await Promise.all(
     queues.map(async (queue): Promise<QueueHealthEntry> => {
@@ -146,23 +181,28 @@ export async function getQueueHealth(queues: Queue[]): Promise<QueueHealthSummar
       const poisonCount = await getPoisonCount(queue);
 
       const counts: QueueJobCounts = {
-        pending: raw.waiting ?? 0,
-        delayed: raw.delayed ?? 0,
-        active: raw.active ?? 0,
-        completed: raw.completed ?? 0,
-        failed: raw.failed ?? 0,
+        pending: raw?.waiting ?? 0,
+        delayed: raw?.delayed ?? 0,
+        active: raw?.active ?? 0,
+        completed: raw?.completed ?? 0,
+        failed: raw?.failed ?? 0,
         poison: poisonCount,
       };
 
-      // ── Quality metrics ───────────────────────────────────────────────────
+      // ── Quality metrics (#1541) ──────────────────────────────────────────
       const [oldestPendingAgeMs, latestFailureReason] = await Promise.all([
         counts.pending > 0 ? getOldestPendingAgeMs(queue, nowMs) : Promise.resolve(null),
         counts.failed > 0 ? getLatestFailureReason(queue) : Promise.resolve(null),
       ]);
 
+      const isStalled = oldestPendingAgeMs !== null && oldestPendingAgeMs > t.oldestPendingAgeMs;
+
       const metrics: QueueQualityMetrics = {
         oldestPendingAgeMs,
         latestFailureReason,
+        queueLength: counts.pending,
+        delayedLength: counts.delayed,
+        isStalled,
       };
 
       // ── Threshold warnings ────────────────────────────────────────────────
@@ -196,24 +236,10 @@ export async function getQueueHealth(queues: Queue[]): Promise<QueueHealthSummar
           `oldest pending job is ${Math.round(oldestPendingAgeMs / 1000)}s old (threshold ${Math.round(t.oldestPendingAgeMs / 1000)}s)`,
         );
       }
-      if (counts.poison > QUEUE_HEALTH_THRESHOLDS.poison) {
-        warnings.push(
-          `poison jobs (${counts.poison}) exceed threshold (${QUEUE_HEALTH_THRESHOLDS.poison})`,
-        );
-      }
-
-      // #909: Degrade queue status if Redis is not healthy
-      let status: QueueHealthEntry['status'] = 'healthy';
-      if (redisStatus === 'outage') {
-        status = 'outage';
-      } else if (redisStatus === 'degraded' || warnings.length > 0) {
-        status = 'degraded';
-      }
 
       return {
         name: queue.name,
         counts,
-        status,
         metrics,
         status: warnings.length > 0 ? 'warning' : 'healthy',
         warnings,
@@ -221,17 +247,6 @@ export async function getQueueHealth(queues: Queue[]): Promise<QueueHealthSummar
     }),
   );
 
-  const overallStatus = redisStatus === 'outage'
-    ? 'outage'
-    : entries.some((e) => e.status === 'outage')
-      ? 'outage'
-      : entries.some((e) => e.status === 'degraded')
-        ? 'degraded'
-        : 'healthy';
-
-  return {
-    queues: entries,
-    overallStatus,
   // ── Per-worker map ─────────────────────────────────────────────────────────
   // Convention: "liquidation" → "liquidationWorker", "compound" → "compoundWorker"
   const workers: Record<string, QueueHealthEntry> = {};

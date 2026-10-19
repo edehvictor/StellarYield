@@ -9,7 +9,7 @@ mod storage;
 #[cfg(test)]
 mod test;
 
-use storage::{DataKey, Proposal, ProposalStatus};
+use storage::{DataKey, ExecutionReadiness, Proposal, ProposalStatus};
 
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -34,6 +34,7 @@ mod ve_yield {
     #[allow(dead_code)]
     pub trait VeYieldInterface {
         fn get_voting_power(env: Env, user: Address) -> i128;
+        fn get_voting_power_at(env: Env, user: Address, timestamp: u64) -> i128;
     }
 }
 
@@ -114,6 +115,13 @@ impl OptimisticGovernance {
             .instance()
             .set(&DataKey::ProposalCount, &proposal_id);
 
+        // Voting weight for this proposal is measured as of now, so tokens
+        // moved or unlocked afterwards cannot change who may dispute it.
+        let snapshot_key = DataKey::ProposalSnapshot(proposal_id);
+        env.storage()
+            .persistent()
+            .set(&snapshot_key, &env.ledger().timestamp());
+
         // Indexer-friendly history: status Pending + window bounds
         env.events().publish(
             (symbol_short!("propose"), proposer),
@@ -129,7 +137,8 @@ impl OptimisticGovernance {
     }
 
     /// Dispute a proposal, freezing its execution.
-    /// Requires non-zero veYIELD voting power.
+    /// Requires non-zero veYIELD voting power as of the time the proposal was
+    /// created (proposals created before snapshots existed use current power).
     pub fn dispute(env: Env, disputer: Address, proposal_id: u64) -> Result<(), Error> {
         Self::require_init(&env)?;
         disputer.require_auth();
@@ -156,7 +165,14 @@ impl OptimisticGovernance {
             .get(&DataKey::VeYieldToken)
             .unwrap();
         let client = ve_yield::VeYieldClient::new(&env, &ve_yield_token);
-        let voting_power = client.get_voting_power(&disputer);
+        let snapshot: Option<u64> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::ProposalSnapshot(proposal_id));
+        let voting_power = match snapshot {
+            Some(timestamp) => client.get_voting_power_at(&disputer, &timestamp),
+            None => client.get_voting_power(&disputer),
+        };
 
         if voting_power <= 0 {
             return Err(Error::InsufficientVotingPower);
@@ -192,17 +208,12 @@ impl OptimisticGovernance {
             .get(&DataKey::Proposal(proposal_id))
             .ok_or(Error::ProposalNotFound)?;
 
-        if proposal.status == ProposalStatus::Disputed {
-            return Err(Error::ProposalDisputed);
-        }
-
-        if proposal.status == ProposalStatus::Executed {
-            return Err(Error::ProposalAlreadyExecuted);
-        }
-
-        let current_time = env.ledger().timestamp();
-        if current_time < proposal.execution_time {
-            return Err(Error::ChallengeWindowActive);
+        if let Some(first_blocker) = Self::readiness_blockers(&proposal, env.ledger().timestamp())
+            .into_iter()
+            .flatten()
+            .next()
+        {
+            return Err(first_blocker);
         }
 
         // Execute the payload
@@ -241,11 +252,45 @@ impl OptimisticGovernance {
             .get(&DataKey::Proposal(proposal_id))
     }
 
+    /// The ledger timestamp at which a proposal's voting weight is measured,
+    /// or `None` for proposals created before snapshots were recorded.
+    pub fn get_proposal_snapshot(env: Env, proposal_id: u64) -> Option<u64> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::ProposalSnapshot(proposal_id))
+    }
+
     pub fn get_proposal_count(env: Env) -> u64 {
         env.storage()
             .instance()
             .get(&DataKey::ProposalCount)
             .unwrap_or(0)
+    }
+
+    /// Read-only aggregate readiness check: reports every specific reason
+    /// (if any) currently blocking `execute()` for this proposal, instead of
+    /// only the first one a caller would hit via a revert.
+    pub fn is_execution_ready(env: Env, proposal_id: u64) -> Result<ExecutionReadiness, Error> {
+        Self::require_init(&env)?;
+
+        let proposal: Proposal = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Proposal(proposal_id))
+            .ok_or(Error::ProposalNotFound)?;
+
+        let mut blocking_reasons: Vec<u32> = Vec::new(&env);
+        for error in Self::readiness_blockers(&proposal, env.ledger().timestamp())
+            .into_iter()
+            .flatten()
+        {
+            blocking_reasons.push_back(Self::error_code(error));
+        }
+
+        Ok(ExecutionReadiness {
+            is_ready: blocking_reasons.is_empty(),
+            blocking_reasons,
+        })
     }
 
     // ── Internal Helpers ──────────────────────────────────────────
@@ -256,6 +301,34 @@ impl OptimisticGovernance {
             ProposalStatus::Disputed => 1,
             ProposalStatus::Executed => 2,
         }
+    }
+
+    fn error_code(error: Error) -> u32 {
+        error as u32
+    }
+
+    /// Every reason (in the same order `execute()` used to check them
+    /// one-at-a-time) currently blocking execution of `proposal`. A fixed
+    /// [Option<Error>; 3] avoids needing a heap allocator in this `no_std`
+    /// contract; at most 3 checks exist today.
+    fn readiness_blockers(proposal: &Proposal, current_time: u64) -> [Option<Error>; 3] {
+        [
+            if proposal.status == ProposalStatus::Disputed {
+                Some(Error::ProposalDisputed)
+            } else {
+                None
+            },
+            if proposal.status == ProposalStatus::Executed {
+                Some(Error::ProposalAlreadyExecuted)
+            } else {
+                None
+            },
+            if current_time < proposal.execution_time {
+                Some(Error::ChallengeWindowActive)
+            } else {
+                None
+            },
+        ]
     }
 
     fn require_init(env: &Env) -> Result<(), Error> {

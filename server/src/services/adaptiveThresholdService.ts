@@ -16,6 +16,33 @@ import { yieldReliabilityEngine as _yieldReliabilityEngine, DataSourceReliabilit
 
 export type ThresholdSource = "health" | "volatility" | "provider_quality" | "market_conditions" | "manual_override";
 
+export type AdaptiveThresholdReasonCode =
+  | "NORMAL_CONDITIONS"
+  | "HEALTH_DEGRADATION"
+  | "HEALTH_CRITICAL"
+  | "HIGH_VOLATILITY"
+  | "POOR_PROVIDER_QUALITY"
+  | "ACTIVE_INCIDENTS"
+  | "HIGH_SYSTEM_LOAD"
+  | "SAFETY_FLOOR_ENFORCED"
+  | "MAX_THRESHOLD_ENFORCED"
+  | "MANUAL_OVERRIDE"
+  | "FALLBACK_DEFAULT";
+
+export const ADAPTIVE_THRESHOLD_REASON_DESCRIPTIONS: Record<AdaptiveThresholdReasonCode, string> = {
+  NORMAL_CONDITIONS: "System conditions are within standard operational parameters.",
+  HEALTH_DEGRADATION: "Threshold increased due to degraded system health score below 80.",
+  HEALTH_CRITICAL: "Critical health penalty applied due to health score falling below critical threshold.",
+  HIGH_VOLATILITY: "Elevated market volatility triggered confidence threshold expansion.",
+  POOR_PROVIDER_QUALITY: "Average provider reliability below acceptable quality threshold.",
+  ACTIVE_INCIDENTS: "Active risk/operational incidents necessitated higher confidence requirement.",
+  HIGH_SYSTEM_LOAD: "Elevated infrastructure system load applied protective penalty.",
+  SAFETY_FLOOR_ENFORCED: "Calculated threshold bounded by absolute safety floor.",
+  MAX_THRESHOLD_ENFORCED: "Calculated threshold bounded by maximum configured ceiling.",
+  MANUAL_OVERRIDE: "Threshold manually overridden with safety limits.",
+  FALLBACK_DEFAULT: "Fallback to default threshold due to an evaluation error.",
+};
+
 export interface ThresholdAdjustment {
   /** Previous threshold value */
   previousThreshold: number;
@@ -25,6 +52,10 @@ export interface ThresholdAdjustment {
   delta: number;
   /** Source that triggered the adjustment */
   source: ThresholdSource;
+  /** Primary reason code */
+  reasonCode?: AdaptiveThresholdReasonCode;
+  /** All applicable reason codes */
+  reasonCodes?: AdaptiveThresholdReasonCode[];
   /** Reason for adjustment */
   reason: string;
   /** Timestamp of adjustment */
@@ -94,13 +125,95 @@ export interface ThresholdState {
   conditions: SystemConditions;
   /** Whether threshold is at safety floor */
   atSafetyFloor: boolean;
+  /** Primary reason code for current threshold level */
+  reasonCode?: AdaptiveThresholdReasonCode;
+  /** All reason codes for current threshold level */
+  reasonCodes?: AdaptiveThresholdReasonCode[];
   /** Reason for current threshold level */
   currentReason: string;
 }
 
+export interface ThresholdRecommendation {
+  recommendedThreshold: number;
+  baselineThreshold: number;
+  primaryReasonCode: AdaptiveThresholdReasonCode;
+  reasonCodes: AdaptiveThresholdReasonCode[];
+  reason: string;
+  atSafetyFloor: boolean;
+  atCeiling: boolean;
+  normalizedConditions: SystemConditions;
+  penalties: {
+    healthPenalty: number;
+    healthCriticalPenalty: number;
+    volatilityPenalty: number;
+    providerQualityPenalty: number;
+    incidentPenalty: number;
+    systemLoadPenalty: number;
+    totalPenalty: number;
+  };
+  timestamp: string;
+}
+
+// ── Normalization and Recommendation Utilities ──────────────────────────
+
+function roundToPrecision(value: number, decimals: number = 4): number {
+  if (!Number.isFinite(value)) return 0;
+  const factor = Math.pow(10, decimals);
+  return Math.round(value * factor) / factor;
+}
+
+/**
+ * Normalizes system conditions before scoring.
+ * Clamps values to valid physical bounds and rounds floating point numbers
+ * to eliminate jitter across repeated calculations.
+ */
+export function normalizeSystemConditions(raw?: Partial<SystemConditions>): SystemConditions {
+  const fallback: SystemConditions = {
+    healthScore: 85,
+    volatilityIndex: 0.30,
+    providerReliability: 80,
+    activeIncidents: 0,
+    systemLoad: 0.65,
+    hoursSinceLastIncident: 168,
+  };
+
+  if (!raw) return { ...fallback };
+
+  const sanitizeNumber = (
+    val: unknown,
+    min: number,
+    max: number,
+    defaultVal: number,
+    decimals: number = 4,
+  ): number => {
+    if (typeof val !== "number" || !Number.isFinite(val) || Number.isNaN(val)) {
+      return defaultVal;
+    }
+    const clamped = Math.max(min, Math.min(max, val));
+    return roundToPrecision(clamped, decimals);
+  };
+
+  const sanitizeInt = (val: unknown, min: number, max: number, defaultVal: number): number => {
+    if (typeof val !== "number" || !Number.isFinite(val) || Number.isNaN(val)) {
+      return defaultVal;
+    }
+    const rounded = Math.round(val);
+    return Math.max(min, Math.min(max, rounded));
+  };
+
+  return {
+    healthScore: sanitizeNumber(raw.healthScore, 0, 100, fallback.healthScore, 2),
+    volatilityIndex: sanitizeNumber(raw.volatilityIndex, 0, 1, fallback.volatilityIndex, 4),
+    providerReliability: sanitizeNumber(raw.providerReliability, 0, 100, fallback.providerReliability, 2),
+    activeIncidents: sanitizeInt(raw.activeIncidents, 0, 1000, fallback.activeIncidents),
+    systemLoad: sanitizeNumber(raw.systemLoad, 0, 1, fallback.systemLoad, 4),
+    hoursSinceLastIncident: sanitizeNumber(raw.hoursSinceLastIncident, 0, 100000, fallback.hoursSinceLastIncident, 2),
+  };
+}
+
 // ── Configuration ───────────────────────────────────────────────────────
 
-const DEFAULT_CONFIG: AdaptiveThresholdConfig = {
+export const DEFAULT_THRESHOLD_CONFIG: AdaptiveThresholdConfig = {
   // Core thresholds
   absoluteMinimum: 0.60, // NEVER go below 60% confidence
   defaultThreshold: 0.75, // 75% confidence in normal conditions
@@ -132,6 +245,148 @@ const DEFAULT_CONFIG: AdaptiveThresholdConfig = {
   enableAuditLogging: true,
   cacheMinutes: 5,
 };
+
+const DEFAULT_CONFIG: AdaptiveThresholdConfig = DEFAULT_THRESHOLD_CONFIG;
+
+// ── Deterministic Recommendation Scoring Function ───────────────────────
+
+/**
+ * Pure deterministic threshold recommendation function.
+ * Normalizes input conditions and produces an identical recommendation,
+ * penalties breakdown, and reason codes for identical inputs.
+ */
+export function recommendThreshold(
+  rawConditions?: Partial<SystemConditions>,
+  configOverrides?: Partial<AdaptiveThresholdConfig>,
+): ThresholdRecommendation {
+  const config = { ...DEFAULT_CONFIG, ...configOverrides };
+  const conditions = normalizeSystemConditions(rawConditions);
+
+  let threshold = config.defaultThreshold;
+  const reasons: string[] = [];
+  const reasonCodes: AdaptiveThresholdReasonCode[] = [];
+
+  let healthPenalty = 0;
+  let healthCriticalPenalty = 0;
+  let volatilityPenalty = 0;
+  let providerQualityPenalty = 0;
+  let incidentPenalty = 0;
+  let systemLoadPenalty = 0;
+
+  // Health-based adjustment
+  if (conditions.healthScore < 80) {
+    healthPenalty = roundToPrecision(((80 - conditions.healthScore) / 10) * config.healthDegradationPenalty, 4);
+    threshold += healthPenalty;
+    reasons.push(`Health degradation: +${(healthPenalty * 100).toFixed(1)}%`);
+    reasonCodes.push("HEALTH_DEGRADATION");
+  }
+
+  if (conditions.healthScore < config.healthCriticalThreshold) {
+    healthCriticalPenalty = 0.10;
+    threshold += healthCriticalPenalty;
+    reasons.push("Critical health status: +10%");
+    reasonCodes.push("HEALTH_CRITICAL");
+  }
+
+  // Volatility-based adjustment
+  if (conditions.volatilityIndex > config.volatilityHighThreshold) {
+    volatilityPenalty = roundToPrecision(config.volatilityPenalty, 4);
+    threshold += volatilityPenalty;
+    reasons.push(`High volatility: +${(config.volatilityPenalty * 100).toFixed(1)}%`);
+    reasonCodes.push("HIGH_VOLATILITY");
+  }
+
+  // Provider quality adjustment
+  if (conditions.providerReliability < config.providerQualityLowThreshold) {
+    providerQualityPenalty = roundToPrecision(config.providerQualityPenalty, 4);
+    threshold += providerQualityPenalty;
+    reasons.push(`Poor provider quality: +${(config.providerQualityPenalty * 100).toFixed(1)}%`);
+    reasonCodes.push("POOR_PROVIDER_QUALITY");
+  }
+
+  // Incident-based adjustment
+  if (conditions.activeIncidents > 0) {
+    incidentPenalty = roundToPrecision(conditions.activeIncidents * config.incidentPenalty, 4);
+    threshold += incidentPenalty;
+    reasons.push(`Active incidents (${conditions.activeIncidents}): +${(incidentPenalty * 100).toFixed(1)}%`);
+    reasonCodes.push("ACTIVE_INCIDENTS");
+  }
+
+  // System load adjustment
+  if (conditions.systemLoad > config.systemLoadHighThreshold) {
+    systemLoadPenalty = roundToPrecision(config.systemLoadPenalty, 4);
+    threshold += systemLoadPenalty;
+    reasons.push(`High system load: +${(config.systemLoadPenalty * 100).toFixed(1)}%`);
+    reasonCodes.push("HIGH_SYSTEM_LOAD");
+  }
+
+  const unboundedThreshold = threshold;
+  const atSafetyFloor = unboundedThreshold <= config.absoluteMinimum;
+  const atCeiling = unboundedThreshold >= config.maximumThreshold;
+
+  // Enforce bounds
+  threshold = Math.max(config.absoluteMinimum, Math.min(config.maximumThreshold, threshold));
+  const finalThreshold = Math.round(threshold * 1000) / 1000;
+
+  if (atSafetyFloor && unboundedThreshold < config.absoluteMinimum) {
+    reasonCodes.push("SAFETY_FLOOR_ENFORCED");
+  }
+  if (atCeiling && unboundedThreshold > config.maximumThreshold) {
+    reasonCodes.push("MAX_THRESHOLD_ENFORCED");
+  }
+
+  if (reasonCodes.length === 0) {
+    reasonCodes.push("NORMAL_CONDITIONS");
+  }
+
+  const primaryReasonCode = reasonCodes[0];
+  const reason = reasons.length > 0 ? reasons.join("; ") : "Normal conditions";
+
+  return {
+    recommendedThreshold: finalThreshold,
+    baselineThreshold: config.defaultThreshold,
+    primaryReasonCode,
+    reasonCodes,
+    reason,
+    atSafetyFloor: finalThreshold === config.absoluteMinimum,
+    atCeiling: finalThreshold === config.maximumThreshold,
+    normalizedConditions: conditions,
+    penalties: {
+      healthPenalty,
+      healthCriticalPenalty,
+      volatilityPenalty,
+      providerQualityPenalty,
+      incidentPenalty,
+      systemLoadPenalty,
+      totalPenalty: roundToPrecision(
+        healthPenalty + healthCriticalPenalty + volatilityPenalty + providerQualityPenalty + incidentPenalty + systemLoadPenalty,
+        4,
+      ),
+    },
+    timestamp: new Date().toISOString(),
+  };
+}
+
+// ── In-Memory Recommendation Persistence Store ──────────────────────────
+
+const recommendationStore = new Map<string, ThresholdRecommendation[]>();
+
+export function saveThresholdRecommendation(key: string, rec: ThresholdRecommendation): void {
+  const existing = recommendationStore.get(key) ?? [];
+  recommendationStore.set(key, [rec, ...existing].slice(0, 50));
+}
+
+export function getLatestThresholdRecommendation(key: string): ThresholdRecommendation | undefined {
+  return recommendationStore.get(key)?.[0];
+}
+
+export function getThresholdRecommendationHistory(key: string): ThresholdRecommendation[] {
+  return recommendationStore.get(key) ?? [];
+}
+
+export function resetThresholdRecommendationStore(): void {
+  recommendationStore.clear();
+}
 
 const cache = new NodeCache({
   stdTTL: DEFAULT_CONFIG.cacheMinutes * 60,
@@ -168,11 +423,12 @@ export class AdaptiveThresholdController {
     }
 
     try {
-      // Collect current system conditions
-      const conditions = await this.collectSystemConditions();
+      // Collect current system conditions and normalize them
+      const rawConditions = await this.collectSystemConditions();
+      const conditions = normalizeSystemConditions(rawConditions);
       
       // Calculate required threshold
-      const { threshold, reason, atSafetyFloor } = await this.calculateThreshold(conditions);
+      const { threshold, reason, atSafetyFloor, reasonCode, reasonCodes } = await this.calculateThreshold(conditions);
       
       // Check if adjustment is needed
       const currentState = this.getPreviousState();
@@ -187,6 +443,8 @@ export class AdaptiveThresholdController {
         adjustmentHistory: this.adjustmentLog.slice(-50), // Keep last 50 adjustments
         conditions,
         atSafetyFloor,
+        reasonCode,
+        reasonCodes,
         currentReason: reason,
       };
 
@@ -197,6 +455,8 @@ export class AdaptiveThresholdController {
           newThreshold: adjustedThreshold,
           delta: adjustedThreshold - currentState.currentThreshold,
           source: this.determineAdjustmentSource(conditions),
+          reasonCode,
+          reasonCodes,
           reason,
           timestamp: new Date().toISOString(),
           conditions,
@@ -223,6 +483,8 @@ export class AdaptiveThresholdController {
         adjustmentHistory: this.adjustmentLog.slice(-50),
         conditions: await this.getFallbackConditions(),
         atSafetyFloor: false,
+        reasonCode: "FALLBACK_DEFAULT",
+        reasonCodes: ["FALLBACK_DEFAULT"],
         currentReason: "Fallback to default threshold due to error",
       };
     }
@@ -271,6 +533,8 @@ export class AdaptiveThresholdController {
       newThreshold: enforcedThreshold,
       delta: enforcedThreshold - previousThreshold,
       source: "manual_override",
+      reasonCode: "MANUAL_OVERRIDE",
+      reasonCodes: ["MANUAL_OVERRIDE"],
       reason: `Manual override: ${reason}`,
       timestamp: new Date().toISOString(),
       conditions,
@@ -288,6 +552,8 @@ export class AdaptiveThresholdController {
       adjustmentHistory: this.adjustmentLog.slice(-50),
       conditions,
       atSafetyFloor: newThreshold <= this.config.absoluteMinimum || enforcedThreshold === this.config.absoluteMinimum,
+      reasonCode: "MANUAL_OVERRIDE",
+      reasonCodes: ["MANUAL_OVERRIDE"],
       currentReason: reason,
     };
 
@@ -363,14 +629,14 @@ export class AdaptiveThresholdController {
       // Get time since last incident
       const hoursSinceLastIncident = await this.getHoursSinceLastIncident();
 
-      return {
+      return normalizeSystemConditions({
         healthScore,
         volatilityIndex,
         providerReliability,
         activeIncidents,
         systemLoad,
         hoursSinceLastIncident,
-      };
+      });
     } catch (error) {
       console.error("Failed to collect system conditions:", error);
       return this.getFallbackConditions();
@@ -384,56 +650,16 @@ export class AdaptiveThresholdController {
     threshold: number;
     reason: string;
     atSafetyFloor: boolean;
+    reasonCode: AdaptiveThresholdReasonCode;
+    reasonCodes: AdaptiveThresholdReasonCode[];
   }> {
-    let threshold = this.config.defaultThreshold;
-    const reasons: string[] = [];
-
-    // Health-based adjustment
-    if (conditions.healthScore < 80) {
-      const healthPenalty = ((80 - conditions.healthScore) / 10) * this.config.healthDegradationPenalty;
-      threshold += healthPenalty;
-      reasons.push(`Health degradation: +${(healthPenalty * 100).toFixed(1)}%`);
-    }
-
-    if (conditions.healthScore < this.config.healthCriticalThreshold) {
-      threshold += 0.10; // Additional penalty for critical health
-      reasons.push("Critical health status: +10%");
-    }
-
-    // Volatility-based adjustment
-    if (conditions.volatilityIndex > this.config.volatilityHighThreshold) {
-      threshold += this.config.volatilityPenalty;
-      reasons.push(`High volatility: +${(this.config.volatilityPenalty * 100).toFixed(1)}%`);
-    }
-
-    // Provider quality adjustment
-    if (conditions.providerReliability < this.config.providerQualityLowThreshold) {
-      threshold += this.config.providerQualityPenalty;
-      reasons.push(`Poor provider quality: +${(this.config.providerQualityPenalty * 100).toFixed(1)}%`);
-    }
-
-    // Incident-based adjustment
-    if (conditions.activeIncidents > 0) {
-      const incidentPenalty = conditions.activeIncidents * this.config.incidentPenalty;
-      threshold += incidentPenalty;
-      reasons.push(`Active incidents (${conditions.activeIncidents}): +${(incidentPenalty * 100).toFixed(1)}%`);
-    }
-
-    // System load adjustment
-    if (conditions.systemLoad > this.config.systemLoadHighThreshold) {
-      threshold += this.config.systemLoadPenalty;
-      reasons.push(`High system load: +${(this.config.systemLoadPenalty * 100).toFixed(1)}%`);
-    }
-
-    // Enforce bounds
-    threshold = Math.max(this.config.absoluteMinimum, Math.min(this.config.maximumThreshold, threshold));
-    
-    const atSafetyFloor = threshold === this.config.absoluteMinimum;
-
+    const rec = recommendThreshold(conditions, this.config);
     return {
-      threshold: Math.round(threshold * 1000) / 1000,
-      reason: reasons.length > 0 ? reasons.join("; ") : "Normal conditions",
-      atSafetyFloor,
+      threshold: rec.recommendedThreshold,
+      reason: rec.reason,
+      atSafetyFloor: rec.atSafetyFloor,
+      reasonCode: rec.primaryReasonCode,
+      reasonCodes: rec.reasonCodes,
     };
   }
 

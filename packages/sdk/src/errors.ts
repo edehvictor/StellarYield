@@ -20,6 +20,14 @@ export const VAULT_ERROR_MESSAGES: Record<number, string> = {
   11: "Storage key not found",
   2001: "Invalid donation basis points (must be 0-10,000)",
   2002: "Charity address is not on protocol whitelist",
+  2003: "Administrative operation has expired",
+  2004: "Administrative operation was already executed",
+  2005: "Cross-contract call is unauthorized or on the wrong network",
+  2006: "Fee recipient is invalid",
+  2007: "Donation amount is below the minimum",
+  2008: "Deposit exceeds the configured liquidity depth",
+  2009: "Storage is already at the requested version",
+  2010: "Storage schema version does not match the contract",
 };
 
 export abstract class SorobanSdkError extends Error {
@@ -71,6 +79,22 @@ export class WrongNetworkError extends SorobanSdkError {
     );
     this.expectedNetwork = expectedNetwork;
     this.actualNetwork = actualNetwork;
+  }
+}
+
+export class UnsupportedNetworkError extends SorobanSdkError {
+  public readonly code = "unsupported_network" as const;
+  public readonly network: string;
+  public readonly supportedNetworks: readonly string[];
+
+  constructor(network: string, supportedNetworks: readonly string[]) {
+    super(
+      `Unsupported network id: '${network}'. Supported networks are: ${supportedNetworks.join(", ")}.`,
+      "simulate",
+      false
+    );
+    this.network = network;
+    this.supportedNetworks = supportedNetworks;
   }
 }
 
@@ -141,138 +165,4 @@ export class InvalidXdrError extends SorobanSdkError {
 export class MissingAuthError extends SorobanSdkError {
   public readonly requiredAddress: string;
 
-  constructor(requiredAddress: string) {
-    super(
-      `Transaction simulation requires authorization entry for '${requiredAddress}'`,
-      "simulate",
-      false
-    );
-    this.requiredAddress = requiredAddress;
-  }
-}
-
-/** HTTP / fetch request timed out before a response arrived. */
-export class ApiTimeoutError extends SorobanSdkError {
-  public readonly timeoutMs: number;
-  public readonly path: string;
-
-  constructor(path: string, timeoutMs: number) {
-    super(`API request to '${path}' timed out after ${timeoutMs}ms`, undefined, true);
-    this.path = path;
-    this.timeoutMs = timeoutMs;
-  }
-}
-
-/** Underlying network failure (DNS, connection reset, offline, etc.). */
-export class ApiNetworkError extends SorobanSdkError {
-  public readonly path: string;
-  public readonly cause?: unknown;
-
-  constructor(path: string, cause?: unknown) {
-    const detail = cause instanceof Error ? cause.message : cause != null ? String(cause) : "unknown";
-    super(`API network error at '${path}': ${detail}`, undefined, true);
-    this.path = path;
-    this.cause = cause;
-  }
-}
-
-/** Non-OK HTTP response from the backend API. */
-export class ApiHttpError extends SorobanSdkError {
-  public readonly path: string;
-  public readonly status: number;
-  public readonly statusText: string;
-
-  constructor(path: string, status: number, statusText: string, retryable: boolean) {
-    super(`API error (${status} ${statusText}) at ${path}`, undefined, retryable);
-    this.path = path;
-    this.status = status;
-    this.statusText = statusText;
-  }
-}
-
-/**
- * Restore preamble data returned by a `SimulateTransactionRestoreResponse`.
- * `transactionData` is a `SorobanDataBuilder` instance from `@stellar/stellar-sdk`
- * (kept as `unknown` here so `errors.ts` has no dependency on that package's types).
- */
-export interface RestorePreambleInfo {
-  minResourceFee: string;
-  transactionData: unknown;
-}
-
-export class RestoreRequiredError extends SorobanSdkError {
-  public readonly minResourceFee: string;
-  public readonly restorePreamble?: RestorePreambleInfo;
-
-  constructor(minResourceFee: string, restorePreamble?: RestorePreambleInfo) {
-    super(
-      `Simulation indicates expired ledger entries requiring a restore footprint operation (min resource fee ${minResourceFee})`,
-      "restore",
-      true
-    );
-    this.minResourceFee = minResourceFee;
-    this.restorePreamble = restorePreamble;
-  }
-}
-
-/**
- * Normalized finality classification for a submitted transaction's poll
- * result, so callers can branch on a small stable set of outcomes instead of
- * raw RPC status strings.
- */
-export interface FinalityResult {
-  status: "success" | "failed" | "timeout" | "unknown";
-  retryable: boolean;
-}
-
-export function classifyFinality(
-  rpcStatus: string | undefined,
-  timedOut: boolean
-): FinalityResult {
-  if (rpcStatus === "SUCCESS") {
-    return { status: "success", retryable: false };
-  }
-  if (rpcStatus === "FAILED") {
-    return { status: "failed", retryable: false };
-  }
-  if (rpcStatus === "NOT_FOUND" && timedOut) {
-    return { status: "timeout", retryable: true };
-  }
-  return { status: "unknown", retryable: true };
-}
-
-export function decodeVaultError(code: number): { name: string; message: string } {
-  const generatedMeta = (VaultError as Record<number, { message: string }>)[code];
-  const name = generatedMeta ? generatedMeta.message : `UnknownError_${code}`;
-  const message = VAULT_ERROR_MESSAGES[code] || `Contract error code ${code}`;
-  return { name, message };
-}
-
-export function parseContractError(
-  error: unknown,
-  rawResultXdr?: string,
-  diagnosticEvents?: string[],
-  phase: SdkErrorPhase = "submit"
-): SorobanSdkError {
-  if (error instanceof SorobanSdkError) {
-    return error;
-  }
-
-  const errString = String(error);
-  // Match numeric contract error code patterns e.g. Error(Contract, #5) or ErrorCode(5)
-  const codeMatch = errString.match(/(?:Error\(Contract,\s*#(\d+)\)|ErrorCode\((\d+)\)|Error\s*(\d+))/i);
-  if (codeMatch) {
-    const codeNum = parseInt(codeMatch[1] || codeMatch[2] || codeMatch[3], 10);
-    const { name, message } = decodeVaultError(codeNum);
-    return new ContractExecutionError(codeNum, name, message, rawResultXdr, diagnosticEvents, phase);
-  }
-
-  return new ContractExecutionError(
-    999,
-    "GenericSorobanError",
-    errString || "Unknown Soroban contract execution failure",
-    rawResultXdr,
-    diagnosticEvents,
-    phase
-  );
-}
+  constructor(requiredAddress: string)

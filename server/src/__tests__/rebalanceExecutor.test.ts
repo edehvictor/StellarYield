@@ -1,3 +1,4 @@
+import * as StellarSdk from '@stellar/stellar-sdk';
 import {
   RebalanceExecutorService,
   FAILURE_CLASS,
@@ -5,6 +6,42 @@ import {
 } from '../services/rebalanceExecutorService';
 import { RebalanceQueueEntryDTO } from '../services/rebalanceQueueService';
 import { EXECUTION_TYPE, REBALANCE_STATUS } from '../queues/types';
+import { NONCE_CONFLICT_CODE } from '../relayer/nonceConflict';
+import type { RebalanceExecutionStrategy } from '../services/vaultStrategyCompatibilityService';
+
+function buildBadSeqTransactionResult(): StellarSdk.xdr.TransactionResult {
+  return new StellarSdk.xdr.TransactionResult({
+    feeCharged: StellarSdk.xdr.Int64.fromString('100'),
+    result: StellarSdk.xdr.TransactionResultResult.txBadSeq(),
+    ext: new StellarSdk.xdr.TransactionResultExt(0),
+  });
+}
+
+/** Builds a minimal, validly-signed fee-bump XDR the executor can parse. */
+function buildFeeBumpXdr(networkPassphrase: string): string {
+  const innerSource = StellarSdk.Keypair.random();
+  const innerAccount = new StellarSdk.Account(innerSource.publicKey(), '1');
+  const contractId = StellarSdk.StrKey.encodeContract(Buffer.alloc(32, 3));
+  const contract = new StellarSdk.Contract(contractId);
+  const innerTx = new StellarSdk.TransactionBuilder(innerAccount, {
+    fee: StellarSdk.BASE_FEE,
+    networkPassphrase,
+  })
+    .addOperation(contract.call('rebalance'))
+    .setTimeout(30)
+    .build();
+  innerTx.sign(innerSource);
+
+  const relayerKeypair = StellarSdk.Keypair.random();
+  const feeBump = StellarSdk.TransactionBuilder.buildFeeBumpTransaction(
+    relayerKeypair,
+    StellarSdk.BASE_FEE,
+    innerTx,
+    networkPassphrase,
+  );
+  feeBump.sign(relayerKeypair);
+  return feeBump.toXDR();
+}
 
 const baseEntry = (): RebalanceQueueEntryDTO => ({
   id: 'entry-1',
@@ -90,6 +127,75 @@ describe('RebalanceExecutorService', () => {
 
       const result = await executor.dryRun(entry);
       expect(result.viable).toBe(true);
+    });
+
+    it('allows compatible active strategies before rebalance', async () => {
+      const entry = baseEntry();
+      entry.executionStrategy = {
+        strategyCompatibility: {
+          strategies: [
+            {
+              id: 'stable',
+              compatibilityTags: ['stablecoin-only'],
+              isActive: true,
+            },
+            {
+              id: 'managed',
+              compatibilityTags: ['automated-rebalancing'],
+              isActive: true,
+            },
+          ],
+        },
+      };
+
+      await expect(executor.dryRun(entry)).resolves.toMatchObject({
+        viable: true,
+        estimatedFill: 100,
+      });
+    });
+
+    it('blocks incompatible active strategies before rebalance', async () => {
+      const entry = baseEntry();
+      entry.executionStrategy = {
+        strategyCompatibility: {
+          strategies: [
+            {
+              id: 'stable',
+              compatibilityTags: ['stablecoin-only'],
+              isActive: true,
+            },
+            {
+              id: 'volatile',
+              compatibilityTags: ['volatile-assets'],
+              isActive: true,
+            },
+          ],
+        },
+      };
+
+      await expect(executor.dryRun(entry)).resolves.toMatchObject({
+        viable: false,
+        estimatedFill: 0,
+        reason: expect.stringContaining('Incompatible strategy tags'),
+      });
+    });
+
+    it('fails closed when strategy compatibility metadata is empty or malformed', async () => {
+      const entry = baseEntry();
+      entry.executionStrategy = { strategyCompatibility: { strategies: [] } };
+
+      const emptyResult = await executor.dryRun(entry);
+      expect(emptyResult.viable).toBe(false);
+      expect(emptyResult.reason).toContain('metadata is invalid');
+
+      entry.executionStrategy = {
+        strategyCompatibility: {
+          strategies: [{ id: 'missing-tags', isActive: true }],
+        },
+      } as unknown as RebalanceExecutionStrategy;
+      const malformedResult = await executor.dryRun(entry);
+      expect(malformedResult.viable).toBe(false);
+      expect(malformedResult.reason).toContain('metadata is invalid');
     });
   });
 
@@ -187,6 +293,217 @@ describe('RebalanceExecutorService', () => {
 
       await expect(executor.execute(entry, attempt)).rejects.toThrow(/dry-run/i);
       expect(attempt.failureClass).toBe(FAILURE_CLASS.STALE_INTENT);
+    });
+
+    it('does not submit a rebalance with incompatible strategies', async () => {
+      const entry = baseEntry();
+      entry.executionStrategy = {
+        strategyCompatibility: {
+          strategies: [
+            {
+              id: 'manual',
+              compatibilityTags: ['manual-execution'],
+              isActive: true,
+            },
+            {
+              id: 'automated',
+              compatibilityTags: ['automated-rebalancing'],
+              isActive: true,
+            },
+          ],
+        },
+      };
+      const attempt = {
+        entryId: entry.id,
+        attemptNumber: 1,
+        startedAt: new Date(),
+        status: 'pending' as const,
+      };
+
+      await expect(executor.execute(entry, attempt)).rejects.toThrow(
+        /strategy compatibility check failed/i,
+      );
+      expect(attempt.failureClass).toBe(FAILURE_CLASS.CONSTRAINT);
+    });
+  });
+
+  // ── Relayer nonce conflict handling (#1153) ───────────────────────────────
+  //
+  // Exercises submitTransactionWithNonceConflictHandling directly (it's
+  // private, accessed the same way execute()'s other private helpers are
+  // exercised elsewhere in this file) so nonce-conflict detection, retry
+  // eligibility, and metadata recording can be tested without standing up
+  // a full relayer HTTP mock + RPC round trip for every case.
+
+  describe('submitTransactionWithNonceConflictHandling', () => {
+    const networkPassphrase = 'Test SDF Network ; September 2015';
+
+    function makeAttempt() {
+      return {
+        entryId: 'entry-1',
+        attemptNumber: 1,
+        startedAt: new Date(),
+        status: 'pending' as const,
+      };
+    }
+
+    it('reports a nonce conflict with the typed NONCE_CONFLICT code and does not retry a fund-moving (Soroban) transaction', async () => {
+      const localExecutor = new RebalanceExecutorService({ networkPassphrase });
+      const feeBumpXdr = buildFeeBumpXdr(networkPassphrase);
+      const badSeqResult = buildBadSeqTransactionResult();
+
+      const sendTransaction = jest.fn().mockResolvedValue({
+        status: 'ERROR',
+        errorResult: badSeqResult,
+      });
+      (localExecutor as any).server.sendTransaction = sendTransaction;
+
+      const attempt = makeAttempt();
+
+      await expect(
+        (localExecutor as any).submitTransactionWithNonceConflictHandling(feeBumpXdr, attempt),
+      ).rejects.toThrow();
+
+      expect(attempt.failureClass).toBe(FAILURE_CLASS.FEE_SEQUENCE);
+      expect(attempt.nonceConflict).toBeDefined();
+      expect(attempt.nonceConflict!.status).toBe('UNSAFE_TO_RETRY');
+      expect(attempt.nonceConflict!.code).toBe(NONCE_CONFLICT_CODE);
+      expect(attempt.nonceConflict!.retried).toBe(false);
+      expect(attempt.nonceConflict!.retryEligible).toBe(false);
+      expect(attempt.nonceConflict!.reason).toMatch(/cannot be safely.*retried/i);
+      // Rebalance transactions invoke a Soroban contract — not fingerprintable
+      // — so exactly one submission attempt is made, never a retry.
+      expect(sendTransaction).toHaveBeenCalledTimes(1);
+    });
+
+    it('retries a nonce conflict and succeeds when a later attempt clears', async () => {
+      const localExecutor = new RebalanceExecutorService({
+        networkPassphrase,
+        networkRetries: 2,
+      });
+      const feeBumpXdr = buildFeeBumpXdr(networkPassphrase);
+      const badSeqResult = buildBadSeqTransactionResult();
+
+      const sendTransaction = jest
+        .fn()
+        .mockResolvedValueOnce({ status: 'ERROR', errorResult: badSeqResult })
+        .mockResolvedValueOnce({ status: 'SUCCESS', hash: 'success-hash' });
+      (localExecutor as any).server.sendTransaction = sendTransaction;
+
+      const attempt = makeAttempt();
+
+      // This scenario is only reachable when the underlying transaction IS
+      // retry-eligible. Force eligibility for this test since every real
+      // transaction type in this codebase's relayer pipeline is a Soroban
+      // call (never eligible) — this proves the retry-success *path* itself
+      // works correctly when eligibility is true, independent of which
+      // transaction types happen to qualify today.
+      const nonceConflictModule = require('../relayer/nonceConflict');
+      const spy = jest
+        .spyOn(nonceConflictModule, 'isSafeToRetryAfterNonceConflict')
+        .mockReturnValue(true);
+
+      try {
+        const result = await (localExecutor as any).submitTransactionWithNonceConflictHandling(
+          feeBumpXdr,
+          attempt,
+        );
+        expect(result.feeBumpHash).toBe('success-hash');
+        expect(attempt.nonceConflict).toBeUndefined();
+        expect(sendTransaction).toHaveBeenCalledTimes(2);
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
+    it('surfaces RETRY_EXHAUSTED with attempt metadata when a retry-eligible transaction keeps conflicting', async () => {
+      const localExecutor = new RebalanceExecutorService({
+        networkPassphrase,
+        networkRetries: 1,
+      });
+      const feeBumpXdr = buildFeeBumpXdr(networkPassphrase);
+      const badSeqResult = buildBadSeqTransactionResult();
+
+      const sendTransaction = jest.fn().mockResolvedValue({
+        status: 'ERROR',
+        errorResult: badSeqResult,
+      });
+      (localExecutor as any).server.sendTransaction = sendTransaction;
+
+      const attempt = makeAttempt();
+
+      const nonceConflictModule = require('../relayer/nonceConflict');
+      const spy = jest
+        .spyOn(nonceConflictModule, 'isSafeToRetryAfterNonceConflict')
+        .mockReturnValue(true);
+
+      try {
+        await expect(
+          (localExecutor as any).submitTransactionWithNonceConflictHandling(feeBumpXdr, attempt),
+        ).rejects.toThrow();
+
+        expect(attempt.nonceConflict!.status).toBe('RETRY_EXHAUSTED');
+        expect(attempt.nonceConflict!.code).toBe(NONCE_CONFLICT_CODE);
+        expect(attempt.nonceConflict!.retried).toBe(true);
+        expect(attempt.nonceConflict!.attempts).toHaveLength(2); // 1 initial + 1 retry
+        expect(
+          attempt.nonceConflict!.attempts.every((a: { outcome: string }) => a.outcome === 'nonce_conflict'),
+        ).toBe(true);
+        expect(sendTransaction).toHaveBeenCalledTimes(2);
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
+    it('does not treat a non-nonce-conflict submission failure as a nonce conflict', async () => {
+      const localExecutor = new RebalanceExecutorService({ networkPassphrase });
+      const feeBumpXdr = buildFeeBumpXdr(networkPassphrase);
+
+      const sendTransaction = jest.fn().mockRejectedValue(new Error('Connection refused'));
+      (localExecutor as any).server.sendTransaction = sendTransaction;
+
+      const attempt = makeAttempt();
+
+      await expect(
+        (localExecutor as any).submitTransactionWithNonceConflictHandling(feeBumpXdr, attempt),
+      ).rejects.toThrow(/connection refused/i);
+
+      expect(attempt.nonceConflict!.status).toBe('FAILED');
+      expect(attempt.nonceConflict!.code).toBeUndefined();
+      expect(sendTransaction).toHaveBeenCalledTimes(1);
+    });
+
+    it('succeeds immediately with no nonce-conflict metadata when submission works on the first try', async () => {
+      const localExecutor = new RebalanceExecutorService({ networkPassphrase });
+      const feeBumpXdr = buildFeeBumpXdr(networkPassphrase);
+
+      const sendTransaction = jest.fn().mockResolvedValue({
+        status: 'SUCCESS',
+        hash: 'first-try-hash',
+      });
+      (localExecutor as any).server.sendTransaction = sendTransaction;
+
+      const attempt = makeAttempt();
+
+      const result = await (localExecutor as any).submitTransactionWithNonceConflictHandling(
+        feeBumpXdr,
+        attempt,
+      );
+
+      expect(result.feeBumpHash).toBe('first-try-hash');
+      expect(attempt.nonceConflict).toBeUndefined();
+      expect(attempt.failureClass).toBeUndefined();
+      expect(sendTransaction).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('classifyError nonce-conflict precision (#1153)', () => {
+    it('classifies a decoded txBadSeq errorResult as FEE_SEQUENCE even without "sequence" in the message', () => {
+      const error = new Error('Transaction submission failed') as Error & {
+        errorResult?: unknown;
+      };
+      error.errorResult = buildBadSeqTransactionResult();
+      expect(executor.classifyError(error)).toBe(FAILURE_CLASS.FEE_SEQUENCE);
     });
   });
 });

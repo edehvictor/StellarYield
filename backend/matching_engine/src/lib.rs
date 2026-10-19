@@ -58,7 +58,12 @@ pub mod settlement;
 pub mod utils;
 
 // Re-export main types
-pub use matching::{MatchResult, MatchingEngine};
+pub use matching::{MatchResult, MatchingEngine, OrderAck, SelfTradePolicy};
 pub use network::{MatchingEngineNetwork, NetworkConfig, NetworkEvent, NetworkMessage};
-pub use orderbook::{Order, OrderBook, OrderStatus, OrderType, Side, Trade};
-pub use settlement::{SettlementBatch, SettlementData, SettlementPayload, SettlementVerifier};
+pub use orderbook::{
+    BookEvent, FillError, Order, OrderBook, OrderBookError, OrderBookSnapshot, OrderStatus,
+    OrderType, SequencedEvent, Side, SnapshotError, Trade,
+};
+pub use settlement::{
+    SettlementBatch, SettlementData, SettlementLedger, SettlementPayload, SettlementVerifier,
+};

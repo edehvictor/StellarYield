@@ -8,6 +8,8 @@ interface FreshnessBannerProps {
   isPartial?: boolean;
   isEstimated?: boolean;
   source?: "live" | "cache";
+  /** Renders an explicit offline indicator alongside the cached-data banner. */
+  isOffline?: boolean;
   onRefresh?: () => void;
 }
 
@@ -17,6 +19,7 @@ export const FreshnessBanner: React.FC<FreshnessBannerProps> = ({
   isPartial,
   isEstimated,
   source,
+  isOffline,
   onRefresh,
 }) => {
   // If no lastUpdated, represent unknown / estimated state
@@ -57,23 +60,35 @@ export const FreshnessBanner: React.FC<FreshnessBannerProps> = ({
     const ageMs = parsedTime ? Date.now() - parsedTime.getTime() : 0;
     const calculated = parsedTime ? computeDecayedFreshnessConfidence(ageMs) : { confidence: 0, unusable: true };
     const finalConfidence = confidence !== undefined ? confidence : calculated.confidence;
-    const isStale = finalConfidence < 0.5 || calculated.unusable;
+    const isStale = !isOffline && (finalConfidence < 0.5 || calculated.unusable);
+
+    const headline = isOffline
+      ? "Offline — Showing Cached Data"
+      : isStale
+      ? "Stale Cached Data"
+      : "Showing Cached Data";
+    const badgeLabel = isOffline ? "Offline" : isStale ? "Stale Cache" : "Cached";
+    const panelClasses = isOffline
+      ? "border-red-500/40 bg-red-500/10 text-red-200"
+      : isStale
+      ? "border-purple-500/30 bg-purple-500/10 text-purple-300"
+      : "border-amber-500/30 bg-amber-500/10 text-amber-200";
+    const badgeClasses = isOffline
+      ? "bg-red-500/25 border border-red-500/50 text-red-300"
+      : isStale
+      ? "bg-purple-500/25 border border-purple-500/40 text-purple-300"
+      : "bg-amber-500/25 border border-amber-500/40 text-amber-300";
 
     return (
       <div
-        className={`glass-panel border p-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 ${
-          isStale
-            ? "border-purple-500/30 bg-purple-500/10 text-purple-300"
-            : "border-amber-500/30 bg-amber-500/10 text-amber-200"
-        }`}
+        className={`glass-panel border p-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 ${panelClasses}`}
         role="status"
+        data-testid={isOffline ? "offline-cache-banner" : "cache-banner"}
       >
         <div className="flex items-start sm:items-center gap-2.5">
           <Clock size={18} className="shrink-0 mt-0.5 sm:mt-0 text-amber-400" />
           <div>
-            <p className="text-sm font-semibold">
-              {isStale ? "Stale Cached Data" : "Showing Cached Data"}
-            </p>
+            <p className="text-sm font-semibold">{headline}</p>
             <p className="text-xs opacity-80 mt-0.5">
               {parsedTime
                 ? `Cached: ${parsedTime.toLocaleTimeString()} (${Math.max(0, Math.round(ageMs / 60000))}m ago) · Confidence: ${Math.round(finalConfidence * 100)}%`
@@ -83,13 +98,9 @@ export const FreshnessBanner: React.FC<FreshnessBannerProps> = ({
         </div>
         <div className="flex items-center gap-2 self-start sm:self-auto">
           <span
-            className={`text-[10px] font-bold uppercase tracking-widest px-2.5 py-1 rounded-full ${
-              isStale
-                ? "bg-purple-500/25 border border-purple-500/40 text-purple-300"
-                : "bg-amber-500/25 border border-amber-500/40 text-amber-300"
-            }`}
+            className={`text-[10px] font-bold uppercase tracking-widest px-2.5 py-1 rounded-full ${badgeClasses}`}
           >
-            {isStale ? "Stale Cache" : "Cached"}
+            {badgeLabel}
           </span>
           {onRefresh && (
             <button

@@ -23,3 +23,9 @@ State transitions:
 Events for indexers (`propose` / `dispute` / `execute`) include proposal id,
 status transition codes, and timestamps so history can be rebuilt without
 replaying storage.
+
+## Voting weight snapshot (#1513)
+
+`propose` records the ledger timestamp as the proposal's snapshot (`get_proposal_snapshot`). `dispute` checks the disputer's veYIELD power as of that time with `get_voting_power_at`, so tokens withdrawn, moved to another account or newly locked after the proposal was created do not change who can dispute it. Weight is measured at the end of the snapshot second: a lock made in the same second as the proposal counts.
+
+Proposals created before this change have no snapshot and keep using current voting power. The veYIELD contract must expose `get_voting_power_at(user, timestamp)`.

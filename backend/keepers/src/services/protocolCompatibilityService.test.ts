@@ -12,6 +12,7 @@ import {
     type CompatibilityIssue,
     type ActionType,
 } from './protocolCompatibilityService';
+import { resolveFallbackTree } from './fallbackTreeService';
 
 describe('protocolCompatibilityService', () => {
     describe('compareVersions', () => {
@@ -286,6 +287,119 @@ describe('protocolCompatibilityService', () => {
             const report = generateCompatibilityReport(protocols);
 
             expect(report.overallStatus).toBe('degraded');
+    });
+});
+
+describe('fallbackTreeResolution', () => {
+    type Candidate = {
+        name: string;
+        compatible: boolean;
+        failureReason?: string;
+    };
+
+    it('selects the primary provider when it is compatible', () => {
+        const candidates: Candidate[] = [
+            { name: 'primary', compatible: true },
+            { name: 'fallback-a', compatible: true },
+        ];
+
+        const result = resolveFallbackTree(candidates);
+
+        expect(result.selected).toBe('primary');
+        expect(result.rejected).toEqual([]);
+    });
+
+    it('selects the first compatible fallback in priority order', () => {
+        const candidates: Candidate[] = [
+            { name: 'primary', compatible: false, failureReason: 'version mismatch' },
+            { name: 'fallback-a', compatible: true },
+            { name: 'fallback-b', compatible: true },
+        ];
+
+        const result = resolveFallbackTree(candidates);
+
+        expect(result.selected).toBe('fallback-a');
+        expect(result.rejected).toEqual([
+            { name: 'primary', reason: 'version mismatch' },
+        ]);
+    });
+
+    it('selects a fallback after multiple rejections', () => {
+        const candidates: Candidate[] = [
+            { name: 'primary', compatible: false, failureReason: 'critical feature missing' },
+            { name: 'fallback-1', compatible: false, failureReason: 'breaking changes' },
+            { name: 'fallback-2', compatible: true },
+        ];
+
+        const result = resolveFallbackTree(candidates);
+
+        expect(result.selected).toBe('fallback-2');
+        expect(result.rejected).toEqual([
+            { name: 'primary', reason: 'critical feature missing' },
+            { name: 'fallback-1', reason: 'breaking changes' },
+        ]);
+    });
+
+    it('returns null when all candidates are incompatible', () => {
+        const candidates: Candidate[] = [
+            { name: 'primary', compatible: false, failureReason: 'version too old' },
+            { name: 'fallback-1', compatible: false, failureReason: 'missing feature' },
+        ];
+
+        const result = resolveFallbackTree(candidates);
+
+        expect(result.selected).toBeNull();
+        expect(result.rejected).toEqual([
+            { name: 'primary', reason: 'version too old' },
+            { name: 'fallback-1', reason: 'missing feature' },
+        ]);
+    });
+
+    it('produces a deterministic result on repeated runs', () => {
+        const candidates: Candidate[] = [
+            { name: 'primary', compatible: false, failureReason: 'error' },
+            { name: 'fallback-a', compatible: true },
+            { name: 'fallback-b', compatible: true },
+        ];
+
+        const first = resolveFallbackTree(candidates);
+        const second = resolveFallbackTree(candidates);
+
+        expect(first).toEqual(second);
+    });
+
+    it('does not bounce between partially valid providers', () => {
+        const req: CompatibilityRequirement = {
+            component: 'core',
+            requiredVersion: '2.0.0',
+            minVersion: '1.5.0',
+            criticalFeatures: [],
+            breakingChanges: ['fee_structure_change'],
+        };
+
+        const candidates: Candidate[] = [
+            {
+                name: 'primary',
+                compatible:
+                    evaluateProtocolCompatibility(
+                        'Blend',
+                        '1.5.0',
+                        '2.0.0',
+                        [req],
+                    ).status !== 'incompatible',
+            },
+            {
+                name: 'fallback-a',
+                compatible: true,
+            },
+        ];
+
+        const first = resolveFallbackTree(candidates);
+        const second = resolveFallbackTree(candidates);
+
+        expect(first).toEqual(second);
+        expect(first.selected).toBe('primary');
+        expect(first.rejected).toEqual([]);
     });
 });
 

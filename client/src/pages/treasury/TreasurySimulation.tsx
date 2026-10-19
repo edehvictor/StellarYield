@@ -208,6 +208,19 @@ const TreasurySimulation: React.FC = () => {
   const [importError, setImportError] = useState("");
   const [importedCount, setImportedCount] = useState(0);
 
+  function parseApiError(body: unknown, fallback: string): string {
+    if (!body || typeof body !== "object") return fallback;
+    const b = body as Record<string, unknown>;
+    if (typeof b.error === "string") return b.error;
+    if (b.error && typeof b.error === "object") {
+      const errObj = b.error as Record<string, unknown>;
+      if (typeof errObj.message === "string") return errObj.message;
+      if (typeof errObj.code === "string") return errObj.code;
+    }
+    if (typeof b.message === "string") return b.message;
+    return fallback;
+  }
+
   async function handlePreview() {
     setImportError("");
     setCashflowPreview(null);
@@ -227,8 +240,8 @@ const TreasurySimulation: React.FC = () => {
         body: JSON.stringify({ rows: parsed }),
       });
       if (!res.ok) {
-        const body = await res.json();
-        setImportError(body.error ?? "Preview request failed");
+        const body = await res.json().catch(() => null);
+        setImportError(parseApiError(body, "Preview request failed"));
       } else {
         setCashflowPreview(await res.json());
       }
@@ -253,8 +266,8 @@ const TreasurySimulation: React.FC = () => {
         }),
       });
       if (!res.ok) {
-        const body = await res.json();
-        setImportError(body.error ?? "Import failed");
+        const body = await res.json().catch(() => null);
+        setImportError(parseApiError(body, "Import failed"));
       } else {
         const result = await res.json();
         setImportedCount((c) => c + result.imported);
@@ -309,7 +322,8 @@ const TreasurySimulation: React.FC = () => {
         }),
       });
       if (!res.ok) {
-        setError("Failed to export comparison");
+        const body = await res.json().catch(() => null);
+        setError(parseApiError(body, "Failed to export comparison"));
       } else {
         const text = await res.text();
         downloadFile(text, `treasury_scenario_comparison.${format}`, format === "csv" ? "text/csv" : "application/json");
@@ -354,8 +368,8 @@ const TreasurySimulation: React.FC = () => {
         }),
       });
       if (!res.ok) {
-        const body = await res.json();
-        setError(body.error ?? "Simulation failed");
+        const body = await res.json().catch(() => null);
+        setError(parseApiError(body, "Simulation failed"));
       } else {
         const simBody = await res.json();
         setResult(simBody.data ?? simBody);

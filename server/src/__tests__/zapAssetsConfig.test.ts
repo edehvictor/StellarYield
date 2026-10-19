@@ -85,6 +85,24 @@ describe("validateZapAssetsJsonEntry", () => {
       validateZapAssetsJsonEntry({ symbol: "A", name: "A", contractId: "C", decimals: 7.1 }, 0),
     ).toThrow(/decimals/);
   });
+
+  it("rejects asset decimals above the supported maximum", () => {
+    expect(() =>
+      validateZapAssetsJsonEntry(
+        { symbol: "A", name: "A", contractId: "C", decimals: 19 },
+        0,
+      ),
+    ).toThrow("decimals must be an integer between 0 and 18");
+  });
+
+  it("accepts the maximum supported asset decimals", () => {
+    expect(
+      validateZapAssetsJsonEntry(
+        { symbol: "A", name: "A", contractId: "C", decimals: 18 },
+        0,
+      ).decimals,
+    ).toBe(18);
+  });
 });
 
 describe("initializeZapSupportedAssetsCache", () => {

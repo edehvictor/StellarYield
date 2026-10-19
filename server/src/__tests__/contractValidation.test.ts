@@ -1,5 +1,6 @@
 import { validateWalletAddress } from "../middleware/validation";
 import { getContractId, getAllContractIds } from "../services/contractRegistry";
+import { Keypair, StrKey } from "@stellar/stellar-sdk";
 import type { Request, Response, NextFunction } from "express";
 
 function createMockReqRes(params: Record<string, string> = {}) {
@@ -12,7 +13,8 @@ function createMockReqRes(params: Record<string, string> = {}) {
     return { req, res, next };
 }
 
-const VALID_ADDR = "GABC2DEF3GHI4JKLM5NPQR6STUV7WXYZA7B2C3D4E5F6G7H2JKLMNOPQ";
+const VALID_ADDR = Keypair.random().publicKey();
+const VALID_CONTRACT = StrKey.encodeContract(Buffer.alloc(32, 1));
 
 describe("validateWalletAddress middleware", () => {
     it("calls next for a valid Stellar address", () => {
@@ -21,9 +23,8 @@ describe("validateWalletAddress middleware", () => {
         expect(next).toHaveBeenCalled();
     });
 
-    it("calls next for address starting with C", () => {
-        const cAddr = "C" + VALID_ADDR.slice(1);
-        const { req, res, next } = createMockReqRes({ address: cAddr });
+    it("calls next for a valid contract address", () => {
+        const { req, res, next } = createMockReqRes({ address: VALID_CONTRACT });
         validateWalletAddress(req, res, next);
         expect(next).toHaveBeenCalled();
     });
@@ -45,6 +46,18 @@ describe("validateWalletAddress middleware", () => {
         const { req, res, next } = createMockReqRes({ address: addr });
         validateWalletAddress(req, res, next);
         expect(next).not.toHaveBeenCalled();
+    });
+
+    it("rejects an account address with a corrupted checksum", () => {
+        const corrupted = `${VALID_ADDR.slice(0, -1)}${VALID_ADDR.endsWith("A") ? "B" : "A"}`;
+        const { req, res, next } = createMockReqRes({ address: corrupted });
+        validateWalletAddress(req, res, next);
+        expect(next).not.toHaveBeenCalled();
+        expect(res.status).toHaveBeenCalledWith(400);
+        expect(res.json).toHaveBeenCalledWith({
+            error: "INVALID_ADDRESS",
+            message: "Invalid Stellar wallet address.",
+        });
     });
 
     it("rejects address not starting with G or C", () => {

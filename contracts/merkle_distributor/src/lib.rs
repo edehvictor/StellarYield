@@ -29,7 +29,12 @@ enum DataKey {
     Epoch,
     /// Total amount claimed in the current epoch.
     TotalClaimed,
+    /// Campaign expiration timestamp in ledger seconds (#1504).
+    Expiry,
 }
+
+/// Maximum allowed depth for a Merkle proof to bound verification cost (#1505).
+pub const MAX_PROOF_DEPTH: u32 = 20;
 
 // ── Errors ──────────────────────────────────────────────────────────────
 
@@ -53,6 +58,12 @@ pub enum DistributorError {
     NoMerkleRoot = 7,
     /// Insufficient contract balance for the claim.
     InsufficientBalance = 8,
+    /// The proof length exceeds MAX_PROOF_DEPTH (#1505).
+    ProofTooLarge = 9,
+    /// The campaign has expired (#1504).
+    CampaignExpired = 10,
+    /// The campaign has not expired yet (#1504).
+    CampaignNotExpired = 11,
 }
 
 // ── Contract ────────────────────────────────────────────────────────────
@@ -81,6 +92,7 @@ impl MerkleDistributor {
         env.storage().instance().set(&DataKey::Token, &token);
         env.storage().instance().set(&DataKey::Epoch, &0u32);
         env.storage().instance().set(&DataKey::TotalClaimed, &0i128);
+        env.storage().instance().set(&DataKey::Expiry, &0u64);
         env.storage().instance().set(&DataKey::Initialized, &true);
 
         env.events()
@@ -117,6 +129,7 @@ impl MerkleDistributor {
             .set(&DataKey::MerkleRoot, &merkle_root);
         env.storage().instance().set(&DataKey::Epoch, &new_epoch);
         env.storage().instance().set(&DataKey::TotalClaimed, &0i128);
+        env.storage().instance().set(&DataKey::Expiry, &0u64);
 
         env.events()
             .publish((symbol_short!("new_root"),), (new_epoch, merkle_root));
@@ -124,12 +137,98 @@ impl MerkleDistributor {
         Ok(())
     }
 
+    /// Set the expiration timestamp for the current campaign (#1504).
+    ///
+    /// After this timestamp (ledger seconds), claims are blocked and the admin
+    /// can reclaim any remaining reward tokens.
+    pub fn set_expiry(env: Env, admin: Address, expiry: u64) -> Result<(), DistributorError> {
+        Self::require_admin(&env, &admin)?;
+        env.storage().instance().set(&DataKey::Expiry, &expiry);
+        env.events().publish((symbol_short!("expiry"),), (expiry,));
+        Ok(())
+    }
+
+    /// Set a new Merkle root with an expiration timestamp (#1504).
+    pub fn set_merkle_root_with_expiry(
+        env: Env,
+        admin: Address,
+        merkle_root: BytesN<32>,
+        expiry: u64,
+    ) -> Result<(), DistributorError> {
+        Self::set_merkle_root(env.clone(), admin, merkle_root)?;
+        env.storage().instance().set(&DataKey::Expiry, &expiry);
+        env.events().publish((symbol_short!("expiry"),), (expiry,));
+        Ok(())
+    }
+
+    // ── Admin: Reclaim Unclaimed Rewards (#1504) ────────────────────
+
+    /// Reclaim unclaimed tokens after the campaign has expired.
+    ///
+    /// Can only be called by the admin and only after `ledger().timestamp() >= expiry`.
+    pub fn reclaim(
+        env: Env,
+        admin: Address,
+        to: Address,
+        amount: i128,
+    ) -> Result<i128, DistributorError> {
+        Self::require_admin(&env, &admin)?;
+
+        if amount <= 0 {
+            return Err(DistributorError::ZeroAmount);
+        }
+
+        let expiry: u64 = env.storage().instance().get(&DataKey::Expiry).unwrap_or(0);
+        if expiry == 0 || env.ledger().timestamp() < expiry {
+            return Err(DistributorError::CampaignNotExpired);
+        }
+
+        let token_addr: Address = env.storage().instance().get(&DataKey::Token).unwrap();
+        let client = token::Client::new(&env, &token_addr);
+        let contract_balance = client.balance(&env.current_contract_address());
+        if contract_balance < amount {
+            return Err(DistributorError::InsufficientBalance);
+        }
+
+        client.transfer(&env.current_contract_address(), &to, &amount);
+
+        env.events()
+            .publish((symbol_short!("reclaim"),), (to, amount));
+
+        Ok(amount)
+    }
+
+    /// Reclaim all remaining unclaimed tokens after campaign expiration (#1504).
+    pub fn reclaim_all(env: Env, admin: Address, to: Address) -> Result<i128, DistributorError> {
+        Self::require_admin(&env, &admin)?;
+
+        let expiry: u64 = env.storage().instance().get(&DataKey::Expiry).unwrap_or(0);
+        if expiry == 0 || env.ledger().timestamp() < expiry {
+            return Err(DistributorError::CampaignNotExpired);
+        }
+
+        let token_addr: Address = env.storage().instance().get(&DataKey::Token).unwrap();
+        let client = token::Client::new(&env, &token_addr);
+        let contract_balance = client.balance(&env.current_contract_address());
+        if contract_balance <= 0 {
+            return Err(DistributorError::InsufficientBalance);
+        }
+
+        client.transfer(&env.current_contract_address(), &to, &contract_balance);
+
+        env.events()
+            .publish((symbol_short!("reclaim"),), (to, contract_balance));
+
+        Ok(contract_balance)
+    }
+
     // ── Claim Rewards ───────────────────────────────────────────────
 
     /// Claim rewards by providing a Merkle proof.
     ///
     /// The caller proves they are entitled to `amount` tokens at leaf
-    /// `index` in the current Merkle tree. The contract verifies the
+    /// `index` in the current Merkle tree. The leaf is bound to the current
+    /// campaign ID (epoch) and the reward asset, and the contract verifies the
     /// proof against the stored root and transfers tokens if valid.
     ///
     /// # Arguments
@@ -156,6 +255,17 @@ impl MerkleDistributor {
             return Err(DistributorError::ZeroAmount);
         }
 
+        // Bounded proof depth check (#1505)
+        if (proof.len() as u32) > MAX_PROOF_DEPTH {
+            return Err(DistributorError::ProofTooLarge);
+        }
+
+        // Campaign expiration check (#1504)
+        let expiry: u64 = env.storage().instance().get(&DataKey::Expiry).unwrap_or(0);
+        if expiry > 0 && env.ledger().timestamp() >= expiry {
+            return Err(DistributorError::CampaignExpired);
+        }
+
         // Check not already claimed
         if Self::is_claimed_internal(&env, index) {
             return Err(DistributorError::AlreadyClaimed);
@@ -168,16 +278,14 @@ impl MerkleDistributor {
             .get(&DataKey::MerkleRoot)
             .ok_or(DistributorError::NoMerkleRoot)?;
 
-        let leaf = Self::compute_leaf(&env, index, &claimant, amount);
+        let epoch: u32 = env.storage().instance().get(&DataKey::Epoch).unwrap();
+        let token_addr: Address = env.storage().instance().get(&DataKey::Token).unwrap();
+
+        let leaf = Self::compute_leaf(&env, epoch, &token_addr, index, &claimant, amount);
         if !Self::verify_proof(&env, &proof, &merkle_root, &leaf) {
             return Err(DistributorError::InvalidProof);
         }
 
-        // Mark as claimed in the bitmap
-        Self::set_claimed(&env, index);
-
-        // Transfer reward tokens to claimant
-        let token_addr: Address = env.storage().instance().get(&DataKey::Token).unwrap();
         let client = token::Client::new(&env, &token_addr);
 
         let contract_balance = client.balance(&env.current_contract_address());
@@ -185,9 +293,10 @@ impl MerkleDistributor {
             return Err(DistributorError::InsufficientBalance);
         }
 
-        client.transfer(&env.current_contract_address(), &claimant, &amount);
+        // Checks-Effects-Interactions: Record claim state before transfer (#1503)
+        Self::set_claimed(&env, index);
 
-        // Update total claimed
+        // Update total claimed before external transfer
         let total_claimed: i128 = env
             .storage()
             .instance()
@@ -196,6 +305,9 @@ impl MerkleDistributor {
         env.storage()
             .instance()
             .set(&DataKey::TotalClaimed, &(total_claimed + amount));
+
+        // Transfer reward tokens to claimant (Interactions)
+        client.transfer(&env.current_contract_address(), &claimant, &amount);
 
         env.events()
             .publish((symbol_short!("claim"),), (claimant, index, amount));
@@ -217,6 +329,14 @@ impl MerkleDistributor {
             .instance()
             .get(&DataKey::MerkleRoot)
             .ok_or(DistributorError::NoMerkleRoot)
+    }
+
+    /// Returns the campaign expiration timestamp (0 if not set) (#1504).
+    pub fn get_expiry(env: Env) -> u64 {
+        env.storage()
+            .instance()
+            .get(&DataKey::Expiry)
+            .unwrap_or(0u64)
     }
 
     /// Returns the current distribution epoch.
@@ -246,10 +366,33 @@ impl MerkleDistributor {
 
     // ── Internal: Merkle Proof Verification ─────────────────────────
 
-    /// Compute the leaf hash: keccak256(abi.encodePacked(index, account, amount)).
-    /// Uses Soroban's crypto primitives for hashing.
-    fn compute_leaf(env: &Env, index: u32, account: &Address, amount: i128) -> BytesN<32> {
+    /// Compute the leaf hash: sha256(campaign_id || asset || index || account || amount).
+    ///
+    /// The campaign ID is the distribution epoch and the asset is the reward
+    /// token, so a leaf is only valid for the campaign and asset it was built for.
+    fn compute_leaf(
+        env: &Env,
+        campaign_id: u32,
+        asset: &Address,
+        index: u32,
+        account: &Address,
+        amount: i128,
+    ) -> BytesN<32> {
         let mut data = soroban_sdk::Bytes::new(env);
+        // Encode campaign ID (epoch) as 4 bytes (big-endian)
+        data.append(&soroban_sdk::Bytes::from_array(
+            env,
+            &campaign_id.to_be_bytes(),
+        ));
+        // Encode the asset address as UTF-8 string bytes
+        let asset_str = asset.to_string();
+        let asset_len = asset_str.len() as usize;
+        let mut asset_buf = [0u8; 56];
+        asset_str.copy_into_slice(&mut asset_buf[..asset_len]);
+        data.append(&soroban_sdk::Bytes::from_slice(
+            env,
+            &asset_buf[..asset_len],
+        ));
         // Encode index as 4 bytes (big-endian)
         data.append(&soroban_sdk::Bytes::from_array(env, &index.to_be_bytes()));
         // Encode the account address as UTF-8 string bytes
@@ -356,7 +499,7 @@ impl MerkleDistributor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use soroban_sdk::testutils::Address as _;
+    use soroban_sdk::testutils::{Address as _, Ledger as _};
     use soroban_sdk::Env;
 
     fn setup_env() -> (
@@ -447,7 +590,7 @@ mod tests {
         let index: u32 = 0;
 
         // Compute the expected leaf hash
-        let leaf = compute_test_leaf(&env, index, &claimant, amount);
+        let leaf = compute_test_leaf(&env, 1, &token_addr, index, &claimant, amount);
 
         // For a single-leaf tree, the root IS the leaf
         let root = leaf.clone();
@@ -474,8 +617,8 @@ mod tests {
         let amount2: i128 = 300;
 
         // Compute leaves
-        let leaf1 = compute_test_leaf(&env, 0, &claimant1, amount1);
-        let leaf2 = compute_test_leaf(&env, 1, &claimant2, amount2);
+        let leaf1 = compute_test_leaf(&env, 1, &token_addr, 0, &claimant1, amount1);
+        let leaf2 = compute_test_leaf(&env, 1, &token_addr, 1, &claimant2, amount2);
 
         // Compute root = hash(sorted(leaf1, leaf2))
         let root = hash_pair_test(&env, &leaf1, &leaf2);
@@ -504,7 +647,7 @@ mod tests {
         let amount: i128 = 1000;
         let index: u32 = 0;
 
-        let leaf = compute_test_leaf(&env, index, &claimant, amount);
+        let leaf = compute_test_leaf(&env, 1, &token_addr, index, &claimant, amount);
         let root = leaf.clone();
         client.set_merkle_root(&admin, &root);
 
@@ -547,18 +690,69 @@ mod tests {
     #[test]
     #[should_panic(expected = "Error(Contract, #8)")]
     fn test_claim_insufficient_balance_panics() {
-        let (env, client, admin, _, _) = setup_env();
+        let (env, client, admin, token_addr, _) = setup_env();
         let claimant = Address::generate(&env);
         let amount: i128 = 1000;
         let index: u32 = 0;
 
-        let leaf = compute_test_leaf(&env, index, &claimant, amount);
+        let leaf = compute_test_leaf(&env, 1, &token_addr, index, &claimant, amount);
         let root = leaf.clone();
         client.set_merkle_root(&admin, &root);
 
         // Don't fund the contract — should fail with InsufficientBalance
         let empty_proof: Vec<BytesN<32>> = Vec::new(&env);
         client.claim(&claimant, &index, &amount, &empty_proof);
+    }
+
+    // ── Campaign / Asset Binding Tests ──────────────────────────────
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #6)")]
+    fn test_claim_rejects_leaf_from_other_campaign() {
+        let (env, client, admin, token_addr, token_admin) = setup_env();
+        let claimant = Address::generate(&env);
+
+        // A leaf built for campaign 1 is published as the root of campaign 2.
+        let campaign_1_leaf = compute_test_leaf(&env, 1, &token_addr, 0, &claimant, 1000);
+        client.set_merkle_root(&admin, &BytesN::from_array(&env, &[1u8; 32]));
+        client.set_merkle_root(&admin, &campaign_1_leaf);
+        assert_eq!(client.get_epoch(), 2);
+
+        mint_tokens(&env, &token_addr, &token_admin, &client.address, 10000);
+
+        let empty_proof: Vec<BytesN<32>> = Vec::new(&env);
+        client.claim(&claimant, &0, &1000, &empty_proof);
+    }
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #6)")]
+    fn test_claim_rejects_leaf_for_other_asset() {
+        let (env, client, admin, token_addr, token_admin) = setup_env();
+        let claimant = Address::generate(&env);
+        let other_asset = Address::generate(&env);
+
+        let other_asset_leaf = compute_test_leaf(&env, 1, &other_asset, 0, &claimant, 1000);
+        client.set_merkle_root(&admin, &other_asset_leaf);
+
+        mint_tokens(&env, &token_addr, &token_admin, &client.address, 10000);
+
+        let empty_proof: Vec<BytesN<32>> = Vec::new(&env);
+        client.claim(&claimant, &0, &1000, &empty_proof);
+    }
+
+    #[test]
+    fn test_claim_accepts_leaf_for_current_campaign_after_root_update() {
+        let (env, client, admin, token_addr, token_admin) = setup_env();
+        let claimant = Address::generate(&env);
+
+        client.set_merkle_root(&admin, &BytesN::from_array(&env, &[1u8; 32]));
+        let leaf = compute_test_leaf(&env, 2, &token_addr, 0, &claimant, 1000);
+        client.set_merkle_root(&admin, &leaf);
+
+        mint_tokens(&env, &token_addr, &token_admin, &client.address, 10000);
+
+        let empty_proof: Vec<BytesN<32>> = Vec::new(&env);
+        assert_eq!(client.claim(&claimant, &0, &1000, &empty_proof), 1000);
     }
 
     // ── Bitmap Tests ────────────────────────────────────────────────
@@ -572,10 +766,208 @@ mod tests {
         assert!(!client.is_claimed(&1000));
     }
 
+    // ── Issue #1503: Duplicate Claim & Repeated Submission Tests ─────
+
+    #[test]
+    fn test_repeated_submission_identical_claim_fails() {
+        let (env, client, admin, token_addr, token_admin) = setup_env();
+        let claimant = Address::generate(&env);
+        let amount: i128 = 1000;
+        let index: u32 = 0;
+
+        let leaf = compute_test_leaf(&env, 1, &token_addr, index, &claimant, amount);
+        client.set_merkle_root(&admin, &leaf);
+
+        let contract_addr = client.address.clone();
+        mint_tokens(&env, &token_addr, &token_admin, &contract_addr, 10000);
+
+        let empty_proof: Vec<BytesN<32>> = Vec::new(&env);
+        // First submission succeeds
+        let res1 = client.try_claim(&claimant, &index, &amount, &empty_proof);
+        assert_eq!(res1, Ok(Ok(1000)));
+        assert!(client.is_claimed(&index));
+        assert_eq!(client.get_total_claimed(), 1000);
+
+        // Repeated submission with identical arguments fails with AlreadyClaimed (#5)
+        let res2 = client.try_claim(&claimant, &index, &amount, &empty_proof);
+        assert_eq!(res2, Err(Ok(DistributorError::AlreadyClaimed)));
+
+        // Third submission from another claimant with the same index also fails
+        let another_claimant = Address::generate(&env);
+        let res3 = client.try_claim(&another_claimant, &index, &amount, &empty_proof);
+        assert_eq!(res3, Err(Ok(DistributorError::AlreadyClaimed)));
+
+        // Contract balance only decreased by one claim amount (10000 - 1000 = 9000)
+        let token_client = soroban_sdk::token::Client::new(&env, &token_addr);
+        assert_eq!(token_client.balance(&contract_addr), 9000);
+    }
+
+    // ── Issue #1504: Campaign Expiry & Unclaimed Reclaim Tests ───────
+
+    #[test]
+    fn test_campaign_exact_expiry_boundary() {
+        let (env, client, admin, token_addr, token_admin) = setup_env();
+        let claimant = Address::generate(&env);
+        let amount: i128 = 1000;
+        let index: u32 = 0;
+        let expiry: u64 = 5000;
+
+        let leaf = compute_test_leaf(&env, 1, &token_addr, index, &claimant, amount);
+        client.set_merkle_root_with_expiry(&admin, &leaf, &expiry);
+        assert_eq!(client.get_expiry(), expiry);
+
+        let contract_addr = client.address.clone();
+        mint_tokens(&env, &token_addr, &token_admin, &contract_addr, 10000);
+
+        // Before expiry: timestamp = expiry - 1 (4999)
+        env.ledger().set_timestamp(4999);
+
+        // Reclaim before expiry must fail with CampaignNotExpired
+        let reclaim_target = Address::generate(&env);
+        let reclaim_res_before = client.try_reclaim(&admin, &reclaim_target, &5000);
+        assert_eq!(
+            reclaim_res_before,
+            Err(Ok(DistributorError::CampaignNotExpired))
+        );
+
+        // Claim before expiry succeeds
+        let empty_proof: Vec<BytesN<32>> = Vec::new(&env);
+        let claim_res = client.try_claim(&claimant, &index, &amount, &empty_proof);
+        assert_eq!(claim_res, Ok(Ok(1000)));
+
+        // Prepare claimant 2 at index 1 for testing at expiry
+        let claimant2 = Address::generate(&env);
+        let amount2: i128 = 2000;
+        let index2: u32 = 1;
+        // In a new root, set expiry to 6000
+        let leaf2 = compute_test_leaf(&env, 2, &token_addr, index2, &claimant2, amount2);
+        client.set_merkle_root_with_expiry(&admin, &leaf2, &6000);
+
+        // At exact expiry: timestamp = 6000
+        env.ledger().set_timestamp(6000);
+
+        // Claim at exact expiry must fail with CampaignExpired
+        let claim_at_expiry = client.try_claim(&claimant2, &index2, &amount2, &empty_proof);
+        assert_eq!(claim_at_expiry, Err(Ok(DistributorError::CampaignExpired)));
+
+        // Reclaim at exact expiry succeeds
+        let reclaim_res_at = client.try_reclaim(&admin, &reclaim_target, &3000);
+        assert_eq!(reclaim_res_at, Ok(Ok(3000)));
+
+        let token_client = soroban_sdk::token::Client::new(&env, &token_addr);
+        assert_eq!(token_client.balance(&reclaim_target), 3000);
+    }
+
+    #[test]
+    fn test_repeated_reclaim() {
+        let (env, client, admin, token_addr, token_admin) = setup_env();
+        let expiry: u64 = 1000;
+        let root = BytesN::from_array(&env, &[1u8; 32]);
+        client.set_merkle_root_with_expiry(&admin, &root, &expiry);
+
+        let contract_addr = client.address.clone();
+        mint_tokens(&env, &token_addr, &token_admin, &contract_addr, 5000);
+
+        // Advance ledger beyond expiry
+        env.ledger().set_timestamp(1500);
+
+        let recipient = Address::generate(&env);
+        // First reclaim succeeds for entire balance
+        let res1 = client.try_reclaim(&admin, &recipient, &5000);
+        assert_eq!(res1, Ok(Ok(5000)));
+
+        // Second (repeated) reclaim fails due to InsufficientBalance
+        let res2 = client.try_reclaim(&admin, &recipient, &1000);
+        assert_eq!(res2, Err(Ok(DistributorError::InsufficientBalance)));
+
+        // Third (repeated) reclaim_all fails due to InsufficientBalance
+        let res3 = client.try_reclaim_all(&admin, &recipient);
+        assert_eq!(res3, Err(Ok(DistributorError::InsufficientBalance)));
+    }
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #3)")]
+    fn test_reclaim_unauthorized_panics() {
+        let (env, client, admin, _, _) = setup_env();
+        let expiry: u64 = 1000;
+        let root = BytesN::from_array(&env, &[1u8; 32]);
+        client.set_merkle_root_with_expiry(&admin, &root, &expiry);
+        env.ledger().set_timestamp(2000);
+
+        let non_admin = Address::generate(&env);
+        let recipient = Address::generate(&env);
+        client.reclaim(&non_admin, &recipient, &1000);
+    }
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #3)")]
+    fn test_set_expiry_unauthorized_panics() {
+        let (env, client, _, _, _) = setup_env();
+        let non_admin = Address::generate(&env);
+        client.set_expiry(&non_admin, &5000);
+    }
+
+    // ── Issue #1505: Proof Depth Bounds Tests ────────────────────────
+
+    #[test]
+    fn test_proof_depth_bounds_maximum_accepted_and_first_rejected() {
+        let (env, client, admin, token_addr, token_admin) = setup_env();
+        let claimant = Address::generate(&env);
+        let amount: i128 = 1000;
+        let index: u32 = 0;
+
+        let root = BytesN::from_array(&env, &[5u8; 32]);
+        client.set_merkle_root(&admin, &root);
+
+        let contract_addr = client.address.clone();
+        mint_tokens(&env, &token_addr, &token_admin, &contract_addr, 10000);
+
+        // Maximum accepted size: MAX_PROOF_DEPTH = 20
+        let mut max_proof: Vec<BytesN<32>> = Vec::new(&env);
+        for _ in 0..MAX_PROOF_DEPTH {
+            max_proof.push_back(BytesN::from_array(&env, &[0u8; 32]));
+        }
+        assert_eq!(max_proof.len(), MAX_PROOF_DEPTH);
+
+        // Calling try_claim with 20 elements passes the proof depth bound check.
+        // It fails with InvalidProof (#6) since the proof is dummy hashes,
+        // but crucially DOES NOT fail with ProofTooLarge (#9).
+        let max_res = client.try_claim(&claimant, &index, &amount, &max_proof);
+        assert_eq!(max_res, Err(Ok(DistributorError::InvalidProof)));
+
+        // First rejected size: MAX_PROOF_DEPTH + 1 = 21
+        let mut oversized_proof = max_proof.clone();
+        oversized_proof.push_back(BytesN::from_array(&env, &[0u8; 32]));
+        assert_eq!(oversized_proof.len(), MAX_PROOF_DEPTH + 1);
+
+        // Calling try_claim with 21 elements is rejected immediately before hashing with ProofTooLarge (#9).
+        let rejected_res = client.try_claim(&claimant, &index, &amount, &oversized_proof);
+        assert_eq!(rejected_res, Err(Ok(DistributorError::ProofTooLarge)));
+    }
+
     // ── Helper functions for tests ──────────────────────────────────
 
-    fn compute_test_leaf(env: &Env, index: u32, account: &Address, amount: i128) -> BytesN<32> {
+    fn compute_test_leaf(
+        env: &Env,
+        campaign_id: u32,
+        asset: &Address,
+        index: u32,
+        account: &Address,
+        amount: i128,
+    ) -> BytesN<32> {
         let mut data = soroban_sdk::Bytes::new(env);
+        data.append(&soroban_sdk::Bytes::from_array(
+            env,
+            &campaign_id.to_be_bytes(),
+        ));
+        let asset_str = asset.to_string();
+        let asset_len = asset_str.len() as usize;
+        let mut asset_buf = [0u8; 56];
+        asset_str.copy_into_slice(&mut asset_buf[..asset_len]);
+        data.append(&soroban_sdk::Bytes::from_slice(
+            env,
+            &asset_buf[..asset_len],
+        ));
         data.append(&soroban_sdk::Bytes::from_array(env, &index.to_be_bytes()));
         let addr_str = account.to_string();
         let len = addr_str.len() as usize;

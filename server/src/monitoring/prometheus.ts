@@ -11,6 +11,7 @@
  *  - stellaryield_http_request_duration_ms — API response time histogram
  *  - stellaryield_db_pool_status           — DB connection pool health (1=up, 0=down)
  *  - stellaryield_indexer_lag_ledgers      — Ledgers behind the chain tip
+ *  - stellaryield_failure_total{provider,network,route,failure_category} — Tagged failure counts
  *
  * Security: no wallet addresses or user-specific data is included.
  */
@@ -121,6 +122,50 @@ sorobanRpcFailoverService.registerMetricsListener({
     sorobanRpcLatencyGauge.set({ endpoint }, latencyMs);
   },
 });
+// ── Failure metrics ─────────────────────────────────────────────────────
+
+const UNKNOWN = "unknown";
+
+const failureCounter = new Counter({
+  name: "stellaryield_failure_total",
+  help: "Count of server-side failures tagged by provider, network, route, and failure category",
+  labelNames: ["provider", "network", "route", "failure_category"] as const,
+  registers: [prometheusRegistry],
+});
+
+/**
+ * Records a tagged failure. Any omitted optional tag is recorded as the
+ * stable "unknown" value (matching this codebase's existing fallback
+ * convention, e.g. protocolFailoverService's status strings) so reliability
+ * reports can still group by the tags that were available.
+ */
+export function recordFailure(tags: {
+  provider?: string;
+  network?: string;
+  route?: string;
+  failure_category?: string;
+}): void {
+  failureCounter.inc({
+    provider: tags.provider || UNKNOWN,
+    network: tags.network || UNKNOWN,
+    route: tags.route || UNKNOWN,
+    failure_category: tags.failure_category || UNKNOWN,
+  });
+}
+
+/**
+ * Normalizes the several network-passphrase env vars used across this
+ * codebase into a stable label value for failure tagging.
+ */
+export function resolveNetworkLabel(): "testnet" | "mainnet" | "unknown" {
+  const raw =
+    process.env.NETWORK_PASSPHRASE ??
+    process.env.STELLAR_NETWORK_PASSPHRASE ??
+    process.env.STELLAR_NETWORK;
+  if (!raw) return UNKNOWN;
+  const upper = raw.toUpperCase();
+  return upper.includes("TESTNET") || upper.includes("TEST SDF") ? "testnet" : "mainnet";
+}
 
 // ── Metric collection ───────────────────────────────────────────────────
 

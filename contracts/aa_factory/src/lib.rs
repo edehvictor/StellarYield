@@ -90,4 +90,5 @@ mod proxy_wallet;
 pub use factory::{DeploymentConfig, FactoryError, ProxyInfo, WalletFactory, WalletFactoryClient};
 pub use proxy_wallet::{
     ExecutionResult, P256PublicKey, ProxyError, ProxyWallet, ProxyWalletClient, UserOperation,
+    UserOperationPolicyPreview,
 };

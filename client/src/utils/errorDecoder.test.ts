@@ -109,6 +109,13 @@ describe("decodeTransactionError", () => {
         expect(result.title).toBe("Charity Not Whitelisted");
     });
 
+    it("decodes donation error 2007 → Donation Below Minimum", () => {
+        const result = decodeTransactionError("Error(Contract, #2007)");
+        expect(result.code).toBe(2007);
+        expect(result.title).toBe("Donation Below Minimum");
+        expect(result.message).toContain("below the minimum");
+    });
+
     it("decodes swap error 3001 → Insufficient Balance for Swap", () => {
         const result = decodeTransactionError("Error(Contract, #3001)");
         expect(result.code).toBe(3001);
@@ -232,14 +239,20 @@ describe("KNOWN_CONTRACT_ERROR_CODES", () => {
         expect(KNOWN_CONTRACT_ERROR_CODES.has(1003)).toBe(true);
     });
 
-    it("contains donation error codes 2001–2002", () => {
-        expect(KNOWN_CONTRACT_ERROR_CODES.has(2001)).toBe(true);
-        expect(KNOWN_CONTRACT_ERROR_CODES.has(2002)).toBe(true);
+    it("contains every documented vault extension error code", () => {
+        for (const code of [2001, 2002, 2003, 2004, 2005, 2006, 2007, 2008, 2009, 2010]) {
+            expect(KNOWN_CONTRACT_ERROR_CODES.has(code)).toBe(true);
+        }
     });
 
     it("contains swap error codes 3001–3002", () => {
         expect(KNOWN_CONTRACT_ERROR_CODES.has(3001)).toBe(true);
         expect(KNOWN_CONTRACT_ERROR_CODES.has(3002)).toBe(true);
+    });
+
+    it("contains the zap quote-expired code 4001", () => {
+        expect(KNOWN_CONTRACT_ERROR_CODES.has(4001)).toBe(true);
+        expect(decodeTransactionError("Error(Contract, #4001)").title).toBe("Quote Expired");
     });
 
     it("every code in the set decodes to a non-fallback title", () => {

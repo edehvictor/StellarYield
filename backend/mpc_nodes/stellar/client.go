@@ -3,13 +3,11 @@ package stellar
 
 import (
 	"context"
-	"encoding/base64"
-	"fmt"
+	"math/big"
 	"time"
 
 	"github.com/pkg/errors"
 	"github.com/stellar/go/keypair"
-	"github.com/stellar/go/network"
 	"github.com/stellar/go/txnbuild"
 	"github.com/stellaryield/mpc_nodes/tss"
 )
@@ -145,9 +143,9 @@ func (c *TreasuryClient) CreatePaymentTransaction(
 			BaseFee:    txnbuild.MinBaseFee * c.config.FeeMultiplier,
 			Memo:       txnbuild.MemoText(memo),
 			Preconditions: txnbuild.Preconditions{
-				TimeBounds: &txnbuild.Timebounds{
+				TimeBounds: txnbuild.TimeBounds{
 					MinTime: 0,
-					MaxTime: uint64(time.Now().Add(5 * time.Minute).Unix()),
+					MaxTime: time.Now().Add(5 * time.Minute).Unix(),
 				},
 			},
 		},
@@ -173,7 +171,7 @@ func (c *TreasuryClient) CreateSetConfigTransaction(
 	setLowThreshold *int32,
 	setMedThreshold *int32,
 	setHighThreshold *int32,
-	setSigner *txnbuild.SetSigner,
+	setSigner *txnbuild.Signer,
 ) (string, error) {
 	publicKey := c.config.MPCPublicKey
 	if publicKey == nil {
@@ -186,10 +184,10 @@ func (c *TreasuryClient) CreateSetConfigTransaction(
 
 	// Build set options operation
 	setOptionsOp := &txnbuild.SetOptions{
-		MasterWeight:    setMasterWeight,
-		LowThreshold:    setLowThreshold,
-		MediumThreshold: setMedThreshold,
-		HighThreshold:   setHighThreshold,
+		MasterWeight:    thresholdFromInt32(setMasterWeight),
+		LowThreshold:    thresholdFromInt32(setLowThreshold),
+		MediumThreshold: thresholdFromInt32(setMedThreshold),
+		HighThreshold:   thresholdFromInt32(setHighThreshold),
 		Signer:          setSigner,
 	}
 
@@ -199,12 +197,12 @@ func (c *TreasuryClient) CreateSetConfigTransaction(
 				AccountID: sourceAccount,
 				Sequence:  0,
 			},
-			Operations:  []txnbuild.Operation{setOptionsOp},
-			BaseFee:     txnbuild.MinBaseFee * c.config.FeeMultiplier,
+			Operations: []txnbuild.Operation{setOptionsOp},
+			BaseFee:    txnbuild.MinBaseFee * c.config.FeeMultiplier,
 			Preconditions: txnbuild.Preconditions{
-				TimeBounds: &txnbuild.Timebounds{
+				TimeBounds: txnbuild.TimeBounds{
 					MinTime: 0,
-					MaxTime: uint64(time.Now().Add(5 * time.Minute).Unix()),
+					MaxTime: time.Now().Add(5 * time.Minute).Unix(),
 				},
 			},
 		},
@@ -234,21 +232,16 @@ func (c *TreasuryClient) SignTransactionWithTSS(
 	}
 
 	// Get the message hash to sign
-	messageHash, err := network.HashTransactionInEnvelope(
-		tx.Transaction,
-		false,
-		c.config.NetworkPassphrase,
-	)
+	messageHash, err := tx.Hash(c.config.NetworkPassphrase)
 	if err != nil {
 		return "", errors.Wrap(err, "failed to hash transaction")
 	}
 
 	// Verify signature matches message hash
-	valid := tss.VerifySignature(
-		c.config.MPCPublicKey.GetPublicKey().AsEd25519PublicKey(),
-		messageHash[:],
-		signature,
-	)
+	valid, err := c.verifyTSSAgainstAccount(messageHash[:], signature)
+	if err != nil {
+		return "", errors.Wrap(err, "failed to verify TSS signature")
+	}
 	if !valid {
 		return "", errors.New("TSS signature verification failed")
 	}
@@ -263,6 +256,25 @@ func (c *TreasuryClient) SignTransactionWithTSS(
 	// 3. Add to transaction envelope
 
 	return txXDR, nil
+}
+
+// verifyTSSAgainstAccount verifies a TSS signature against the configured
+// MPC Stellar account. The TSS signature is encoded to the 64-byte Stellar
+// format and checked with the account's Ed25519 verifier.
+func (c *TreasuryClient) verifyTSSAgainstAccount(messageHash []byte, signature *tss.Signature) (bool, error) {
+	if c.config.MPCPublicKey == nil {
+		return false, errors.New("MPC public key not set")
+	}
+
+	sigBytes, err := EncodeSignature(signature)
+	if err != nil {
+		return false, errors.Wrap(err, "failed to encode signature")
+	}
+
+	if err := c.config.MPCPublicKey.Verify(messageHash, sigBytes); err != nil {
+		return false, nil
+	}
+	return true, nil
 }
 
 // SubmitTransaction submits a signed transaction to Stellar
@@ -289,11 +301,7 @@ func (c *TreasuryClient) BuildSigningRequest(txXDR string, operationType string)
 		return nil, errors.Wrap(err, "failed to decode transaction")
 	}
 
-	messageHash, err := network.HashTransactionInEnvelope(
-		tx.Transaction,
-		false,
-		c.config.NetworkPassphrase,
-	)
+	messageHash, err := tx.Hash(c.config.NetworkPassphrase)
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to hash transaction")
 	}
@@ -318,25 +326,12 @@ func (c *TreasuryClient) VerifyTransactionSignature(
 		return false, errors.Wrap(err, "failed to decode transaction")
 	}
 
-	messageHash, err := network.HashTransactionInEnvelope(
-		tx.Transaction,
-		false,
-		c.config.NetworkPassphrase,
-	)
+	messageHash, err := tx.Hash(c.config.NetworkPassphrase)
 	if err != nil {
 		return false, errors.Wrap(err, "failed to hash transaction")
 	}
 
-	publicKey := c.config.MPCPublicKey
-	if publicKey == nil {
-		return false, errors.New("MPC public key not set")
-	}
-
-	return tss.VerifySignature(
-		publicKey.GetPublicKey().AsEd25519PublicKey(),
-		messageHash[:],
-		signature,
-	), nil
+	return c.verifyTSSAgainstAccount(messageHash[:], signature)
 }
 
 // GetNetworkPassphrase returns the configured network passphrase
@@ -351,15 +346,24 @@ func (c *TreasuryClient) GetHorizonURL() string {
 
 // ParseTransactionXDR parses a transaction XDR and returns details
 func (c *TreasuryClient) ParseTransactionXDR(txXDR string) (map[string]interface{}, error) {
-	tx, err := txnbuild.TransactionFromXDR(txXDR)
+	parsed, err := txnbuild.TransactionFromXDR(txXDR)
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to decode transaction")
 	}
 
+	tx, ok := parsed.Transaction()
+	if !ok {
+		return nil, errors.New("fee-bump transactions are not supported")
+	}
+
 	operations := make([]map[string]interface{}, 0, len(tx.Operations()))
 	for _, op := range tx.Operations() {
+		xdrOp, err := op.BuildXDR()
+		if err != nil {
+			return nil, errors.Wrap(err, "failed to build operation XDR")
+		}
 		opMap := map[string]interface{}{
-			"type": op.GetOp().Type.String(),
+			"type": xdrOp.Body.Type.String(),
 		}
 
 		switch o := op.(type) {
@@ -387,8 +391,8 @@ func (c *TreasuryClient) ParseTransactionXDR(txXDR string) (map[string]interface
 
 	return map[string]interface{}{
 		"source_account": tx.SourceAccount().AccountID,
-		"sequence":       tx.Sequence(),
-		"fee":            tx.Fee(),
+		"sequence":       tx.SequenceNumber(),
+		"fee":            tx.MaxFee(),
 		"operations":     operations,
 		"memo":           tx.Memo(),
 	}, nil
@@ -426,27 +430,36 @@ func DecodeSignature(sigBytes []byte) (*tss.Signature, error) {
 	return &tss.Signature{R: r, S: s}, nil
 }
 
+// thresholdFromInt32 converts an optional int32 threshold to the txnbuild
+// Threshold type, returning nil when the input is nil.
+func thresholdFromInt32(v *int32) *txnbuild.Threshold {
+	if v == nil {
+		return nil
+	}
+	return txnbuild.NewThreshold(txnbuild.Threshold(*v))
+}
+
 // TreasuryOperationType represents types of treasury operations
 type TreasuryOperationType string
 
 const (
-	OpPayment          TreasuryOperationType = "PAYMENT"
-	OpSetOptions       TreasuryOperationType = "SET_OPTIONS"
-	OpCreateAccount    TreasuryOperationType = "CREATE_ACCOUNT"
-	OpManageData       TreasuryOperationType = "MANAGE_DATA"
-	OpBumpSequence     TreasuryOperationType = "BUMP_SEQUENCE"
-	OpManageSellOffer  TreasuryOperationType = "MANAGE_SELL_OFFER"
-	OpManageBuyOffer   TreasuryOperationType = "MANAGE_BUY_OFFER"
+	OpPayment         TreasuryOperationType = "PAYMENT"
+	OpSetOptions      TreasuryOperationType = "SET_OPTIONS"
+	OpCreateAccount   TreasuryOperationType = "CREATE_ACCOUNT"
+	OpManageData      TreasuryOperationType = "MANAGE_DATA"
+	OpBumpSequence    TreasuryOperationType = "BUMP_SEQUENCE"
+	OpManageSellOffer TreasuryOperationType = "MANAGE_SELL_OFFER"
+	OpManageBuyOffer  TreasuryOperationType = "MANAGE_BUY_OFFER"
 )
 
 // TreasuryRequest represents a treasury operation request
 type TreasuryRequest struct {
-	ID          string                `json:"id"`
-	Type        TreasuryOperationType `json:"type"`
+	ID          string                 `json:"id"`
+	Type        TreasuryOperationType  `json:"type"`
 	Parameters  map[string]interface{} `json:"parameters"`
-	RequesterID string                `json:"requester_id"`
-	CreatedAt   time.Time             `json:"created_at"`
-	Status      string                `json:"status"`
+	RequesterID string                 `json:"requester_id"`
+	CreatedAt   time.Time              `json:"created_at"`
+	Status      string                 `json:"status"`
 }
 
 // Validate validates a treasury request

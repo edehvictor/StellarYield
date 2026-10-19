@@ -28,6 +28,24 @@ pub struct ApySnapshot {
     pub timestamp: u64,
 }
 
+/// Read-only breakdown of the vault's fee accrual state.
+///
+/// This struct is a pure view over existing storage: it does not mutate any
+/// state and is safe to call repeatedly. All amounts are expressed in the
+/// vault's underlying asset units; all rates are in basis points.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct FeeAccrualBreakdown {
+    /// Current management fee in basis points (0 if unset).
+    pub management_fee_bps: i128,
+    /// Current performance fee in basis points.
+    pub performance_fee_bps: i128,
+    /// Cumulative performance fees collected to date.
+    pub total_fees_collected: i128,
+    /// Pending (unsettled) fees accrued but not yet collected.
+    pub pending_fees: i128,
+}
+
 /// Basis points denominator.
 const BPS_DENOMINATOR: i128 = 10_000;
 
@@ -39,6 +57,9 @@ const DEFAULT_MAX_FEE_BPS: i128 = 1_000;
 
 /// Number of APY snapshots to consider for moving average.
 const MOVING_AVERAGE_WINDOW: u32 = 10;
+
+/// Storage key for pending (unsettled) fees.
+const PENDING_FEES_KEY: soroban_sdk::Symbol = symbol_short!("pend_fee");
 
 #[contractimpl]
 impl YieldVault {
@@ -189,6 +210,19 @@ impl YieldVault {
         (net, fee)
     }
 
+    /// Calculate a performance fee only on a realized gain above the vault's
+    /// cost basis. Deposits and unrealized mark-to-market changes therefore do
+    /// not create a fee. This helper is intentionally pure with respect to
+    /// storage so callers can settle the gain atomically with their transfer.
+    pub fn apply_realized_performance_fee(
+        env: &Env,
+        realized_assets: i128,
+        cost_basis: i128,
+    ) -> (i128, i128) {
+        let gain = realized_assets.saturating_sub(cost_basis).max(0);
+        Self::apply_performance_fee(env, gain)
+    }
+
     /// View: return the current performance fee in basis points.
     /// This fee is applied to harvest yields.
     pub fn get_performance_fee_bps(env: Env) -> i128 {
@@ -212,6 +246,48 @@ impl YieldVault {
             .instance()
             .get(&FeeKey::TotalFeesCollected)
             .unwrap_or(0)
+    }
+
+    /// View: return a read-only breakdown of the vault's fee accrual state.
+    ///
+    /// This is a pure read: it never mutates storage and is therefore stable
+    /// across repeated calls within the same ledger. It aggregates the
+    /// management fee, performance fee, total fees collected, and any pending
+    /// (unsettled) fees into a single struct for off-chain consumers.
+    ///
+    /// # Returns
+    /// A [`FeeAccrualBreakdown`] describing the current accrual ledger.
+    pub fn get_fee_accrual_breakdown(env: Env) -> FeeAccrualBreakdown {
+        let management_fee_bps: i128 = env
+            .storage()
+            .instance()
+            .get(&FeeKey::MinFeeBps)
+            .unwrap_or(0);
+
+        let performance_fee_bps: i128 = env
+            .storage()
+            .instance()
+            .get(&FeeKey::PerformanceFeeBps)
+            .unwrap_or(DEFAULT_MIN_FEE_BPS);
+
+        let total_fees_collected: i128 = env
+            .storage()
+            .instance()
+            .get(&FeeKey::TotalFeesCollected)
+            .unwrap_or(0);
+
+        let pending_fees: i128 = env
+            .storage()
+            .instance()
+            .get(&PENDING_FEES_KEY)
+            .unwrap_or(0);
+
+        FeeAccrualBreakdown {
+            management_fee_bps,
+            performance_fee_bps,
+            total_fees_collected,
+            pending_fees,
+        }
     }
 
     /// Update the address that receives protocol performance fees.
@@ -395,6 +471,22 @@ mod tests {
     }
 
     #[test]
+    fn test_realized_performance_fee_ignores_unrealized_loss_and_principal() {
+        let (env, client, admin, _, _) = setup_env();
+        client.set_fee_bounds(&admin, &1_000, &1_000);
+
+        let (net, fee) = env.as_contract(&client.address, || {
+            YieldVault::apply_realized_performance_fee(&env, 900, 1_000)
+        });
+        assert_eq!((net, fee), (0, 0));
+
+        let (net, fee) = env.as_contract(&client.address, || {
+            YieldVault::apply_realized_performance_fee(&env, 1_200, 1_000)
+        });
+        assert_eq!((net, fee), (180, 20));
+    }
+
+    #[test]
     fn test_fee_rounding_dust_bound() {
         // Verify that rounding dust never exceeds 1 unit
         // For any gross_amount and fee_bps, the rounding error is at most 1
@@ -412,5 +504,73 @@ mod tests {
                 gross
             );
         }
+    }
+
+    #[test]
+    fn test_fee_accrual_breakdown_no_accrual() {
+        let (env, client, _admin, _, _) = setup_env();
+
+        let breakdown = client.get_fee_accrual_breakdown();
+        assert_eq!(breakdown.management_fee_bps, 0);
+        assert_eq!(breakdown.performance_fee_bps, DEFAULT_MIN_FEE_BPS);
+        assert_eq!(breakdown.total_fees_collected, 0);
+        assert_eq!(breakdown.pending_fees, 0);
+    }
+
+    #[test]
+    fn test_fee_accrual_breakdown_one_period() {
+        let (env, client, admin, _, _) = setup_env();
+
+        // Record a single APY observation: 2000 bps -> raw fee 200 bps,
+        // clamped to the default minimum of 100 bps.
+        let new_fee = client.record_apy_and_adjust_fee(&admin, &2_000);
+        assert_eq!(new_fee, DEFAULT_MIN_FEE_BPS);
+
+        let breakdown = client.get_fee_accrual_breakdown();
+        assert_eq!(breakdown.performance_fee_bps, DEFAULT_MIN_FEE_BPS);
+        assert_eq!(breakdown.total_fees_collected, 0);
+        assert_eq!(breakdown.pending_fees, 0);
+
+        // Verify the breakdown matches the individual view getters.
+        assert_eq!(
+            breakdown.performance_fee_bps,
+            client.get_performance_fee_bps()
+        );
+        assert_eq!(
+            breakdown.total_fees_collected,
+            client.get_total_fees_collected()
+        );
+    }
+
+    #[test]
+    fn test_fee_accrual_breakdown_repeated_read_stability() {
+        let (env, client, admin, _, _) = setup_env();
+
+        client.record_apy_and_adjust_fee(&admin, &5_000);
+
+        let first = client.get_fee_accrual_breakdown();
+        let second = client.get_fee_accrual_breakdown();
+        let third = client.get_fee_accrual_breakdown();
+
+        // Repeated reads must be stable and must not mutate state.
+        assert_eq!(first.management_fee_bps, second.management_fee_bps);
+        assert_eq!(first.performance_fee_bps, second.performance_fee_bps);
+        assert_eq!(first.total_fees_collected, second.total_fees_collected);
+        assert_eq!(first.pending_fees, second.pending_fees);
+
+        assert_eq!(second.management_fee_bps, third.management_fee_bps);
+        assert_eq!(second.performance_fee_bps, third.performance_fee_bps);
+        assert_eq!(second.total_fees_collected, third.total_fees_collected);
+        assert_eq!(second.pending_fees, third.pending_fees);
+
+        // And the underlying view getters remain unchanged.
+        assert_eq!(
+            first.performance_fee_bps,
+            client.get_performance_fee_bps()
+        );
+        assert_eq!(
+            first.total_fees_collected,
+            client.get_total_fees_collected()
+        );
     }
 }

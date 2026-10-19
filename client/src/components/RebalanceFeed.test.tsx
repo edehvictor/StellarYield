@@ -5,7 +5,7 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
-import { RebalanceFeed } from "../RebalanceFeed";
+import { RebalanceFeed } from "./RebalanceFeed";
 import { RebalanceFeedService } from "../services/rebalanceFeedService";
 import type { RebalanceEvent } from "../../../shared/types/rebalanceEvent";
 
@@ -207,8 +207,8 @@ describe("RebalanceFeed Component", () => {
       render(<RebalanceFeed vaultId="vault-123" enablePolling={false} />);
 
       await waitFor(() => {
-        const expandButton = screen.getByRole("button", { name: "" }).parentElement?.querySelector('button[aria-label=""]');
-        if (expandButton) fireEvent.click(expandButton);
+        const expandButton = screen.getByRole("button", { name: /expand details/i });
+        fireEvent.click(expandButton);
       });
 
       // Check for expanded content
@@ -237,9 +237,8 @@ describe("RebalanceFeed Component", () => {
 
       // Expand the event (click reveal button)
       await waitFor(() => {
-        const buttons = screen.getAllByRole("button");
-        const expandButton = buttons.find((b) => b.getAttribute("aria-label") === "");
-        if (expandButton) fireEvent.click(expandButton);
+        const expandButton = screen.getByRole("button", { name: /expand details/i });
+        fireEvent.click(expandButton);
       });
 
       await waitFor(() => {
@@ -266,9 +265,8 @@ describe("RebalanceFeed Component", () => {
 
       // Expand the event
       await waitFor(() => {
-        const buttons = screen.getAllByRole("button");
-        const expandButton = buttons.find((b) => b.getAttribute("aria-label") === "");
-        if (expandButton) fireEvent.click(expandButton);
+        const expandButton = screen.getByRole("button", { name: /expand details/i });
+        fireEvent.click(expandButton);
       });
 
       await waitFor(() => {
@@ -296,9 +294,8 @@ describe("RebalanceFeed Component", () => {
 
       // Expand the event
       await waitFor(() => {
-        const buttons = screen.getAllByRole("button");
-        const expandButton = buttons.find((b) => b.getAttribute("aria-label") === "");
-        if (expandButton) fireEvent.click(expandButton);
+        const expandButton = screen.getByRole("button", { name: /expand details/i });
+        fireEvent.click(expandButton);
       });
 
       await waitFor(() => {

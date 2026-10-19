@@ -6,6 +6,7 @@ import {
   SOURCE_HEALTH_THRESHOLDS,
   type SourceHealthInput,
   type SourceHealthSummary,
+  detectRegistryConflicts,
 } from "../yieldSourceRegistryService";
 import type { DataSourceReliability } from "../yieldReliabilityService";
 
@@ -29,7 +30,8 @@ describe("classifySourceHealth", () => {
   it("marks a source unavailable after consecutive failures", () => {
     const result = classifySourceHealth({
       ...baseInput,
-      consecutiveFailures: SOURCE_HEALTH_THRESHOLDS.unavailableConsecutiveFailures,
+      consecutiveFailures:
+        SOURCE_HEALTH_THRESHOLDS.unavailableConsecutiveFailures,
     });
     expect(result.status).toBe("unavailable");
     expect(result.failureReason).toMatch(/consecutive fetch failures/);
@@ -78,6 +80,78 @@ describe("classifySourceHealth", () => {
       ageSeconds: SOURCE_HEALTH_THRESHOLDS.staleAgeSeconds + 60,
     });
     expect(result.status).toBe("unavailable");
+  });
+});
+
+describe("detectRegistryConflicts", () => {
+  it("detects duplicate provider IDs and reports both entries", () => {
+    const result = detectRegistryConflicts([
+      { id: "blend_api", name: "Blend", source: "api" },
+      { id: "blend_api", name: "Blend mirror", source: "api" },
+    ]);
+
+    expect(result.status).toBe("conflicted");
+    expect(result.conflicts).toHaveLength(1);
+    expect(result.conflicts[0]).toMatchObject({
+      type: "providerId",
+      identity: "blend_api",
+    });
+    expect(
+      result.conflicts[0]?.entries.map((entry) => entry.providerName),
+    ).toEqual(["Blend", "Blend mirror"]);
+  });
+
+  it("detects an alias shared by otherwise distinct providers", () => {
+    const result = detectRegistryConflicts([
+      { id: "blend_api", name: "Blend", source: "api", aliases: ["blend"] },
+      { id: "blend_v2", name: "Blend v2", source: "api", aliases: [" BLEND "] },
+    ]);
+
+    expect(result.conflicts).toEqual([
+      expect.objectContaining({ type: "alias", identity: "blend" }),
+    ]);
+  });
+
+  it("keeps source labels distinct when only the URL path differs", () => {
+    const result = detectRegistryConflicts([
+      {
+        id: "feed_a",
+        name: "Feed A",
+        source: "api",
+        sourceLabel: "https://feeds.example.com/v1",
+      },
+      {
+        id: "feed_b",
+        name: "Feed B",
+        source: "api",
+        sourceLabel: "https://feeds.example.com/v2",
+      },
+    ]);
+
+    expect(result.status).toBe("valid");
+    expect(result.conflicts).toHaveLength(0);
+  });
+
+  it("detects a source label repeated with case and trailing-slash differences", () => {
+    const result = detectRegistryConflicts([
+      {
+        id: "feed_a",
+        name: "Feed A",
+        source: "api",
+        sourceLabel: "https://feeds.example.com/v1/",
+      },
+      {
+        id: "feed_b",
+        name: "Feed B",
+        source: "api",
+        sourceLabel: "HTTPS://FEEDS.EXAMPLE.COM/v1",
+      },
+    ]);
+
+    expect(result.conflicts[0]).toMatchObject({
+      type: "sourceLabel",
+      identity: "feeds.example.com/v1",
+    });
   });
 });
 
@@ -138,7 +212,9 @@ describe("toSourceHealth", () => {
       ...reliability,
       signals: {
         ...reliability.signals,
-        lastSuccessfulFetch: new Date(Date.now() - 60 * 60 * 1000).toISOString(),
+        lastSuccessfulFetch: new Date(
+          Date.now() - 60 * 60 * 1000,
+        ).toISOString(),
       },
     });
     expect(stale.status).toBe("stale");
@@ -199,7 +275,9 @@ describe("getSourceHealthRegistry", () => {
 
     // lastInvalidatedAt is a valid ISO timestamp
     expect(typeof registry.lastInvalidatedAt).toBe("string");
-    expect(new Date(registry.lastInvalidatedAt).toString()).not.toBe("Invalid Date");
+    expect(new Date(registry.lastInvalidatedAt).toString()).not.toBe(
+      "Invalid Date",
+    );
   });
 
   it("increments cacheVersion and includes cacheAge on subsequent calls", async () => {

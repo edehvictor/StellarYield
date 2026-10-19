@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "prebuild": "npm --prefix ../packages/sdk ci --no-audit && npm --prefix ../packages/sdk run build",
+    "prebuild": "npm --prefix ../packages/sdk ci --no-audit && npm --prefix ../packages/sdk run build && node scripts/validateDeploymentConfig.js",
     "build": "tsc -b && vite build",
     "lint": "eslint .",
     "lint:ci-scope": "eslint src/features/zap",
