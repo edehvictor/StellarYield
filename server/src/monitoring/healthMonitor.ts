@@ -29,6 +29,23 @@ export async function startHealthMonitor() {
       if (status.sorobanRpc === "warning")
         issues.push("⚠️ Soroban RPC is degraded");
 
+      // Check Soroban RPC Failover Pool status
+      try {
+        const rpcEndpoint = HEALTH_ENDPOINT.replace(/\/api\/health$/, "/api/rpc/status");
+        const rpcResp = await axios.get(rpcEndpoint, { timeout: 5_000 });
+        if (rpcResp.data) {
+          if (rpcResp.data.status === "all_down") {
+            issues.push("❌ All Soroban RPC pool endpoints are DOWN");
+          } else if (rpcResp.data.status === "failover_active") {
+            issues.push(
+              `⚠️ Soroban RPC running on failover node: ${rpcResp.data.activeEndpoint} (priority ${rpcResp.data.activePriority})`,
+            );
+          }
+        }
+      } catch {
+        // Non-fatal if /api/rpc is temporarily unavailable
+      }
+
       if (issues.length > 0) {
         const severity = issues.some((i) => i.startsWith("❌"))
           ? "HIGH"

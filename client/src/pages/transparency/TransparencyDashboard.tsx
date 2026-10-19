@@ -28,6 +28,7 @@ import { getApiBaseUrl } from "../../lib/api";
 import { parseSmokeRunResult } from "./smokeResults";
 import VaultReliabilityPanel from "./VaultReliabilityPanel";
 import AuditReplayReportPanel from "./AuditReplayReportPanel";
+import SorobanRpcFailoverPanel from "../../components/SorobanRpcFailoverPanel";
 import RegistryDiffPage from "./RegistryDiff";
 
 const getApiBase = () => {
@@ -296,6 +297,8 @@ export default function TransparencyDashboard() {
                     </LineChart>
                 </ResponsiveContainer>
             </div>
+
+            <SorobanRpcFailoverPanel />
 
             <div className="glass-panel rounded-2xl p-6">
                 <div className="flex items-center gap-2 mb-4">

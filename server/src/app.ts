@@ -56,6 +56,7 @@ import momentumRouter from "./routes/momentum";
 import queueRouter from "./routes/queue";
 import vaultActivityRouter from "./routes/vaultActivity";
 import watchlistRouter from "./routes/watchlist";
+import sorobanRpcRouter from "./routes/sorobanRpc";
 
 import { createAuthChallenge, verifyAuthChallenge } from "./utils/stellarAuth";
 import {
@@ -158,6 +159,7 @@ export function createApp() {
   app.use("/api/relayer", relayerStatusRouter);
   app.use("/api/risk", riskRouter);
   app.use("/api/liquidity", fragmentationRouter);
+  app.use("/api/rpc", sorobanRpcRouter);
   app.use("/api/indexer", indexerRouter);
   app.use("/api/audit-replay", auditReplayRouter);
   app.use("/api/momentum", momentumRouter);

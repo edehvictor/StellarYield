@@ -38,7 +38,9 @@ Edit `.env.deploy` with your values. The file is gitignored — never commit sec
 
 | Variable | Description |
 |---|---|
-| `STELLAR_RPC_URL` | Soroban RPC endpoint (default: Stellar testnet) |
+| `STELLAR_RPC_URL` | Primary Soroban RPC endpoint (default: Stellar testnet) |
+| `STELLAR_RPC_FALLBACK_URLS` | Optional comma-separated backup Soroban RPC endpoints for automatic failover |
+| `STELLAR_RPC_ALERT_WEBHOOK` | Optional webhook URL for deployment failover alert notifications |
 | `STELLAR_NETWORK_PASSPHRASE` | Network passphrase |
 | `STELLAR_SOURCE_ACCOUNT` | Secret key (`S...`) or named CLI identity |
 

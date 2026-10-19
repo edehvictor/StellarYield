@@ -15,9 +15,10 @@
  * Security: no wallet addresses or user-specific data is included.
  */
 
-import { Registry, Gauge, Histogram, collectDefaultMetrics } from "prom-client";
+import { Registry, Gauge, Histogram, Counter, collectDefaultMetrics } from "prom-client";
 import { getYieldData } from "../services/yieldService";
 import { metrics as httpMetrics } from "../middleware/metrics";
+import { sorobanRpcFailoverService } from "../services/sorobanRpcFailoverService";
 
 // ── Registry ────────────────────────────────────────────────────────────
 
@@ -69,6 +70,58 @@ const indexerLagGauge = new Gauge({
   registers: [prometheusRegistry],
 });
 
+// ── Soroban RPC Failover & Health metrics ───────────────────────────────
+
+export const sorobanRpcFailoverCounter = new Counter({
+  name: "stellaryield_soroban_rpc_failover_total",
+  help: "Total number of Soroban RPC failover transitions",
+  labelNames: ["from_endpoint", "to_endpoint", "reason"] as const,
+  registers: [prometheusRegistry],
+});
+
+export const sorobanRpcEndpointStatusGauge = new Gauge({
+  name: "stellaryield_soroban_rpc_endpoint_status",
+  help: "Health status of Soroban RPC endpoint (1 = healthy, 2 = degraded, 0 = down)",
+  labelNames: ["endpoint"] as const,
+  registers: [prometheusRegistry],
+});
+
+export const sorobanRpcRequestsCounter = new Counter({
+  name: "stellaryield_soroban_rpc_requests_total",
+  help: "Total number of Soroban RPC requests handled per endpoint",
+  labelNames: ["endpoint", "status"] as const,
+  registers: [prometheusRegistry],
+});
+
+export const sorobanRpcLatencyGauge = new Gauge({
+  name: "stellaryield_soroban_rpc_latency_ms",
+  help: "Observed latency in milliseconds for Soroban RPC endpoint",
+  labelNames: ["endpoint"] as const,
+  registers: [prometheusRegistry],
+});
+
+export const sorobanRpcActiveEndpointGauge = new Gauge({
+  name: "stellaryield_soroban_rpc_active",
+  help: "Currently active Soroban RPC endpoint (1 = active, 0 = standby)",
+  labelNames: ["endpoint"] as const,
+  registers: [prometheusRegistry],
+});
+
+// Hook into failover service events
+sorobanRpcFailoverService.registerMetricsListener({
+  onFailover: (from, to, reason) => {
+    sorobanRpcFailoverCounter.inc({
+      from_endpoint: from,
+      to_endpoint: to,
+      reason: reason.substring(0, 50),
+    });
+  },
+  onRequest: (endpoint, status, latencyMs) => {
+    sorobanRpcRequestsCounter.inc({ endpoint, status });
+    sorobanRpcLatencyGauge.set({ endpoint }, latencyMs);
+  },
+});
+
 // ── Metric collection ───────────────────────────────────────────────────
 
 /**
@@ -99,6 +152,16 @@ export function refreshInfraMetrics(opts: {
   dbPoolGauge.set(opts.dbUp ? 1 : 0);
   indexerLagGauge.set(opts.indexerLag);
   depositorsGauge.set(opts.depositorCount);
+
+  // Sync Soroban RPC endpoint gauges
+  const endpoints = sorobanRpcFailoverService.getEndpoints();
+  const activeUrl = sorobanRpcFailoverService.getActiveEndpoint();
+  for (const ep of endpoints) {
+    const statusVal = ep.status === "healthy" ? 1 : ep.status === "degraded" ? 2 : 0;
+    sorobanRpcEndpointStatusGauge.set({ endpoint: ep.url }, statusVal);
+    sorobanRpcActiveEndpointGauge.set({ endpoint: ep.url }, ep.url === activeUrl ? 1 : 0);
+    sorobanRpcLatencyGauge.set({ endpoint: ep.url }, ep.latencyMs);
+  }
 
   // Sync HTTP latencies from the in-memory metrics store
   const latencies = httpMetrics.requestLatencies;

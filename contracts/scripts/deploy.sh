@@ -94,9 +94,54 @@ for contract in "${CONTRACTS[@]}"; do
 done
 
 # ---------------------------------------------------------------------------
-# Deploy each contract and collect IDs
+# Deploy each contract and collect IDs with Soroban RPC failover support
 # ---------------------------------------------------------------------------
 declare -A DEPLOYED_IDS
+
+deploy_with_rpc_failover() {
+  local wasm_file="$1"
+  local contract_name="$2"
+  local rpc_list=("$STELLAR_RPC_URL")
+
+  if [[ -n "${STELLAR_RPC_FALLBACK_URLS:-}" ]]; then
+    IFS=',' read -ra fallbacks <<< "$STELLAR_RPC_FALLBACK_URLS"
+    for fb in "${fallbacks[@]}"; do
+      trimmed=$(echo "$fb" | tr -d '[:space:]')
+      [[ -n "$trimmed" ]] && rpc_list+=("$trimmed")
+    done
+  fi
+
+  local deployed_id=""
+  for rpc in "${rpc_list[@]}"; do
+    log "  Attempting deploy for $contract_name via $rpc..."
+    local output
+    if output=$(stellar contract deploy \
+      --wasm "$wasm_file" \
+      --source-account "$STELLAR_SOURCE_ACCOUNT" \
+      --rpc-url "$rpc" \
+      --network-passphrase "$STELLAR_NETWORK_PASSPHRASE" 2>&1); then
+      deployed_id=$(echo "$output" | tail -1 | tr -d '[:space:]')
+      if [[ "$rpc" != "$STELLAR_RPC_URL" ]]; then
+        warn "Failover deploy succeeded for $contract_name using fallback RPC: $rpc"
+        if [[ -n "${STELLAR_RPC_ALERT_WEBHOOK:-}" ]]; then
+          curl -s -X POST -H "Content-Type: application/json" \
+            -d "{\"content\":\"[Soroban RPC Failover] Contract deploy for $contract_name failed over to $rpc\"}" \
+            "$STELLAR_RPC_ALERT_WEBHOOK" >/dev/null || true
+        fi
+      fi
+      echo "$deployed_id"
+      return 0
+    else
+      warn "Deploy attempt failed via $rpc: $output"
+      if [[ -n "${STELLAR_RPC_ALERT_WEBHOOK:-}" ]]; then
+        curl -s -X POST -H "Content-Type: application/json" \
+          -d "{\"content\":\"[Soroban RPC Alert] Deploy attempt failed on $rpc for $contract_name: $output\"}" \
+          "$STELLAR_RPC_ALERT_WEBHOOK" >/dev/null || true
+      fi
+    fi
+  done
+  return 1
+}
 
 for contract in "${CONTRACTS[@]}"; do
   dir="$CONTRACTS_DIR/$contract"
@@ -109,20 +154,13 @@ for contract in "${CONTRACTS[@]}"; do
 
   log "  Deploying $contract from $wasm_file..."
 
-  contract_id=$(stellar contract deploy \
-    --wasm "$wasm_file" \
-    --source-account "$STELLAR_SOURCE_ACCOUNT" \
-    --rpc-url "$STELLAR_RPC_URL" \
-    --network-passphrase "$STELLAR_NETWORK_PASSPHRASE" \
-    2>&1)
+  contract_id=$(deploy_with_rpc_failover "$wasm_file" "$contract")
 
-  if [[ $? -ne 0 ]]; then
-    warn "Deploy failed for $contract: $contract_id"
+  if [[ $? -ne 0 || -z "$contract_id" ]]; then
+    warn "Deploy failed across all RPC endpoints for $contract"
     continue
   fi
 
-  # stellar contract deploy prints the contract ID on the last line
-  contract_id=$(echo "$contract_id" | tail -1 | tr -d '[:space:]')
   DEPLOYED_IDS["$contract"]="$contract_id"
   log "  $contract => $contract_id"
 done

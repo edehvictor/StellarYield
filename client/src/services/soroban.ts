@@ -26,6 +26,28 @@ import { apiFetch } from "../lib/api";
 // ── Configuration ───────────────────────────────────────────────────────
 
 export const RPC_URL = import.meta.env.VITE_SOROBAN_RPC_URL ?? "https://soroban-testnet.stellar.org";
+export const RPC_FALLBACK_URLS: string[] = (
+  (import.meta.env.VITE_SOROBAN_RPC_FALLBACK_URLS as string | undefined) ?? ""
+)
+  .split(",")
+  .map((u: string) => u.trim())
+  .filter((u: string) => u.length > 0);
+
+export const ALL_RPC_URLS: string[] = [RPC_URL, ...RPC_FALLBACK_URLS];
+
+let activeRpcIndex = 0;
+
+export function getActiveRpcUrl(): string {
+  return ALL_RPC_URLS[activeRpcIndex] ?? RPC_URL;
+}
+
+export function rotateToFallbackRpc(): string {
+  if (ALL_RPC_URLS.length > 1) {
+    activeRpcIndex = (activeRpcIndex + 1) % ALL_RPC_URLS.length;
+  }
+  return getActiveRpcUrl();
+}
+
 export const NETWORK_PASSPHRASE =
   import.meta.env.VITE_NETWORK_PASSPHRASE ?? "Test SDF Network ; September 2015";
 
@@ -57,7 +79,7 @@ export type TxPhaseCallback = (phase: TxPhase) => void;
 // ── Helpers ─────────────────────────────────────────────────────────────
 
 function getServer(): StellarSdk.rpc.Server {
-  return new StellarSdk.rpc.Server(RPC_URL);
+  return new StellarSdk.rpc.Server(getActiveRpcUrl());
 }
 
 function getVaultClient(contractId?: string): VaultClient {

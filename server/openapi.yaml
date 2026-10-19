@@ -73,8 +73,67 @@ tags:
     description: Fiat onramp provider webhook integration
   - name: Deposits
     description: Multi-asset deposit routing recommendations
+  - name: SorobanRpc
+    description: Soroban RPC failover monitoring, health status, and alert hooks
 
 paths:
+  /api/rpc/status:
+    get:
+      summary: Retrieve Soroban RPC pool status and failover metrics
+      description: Returns active endpoint, status of all endpoints, failover counts, and recent alert hooks
+      tags:
+        - SorobanRpc
+      responses:
+        '200':
+          description: Status snapshot returned successfully
+  /api/rpc/health:
+    get:
+      summary: Quick Soroban RPC health probe
+      description: Returns 200 (healthy or degraded on failover) or 503 (all endpoints down)
+      tags:
+        - SorobanRpc
+      responses:
+        '200':
+          description: RPC pool operational
+        '503':
+          description: All RPC endpoints unavailable
+  /api/rpc/failover:
+    post:
+      summary: Trigger manual Soroban RPC failover
+      description: Manually switches active RPC node or rotates to next available node
+      tags:
+        - SorobanRpc
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                targetEndpoint:
+                  type: string
+                reason:
+                  type: string
+      responses:
+        '200':
+          description: Failover executed
+  /api/rpc/reset:
+    post:
+      summary: Reset Soroban RPC failover counters
+      description: Clears failover metrics and restores primary endpoint
+      tags:
+        - SorobanRpc
+      responses:
+        '200':
+          description: Metrics reset
+  /api/rpc/alerts:
+    get:
+      summary: Retrieve recent Soroban RPC alert hooks
+      description: Returns recent alert history dispatched by the RPC failover service
+      tags:
+        - SorobanRpc
+      responses:
+        '200':
+          description: List of recent alerts
   /api/health:
     get:
       summary: Check system health status
