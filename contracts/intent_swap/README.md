@@ -10,6 +10,9 @@
 - `create_intent(owner, sell_token, buy_token, sell_amount, min_buy_amount, max_fee, expiry, partial_fill, nonce, domain)`
 - `fill_intent(solver, intent_id, buy_amount, sell_amount, solver_fee, quoted_at)`
 - `get_domain()` → `IntentDomain { network_id, verifying_contract }`
+- `get_version()` → `u32` (domain separation contract version)
+- `create_signature_payload(contract_version, domain, operation_type, nonce)` → `IntentSignaturePayload`
+- `compute_signature_payload_hash(payload)` → `BytesN<32>` (canonical SHA-256 payload hash)
 - `set_max_quote_age(admin, max_age_secs)`, `get_max_quote_age()`
 - `cancel_intent(owner, intent_id)`
 - `cancel_nonce(owner, nonce)`
