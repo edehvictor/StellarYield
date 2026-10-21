@@ -77,6 +77,8 @@ tags:
     description: Multi-asset deposit routing recommendations
   - name: SorobanRpc
     description: Soroban RPC failover monitoring, health status, and alert hooks
+  - name: Wallet
+    description: Typed wallet recovery telemetry (stable rejection codes and guidance)
 
 paths:
   /api/rpc/status:
@@ -4485,6 +4487,131 @@ paths:
                       type: object
         '400':
           description: Invalid wallet address or category
+
+  /api/wallet/signature-rejections:
+    post:
+      summary: Record a rejected wallet signature and return recovery guidance
+      description: >
+        Records non-sensitive rejection telemetry and returns stable recovery
+        copy. Raw provider reasons may be sent for classification but are never
+        stored or echoed. Clients should recover locally and treat this call as
+        best-effort.
+      tags:
+        - Wallet
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [action]
+              properties:
+                action:
+                  type: string
+                  example: portfolio_deposit
+                walletAddress:
+                  type: string
+                provider:
+                  type: string
+                  example: freighter
+                code:
+                  type: string
+                  enum:
+                    - USER_REJECTED_SIGNATURE
+                    - WALLET_LOCKED
+                    - WALLET_DISCONNECTED
+                    - WALLET_UNSUPPORTED
+                    - SIGNING_TIMEOUT
+                    - MALFORMED_SIGNATURE_RESPONSE
+                    - UNKNOWN_SIGNING_FAILURE
+                reason:
+                  type: string
+                  description: Optional raw reason used only for server-side classification
+                attempt:
+                  type: integer
+                  minimum: 1
+                  maximum: 99
+                maxAttempts:
+                  type: integer
+                  minimum: 1
+                  maximum: 99
+                completedSteps:
+                  type: integer
+                  minimum: 0
+                totalSteps:
+                  type: integer
+                  minimum: 0
+      responses:
+        '201':
+          description: Rejection recorded; stable guidance returned
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  code:
+                    type: string
+                  title:
+                    type: string
+                  message:
+                    type: string
+                  guidance:
+                    type: string
+                  retryable:
+                    type: boolean
+                  attempt:
+                    type: integer
+                  maxAttempts:
+                    type: integer
+                  remainingAttempts:
+                    type: integer
+                  actions:
+                    type: array
+                    items:
+                      type: string
+                      enum: [retry, reconnect, switch_wallet, cancel]
+                  recordedAt:
+                    type: string
+                    format: date-time
+        '400':
+          description: Typed validation error (INVALID_ACTION, INVALID_REJECTION_CODE, …)
+
+  /api/wallet/signature-rejections/summary:
+    get:
+      summary: Aggregate recorded signature rejections
+      description: Returns counts by stable rejection code, optionally scoped to one wallet.
+      tags:
+        - Wallet
+      parameters:
+        - name: wallet
+          in: query
+          required: false
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Summary returned (empty with total 0 when nothing was recorded)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  wallet:
+                    type: string
+                    nullable: true
+                  total:
+                    type: integer
+                  byCode:
+                    type: object
+                    additionalProperties:
+                      type: integer
+                  topAction:
+                    type: string
+                    nullable: true
+                  lastOccurredAt:
+                    type: string
+                    format: date-time
+                    nullable: true
 
   # Intentionally excluded routes:
   # - Internal debugging and profiling endpoints under /internal/* are intentionally omitted from this public spec.
