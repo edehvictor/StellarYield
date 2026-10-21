@@ -38,6 +38,12 @@ export interface ZapQuoteResponse {
   assumptionFingerprint?: string;
   /** Explicit snapshot of assumptions used to compute the fingerprint (#1366). */
   assumptions?: import("../../../../shared/types/quoteAssumptionFingerprint").QuoteAssumptions;
+  /**
+   * Provider/asset/APY-source/fee/freshness assumptions behind the selected
+   * yield route. Present when the server could derive them; individual groups
+   * may be null and are listed in `unavailableFields`.
+   */
+  routeAssumptions?: import("../../../../shared/types/routeAssumptions").ZapQuoteRouteAssumptions;
 }
 
 /** Asset the user can select as zap input (Soroban SAC contract id). */
