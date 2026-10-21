@@ -202,10 +202,10 @@ fn test_exercise_succeeds_at_opening_time_boundary() {
     client.exercise(&exerciser, &option_id);
 
     let client_u = soroban_sdk::token::Client::new(&env, &underlying);
-    let client_q = soroban_sdk::token::Client::new(&env, &quote);
 
     assert_eq!(client_u.balance(&exerciser), 10_000_000);
-    assert_eq!(client_q.balance(&minter), 100_000_000);
+    // The minter keeps the 10M it never collateralised.
+    assert_eq!(client_u.balance(&minter), 10_000_000);
     assert_eq!(client_u.balance(&client.address), 0);
 }
 
@@ -222,10 +222,10 @@ fn test_exercise_succeeds_at_expiration_time_boundary() {
     client.exercise(&exerciser, &option_id);
 
     let client_u = soroban_sdk::token::Client::new(&env, &underlying);
-    let client_q = soroban_sdk::token::Client::new(&env, &quote);
 
     assert_eq!(client_u.balance(&exerciser), 10_000_000);
-    assert_eq!(client_q.balance(&minter), 100_000_000);
+    assert_eq!(client_u.balance(&minter), 10_000_000);
+    assert_eq!(client_u.balance(&client.address), 0);
 }
 
 #[test]
@@ -241,10 +241,10 @@ fn test_exercise_succeeds_mid_window() {
     client.exercise(&exerciser, &option_id);
 
     let client_u = soroban_sdk::token::Client::new(&env, &underlying);
-    let client_q = soroban_sdk::token::Client::new(&env, &quote);
 
     assert_eq!(client_u.balance(&exerciser), 10_000_000);
-    assert_eq!(client_q.balance(&minter), 100_000_000);
+    assert_eq!(client_u.balance(&minter), 10_000_000);
+    assert_eq!(client_u.balance(&client.address), 0);
 }
 
 // ── Exercise: expired rejection (after expiration_time) ───────────────────
@@ -604,14 +604,13 @@ fn test_partial_exercise_releases_only_the_exercised_reserve() {
     let exerciser = Address::generate(&env);
     mint_tokens(&env, &quote, &exerciser, 200_000_000);
     let token_u = soroban_sdk::token::Client::new(&env, &underlying);
-    let token_q = soroban_sdk::token::Client::new(&env, &quote);
 
     env.ledger().set_timestamp(750);
     client.exercise_partial(&exerciser, &option_id, &4_000_000);
 
     // 4M of the 10M left the contract; the other 6M stays reserved.
     assert_eq!(token_u.balance(&exerciser), 4_000_000);
-    assert_eq!(token_q.balance(&minter), 40_000_000);
+    assert_eq!(token_u.balance(&minter), 10_000_000);
     assert_eq!(
         client.get_reserved_collateral(&minter, &underlying),
         6_000_000
@@ -627,6 +626,24 @@ fn test_partial_exercise_releases_only_the_exercised_reserve() {
     assert_eq!(
         client.get_reserved_collateral(&minter, &underlying),
         5_000_000
+    );
+}
+
+#[test]
+fn test_partial_exercise_settles_one_base_unit_exactly() {
+    let (env, client, _, _, underlying, quote) = setup_env();
+    let (option_id, minter) = mint_call_option(&env, &client, &underlying, &quote);
+    let exerciser = Address::generate(&env);
+    let token = soroban_sdk::token::Client::new(&env, &underlying);
+
+    env.ledger().set_timestamp(750);
+    client.exercise_partial(&exerciser, &option_id, &1);
+
+    assert_eq!(token.balance(&exerciser), 1);
+    assert_eq!(token.balance(&client.address), 9_999_999);
+    assert_eq!(
+        client.get_reserved_collateral(&minter, &underlying),
+        9_999_999
     );
 }
 

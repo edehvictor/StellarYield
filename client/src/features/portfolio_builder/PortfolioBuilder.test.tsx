@@ -213,4 +213,35 @@ describe("PortfolioBuilder Component", () => {
     });
     expect(deposit).toHaveBeenCalledTimes(3);
   });
+
+  it("blocks execution and offers a rebalance when allocations would be dust", async () => {
+    render(
+      <PortfolioBuilder
+        walletAddress="GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF"
+        availableVaults={mockAvailableVaults}
+      />
+    );
+
+    // 1 USDC split 50/50 rounds the second vault to zero.
+    fireEvent.change(screen.getByPlaceholderText("Enter amount to allocate"), {
+      target: { value: "1" },
+    });
+
+    expect(await screen.findByTestId("dust-allocation-warning")).toBeInTheDocument();
+    expect(screen.getByText("Dust allocations detected")).toBeInTheDocument();
+
+    const executeBtn = screen.getByRole("button", {
+      name: /Execute Multi-Vault Deposit/i,
+    });
+    expect(executeBtn).toBeDisabled();
+
+    fireEvent.click(screen.getByRole("button", { name: /Remove dust & rebalance/i }));
+
+    await waitFor(() => {
+      expect(screen.queryByTestId("dust-allocation-warning")).not.toBeInTheDocument();
+    });
+    expect(
+      screen.getByRole("button", { name: /Execute Multi-Vault Deposit/i }),
+    ).not.toBeDisabled();
+  });
 });

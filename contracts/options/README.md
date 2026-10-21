@@ -33,6 +33,12 @@
 
 ## Collateral Accounting
 
+`get_premium` uses fixed-point arithmetic scaled by `1e9`. Its nonnegative
+monetary divisions round down, so fractional base units are never included in
+the returned premium. At or after expiry, intrinsic value is the exact positive
+difference between spot and strike (or zero). Exercise settlement transfers
+the requested collateral amount in token base units without further rounding.
+
 Collateral held by the contract is tracked per `(owner, asset)` in two buckets:
 
 - **Free**: deposited via `deposit`, withdrawable at any time with `withdraw`.

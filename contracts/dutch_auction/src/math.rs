@@ -61,7 +61,15 @@ pub fn checked_current_price(
     duration: u64,
     now: u64,
 ) -> Option<i128> {
-    if now <= start_time {
+    if now < start_time {
+        return Some(start_price);
+    }
+
+    if duration == 0 {
+        return Some(floor_price);
+    }
+
+    if now == start_time {
         return Some(start_price);
     }
 
@@ -222,9 +230,10 @@ mod tests {
         );
         // now before start at the extremes.
         assert_eq!(checked_current_price(100, 0, u64::MAX, 10, 0), Some(100));
-        // zero duration means fully decayed once time has moved past the start.
+        // A zero-duration auction is already fully decayed at its start time.
         assert_eq!(checked_current_price(100, 40, 5, 0, 6), Some(40));
-        assert_eq!(checked_current_price(100, 40, 5, 0, 5), Some(100));
+        assert_eq!(checked_current_price(100, 40, 5, 0, 5), Some(40));
+        assert_eq!(checked_current_price(100, 40, 5, 0, 4), Some(100));
     }
 
     #[test]

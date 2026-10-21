@@ -4498,6 +4498,16 @@ paths:
         best-effort.
       tags:
         - Wallet
+  /api/portfolio/builder/validate:
+    post:
+      summary: Validate a portfolio builder draft for dust allocations
+      description: >
+        Re-checks a portfolio builder draft before deposits are submitted.
+        A well-formed payload always returns 200; `valid: false` means one or
+        more allocations would receive dust and must be adjusted or
+        redistributed. Malformed payloads return a typed 400.
+      tags:
+        - Portfolio
       requestBody:
         required: true
         content:
@@ -4544,6 +4554,45 @@ paths:
       responses:
         '201':
           description: Rejection recorded; stable guidance returned
+              required: [totalAmount, allocations]
+              properties:
+                totalAmount:
+                  type: string
+                  description: Total deposit in base token units (non-negative integer)
+                  example: "100"
+                minimumAllocationAmount:
+                  type: string
+                  description: Minimum economically meaningful deposit per vault (default "1")
+                  example: "1"
+                minNonZeroWeightPct:
+                  type: number
+                  description: Smallest non-zero weight that is not dust (default 0.01)
+                  example: 0.01
+                allocations:
+                  type: array
+                  items:
+                    type: object
+                    required: [vaultContractId, weight]
+                    properties:
+                      vaultContractId:
+                        type: string
+                      vaultName:
+                        type: string
+                      weight:
+                        type: number
+                        description: Percentage of the portfolio (0-100)
+              example:
+                totalAmount: "1"
+                allocations:
+                  - vaultContractId: blend
+                    vaultName: Blend
+                    weight: 50
+                  - vaultContractId: soroswap
+                    vaultName: Soroswap
+                    weight: 50
+      responses:
+        '200':
+          description: Validation completed; inspect `valid` and `issues`
           content:
             application/json:
               schema:
@@ -4612,6 +4661,52 @@ paths:
                     type: string
                     format: date-time
                     nullable: true
+                  valid:
+                    type: boolean
+                  message:
+                    type: string
+                  totalAmount:
+                    type: string
+                  minimumAllocationAmount:
+                    type: string
+                  minNonZeroWeightPct:
+                    type: number
+                  weightsTotalPct:
+                    type: number
+                  issues:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        code:
+                          type: string
+                          enum: [WEIGHT_BELOW_MINIMUM, AMOUNT_BELOW_MINIMUM, AMOUNT_ROUNDS_TO_ZERO]
+                        vaultContractId:
+                          type: string
+                        vaultName:
+                          type: string
+                        weightPct:
+                          type: number
+                        amount:
+                          type: string
+                        minimumAmount:
+                          type: string
+                        message:
+                          type: string
+                        remediation:
+                          type: string
+                  suggestedAllocations:
+                    type: array
+                    nullable: true
+                    items:
+                      type: object
+                      properties:
+                        vaultContractId:
+                          type: string
+                        weight:
+                          type: number
+        '400':
+          description: Typed validation error (INVALID_TOTAL_AMOUNT, ALLOCATION_SUM_MISMATCH, …)
 
   # Intentionally excluded routes:
   # - Internal debugging and profiling endpoints under /internal/* are intentionally omitted from this public spec.

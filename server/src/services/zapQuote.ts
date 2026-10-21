@@ -16,6 +16,8 @@ import {
   verifyQuoteAssumptionFingerprint,
   type QuoteAssumptions,
 } from "../../../shared/types/quoteAssumptionFingerprint";
+import type { ZapQuoteRouteAssumptions } from "../../../shared/types/routeAssumptions";
+import { buildZapQuoteRouteAssumptions } from "./routeAssumptionsService";
 
 export interface ZapQuoteBody {
   inputTokenContract: string;
@@ -104,6 +106,14 @@ export interface ZapQuoteResult {
    * Explicit snapshot of assumptions used to compute the fingerprint (#1366).
    */
   assumptions?: QuoteAssumptions;
+  /**
+   * Provider/asset/APY-source/fee/freshness assumptions behind the selected
+   * yield route, so the UI can explain why a route was chosen and what could
+   * change before execution. Missing groups are reported as null and listed
+   * in `unavailableFields`; the quote is never rejected for missing
+   * assumptions.
+   */
+  routeAssumptions?: ZapQuoteRouteAssumptions;
   /**
    * Minimum-balance reserve check result (#1148), present only when the
    * request included `walletAddress`. `safe: false` means executing this
@@ -401,6 +411,10 @@ export async function getZapQuote(body: ZapQuoteBody): Promise<ZapQuoteResult> {
 
   const reserveCheck = await computeReserveCheck(body);
 
+  // Route assumptions (#route-assumptions): reuse the yield feed already
+  // fetched above for the TVL/slippage model — no extra network call.
+  const routeAssumptions = buildZapQuoteRouteAssumptions(protocol, yieldData, now);
+
   const assumptions: QuoteAssumptions = {
     inputTokenContract: body.inputTokenContract,
     vaultTokenContract: body.vaultTokenContract,
@@ -434,6 +448,7 @@ export async function getZapQuote(body: ZapQuoteBody): Promise<ZapQuoteResult> {
     assetConfigVersion,
     assumptionFingerprint,
     assumptions,
+    routeAssumptions,
     ...(reserveCheck ? { reserveCheck } : {}),
   };
 }

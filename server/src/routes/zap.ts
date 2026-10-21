@@ -72,6 +72,7 @@ router.post("/quote", validateZapQuote, async (req: Request, res: Response) => {
       vaultPauseState,
       assumptionFingerprint: quote.assumptionFingerprint,
       assumptions: quote.assumptions,
+      routeAssumptions: quote.routeAssumptions,
       ...(quote.reserveCheck ? { reserveCheck: quote.reserveCheck } : {}),
     });
   } catch (e) {

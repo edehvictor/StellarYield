@@ -30,6 +30,7 @@ import {
 import type { ZapAssetOption, ZapQuoteResponse, FeeDriftWarning } from "./types";
 import { detectClientFeeDrift } from "./types";
 import { QuoteAssumptionFingerprintDisplay } from "../../components/transaction/QuoteAssumptionFingerprintDisplay";
+import RouteAssumptionsPanel from "./RouteAssumptionsPanel";
 import {
   computeQuoteAssumptionFingerprint,
   verifyQuoteAssumptionFingerprint,
@@ -1134,6 +1135,13 @@ export default function ZapDepositPanel({ walletAddress }: ZapDepositPanelProps)
         onRetry={txPhase === "failure" ? retryZap : undefined}
         className="mb-4"
       />
+
+      {/* Route assumptions: provider/asset/APY-source/fee/freshness behind this quote */}
+      {needsSwap && quoteData?.routeAssumptions && (
+        <div className="mb-4">
+          <RouteAssumptionsPanel assumptions={quoteData.routeAssumptions} />
+        </div>
+      )}
 
       {/* Quote Assumption Fingerprint Display (#1366) */}
       <div className="mb-4">

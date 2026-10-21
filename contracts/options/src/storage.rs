@@ -188,6 +188,7 @@ pub fn write_cancelled(e: &Env, id: u32) {
 }
 
 /// Read the ordered list of writer position ids attached to an option.
+#[allow(dead_code)]
 pub fn read_writer_positions(e: &Env, id: u32) -> soroban_sdk::Vec<u32> {
     let key = DataKey::WriterPositions(id);
     if e.storage().persistent().has(&key) {
@@ -199,6 +200,7 @@ pub fn read_writer_positions(e: &Env, id: u32) -> soroban_sdk::Vec<u32> {
         .unwrap_or(soroban_sdk::Vec::new(e))
 }
 
+#[allow(dead_code)]
 pub fn write_writer_positions(e: &Env, id: u32, positions: &soroban_sdk::Vec<u32>) {
     let key = DataKey::WriterPositions(id);
     e.storage().persistent().set(&key, positions);
@@ -206,6 +208,7 @@ pub fn write_writer_positions(e: &Env, id: u32, positions: &soroban_sdk::Vec<u32
 }
 
 /// Read the collateral remaining in a specific writer position for an option.
+#[allow(dead_code)]
 pub fn read_position_collateral(e: &Env, option_id: u32, position_id: u32) -> i128 {
     let key = DataKey::PositionCollateral(option_id, position_id);
     if e.storage().persistent().has(&key) {
@@ -214,6 +217,7 @@ pub fn read_position_collateral(e: &Env, option_id: u32, position_id: u32) -> i1
     e.storage().persistent().get(&key).unwrap_or(0)
 }
 
+#[allow(dead_code)]
 pub fn write_position_collateral(e: &Env, option_id: u32, position_id: u32, amount: i128) {
     let key = DataKey::PositionCollateral(option_id, position_id);
     e.storage().persistent().set(&key, &amount);

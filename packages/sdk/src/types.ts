@@ -1,3 +1,5 @@
+import { InvalidAmountError } from "./errors";
+
 export interface VaultConfig {
   contractId: string;
   networkPassphrase: string;
@@ -96,15 +98,133 @@ export interface ApiCachedGetResult<T> {
   error: string | null;
 }
 
+/**
+ * A token amount in base units (e.g. stroops). Use a `bigint`, a decimal
+ * string, or a `number` that is a safe integer. Fractional or unsafe numbers
+ * are rejected by {@link toTokenUnits} because they cannot be represented
+ * exactly.
+ */
+export type TokenAmount = bigint | string | number;
+
+export interface ToTokenUnitsOptions {
+  /**
+   * Token decimals. When set, string inputs are read as whole-token decimal
+   * amounts (e.g. `"1.5"`) and scaled into base units. Without it, strings
+   * must already be whole base units. `bigint` and `number` inputs are always
+   * base units.
+   */
+  decimals?: number;
+  /** Field name used in error messages (default: "amount"). */
+  field?: string;
+  /** Allow negative amounts (default: false). */
+  allowNegative?: boolean;
+}
+
+const INTEGER_STRING = /^-?\d+$/;
+const DECIMAL_STRING = /^-?\d+\.\d+$/;
+
+/**
+ * Normalize a token amount into exact base units without ever routing the
+ * value through floating point.
+ *
+ * - `bigint` values pass through unchanged.
+ * - `number` values must be safe integers (`Number.isSafeInteger`).
+ * - `string` values must be plain decimal digits; a fractional part is only
+ *   accepted when `decimals` is given and does not exceed it.
+ *
+ * @throws {InvalidAmountError} when the input would lose precision or is malformed.
+ */
+export function toTokenUnits(value: TokenAmount, options: ToTokenUnitsOptions = {}): bigint {
+  const field = options.field ?? "amount";
+  const decimals = options.decimals;
+  if (decimals !== undefined && (!Number.isSafeInteger(decimals) || decimals < 0)) {
+    throw new InvalidAmountError(field, value, `decimals must be a non-negative integer, got ${decimals}`);
+  }
+
+  let units: bigint;
+  if (typeof value === "bigint") {
+    units = value;
+  } else if (typeof value === "number") {
+    if (!Number.isFinite(value)) {
+      throw new InvalidAmountError(field, value, "must be a finite number");
+    }
+    if (!Number.isInteger(value)) {
+      throw new InvalidAmountError(
+        field,
+        value,
+        "fractional numbers lose precision; pass base units or a decimal string with `decimals`"
+      );
+    }
+    if (!Number.isSafeInteger(value)) {
+      throw new InvalidAmountError(
+        field,
+        value,
+        `exceeds Number.MAX_SAFE_INTEGER (${Number.MAX_SAFE_INTEGER}); pass a bigint or a decimal string`
+      );
+    }
+    units = BigInt(value);
+  } else if (typeof value === "string") {
+    units = parseAmountString(value, decimals, field);
+  } else {
+    throw new InvalidAmountError(field, value, `unsupported type '${typeof value}'`);
+  }
+
+  if (units < 0n && !options.allowNegative) {
+    throw new InvalidAmountError(field, value, "must not be negative");
+  }
+  return units;
+}
+
+function parseAmountString(value: string, decimals: number | undefined, field: string): bigint {
+  if (INTEGER_STRING.test(value)) {
+    return BigInt(value) * 10n ** BigInt(decimals ?? 0);
+  }
+  if (DECIMAL_STRING.test(value)) {
+    if (decimals === undefined) {
+      throw new InvalidAmountError(
+        field,
+        value,
+        "fractional strings require `decimals` to convert into base units"
+      );
+    }
+    const negative = value.startsWith("-");
+    const [whole, fraction] = (negative ? value.slice(1) : value).split(".");
+    if (fraction.length > decimals) {
+      throw new InvalidAmountError(
+        field,
+        value,
+        `has ${fraction.length} fractional digits but the token only supports ${decimals}`
+      );
+    }
+    const scale = 10n ** BigInt(decimals);
+    const units = BigInt(whole) * scale + BigInt(fraction.padEnd(decimals, "0"));
+    return negative ? -units : units;
+  }
+  throw new InvalidAmountError(field, value, `'${value}' is not a decimal number string`);
+}
+
+/** Format base units as a decimal string, e.g. `formatTokenUnits(15_000_000n, 7) === "1.5"`. */
+export function formatTokenUnits(units: bigint, decimals: number): string {
+  if (!Number.isSafeInteger(decimals) || decimals < 0) {
+    throw new InvalidAmountError("decimals", decimals, "must be a non-negative integer");
+  }
+  const negative = units < 0n;
+  const abs = negative ? -units : units;
+  const scale = 10n ** BigInt(decimals);
+  const whole = abs / scale;
+  const fraction = (abs % scale).toString().padStart(decimals, "0").replace(/0+$/, "");
+  return `${negative ? "-" : ""}${whole}${fraction ? `.${fraction}` : ""}`;
+}
+
 export interface DepositParams {
   from: string;
-  amount: bigint | string;
-  minSharesOut?: bigint | string;
+  amount: TokenAmount;
+  minSharesOut?: TokenAmount;
 }
 
 export interface WithdrawParams {
   to: string;
-  shares: bigint | string;
+  shares: TokenAmount;
 }
 
 export interface VaultInfo {

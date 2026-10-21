@@ -19,7 +19,8 @@
 //! - Intents have expiry timestamps and minimum output guarantees
 
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, symbol_short, token, Address, BytesN, Env,
+    contract, contracterror, contractimpl, contracttype, symbol_short, token, xdr::ToXdr, Address,
+    BytesN, Env, Symbol,
 };
 
 // ── Storage Keys ────────────────────────────────────────────────────────
@@ -53,6 +54,26 @@ pub struct IntentDomain {
     /// SHA-256 of the network passphrase.
     pub network_id: BytesN<32>,
     pub verifying_contract: Address,
+}
+
+/// Canonical intent signature payload for off-chain signing and verification (#1495).
+///
+/// Binds contract version, network ID, verifying contract address, operation type,
+/// and unique nonce to guarantee domain separation and prevent cross-version,
+/// cross-network, or cross-operation replay attacks.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct IntentSignaturePayload {
+    /// Protocol contract version (e.g. 1)
+    pub contract_version: u32,
+    /// Network ID (SHA-256 of network passphrase)
+    pub network_id: BytesN<32>,
+    /// Verifying contract deployment address
+    pub verifying_contract: Address,
+    /// Symbolic operation identifier (e.g. symbol_short!("create"), symbol_short!("cancel"), symbol_short!("fill"))
+    pub operation_type: Symbol,
+    /// Unique owner nonce
+    pub nonce: u64,
 }
 
 /// Lifecycle of an owner-scoped intent nonce. Absent means unused.
@@ -612,12 +633,42 @@ impl IntentSwap {
 
     // ── View Functions ──────────────────────────────────────────────
 
+    pub const CONTRACT_VERSION: u32 = 1;
+
     /// The domain an intent must sign to be accepted by this deployment.
     pub fn get_domain(env: Env) -> IntentDomain {
         IntentDomain {
             network_id: env.ledger().network_id(),
             verifying_contract: env.current_contract_address(),
         }
+    }
+
+    /// Return the current contract protocol version for domain separation (#1495).
+    pub fn get_version(_env: Env) -> u32 {
+        Self::CONTRACT_VERSION
+    }
+
+    /// Create canonical signature payload binding version, domain, operation type, and nonce (#1495).
+    pub fn create_signature_payload(
+        _env: Env,
+        contract_version: u32,
+        domain: IntentDomain,
+        operation_type: Symbol,
+        nonce: u64,
+    ) -> IntentSignaturePayload {
+        IntentSignaturePayload {
+            contract_version,
+            network_id: domain.network_id,
+            verifying_contract: domain.verifying_contract,
+            operation_type,
+            nonce,
+        }
+    }
+
+    /// Compute canonical SHA-256 hash of a domain-separated signature payload (#1495).
+    pub fn compute_signature_payload_hash(env: Env, payload: IntentSignaturePayload) -> BytesN<32> {
+        let xdr_bytes = payload.to_xdr(&env);
+        env.crypto().sha256(&xdr_bytes).to_bytes()
     }
 
     pub fn get_max_quote_age(env: Env) -> u64 {
@@ -1708,6 +1759,165 @@ mod tests {
             &1,
             &client.get_domain(),
         );
+    }
+
+    // ── #1495 Domain separation for intent swap signatures ────────────────
+
+    #[test]
+    fn test_domain_separation_across_contract_versions() {
+        let (env, client, _, _, _, _, contract_id) = setup_env();
+        let domain = IntentDomain {
+            network_id: network_id(&env, PUBNET),
+            verifying_contract: contract_id.clone(),
+        };
+
+        let payload_v1 =
+            client.create_signature_payload(&1, &domain, &symbol_short!("create"), &42);
+        let payload_v2 =
+            client.create_signature_payload(&2, &domain, &symbol_short!("create"), &42);
+
+        let hash_v1 = client.compute_signature_payload_hash(&payload_v1);
+        let hash_v2 = client.compute_signature_payload_hash(&payload_v2);
+
+        // Different versions must yield distinct canonical hashes and payloads
+        assert_ne!(payload_v1.to_xdr(&env), payload_v2.to_xdr(&env));
+        assert_ne!(hash_v1, hash_v2);
+    }
+
+    #[test]
+    fn test_domain_separation_across_network_ids() {
+        let (env, client, _, _, _, _, contract_id) = setup_env();
+        let domain_pubnet = IntentDomain {
+            network_id: network_id(&env, PUBNET),
+            verifying_contract: contract_id.clone(),
+        };
+        let domain_testnet = IntentDomain {
+            network_id: network_id(&env, TESTNET),
+            verifying_contract: contract_id.clone(),
+        };
+
+        let payload_pubnet =
+            client.create_signature_payload(&1, &domain_pubnet, &symbol_short!("create"), &10);
+        let payload_testnet =
+            client.create_signature_payload(&1, &domain_testnet, &symbol_short!("create"), &10);
+
+        let hash_pubnet = client.compute_signature_payload_hash(&payload_pubnet);
+        let hash_testnet = client.compute_signature_payload_hash(&payload_testnet);
+
+        assert_ne!(payload_pubnet.to_xdr(&env), payload_testnet.to_xdr(&env));
+        assert_ne!(hash_pubnet, hash_testnet);
+    }
+
+    #[test]
+    fn test_domain_separation_across_operation_types() {
+        let (env, client, _, _, _, _, contract_id) = setup_env();
+        let domain = IntentDomain {
+            network_id: network_id(&env, PUBNET),
+            verifying_contract: contract_id,
+        };
+
+        let op_create = symbol_short!("create");
+        let op_cancel = symbol_short!("cancel");
+        let op_fill = symbol_short!("fill");
+        let op_cxl_nonce = symbol_short!("cxl_nonce");
+
+        let p_create = client.create_signature_payload(&1, &domain, &op_create, &1);
+        let p_cancel = client.create_signature_payload(&1, &domain, &op_cancel, &1);
+        let p_fill = client.create_signature_payload(&1, &domain, &op_fill, &1);
+        let p_cxl_nonce = client.create_signature_payload(&1, &domain, &op_cxl_nonce, &1);
+
+        let h_create = client.compute_signature_payload_hash(&p_create);
+        let h_cancel = client.compute_signature_payload_hash(&p_cancel);
+        let h_fill = client.compute_signature_payload_hash(&p_fill);
+        let h_cxl_nonce = client.compute_signature_payload_hash(&p_cxl_nonce);
+
+        // Every operation type payload and hash must be mutually distinct
+        let hashes = [h_create, h_cancel, h_fill, h_cxl_nonce];
+        for i in 0..hashes.len() {
+            for j in (i + 1)..hashes.len() {
+                assert_ne!(hashes[i], hashes[j]);
+            }
+        }
+    }
+
+    #[test]
+    fn test_domain_separation_across_verifying_contracts() {
+        let (env, client, _, _, _, _, contract_a) = setup_env();
+        let contract_b = env.register(IntentSwap, ());
+
+        let domain_a = IntentDomain {
+            network_id: network_id(&env, PUBNET),
+            verifying_contract: contract_a,
+        };
+        let domain_b = IntentDomain {
+            network_id: network_id(&env, PUBNET),
+            verifying_contract: contract_b,
+        };
+
+        let p_a = client.create_signature_payload(&1, &domain_a, &symbol_short!("create"), &5);
+        let p_b = client.create_signature_payload(&1, &domain_b, &symbol_short!("create"), &5);
+
+        assert_ne!(p_a.clone().to_xdr(&env), p_b.clone().to_xdr(&env));
+        assert_ne!(
+            client.compute_signature_payload_hash(&p_a),
+            client.compute_signature_payload_hash(&p_b)
+        );
+    }
+
+    #[test]
+    fn test_domain_separation_across_nonces() {
+        let (env, client, _, _, _, _, contract_id) = setup_env();
+        let domain = IntentDomain {
+            network_id: network_id(&env, PUBNET),
+            verifying_contract: contract_id,
+        };
+
+        let p_nonce1 = client.create_signature_payload(&1, &domain, &symbol_short!("create"), &1);
+        let p_nonce2 = client.create_signature_payload(&1, &domain, &symbol_short!("create"), &2);
+
+        assert_ne!(p_nonce1.clone().to_xdr(&env), p_nonce2.clone().to_xdr(&env));
+        assert_ne!(
+            client.compute_signature_payload_hash(&p_nonce1),
+            client.compute_signature_payload_hash(&p_nonce2)
+        );
+    }
+
+    #[test]
+    fn test_canonical_serialization_vectors() {
+        let (env, client, _, _, _, _, contract_id) = setup_env();
+        let domain = IntentDomain {
+            network_id: network_id(&env, PUBNET),
+            verifying_contract: contract_id.clone(),
+        };
+
+        let payload = client.create_signature_payload(
+            &client.get_version(),
+            &domain,
+            &symbol_short!("create"),
+            &100,
+        );
+
+        // 1. Verify determinism: repeated serialization produces identical bytes
+        let xdr_1 = payload.clone().to_xdr(&env);
+        let xdr_2 = payload.clone().to_xdr(&env);
+        assert_eq!(xdr_1, xdr_2);
+
+        // 2. Verify deterministic SHA-256 hash output
+        let hash_1 = client.compute_signature_payload_hash(&payload);
+        let hash_2 = client.compute_signature_payload_hash(&payload);
+        assert_eq!(hash_1, hash_2);
+
+        // 3. Verify hash length is exactly 32 bytes
+        assert_eq!(hash_1.to_array().len(), 32);
+
+        // 4. Verify canonical non-empty XDR byte representation
+        assert!(xdr_1.len() > 0);
+
+        // 5. Verify payload roundtrip properties
+        assert_eq!(payload.contract_version, 1);
+        assert_eq!(payload.nonce, 100);
+        assert_eq!(payload.operation_type, symbol_short!("create"));
+        assert_eq!(payload.verifying_contract, contract_id);
     }
 
     // ── #1489 Solver quote freshness ─────────────────────────────────────

@@ -19,6 +19,8 @@ import RebalancePreview from "./RebalancePreviewPanel";
 import AllocationDeltaPreview from "./AllocationDeltaPreview";
 import SignatureRejectionRecovery from "../wallet/SignatureRejectionRecovery";
 import { useSignatureRecovery } from "../wallet/useSignatureRecovery";
+import DustAllocationWarning from "./DustAllocationWarning";
+import { validatePortfolioDust } from "../../../../shared/types/portfolioDust";
 import { useWallet } from "../../context/useWallet";
 import { deposit } from "../../services/soroban";
 
@@ -63,6 +65,7 @@ export default function PortfolioBuilder({
     () => buildInitialAllocations(availableVaults),
   );
   const [isSavingAllocation, setIsSavingAllocation] = useState(false);
+  const [isResolvingDust, setIsResolvingDust] = useState(false);
   const [txPhase, setTxPhase] = useState<TxPhase>("idle");
   const [error, setError] = useState("");
   const [executeTx, setExecuteTx] = useState(false);
@@ -125,6 +128,21 @@ export default function PortfolioBuilder({
     }
   }, [totalAmountValue, allocations, isValid]);
 
+  const dustValidation = useMemo(() => {
+    try {
+      return validatePortfolioDust({
+        totalAmount: totalAmountValue ?? 0n,
+        allocations,
+      });
+    } catch {
+      // The builder already surfaces malformed weight/amount input; dust
+      // validation must never make the panel crash.
+      return null;
+    }
+  }, [totalAmountValue, allocations]);
+
+  const hasDustAllocations = Boolean(dustValidation && !dustValidation.valid);
+
   const handleWeightChange = useCallback(
     (index: number, newWeight: number) => {
       const updated = [...allocations];
@@ -140,6 +158,31 @@ export default function PortfolioBuilder({
    * resumes at the failed vault so already-signed deposits are not repeated.
    */
   async function executeDeposits(startIndex: number) {
+  const handleAutoResolveDust = useCallback(() => {
+    if (!dustValidation?.suggestedAllocations) return;
+
+    setIsResolvingDust(true);
+    try {
+      const byId = new Map(
+        allocations.map((allocation) => [allocation.vaultContractId, allocation]),
+      );
+      const rebalanced = dustValidation.suggestedAllocations.flatMap(
+        (suggestion) => {
+          const existing = byId.get(suggestion.vaultContractId);
+          if (!existing) return [];
+          return [{ ...existing, weight: suggestion.weight, amount: 0n }];
+        },
+      );
+      if (rebalanced.length > 0) {
+        setAllocations(normalizeWeights(rebalanced));
+        setError("");
+      }
+    } finally {
+      setIsResolvingDust(false);
+    }
+  }, [allocations, dustValidation]);
+
+  const handleExecuteDeposits = useCallback(async () => {
     if (!walletAddress) {
       setError("Wallet not connected");
       return;
@@ -147,6 +190,14 @@ export default function PortfolioBuilder({
 
     if (totalAmountValue === null || totalAmountValue <= 0n || !isValid) {
       setError("Invalid allocation or amount");
+      return;
+    }
+
+    if (hasDustAllocations) {
+      setError(
+        dustValidation?.message ||
+          "Some allocations are too small to deposit; adjust them before continuing.",
+      );
       return;
     }
 
@@ -277,6 +328,14 @@ export default function PortfolioBuilder({
     setCompletedCount(0);
     setTxPhase("idle");
   };
+    totalAmountValue,
+    isValid,
+    executeTx,
+    distributedAllocations,
+    signTransaction,
+    hasDustAllocations,
+    dustValidation?.message,
+  ]);
 
   return (
     <div className="space-y-6">
@@ -385,6 +444,15 @@ export default function PortfolioBuilder({
         )}
       </div>
 
+      {/* Dust validation (#1378) — blocks execution until resolved */}
+      {totalAmountValue !== null && totalAmountValue > 0n && dustValidation && (
+        <DustAllocationWarning
+          validation={dustValidation}
+          onAutoResolve={handleAutoResolveDust}
+          isResolving={isResolvingDust}
+        />
+      )}
+
       {/* Summary */}
       {totalAmount && isValid && (
         <div className="glass-panel p-6 space-y-3">
@@ -468,7 +536,9 @@ export default function PortfolioBuilder({
       {/* Execute Button */}
       <button
         onClick={handleExecuteDeposits}
-        disabled={!isValid || !totalAmount || txPhase !== "idle"}
+        disabled={
+          !isValid || !totalAmount || hasDustAllocations || txPhase !== "idle"
+        }
         className="w-full bg-gradient-to-r from-purple-600 to-blue-600 hover:from-purple-700 hover:to-blue-700 disabled:opacity-50 text-white font-semibold py-3 rounded-lg flex items-center justify-center gap-2"
       >
         <Zap className="w-5 h-5" />
