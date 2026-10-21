@@ -17,6 +17,8 @@ import {
 } from "./portfolioUtils";
 import RebalancePreview from "./RebalancePreviewPanel";
 import AllocationDeltaPreview from "./AllocationDeltaPreview";
+import DustAllocationWarning from "./DustAllocationWarning";
+import { validatePortfolioDust } from "../../../../shared/types/portfolioDust";
 import { useWallet } from "../../context/useWallet";
 import { deposit } from "../../services/soroban";
 
@@ -56,6 +58,7 @@ export default function PortfolioBuilder({
     () => buildInitialAllocations(availableVaults),
   );
   const [isSavingAllocation, setIsSavingAllocation] = useState(false);
+  const [isResolvingDust, setIsResolvingDust] = useState(false);
   const [txPhase, setTxPhase] = useState<TxPhase>("idle");
   const [error, setError] = useState("");
   const [executeTx, setExecuteTx] = useState(false);
@@ -85,19 +88,48 @@ export default function PortfolioBuilder({
 
   const isValid = useMemo(() => isValidAllocation(allocations), [allocations]);
 
+  // Parse once and treat a decimal/negative/empty input as "no amount" rather
+  // than letting BigInt throw during render.
+  const totalAmountValue = useMemo<bigint | null>(() => {
+    const trimmed = totalAmount.trim();
+    if (!/^\d+$/.test(trimmed)) return null;
+    try {
+      return BigInt(trimmed);
+    } catch {
+      return null;
+    }
+  }, [totalAmount]);
+
   const blendedApy = useMemo(
     () => calculateBlendedApy(allocations),
     [allocations],
   );
 
   const distributedAllocations = useMemo(() => {
-    if (!totalAmount || !isValid) return allocations;
+    if (totalAmountValue === null || totalAmountValue <= 0n || !isValid) {
+      return allocations;
+    }
     try {
-      return distributeAmount(BigInt(totalAmount), allocations);
+      return distributeAmount(totalAmountValue, allocations);
     } catch {
       return allocations;
     }
-  }, [totalAmount, allocations, isValid]);
+  }, [totalAmountValue, allocations, isValid]);
+
+  const dustValidation = useMemo(() => {
+    try {
+      return validatePortfolioDust({
+        totalAmount: totalAmountValue ?? 0n,
+        allocations,
+      });
+    } catch {
+      // The builder already surfaces malformed weight/amount input; dust
+      // validation must never make the panel crash.
+      return null;
+    }
+  }, [totalAmountValue, allocations]);
+
+  const hasDustAllocations = Boolean(dustValidation && !dustValidation.valid);
 
   const handleWeightChange = useCallback(
     (index: number, newWeight: number) => {
@@ -108,14 +140,46 @@ export default function PortfolioBuilder({
     [allocations],
   );
 
+  const handleAutoResolveDust = useCallback(() => {
+    if (!dustValidation?.suggestedAllocations) return;
+
+    setIsResolvingDust(true);
+    try {
+      const byId = new Map(
+        allocations.map((allocation) => [allocation.vaultContractId, allocation]),
+      );
+      const rebalanced = dustValidation.suggestedAllocations.flatMap(
+        (suggestion) => {
+          const existing = byId.get(suggestion.vaultContractId);
+          if (!existing) return [];
+          return [{ ...existing, weight: suggestion.weight, amount: 0n }];
+        },
+      );
+      if (rebalanced.length > 0) {
+        setAllocations(normalizeWeights(rebalanced));
+        setError("");
+      }
+    } finally {
+      setIsResolvingDust(false);
+    }
+  }, [allocations, dustValidation]);
+
   const handleExecuteDeposits = useCallback(async () => {
     if (!walletAddress) {
       setError("Wallet not connected");
       return;
     }
 
-    if (!totalAmount || !isValid) {
+    if (totalAmountValue === null || totalAmountValue <= 0n || !isValid) {
       setError("Invalid allocation or amount");
+      return;
+    }
+
+    if (hasDustAllocations) {
+      setError(
+        dustValidation?.message ||
+          "Some allocations are too small to deposit; adjust them before continuing.",
+      );
       return;
     }
 
@@ -170,11 +234,13 @@ export default function PortfolioBuilder({
     }
   }, [
     walletAddress,
-    totalAmount,
+    totalAmountValue,
     isValid,
     executeTx,
     distributedAllocations,
     signTransaction,
+    hasDustAllocations,
+    dustValidation?.message,
   ]);
 
   return (
@@ -245,9 +311,9 @@ export default function PortfolioBuilder({
               </div>
               <div className="text-right">
                 <p className="font-semibold">{alloc.weight.toFixed(1)}%</p>
-                {totalAmount && (
+                {totalAmountValue !== null && totalAmountValue > 0n && (
                   <p className="text-xs text-gray-400">
-                    {(BigInt(totalAmount) *
+                    {(totalAmountValue *
                       BigInt(Math.round(alloc.weight * 100))) /
                       BigInt(10000)}{" "}
                     USDC
@@ -279,6 +345,15 @@ export default function PortfolioBuilder({
           </div>
         )}
       </div>
+
+      {/* Dust validation (#1378) — blocks execution until resolved */}
+      {totalAmountValue !== null && totalAmountValue > 0n && dustValidation && (
+        <DustAllocationWarning
+          validation={dustValidation}
+          onAutoResolve={handleAutoResolveDust}
+          isResolving={isResolvingDust}
+        />
+      )}
 
       {/* Summary */}
       {totalAmount && isValid && (
@@ -342,7 +417,9 @@ export default function PortfolioBuilder({
       {/* Execute Button */}
       <button
         onClick={handleExecuteDeposits}
-        disabled={!isValid || !totalAmount || txPhase !== "idle"}
+        disabled={
+          !isValid || !totalAmount || hasDustAllocations || txPhase !== "idle"
+        }
         className="w-full bg-gradient-to-r from-purple-600 to-blue-600 hover:from-purple-700 hover:to-blue-700 disabled:opacity-50 text-white font-semibold py-3 rounded-lg flex items-center justify-center gap-2"
       >
         <Zap className="w-5 h-5" />

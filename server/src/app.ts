@@ -85,6 +85,7 @@ import deltaNeutralRouter from "./routes/deltaNeutral";
 import integrationsRouter from "./routes/integrations";
 import preferencesRouter from "./routes/preferences";
 import rewardCampaignCalendarRouter from "./routes/rewardCampaignCalendar";
+import portfolioBuilderRouter from "./routes/portfolioBuilder";
 
 import { createAuthChallenge, verifyAuthChallenge } from "./utils/stellarAuth";
 import {
@@ -188,6 +189,7 @@ export function createApp() {
   app.use("/api/portfolio/reconcile", portfolioReconcileRouter);
   app.use("/api/portfolio/exposure", portfolioExposureRouter);
   app.use("/api/portfolio/import", portfolioImportRouter);
+  app.use("/api/portfolio/builder", portfolioBuilderRouter);
   app.use("/api/presets", presetsRouter);
   app.use("/api/analytics", analyticsRouter);
   app.use("/api/offramp", offrampRouter);

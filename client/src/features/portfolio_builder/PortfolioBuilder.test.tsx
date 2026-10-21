@@ -37,8 +37,9 @@ describe("PortfolioBuilder Component", () => {
     );
 
     expect(screen.getByText("Portfolio Allocation")).toBeInTheDocument();
-    expect(screen.getByText("Blend Vault")).toBeInTheDocument();
-    expect(screen.getByText("Soroswap Vault")).toBeInTheDocument();
+    // Vault names also appear in the allocation delta preview.
+    expect(screen.getAllByText("Blend Vault").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Soroswap Vault").length).toBeGreaterThan(0);
   });
 
   it("handles mock execution flow when opt-in checkbox is unchecked", async () => {
@@ -122,5 +123,36 @@ describe("PortfolioBuilder Component", () => {
     });
 
     expect(screen.getAllByText("User rejected signing").length).toBeGreaterThan(0);
+  });
+
+  it("blocks execution and offers a rebalance when allocations would be dust", async () => {
+    render(
+      <PortfolioBuilder
+        walletAddress="GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF"
+        availableVaults={mockAvailableVaults}
+      />
+    );
+
+    // 1 USDC split 50/50 rounds the second vault to zero.
+    fireEvent.change(screen.getByPlaceholderText("Enter amount to allocate"), {
+      target: { value: "1" },
+    });
+
+    expect(await screen.findByTestId("dust-allocation-warning")).toBeInTheDocument();
+    expect(screen.getByText("Dust allocations detected")).toBeInTheDocument();
+
+    const executeBtn = screen.getByRole("button", {
+      name: /Execute Multi-Vault Deposit/i,
+    });
+    expect(executeBtn).toBeDisabled();
+
+    fireEvent.click(screen.getByRole("button", { name: /Remove dust & rebalance/i }));
+
+    await waitFor(() => {
+      expect(screen.queryByTestId("dust-allocation-warning")).not.toBeInTheDocument();
+    });
+    expect(
+      screen.getByRole("button", { name: /Execute Multi-Vault Deposit/i }),
+    ).not.toBeDisabled();
   });
 });
