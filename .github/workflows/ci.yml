@@ -7,7 +7,46 @@ on:
       - dev
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
+  malware-check:
+    name: Malware Indicator Check
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout without saved credentials
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Checkout trusted scanner for pull requests
+        if: github.event_name == 'pull_request'
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: .security-base
+          persist-credentials: false
+          sparse-checkout: scripts/check-malware-indicators.py
+          sparse-checkout-cone-mode: false
+
+      - name: Scan tracked files without installing dependencies
+        env:
+          SCAN_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+          SCAN_EVENT: ${{ github.event_name }}
+        run: |
+          SCANNER=scripts/check-malware-indicators.py
+          if [ "$SCAN_EVENT" = "pull_request" ]; then
+            SCANNER=.security-base/scripts/check-malware-indicators.py
+            if [ ! -f "$SCANNER" ]; then
+              echo "Initial scanner installation requires manual review and a merge into the base branch."
+              exit 1
+            fi
+          fi
+          python3 -I "$SCANNER" --root "$GITHUB_WORKSPACE" --base "$SCAN_BASE"
+
   changes:
     name: Detect changed areas
     runs-on: ubuntu-latest
@@ -56,7 +95,7 @@ jobs:
 
   client:
     name: Client CI
-    needs: changes
+    needs: [changes, malware-check]
     if: needs.changes.outputs.client == 'true'
     runs-on: ubuntu-latest
     defaults:
@@ -85,7 +124,7 @@ jobs:
 
   server:
     name: Server CI
-    needs: changes
+    needs: [changes, malware-check]
     if: needs.changes.outputs.server == 'true'
     runs-on: ubuntu-latest
     defaults:
@@ -117,7 +156,7 @@ jobs:
 
   contracts:
     name: Contracts CI
-    needs: changes
+    needs: [changes, malware-check]
     if: needs.changes.outputs.contracts == 'true'
     runs-on: ubuntu-latest
     defaults:
