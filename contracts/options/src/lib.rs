@@ -6,11 +6,13 @@ use soroban_sdk::{
     Address, Env,
 };
 
+mod events;
 mod math;
 mod storage;
 #[cfg(test)]
 mod tests;
 
+use events::{emit_cancelled, emit_created, emit_exercised, emit_expired, emit_filled};
 use math::black_scholes_call;
 use storage::{
     clear_oracle_max_age, has_admin, read_admin, read_cancelled, read_exercised_amount,
@@ -215,10 +217,7 @@ impl OptionsContract {
         write_option(&env, counter, &option_data);
         write_option_counter(&env, counter);
 
-        env.events().publish(
-            (symbol_short!("mint"), counter),
-            (minter, strike_price, opening_time, expiration_time),
-        );
+        emit_created(&env, counter, &option_data);
 
         Ok(counter)
     }
@@ -270,7 +269,8 @@ impl OptionsContract {
             OptionType::Call => option.underlying_asset.clone(),
             OptionType::Put => option.quote_asset.clone(),
         };
-        let remaining = option.collateral_amount - read_exercised_amount(&env, option_id);
+        let exercised_amount = read_exercised_amount(&env, option_id);
+        let remaining = option.collateral_amount - exercised_amount;
 
         token::Client::new(&env, &collateral_asset).transfer(
             &env.current_contract_address(),
@@ -280,8 +280,7 @@ impl OptionsContract {
         release_reserved(&env, &minter, &collateral_asset, remaining);
         write_cancelled(&env, option_id);
 
-        env.events()
-            .publish((symbol_short!("cancel"), option_id), (minter, remaining));
+        emit_cancelled(&env, option_id, &option, remaining, exercised_amount);
 
         Ok(())
     }
@@ -308,7 +307,8 @@ impl OptionsContract {
         };
 
         // Only what partial exercises have not already paid out is still held.
-        let remaining = option.collateral_amount - read_exercised_amount(&env, option_id);
+        let exercised_amount = read_exercised_amount(&env, option_id);
+        let remaining = option.collateral_amount - exercised_amount;
 
         let client = token::Client::new(&env, &collateral_asset);
         client.transfer(&env.current_contract_address(), &option.minter, &remaining);
@@ -318,10 +318,7 @@ impl OptionsContract {
         option.expired = true;
         write_option(&env, option_id, &option);
 
-        env.events().publish(
-            (symbol_short!("expire"), option_id),
-            (option.minter.clone(),),
-        );
+        emit_expired(&env, option_id, &option, remaining, exercised_amount);
 
         Ok(())
     }
@@ -494,12 +491,24 @@ impl OptionsContract {
         if new_exercised >= option.collateral_amount {
             option.exercised = true;
             write_option(env, option_id, &option);
+            emit_exercised(
+                env,
+                option_id,
+                &option,
+                exerciser,
+                to_exercise,
+                new_exercised,
+            );
+        } else {
+            emit_filled(
+                env,
+                option_id,
+                &option,
+                exerciser,
+                to_exercise,
+                new_exercised,
+            );
         }
-
-        env.events().publish(
-            (symbol_short!("exercise"), option_id),
-            (exerciser, to_exercise),
-        );
 
         Ok(())
     }

@@ -1391,3 +1391,217 @@ mod payout_conservation {
         }
     }
 }
+
+// ── Versioned lifecycle events (#1467) ───────────────────────────────────
+
+mod versioned_lifecycle_events {
+    use super::*;
+    use crate::events::{OptionLifecycleEvent, OPTION_EVENT_SCHEMA_VERSION};
+    use soroban_sdk::{
+        symbol_short,
+        testutils::{Events as _, Ledger},
+        Env, Symbol, TryFromVal,
+    };
+
+    fn is_lifecycle_kind(kind: &Symbol) -> bool {
+        *kind == symbol_short!("create")
+            || *kind == symbol_short!("fill")
+            || *kind == symbol_short!("exercise")
+            || *kind == symbol_short!("expire")
+            || *kind == symbol_short!("cancel")
+    }
+
+    /// The versioned lifecycle events emitted by the most recent invocation.
+    fn lifecycle_events(env: &Env) -> soroban_sdk::Vec<(Symbol, u32, OptionLifecycleEvent)> {
+        let mut out = soroban_sdk::Vec::new(env);
+        for (_, topics, data) in env.events().all().iter() {
+            if topics.len() != 3 {
+                continue;
+            }
+            let Some(first) = topics.get(0) else {
+                continue;
+            };
+            let Ok(kind) = Symbol::try_from_val(env, &first) else {
+                continue;
+            };
+            if !is_lifecycle_kind(&kind) {
+                continue;
+            }
+            let Ok(option_id) = u32::try_from_val(env, &topics.get(1).unwrap()) else {
+                continue;
+            };
+            let Ok(schema_version) = u32::try_from_val(env, &topics.get(2).unwrap()) else {
+                continue;
+            };
+            let Ok(event) = OptionLifecycleEvent::try_from_val(env, &data) else {
+                continue;
+            };
+
+            assert_eq!(event.option_id, option_id);
+            assert_eq!(event.schema_version, schema_version);
+            out.push_back((kind, schema_version, event));
+        }
+        out
+    }
+
+    fn single_event(env: &Env) -> (Symbol, u32, OptionLifecycleEvent) {
+        let events = lifecycle_events(env);
+        assert_eq!(events.len(), 1, "expected one versioned lifecycle event");
+        events.get(0).unwrap()
+    }
+
+    #[test]
+    fn create_event_exposes_versioned_position_fields() {
+        let (env, client, _, _, underlying, quote) = setup_env();
+        env.ledger().set_timestamp(123);
+        let minter = Address::generate(&env);
+        mint_tokens(&env, &underlying, &minter, 10_000_000);
+
+        let option_id = client.mint(
+            &minter,
+            &OptionType::Call,
+            &underlying,
+            &quote,
+            &100_000_000_i128,
+            &500u64,
+            &1000u64,
+            &10_000_000_i128,
+        );
+
+        let (kind, version, event) = single_event(&env);
+        assert_eq!(kind, symbol_short!("create"));
+        assert_eq!(version, OPTION_EVENT_SCHEMA_VERSION);
+        assert_eq!(event.schema_version, OPTION_EVENT_SCHEMA_VERSION);
+        assert_eq!(event.option_id, option_id);
+        assert_eq!(event.option_type, OptionType::Call);
+        assert_eq!(event.minter, minter);
+        assert_eq!(event.actor, minter);
+        assert_eq!(event.underlying_asset, underlying);
+        assert_eq!(event.quote_asset, quote);
+        assert_eq!(event.collateral_asset, underlying);
+        assert_eq!(event.strike_price, 100_000_000);
+        assert_eq!(event.opening_time, 500);
+        assert_eq!(event.expiration_time, 1000);
+        assert_eq!(event.collateral_amount, 10_000_000);
+        assert_eq!(event.amount, 10_000_000);
+        assert_eq!(event.exercised_amount, 0);
+        assert_eq!(event.remaining_collateral, 10_000_000);
+        assert_eq!(event.timestamp, 123);
+    }
+
+    #[test]
+    fn create_fill_exercise_events_are_ordered_and_consistent() {
+        let (env, client, _, _, underlying, quote) = setup_env();
+        let (option_id, minter) = mint_call_option(&env, &client, &underlying, &quote);
+        let exerciser = Address::generate(&env);
+
+        let (create_kind, version, create) = single_event(&env);
+        assert_eq!(create_kind, symbol_short!("create"));
+        assert_eq!(version, OPTION_EVENT_SCHEMA_VERSION);
+        assert_eq!(create.option_id, option_id);
+
+        env.ledger().set_timestamp(750);
+        client.exercise_partial(&exerciser, &option_id, &4_000_000);
+
+        let (fill_kind, version, fill) = single_event(&env);
+        assert_eq!(fill_kind, symbol_short!("fill"));
+        assert_eq!(version, OPTION_EVENT_SCHEMA_VERSION);
+        assert_eq!(fill.option_id, option_id);
+        assert_eq!(fill.minter, minter);
+        assert_eq!(fill.actor, exerciser);
+        assert_eq!(fill.amount, 4_000_000);
+        assert_eq!(fill.exercised_amount, 4_000_000);
+        assert_eq!(fill.remaining_collateral, 6_000_000);
+
+        client.exercise(&exerciser, &option_id);
+
+        let (exercise_kind, version, exercise) = single_event(&env);
+        assert_eq!(exercise_kind, symbol_short!("exercise"));
+        assert_eq!(version, OPTION_EVENT_SCHEMA_VERSION);
+        assert_eq!(exercise.option_id, option_id);
+        assert_eq!(exercise.minter, minter);
+        assert_eq!(exercise.actor, exerciser);
+        assert_eq!(exercise.amount, 6_000_000);
+        assert_eq!(exercise.exercised_amount, 10_000_000);
+        assert_eq!(exercise.remaining_collateral, 0);
+    }
+
+    #[test]
+    fn full_exercise_emits_exercise_without_a_fill() {
+        let (env, client, _, _, underlying, quote) = setup_env();
+        let (option_id, minter) = mint_call_option(&env, &client, &underlying, &quote);
+        let exerciser = Address::generate(&env);
+
+        // Discard the create event; this test starts from the open position.
+        let _ = single_event(&env);
+
+        env.ledger().set_timestamp(750);
+        client.exercise(&exerciser, &option_id);
+
+        let (kind, version, event) = single_event(&env);
+        assert_eq!(kind, symbol_short!("exercise"));
+        assert_eq!(version, OPTION_EVENT_SCHEMA_VERSION);
+        assert_eq!(event.option_id, option_id);
+        assert_eq!(event.minter, minter);
+        assert_eq!(event.actor, exerciser);
+        assert_eq!(event.amount, 10_000_000);
+        assert_eq!(event.exercised_amount, 10_000_000);
+        assert_eq!(event.remaining_collateral, 0);
+    }
+
+    #[test]
+    fn expiry_emits_versioned_expire_after_partial_fill() {
+        let (env, client, _, _, underlying, quote) = setup_env();
+        let (option_id, minter) = mint_call_option(&env, &client, &underlying, &quote);
+        let exerciser = Address::generate(&env);
+
+        let (create_kind, _, _) = single_event(&env);
+        assert_eq!(create_kind, symbol_short!("create"));
+
+        env.ledger().set_timestamp(750);
+        client.exercise_partial(&exerciser, &option_id, &4_000_000);
+        let (fill_kind, _, _) = single_event(&env);
+        assert_eq!(fill_kind, symbol_short!("fill"));
+
+        env.ledger().set_timestamp(1001);
+        client.expire(&option_id);
+
+        let (kind, version, event) = single_event(&env);
+        assert_eq!(kind, symbol_short!("expire"));
+        assert_eq!(version, OPTION_EVENT_SCHEMA_VERSION);
+        assert_eq!(event.option_id, option_id);
+        assert_eq!(event.minter, minter);
+        assert_eq!(event.actor, minter);
+        assert_eq!(event.amount, 6_000_000);
+        assert_eq!(event.exercised_amount, 4_000_000);
+        assert_eq!(event.remaining_collateral, 0);
+        assert_eq!(event.timestamp, 1001);
+    }
+
+    #[test]
+    fn cancellation_emits_versioned_cancel_after_partial_fill() {
+        let (env, client, _, _, underlying, quote) = setup_env();
+        let (option_id, minter) = mint_call_option(&env, &client, &underlying, &quote);
+        let exerciser = Address::generate(&env);
+
+        let (create_kind, _, _) = single_event(&env);
+        assert_eq!(create_kind, symbol_short!("create"));
+
+        env.ledger().set_timestamp(750);
+        client.exercise_partial(&exerciser, &option_id, &4_000_000);
+        let (fill_kind, _, _) = single_event(&env);
+        assert_eq!(fill_kind, symbol_short!("fill"));
+
+        client.cancel(&minter, &option_id);
+
+        let (kind, version, event) = single_event(&env);
+        assert_eq!(kind, symbol_short!("cancel"));
+        assert_eq!(version, OPTION_EVENT_SCHEMA_VERSION);
+        assert_eq!(event.option_id, option_id);
+        assert_eq!(event.minter, minter);
+        assert_eq!(event.actor, minter);
+        assert_eq!(event.amount, 6_000_000);
+        assert_eq!(event.exercised_amount, 4_000_000);
+        assert_eq!(event.remaining_collateral, 0);
+    }
+}

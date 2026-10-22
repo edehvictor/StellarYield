@@ -19,13 +19,20 @@
 
 ## Events
 
-- `mint`
-- `exercise` (position fully exercised)
-- `partial` (part of the collateral exercised)
-- `cancel`
-- `expire`
-- `deposit`
-- `withdraw`
+Position lifecycle events are versioned. Each event uses the topics
+`(kind, option_id, schema_version)` and an `OptionLifecycleEvent` payload
+containing the position id, option type, minter, actor, underlying and quote
+assets, collateral asset, strike, exercise window, collateral amount, amount
+moved by this transition, cumulative exercised amount, remaining collateral,
+and ledger timestamp.
+
+- `create` — position minted and collateral escrowed
+- `fill` — partial exercise consumed part of the remaining collateral
+- `exercise` — position fully exercised
+- `expire` — unexercised collateral returned after expiry
+- `cancel` — unexercised collateral returned to the minter
+
+`deposit` and `withdraw` continue to emit their existing collateral events.
 
 ## Errors
 
