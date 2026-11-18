@@ -65,9 +65,17 @@ Source: `contracts/stableswap/src/lib.rs`
 | 6    | `Unauthorized`          | Caller is not admin                          | Use the admin address                       |
 | 7    | `InvalidAmpCoeff`       | Amplification coefficient out of range       | Use a valid amp value (typically 1–10 000)  |
 | 8    | `InvalidFee`            | Fee basis points out of range                | Use a fee value within protocol limits      |
-| 9    | `MathOverflow`          | Arithmetic overflow in invariant calculation | Reduce input amounts                        |
+| 9    | `MathOverflow`          | A checked intermediate cannot be represented in `i128` | Reduce the amount; see the per-side reserve limit in `docs/contracts/stableswap-invariant.md` |
 | 10   | `ZeroInvariant`         | Pool invariant is zero                       | Pool is empty; add liquidity first          |
 | 11   | `InvalidToken`          | Token address is duplicate, LP token, or unrecognized in swap | Use distinct, registered pool tokens |
+
+`stableswap` uses checked arithmetic and documented floor rounding for every
+invariant, fee, deposit and withdrawal calculation. Boundary values (zero,
+minimum one-unit reserves, maximum `i128` inputs) either produce a defined
+result or a typed error above; a rejected call never changes reserves, LP supply,
+LP balances or token balances. See
+`docs/contracts/stableswap-invariant.md` for the rounding table and numeric
+limits.
 
 ---
 

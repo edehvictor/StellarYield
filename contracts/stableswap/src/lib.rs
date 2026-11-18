@@ -15,6 +15,34 @@
 //! Dynamic fee adjustment scales linearly with pool imbalance:
 //!   fee = base_fee + (imbalance_ratio · fee_multiplier)
 //! where imbalance_ratio = |x/S - 0.5| / 0.5  (S = x+y)
+//!
+//! ## Rounding and numeric limits
+//!
+//! All arithmetic is checked. Values that cannot be represented safely return a
+//! typed [`StableSwapError`] (`MathOverflow`, `InvalidAmount`, `ZeroInvariant`)
+//! before any token transfer or storage write, so a failed call never changes
+//! reserves, LP supply, LP balances, or token balances.
+//!
+//! Rounding rules (all divisions are integer division of non-negative values, so
+//! they round **down**):
+//!
+//! - Newton intermediate products are folded division-first
+//!   (`floor(floor(d²/4L)·d/S)` for `d³/(4·x·y)`), which keeps them smaller than
+//!   the exact rational value and extends the safe reserve range beyond a direct
+//!   cube. The iteration still needs `ann·S·D` to fit in `i128`, so for a
+//!   balanced pool the per-side reserve limit is roughly
+//!   `sqrt(i128::MAX / (4·A))` (`≈ 6.5·10¹⁷` for `A = 100`). Values beyond the
+//!   checked domain return `MathOverflow` instead of wrapping.
+//! - The invariant `D` and the solved reserve `y` are returned as the first
+//!   iterate whose change is at most one unit, so `|result − exact| ≤ 1`.
+//! - Deposits mint `floor(total_supply·(D₁−D₀)/D₀)` LP tokens and withdrawals pay
+//!   `floor(reserve·lp_amount/total_supply)`; both round in favour of the pool.
+//! - Swap fees and the post-fee input are floored, and the output is
+//!   `reserve_out − y`, rounding in favour of the pool.
+//!
+//! Minimum reserves are `1` unit per token; zero reserves or a zero invariant are
+//! rejected. Requesting an amount that pushes an intermediate value outside the
+//! `i128` domain is rejected with `MathOverflow` rather than wrapping.
 
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, symbol_short, token, Address, Env,
@@ -487,23 +515,12 @@ impl StableSwap {
         // A·n^n  (n=2, n^n=4)
         let ann: i128 = (amp as i128)
             .checked_mul(4)
-            .ok_or(StableSwapError::MathOverflow)?;
+            .ok_or(StableSwapError::InvalidAmpCoeff)?;
 
         let mut d = s;
 
         for _ in 0..NEWTON_ITERS {
-            // d_prod = D^3 / (4·x·y)
-            let d3 = d
-                .checked_mul(d)
-                .and_then(|v| v.checked_mul(d))
-                .ok_or(StableSwapError::MathOverflow)?;
-            let four_xy = x
-                .checked_mul(4)
-                .and_then(|v| v.checked_mul(y))
-                .ok_or(StableSwapError::MathOverflow)?;
-            let d_prod = d3
-                .checked_div(four_xy)
-                .ok_or(StableSwapError::MathOverflow)?;
+            let d_prod = Self::compute_d_prod(d, x, y)?;
 
             // numerator = (ann·S + n·d_prod)·D  = (ann·S + 2·d_prod)·D
             let numer = ann
@@ -539,13 +556,35 @@ impl StableSwap {
                 return Err(StableSwapError::MathOverflow);
             }
 
-            // Converged?
-            if (d_next - d).abs() <= 1 {
+            // Converged? `d_next` and `d` are both positive and fit in i128, so
+            // the difference is safe; use checked math to keep it explicit.
+            let delta = d_next.checked_sub(d).ok_or(StableSwapError::MathOverflow)?;
+            if delta.unsigned_abs() <= 1 {
                 return Ok(d_next);
             }
             d = d_next;
         }
         Err(StableSwapError::MathOverflow)
+    }
+
+    /// Compute `d³ / (4·x·y)` without overflowing the intermediate cube.
+    ///
+    /// Division-first folding (`floor(floor(d²/4·max)·d/min)`) keeps every
+    /// intermediate smaller than `i128::MAX` for reserves that would overflow a
+    /// direct `d³` product, and floors at each step so the result never exceeds
+    /// the exact rational value (rounding favours the pool).
+    fn compute_d_prod(d: i128, x: i128, y: i128) -> Result<i128, StableSwapError> {
+        let (large, small) = if x >= y { (x, y) } else { (y, x) };
+        let four_large = large.checked_mul(4).ok_or(StableSwapError::MathOverflow)?;
+        let d2 = d.checked_mul(d).ok_or(StableSwapError::MathOverflow)?;
+        let quotient = d2
+            .checked_div(four_large)
+            .ok_or(StableSwapError::MathOverflow)?;
+        quotient
+            .checked_mul(d)
+            .ok_or(StableSwapError::MathOverflow)?
+            .checked_div(small)
+            .ok_or(StableSwapError::MathOverflow)
     }
 
     /// Given the new reserve of one token (x_new), compute the required
@@ -567,7 +606,7 @@ impl StableSwap {
         // where b = x_new + D/ann,  D ≈ sum (initial guess)
         let ann: i128 = (amp as i128)
             .checked_mul(4)
-            .ok_or(StableSwapError::MathOverflow)?;
+            .ok_or(StableSwapError::InvalidAmpCoeff)?;
 
         // Approximate D as proportional to sum (conservative; accurate enough for 2-coin pools)
         let d = sum;
@@ -577,17 +616,17 @@ impl StableSwap {
             .checked_add(d.checked_div(ann).ok_or(StableSwapError::MathOverflow)?)
             .ok_or(StableSwapError::MathOverflow)?;
 
-        // c = D^3 / (4·ann·x_new)
-        let d3 = d
-            .checked_mul(d)
-            .and_then(|v| v.checked_mul(d))
-            .ok_or(StableSwapError::MathOverflow)?;
+        // c = D³ / (4·ann·x_new), folded division-first to avoid overflowing
+        // the intermediate cube (see module rounding notes).
         let four_ann_x = ann
             .checked_mul(4)
             .and_then(|v| v.checked_mul(x_new))
             .ok_or(StableSwapError::MathOverflow)?;
-        let c = d3
+        let d2 = d.checked_mul(d).ok_or(StableSwapError::MathOverflow)?;
+        let c = d2
             .checked_div(four_ann_x)
+            .ok_or(StableSwapError::MathOverflow)?
+            .checked_mul(d)
             .ok_or(StableSwapError::MathOverflow)?;
 
         let mut y = d;
@@ -614,7 +653,8 @@ impl StableSwap {
                 return Err(StableSwapError::MathOverflow);
             }
 
-            if (y_next - y).abs() <= 1 {
+            let delta = y_next.checked_sub(y).ok_or(StableSwapError::MathOverflow)?;
+            if delta.unsigned_abs() <= 1 {
                 return Ok(y_next);
             }
             y = y_next;
@@ -1256,5 +1296,181 @@ mod tests {
             StableSwap::compute_dynamic_fee(1000, 1000, FEE_PRECISION as u32, 0),
             Err(StableSwapError::InvalidFee)
         );
+    }
+
+    // ── Boundary-value invariant calculations (#1764) ──────────────────
+
+    #[test]
+    fn test_compute_d_minimum_reserves() {
+        // One unit per token is the smallest valid pool. D is finite, positive,
+        // and at least the reserve sum.
+        let d = StableSwap::compute_d(1, 1, 1).expect("minimum reserves must converge");
+        assert!(d >= 2);
+
+        // Minimum remains valid at maximum amplification.
+        let d_max_amp = StableSwap::compute_d(1, 1, MAX_A).expect("min reserves at MAX_A");
+        assert!(d_max_amp >= 2);
+    }
+
+    #[test]
+    fn test_compute_d_near_limit_reserves() {
+        // 1e17 per side: large enough that a direct `d^3` is close to the i128
+        // limit, but within the documented `sqrt(i128::MAX / (4·A))` domain.
+        let reserve: i128 = 100_000_000_000_000_000;
+        let d = StableSwap::compute_d(reserve, reserve, 100)
+            .expect("near-limit balanced reserves must converge");
+        assert!(d >= reserve.checked_mul(2).unwrap());
+        assert!(d < reserve.checked_mul(4).unwrap());
+    }
+
+    #[test]
+    fn test_compute_d_maximum_reserves_typed_error() {
+        // x + y overflows i128: typed failure, never a panic.
+        assert_eq!(
+            StableSwap::compute_d(i128::MAX, i128::MAX, 100),
+            Err(StableSwapError::MathOverflow)
+        );
+
+        // Sum fits but d^2 cannot be represented: typed failure.
+        let third = i128::MAX / 3;
+        assert_eq!(
+            StableSwap::compute_d(third, third, 100),
+            Err(StableSwapError::MathOverflow)
+        );
+    }
+
+    #[test]
+    fn test_compute_y_near_limit_and_maximum() {
+        // Near-limit values converge instead of overflowing the cube.
+        let y = StableSwap::compute_y(1_000_000_000_000_000_000, 2_000_000_000_000_000_000, 100)
+            .expect("near-limit y must converge");
+        assert!(y > 0);
+
+        // Maximum inputs that cannot be represented return a typed error.
+        assert_eq!(
+            StableSwap::compute_y(i128::MAX, i128::MAX, 100),
+            Err(StableSwapError::MathOverflow)
+        );
+    }
+
+    #[test]
+    fn test_dynamic_fee_maximum_values() {
+        // Balanced maximum reserves have zero imbalance and no overflow.
+        let half = i128::MAX / 2;
+        assert_eq!(
+            StableSwap::compute_dynamic_fee(half, half, 30_000, 20_000),
+            Ok(30_000)
+        );
+
+        // Extreme imbalance at the i128 limit cannot be scaled safely.
+        assert_eq!(
+            StableSwap::compute_dynamic_fee(i128::MAX, 0, 30_000, 20_000),
+            Err(StableSwapError::MathOverflow)
+        );
+    }
+
+    #[test]
+    fn test_minimum_liquidity_lifecycle_rounds_down() {
+        let env = Env::default();
+        let (client, user, _token0, _token1, _) = setup_pool_with_tokens(&env, 100);
+
+        // Smallest meaningful deposit.
+        let mint = client.add_liquidity(&user, &1, &1, &0);
+        assert!(mint > 0);
+        assert_eq!(client.get_reserves(), (1, 1));
+
+        // A tiny withdrawal rounds both payouts to zero and is rejected, leaving
+        // LP balance, supply, and reserves untouched.
+        let tiny = mint / 2;
+        if tiny > 0 {
+            let res = client.try_remove_liquidity(&user, &tiny, &0, &0);
+            assert_eq!(res, Err(Ok(StableSwapError::InsufficientLiquidity)));
+            assert_eq!(client.get_lp_balance(&user), mint);
+            assert_eq!(client.get_total_supply(), mint);
+            assert_eq!(client.get_reserves(), (1, 1));
+        }
+
+        // Full exit returns exactly the reserves (floor division is exact here).
+        let (out0, out1) = client.remove_liquidity(&user, &mint, &0, &0);
+        assert_eq!((out0, out1), (1, 1));
+        assert_eq!(client.get_reserves(), (0, 0));
+        assert_eq!(client.get_total_supply(), 0);
+    }
+
+    #[test]
+    fn test_withdrawal_rounding_is_documented_floor() {
+        let env = Env::default();
+        let (client, user, _token0, _token1, _) = setup_pool_with_tokens(&env, 100);
+
+        let mint = client.add_liquidity(&user, &1_000_000, &1_000_000, &0);
+        let (reserve0, reserve1) = client.get_reserves();
+        let lp_amount = mint / 3;
+
+        let (out0, out1) = client.remove_liquidity(&user, &lp_amount, &0, &0);
+
+        // Payouts must equal floor(reserve * lp / supply): the pool never pays
+        // out more than the proportional share.
+        assert_eq!(out0, reserve0 * lp_amount / mint);
+        assert_eq!(out1, reserve1 * lp_amount / mint);
+        assert!(out0 <= reserve0);
+        assert!(out1 <= reserve1);
+    }
+
+    #[test]
+    fn test_add_liquidity_max_amount_rejected_without_state_change() {
+        let env = Env::default();
+        let (client, user, token0, token1, _) = setup_pool_with_tokens(&env, 100);
+        let t0_client = token::Client::new(&env, &token0);
+        let t1_client = token::Client::new(&env, &token1);
+
+        client.add_liquidity(&user, &1_000, &1_000, &0);
+        let reserves = client.get_reserves();
+        let supply = client.get_total_supply();
+        let bal0 = t0_client.balance(&user);
+        let bal1 = t1_client.balance(&user);
+
+        // reserve + i128::MAX overflows: typed failure before any transfer.
+        assert_eq!(
+            client.try_add_liquidity(&user, &i128::MAX, &1, &0),
+            Err(Ok(StableSwapError::MathOverflow))
+        );
+        assert_eq!(client.get_reserves(), reserves);
+        assert_eq!(client.get_total_supply(), supply);
+        assert_eq!(t0_client.balance(&user), bal0);
+        assert_eq!(t1_client.balance(&user), bal1);
+
+        // Safe retry with a representable amount succeeds.
+        let mint = client.add_liquidity(&user, &1_000, &1_000, &0);
+        assert!(mint > 0);
+        assert_eq!(t0_client.balance(&user), bal0 - 1_000);
+        assert_eq!(t1_client.balance(&user), bal1 - 1_000);
+    }
+
+    #[test]
+    fn test_swap_max_amount_rejected_without_state_change() {
+        let env = Env::default();
+        let (client, user, token0, token1, _) = setup_pool_with_tokens(&env, 100);
+        let t0_client = token::Client::new(&env, &token0);
+        let t1_client = token::Client::new(&env, &token1);
+
+        client.add_liquidity(&user, &1_000_000, &1_000_000, &0);
+        let reserves = client.get_reserves();
+        let bal0 = t0_client.balance(&user);
+        let bal1 = t1_client.balance(&user);
+
+        // `amount_in * fee_factor` cannot be represented: typed failure.
+        assert_eq!(
+            client.try_swap(&user, &token0, &i128::MAX, &0),
+            Err(Ok(StableSwapError::MathOverflow))
+        );
+        assert_eq!(client.get_reserves(), reserves);
+        assert_eq!(t0_client.balance(&user), bal0);
+        assert_eq!(t1_client.balance(&user), bal1);
+
+        // Safe retry.
+        let out = client.swap(&user, &token0, &100_000, &0);
+        assert!(out > 0);
+        assert_eq!(t0_client.balance(&user), bal0 - 100_000);
+        assert_eq!(t1_client.balance(&user), bal1 + out);
     }
 }
