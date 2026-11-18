@@ -411,6 +411,14 @@
                     },
                     {
                       "key": {
+                        "symbol": "sequence"
+                      },
+                      "val": {
+                        "u64": 1
+                      }
+                    },
+                    {
+                      "key": {
                         "symbol": "tick_lower"
                       },
                       "val": {

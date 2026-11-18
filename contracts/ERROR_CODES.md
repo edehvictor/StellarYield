@@ -111,20 +111,9 @@ Source: `contracts/clmm_core/src/lib.rs`
 | 8    | `Unauthorized`          | Caller is not the position owner                               | Use the position owner address                           |
 | 9    | `InvalidPosition`       | No position exists with this id                                | Check the position id                                    |
 | 10   | `DuplicateOperation`    | An operation identity was already consumed by a successful call | Reuse the identity only for a genuine retry of the same call; use a new one for a new operation |
-| 11   | `InvalidFee`            | Fee above 10 000 bps (100%)                                    | Pass `fee <= 10000`                                      |
-| 12   | `InvalidTickSpacing`    | Tick spacing is zero, negative, above 16 384, or corrupt in storage | Re-initialize the pool with a supported tick spacing |
-| 13   | `InvalidSqrtPrice`      | Initial sqrt price below the representable minimum             | Pass a sqrt price within `[MIN_SQRT_RATIO, MAX_SQRT_RATIO]` |
-| 14   | `MathOverflow`          | Checked arithmetic would overflow the accounting domain        | Reduce the amount or liquidity requested                 |
-| 15   | `CorruptedPosition`     | A stored position record fails boundary validation             | Reconcile the record from on-chain events before retrying |
+| 11   | `ConcurrentModification` | Position sequence does not match; position state was modified concurrently | Query current sequence via `get_position()` / `get_position_sequence()` and retry |
 
-`clmm_core` validates every untrusted field at the boundary — `initialize`
-configuration, `mint` / `burn` / `swap` arguments, and position records read back
-from persistent storage — before it changes any state or moves any token. A call
-rejected with one of these codes leaves pool state, tick state, position records
-and token balances untouched, so it is safe to retry with corrected input.
-
-See `docs/contracts/clmm-operations.md` for identity scoping, validation rules
-and retry rules.
+See `docs/contracts/clmm-operations.md` for identity scoping, optimistic concurrency, and retry rules.
 
 ---
 
