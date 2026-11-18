@@ -61,7 +61,7 @@ pub struct TickInfo {
 }
 
 #[contracttype]
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Position {
     pub owner: Address,
     pub tick_lower: i32,
@@ -71,6 +71,7 @@ pub struct Position {
     pub fee_growth_inside_1_last_x128: u128,
     pub tokens_owed_0: u128,
     pub tokens_owed_1: u128,
+    pub sequence: u64,
 }
 
 // ── Errors ──────────────────────────────────────────────────────────────
@@ -89,6 +90,7 @@ pub enum ClmmError {
     Unauthorized = 8,
     InvalidPosition = 9,
     DuplicateOperation = 10,
+    ConcurrentModification = 11,
 }
 
 // ── Contract ────────────────────────────────────────────────────────────
@@ -269,6 +271,7 @@ impl ClmmCore {
             fee_growth_inside_1_last_x128: fee_growth_inside_1,
             tokens_owed_0: 0,
             tokens_owed_1: 0,
+            sequence: 1,
         };
 
         env.storage()
@@ -283,6 +286,10 @@ impl ClmmCore {
         env.events().publish(
             (symbol_short!("mint"),),
             (position_id, owner.clone(), tick_lower, tick_upper, amount),
+        );
+        env.events().publish(
+            (symbol_short!("pos_seq"),),
+            (position_id, position.sequence),
         );
         Self::publish_operation(
             &env,
@@ -300,6 +307,10 @@ impl ClmmCore {
     /// # Arguments
     /// * `position_id` — ID of the position to burn
     /// * `amount` — Amount of liquidity to remove
+    /// * `expected_sequence` — Monotonically increasing sequence number observed
+    ///   by the caller. If concurrent operations have modified the position,
+    ///   the call fails with `ConcurrentModification` before any ticks, balances
+    ///   or state are mutated.
     /// * `operation_id` — Caller-generated identity for this submission,
     ///   scoped to the position owner, the operation kind and the position.
     ///
@@ -309,6 +320,7 @@ impl ClmmCore {
         env: Env,
         position_id: u64,
         amount: u128,
+        expected_sequence: u64,
         operation_id: BytesN<32>,
     ) -> Result<(u128, u128), ClmmError> {
         Self::require_init(&env)?;
@@ -321,10 +333,6 @@ impl ClmmCore {
 
         position.owner.require_auth();
 
-        if amount == 0 || amount > position.liquidity {
-            return Err(ClmmError::InsufficientLiquidity);
-        }
-
         let operation_key = Self::operation_key(
             &env,
             &position.owner,
@@ -333,6 +341,14 @@ impl ClmmCore {
             &operation_id,
         );
         Self::require_new_operation(&env, &operation_key)?;
+
+        if position.sequence != expected_sequence {
+            return Err(ClmmError::ConcurrentModification);
+        }
+
+        if amount == 0 || amount > position.liquidity {
+            return Err(ClmmError::InsufficientLiquidity);
+        }
 
         let current_tick: i32 = env.storage().instance().get(&DataKey::CurrentTick).unwrap();
         let sqrt_price: u128 = env
@@ -365,6 +381,10 @@ impl ClmmCore {
         position.liquidity -= amount;
         position.tokens_owed_0 += amount0;
         position.tokens_owed_1 += amount1;
+        position.sequence = position
+            .sequence
+            .checked_add(1)
+            .ok_or(ClmmError::InvalidPosition)?;
 
         env.storage()
             .persistent()
@@ -375,6 +395,10 @@ impl ClmmCore {
         env.events().publish(
             (symbol_short!("burn"),),
             (position_id, amount, amount0, amount1),
+        );
+        env.events().publish(
+            (symbol_short!("pos_seq"),),
+            (position_id, position.sequence),
         );
         Self::publish_operation(
             &env,
@@ -585,6 +609,10 @@ impl ClmmCore {
     ///
     /// # Arguments
     /// * `position_id` — Position ID to collect from
+    /// * `expected_sequence` — Monotonically increasing sequence number observed
+    ///   by the caller. If concurrent operations have modified the position,
+    ///   the call fails with `ConcurrentModification` before any checkpoints,
+    ///   balances or state are mutated.
     /// * `operation_id` — Caller-generated identity for this submission,
     ///   scoped to the position owner, the operation kind and the position.
     ///
@@ -593,6 +621,7 @@ impl ClmmCore {
     pub fn collect(
         env: Env,
         position_id: u64,
+        expected_sequence: u64,
         operation_id: BytesN<32>,
     ) -> Result<(u128, u128), ClmmError> {
         Self::require_init(&env)?;
@@ -613,6 +642,10 @@ impl ClmmCore {
             &operation_id,
         );
         Self::require_new_operation(&env, &operation_key)?;
+
+        if position.sequence != expected_sequence {
+            return Err(ClmmError::ConcurrentModification);
+        }
 
         // Calculate fees earned
         let current_tick: i32 = env.storage().instance().get(&DataKey::CurrentTick).unwrap();
@@ -672,6 +705,10 @@ impl ClmmCore {
         position.fee_growth_inside_1_last_x128 = fee_growth_inside_1;
         position.tokens_owed_0 = 0;
         position.tokens_owed_1 = 0;
+        position.sequence = position
+            .sequence
+            .checked_add(1)
+            .ok_or(ClmmError::InvalidPosition)?;
 
         env.storage()
             .persistent()
@@ -682,6 +719,10 @@ impl ClmmCore {
         env.events().publish(
             (symbol_short!("collect"),),
             (position_id, collect_0, collect_1),
+        );
+        env.events().publish(
+            (symbol_short!("pos_seq"),),
+            (position_id, position.sequence),
         );
         Self::publish_operation(
             &env,
@@ -701,6 +742,15 @@ impl ClmmCore {
             .persistent()
             .get(&DataKey::Position(position_id))
             .ok_or(ClmmError::InvalidPosition)
+    }
+
+    pub fn get_position_sequence(env: Env, position_id: u64) -> Result<u64, ClmmError> {
+        let position: Position = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Position(position_id))
+            .ok_or(ClmmError::InvalidPosition)?;
+        Ok(position.sequence)
     }
 
     pub fn get_current_tick(env: Env) -> i32 {
@@ -990,19 +1040,21 @@ mod tests {
         let (owner, position_id) = open_position(&env, &client, &token0, &token1);
         let id = operation_id(&env, 2);
 
-        client.burn(&position_id, &40_000, &id);
+        client.burn(&position_id, &40_000, &1, &id);
         let after = client.get_position(&position_id);
+        assert_eq!(after.sequence, 2);
         let liquidity = client.get_liquidity();
         let owner0 = balance(&env, &token0, &owner);
         let owner1 = balance(&env, &token1, &owner);
 
-        let retry = client.try_burn(&position_id, &40_000, &id);
+        let retry = client.try_burn(&position_id, &40_000, &2, &id);
         assert_eq!(retry, Err(Ok(ClmmError::DuplicateOperation)));
 
         let now = client.get_position(&position_id);
         assert_eq!(now.liquidity, after.liquidity);
         assert_eq!(now.tokens_owed_0, after.tokens_owed_0);
         assert_eq!(now.tokens_owed_1, after.tokens_owed_1);
+        assert_eq!(now.sequence, after.sequence);
         assert_eq!(client.get_liquidity(), liquidity);
         assert_eq!(balance(&env, &token0, &owner), owner0);
         assert_eq!(balance(&env, &token1, &owner), owner1);
@@ -1014,12 +1066,14 @@ mod tests {
         let (_owner, position_id) = open_position(&env, &client, &token0, &token1);
         let id = operation_id(&env, 3);
 
-        let failed = client.try_burn(&position_id, &100_001, &id);
+        let failed = client.try_burn(&position_id, &100_001, &1, &id);
         assert_eq!(failed, Err(Ok(ClmmError::InsufficientLiquidity)));
         assert_eq!(client.get_position(&position_id).liquidity, 100_000);
+        assert_eq!(client.get_position(&position_id).sequence, 1);
 
-        client.burn(&position_id, &40_000, &id);
+        client.burn(&position_id, &40_000, &1, &id);
         assert_eq!(client.get_position(&position_id).liquidity, 60_000);
+        assert_eq!(client.get_position(&position_id).sequence, 2);
     }
 
     #[test]
@@ -1028,17 +1082,22 @@ mod tests {
         let (owner, position_id) = open_position(&env, &client, &token0, &token1);
         let id = operation_id(&env, 4);
 
-        assert_eq!(client.collect(&position_id, &id), (0, 0));
+        assert_eq!(client.collect(&position_id, &1, &id), (0, 0));
+        assert_eq!(client.get_position(&position_id).sequence, 2);
         let owner0 = balance(&env, &token0, &owner);
         let owner1 = balance(&env, &token1, &owner);
 
-        let retry = client.try_collect(&position_id, &id);
+        let retry = client.try_collect(&position_id, &2, &id);
         assert_eq!(retry, Err(Ok(ClmmError::DuplicateOperation)));
         assert_eq!(balance(&env, &token0, &owner), owner0);
         assert_eq!(balance(&env, &token1, &owner), owner1);
 
         // A fresh identity collects later without re-applying the first effect.
-        assert_eq!(client.collect(&position_id, &operation_id(&env, 5)), (0, 0));
+        assert_eq!(
+            client.collect(&position_id, &2, &operation_id(&env, 5)),
+            (0, 0)
+        );
+        assert_eq!(client.get_position(&position_id).sequence, 3);
     }
 
     #[test]
@@ -1068,11 +1127,207 @@ mod tests {
         let id = operation_id(&env, 12);
 
         // The mint above used id 1; the same value is free for a burn and a collect.
-        client.burn(&position_id, &1_000, &id);
-        assert!(client.try_collect(&position_id, &id).is_ok());
+        client.burn(&position_id, &1_000, &1, &id);
+        assert!(client.try_collect(&position_id, &2, &id).is_ok());
 
         let owner_now = client.get_position(&position_id);
         assert_eq!(owner_now.owner, owner);
         assert_eq!(owner_now.liquidity, 99_000);
+        assert_eq!(owner_now.sequence, 3);
+    }
+
+    #[test]
+    fn test_normal_operation_sequence_lifecycle() {
+        let (env, client, token0, token1) = setup_pool();
+        let (_owner, position_id) = open_position(&env, &client, &token0, &token1);
+
+        // Initial sequence after mint is 1
+        assert_eq!(client.get_position(&position_id).sequence, 1);
+        assert_eq!(client.get_position_sequence(&position_id), 1);
+
+        // Burn with matching sequence 1 advances sequence to 2
+        let (b0, b1) = client.burn(&position_id, &25_000, &1, &operation_id(&env, 20));
+        assert!(b0 > 0 || b1 > 0);
+        assert_eq!(client.get_position(&position_id).sequence, 2);
+        assert_eq!(client.get_position_sequence(&position_id), 2);
+        assert_eq!(client.get_position(&position_id).liquidity, 75_000);
+
+        // Collect with matching sequence 2 advances sequence to 3
+        let (c0, c1) = client.collect(&position_id, &2, &operation_id(&env, 21));
+        assert_eq!(c0, b0);
+        assert_eq!(c1, b1);
+        assert_eq!(client.get_position(&position_id).sequence, 3);
+        assert_eq!(client.get_position_sequence(&position_id), 3);
+
+        // Second burn with matching sequence 3 advances sequence to 4
+        client.burn(&position_id, &25_000, &3, &operation_id(&env, 22));
+        assert_eq!(client.get_position(&position_id).sequence, 4);
+        assert_eq!(client.get_position_sequence(&position_id), 4);
+        assert_eq!(client.get_position(&position_id).liquidity, 50_000);
+    }
+
+    #[test]
+    fn test_burn_with_stale_sequence_is_rejected_and_preserves_state() {
+        let (env, client, token0, token1) = setup_pool();
+        let (owner, position_id) = open_position(&env, &client, &token0, &token1);
+
+        let initial_position = client.get_position(&position_id);
+        assert_eq!(initial_position.sequence, 1);
+        let pool_liquidity = client.get_liquidity();
+        let owner_balance_0 = balance(&env, &token0, &owner);
+        let owner_balance_1 = balance(&env, &token1, &owner);
+        let pool_balance_0 = balance(&env, &token0, &client.address);
+        let pool_balance_1 = balance(&env, &token1, &client.address);
+
+        // Attempt burn with stale / mismatched sequence (e.g., 0, 2, 99)
+        let stale_res = client.try_burn(&position_id, &30_000, &0, &operation_id(&env, 30));
+        assert_eq!(stale_res, Err(Ok(ClmmError::ConcurrentModification)));
+
+        let mismatched_res = client.try_burn(&position_id, &30_000, &99, &operation_id(&env, 31));
+        assert_eq!(mismatched_res, Err(Ok(ClmmError::ConcurrentModification)));
+
+        // Verify position state is completely preserved
+        let position_after = client.get_position(&position_id);
+        assert_eq!(position_after, initial_position);
+        assert_eq!(client.get_position_sequence(&position_id), 1);
+
+        // Verify pool liquidity and balances are untouched
+        assert_eq!(client.get_liquidity(), pool_liquidity);
+        assert_eq!(balance(&env, &token0, &owner), owner_balance_0);
+        assert_eq!(balance(&env, &token1, &owner), owner_balance_1);
+        assert_eq!(balance(&env, &token0, &client.address), pool_balance_0);
+        assert_eq!(balance(&env, &token1, &client.address), pool_balance_1);
+    }
+
+    #[test]
+    fn test_collect_with_stale_sequence_is_rejected_and_preserves_state() {
+        let (env, client, token0, token1) = setup_pool();
+        let (owner, position_id) = open_position(&env, &client, &token0, &token1);
+
+        // Burn 20_000 to accrue tokens_owed on the position; sequence becomes 2
+        client.burn(&position_id, &20_000, &1, &operation_id(&env, 40));
+        let position_before = client.get_position(&position_id);
+        assert_eq!(position_before.sequence, 2);
+        assert!(position_before.tokens_owed_0 > 0 || position_before.tokens_owed_1 > 0);
+
+        let owner_balance_0 = balance(&env, &token0, &owner);
+        let owner_balance_1 = balance(&env, &token1, &owner);
+        let pool_balance_0 = balance(&env, &token0, &client.address);
+        let pool_balance_1 = balance(&env, &token1, &client.address);
+
+        // Attempt collect with stale sequence 1
+        let stale_res = client.try_collect(&position_id, &1, &operation_id(&env, 41));
+        assert_eq!(stale_res, Err(Ok(ClmmError::ConcurrentModification)));
+
+        // Attempt collect with future sequence 99
+        let future_res = client.try_collect(&position_id, &99, &operation_id(&env, 42));
+        assert_eq!(future_res, Err(Ok(ClmmError::ConcurrentModification)));
+
+        // Verify tokens owed and fee checkpoints are preserved
+        let position_after = client.get_position(&position_id);
+        assert_eq!(position_after, position_before);
+        assert_eq!(position_after.sequence, 2);
+
+        // Balances remain untouched
+        assert_eq!(balance(&env, &token0, &owner), owner_balance_0);
+        assert_eq!(balance(&env, &token1, &owner), owner_balance_1);
+        assert_eq!(balance(&env, &token0, &client.address), pool_balance_0);
+        assert_eq!(balance(&env, &token1, &client.address), pool_balance_1);
+    }
+
+    #[test]
+    fn test_concurrent_state_collision_and_safe_retry() {
+        let (env, client, token0, token1) = setup_pool();
+        let (_owner, position_id) = open_position(&env, &client, &token0, &token1);
+
+        // Two callers (or concurrent workers) both observed sequence 1
+        let seq_snapshot = client.get_position_sequence(&position_id);
+        assert_eq!(seq_snapshot, 1);
+
+        let id_worker_a = operation_id(&env, 50);
+        let id_worker_b = operation_id(&env, 51);
+
+        // Worker A executes first and succeeds, bumping sequence to 2
+        client.burn(&position_id, &20_000, &seq_snapshot, &id_worker_a);
+        assert_eq!(client.get_position_sequence(&position_id), 2);
+        assert_eq!(client.get_position(&position_id).liquidity, 80_000);
+
+        // Worker B's transaction arrives with the now-stale snapshot (sequence 1)
+        let collision_res = client.try_burn(&position_id, &30_000, &seq_snapshot, &id_worker_b);
+        assert_eq!(collision_res, Err(Ok(ClmmError::ConcurrentModification)));
+
+        // State was not corrupted by Worker B's failed attempt
+        assert_eq!(client.get_position(&position_id).liquidity, 80_000);
+        assert_eq!(client.get_position_sequence(&position_id), 2);
+
+        // Worker B re-reads the position, obtains updated sequence 2, and retries safely
+        let updated_seq = client.get_position_sequence(&position_id);
+        assert_eq!(updated_seq, 2);
+
+        let (b0, b1) = client.burn(&position_id, &30_000, &updated_seq, &id_worker_b);
+        assert!(b0 > 0 || b1 > 0);
+        assert_eq!(client.get_position(&position_id).liquidity, 50_000);
+        assert_eq!(client.get_position_sequence(&position_id), 3);
+    }
+
+    #[test]
+    fn test_concurrent_burn_and_collect_collision_and_safe_retry() {
+        let (env, client, token0, token1) = setup_pool();
+        let (owner, position_id) = open_position(&env, &client, &token0, &token1);
+
+        // Both burn and collect are initiated concurrently based on sequence 1
+        let seq_snapshot = client.get_position_sequence(&position_id);
+        assert_eq!(seq_snapshot, 1);
+
+        let id_burn = operation_id(&env, 60);
+        let id_collect = operation_id(&env, 61);
+
+        // Burn lands first, advancing sequence to 2
+        client.burn(&position_id, &15_000, &seq_snapshot, &id_burn);
+        assert_eq!(client.get_position_sequence(&position_id), 2);
+
+        // Concurrent collect with stale sequence 1 is rejected
+        let collect_res = client.try_collect(&position_id, &seq_snapshot, &id_collect);
+        assert_eq!(collect_res, Err(Ok(ClmmError::ConcurrentModification)));
+
+        let bal_before_0 = balance(&env, &token0, &owner);
+        let bal_before_1 = balance(&env, &token1, &owner);
+
+        // Collect refreshes to sequence 2 and retries safely
+        let refreshed_seq = client.get_position_sequence(&position_id);
+        assert_eq!(refreshed_seq, 2);
+
+        let (collected_0, collected_1) = client.collect(&position_id, &refreshed_seq, &id_collect);
+        assert!(collected_0 > 0 || collected_1 > 0);
+        assert_eq!(client.get_position_sequence(&position_id), 3);
+        assert_eq!(client.get_position(&position_id).tokens_owed_0, 0);
+        assert_eq!(client.get_position(&position_id).tokens_owed_1, 0);
+        assert_eq!(
+            balance(&env, &token0, &owner),
+            bal_before_0 + collected_0 as i128
+        );
+        assert_eq!(
+            balance(&env, &token1, &owner),
+            bal_before_1 + collected_1 as i128
+        );
+    }
+
+    #[test]
+    fn test_failed_concurrency_check_does_not_consume_the_operation_id() {
+        let (env, client, token0, token1) = setup_pool();
+        let (_owner, position_id) = open_position(&env, &client, &token0, &token1);
+        let id = operation_id(&env, 70);
+
+        // Rejected due to sequence mismatch: operation id is NOT consumed
+        let failed = client.try_burn(&position_id, &10_000, &99, &id);
+        assert_eq!(failed, Err(Ok(ClmmError::ConcurrentModification)));
+
+        // Safe retry with correct sequence using the SAME operation id succeeds
+        client.burn(&position_id, &10_000, &1, &id);
+        assert_eq!(client.get_position_sequence(&position_id), 2);
+
+        // Once consumed, submitting the same operation id again is rejected with DuplicateOperation
+        let duplicate = client.try_burn(&position_id, &10_000, &2, &id);
+        assert_eq!(duplicate, Err(Ok(ClmmError::DuplicateOperation)));
     }
 }
