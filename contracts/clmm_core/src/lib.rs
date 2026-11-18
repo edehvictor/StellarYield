@@ -1,4 +1,8 @@
 #![no_std]
+// Contract entry points are generated as flat argument lists (`mint` carries
+// the deposit, its two caps and the operation identity), matching the other
+// contracts in this workspace.
+#![allow(clippy::too_many_arguments)]
 
 //! # CLMM Core — Concentrated Liquidity Market Maker Engine
 //!
@@ -6,12 +10,21 @@
 //! custom price ranges, and NFT-style position tracking for capital efficiency.
 
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, symbol_short, token, Address, Env,
+    contract, contracterror, contractimpl, contracttype, symbol_short, token, xdr::ToXdr, Address,
+    Bytes, BytesN, Env, Symbol,
 };
 
 mod math;
 mod position;
 mod tick;
+
+/// Domain separator for position operation identities.
+const OPERATION_DOMAIN: &[u8] = b"stellaryield_clmm_op_v1";
+/// Refresh an operation receipt once less than ~1 day of ledgers remains.
+const OPERATION_TTL_THRESHOLD: u32 = 17_280;
+/// Keep consumed operation identities for ~30 days of ledgers, so a delayed
+/// retry is still rejected instead of being applied a second time.
+const OPERATION_TTL_EXTEND_TO: u32 = 518_400;
 
 // ── Storage Keys ────────────────────────────────────────────────────────
 
@@ -31,6 +44,8 @@ pub enum DataKey {
     Tick(i32),
     Position(u64),
     NextPositionId,
+    /// Marks a domain-separated position operation identity as consumed.
+    Operation(BytesN<32>),
 }
 
 // ── Data Structures ─────────────────────────────────────────────────────
@@ -73,6 +88,7 @@ pub enum ClmmError {
     PriceLimitExceeded = 7,
     Unauthorized = 8,
     InvalidPosition = 9,
+    DuplicateOperation = 10,
 }
 
 // ── Contract ────────────────────────────────────────────────────────────
@@ -145,6 +161,10 @@ impl ClmmCore {
     /// * `amount` — Liquidity amount to add
     /// * `amount0_max` — Maximum token0 to deposit
     /// * `amount1_max` — Maximum token1 to deposit
+    /// * `operation_id` — Caller-generated identity for this submission. A
+    ///   retry that reuses an identity already consumed by a successful mint
+    ///   is rejected with `DuplicateOperation`; a call that fails does not
+    ///   consume the identity, so it can be retried safely.
     ///
     /// # Returns
     /// (position_id, amount0, amount1) — Position ID and actual amounts deposited
@@ -156,6 +176,7 @@ impl ClmmCore {
         amount: u128,
         amount0_max: u128,
         amount1_max: u128,
+        operation_id: BytesN<32>,
     ) -> Result<(u64, u128, u128), ClmmError> {
         Self::require_init(&env)?;
         owner.require_auth();
@@ -165,6 +186,12 @@ impl ClmmCore {
         }
 
         Self::validate_tick_range(&env, tick_lower, tick_upper)?;
+
+        // Mint has no position id yet, so its identity is scoped to the owner
+        // and the position id is fixed at zero.
+        let operation_key =
+            Self::operation_key(&env, &owner, symbol_short!("mint"), 0, &operation_id);
+        Self::require_new_operation(&env, &operation_key)?;
 
         let current_tick: i32 = env.storage().instance().get(&DataKey::CurrentTick).unwrap();
         let sqrt_price: u128 = env
@@ -251,9 +278,18 @@ impl ClmmCore {
             .instance()
             .set(&DataKey::NextPositionId, &(position_id + 1));
 
+        Self::record_operation(&env, &operation_key);
+
         env.events().publish(
             (symbol_short!("mint"),),
-            (position_id, owner, tick_lower, tick_upper, amount),
+            (position_id, owner.clone(), tick_lower, tick_upper, amount),
+        );
+        Self::publish_operation(
+            &env,
+            &owner,
+            symbol_short!("mint"),
+            position_id,
+            &operation_id,
         );
 
         Ok((position_id, amount0, amount1))
@@ -264,10 +300,17 @@ impl ClmmCore {
     /// # Arguments
     /// * `position_id` — ID of the position to burn
     /// * `amount` — Amount of liquidity to remove
+    /// * `operation_id` — Caller-generated identity for this submission,
+    ///   scoped to the position owner, the operation kind and the position.
     ///
     /// # Returns
     /// (amount0, amount1) — Amounts of token0 and token1 returned
-    pub fn burn(env: Env, position_id: u64, amount: u128) -> Result<(u128, u128), ClmmError> {
+    pub fn burn(
+        env: Env,
+        position_id: u64,
+        amount: u128,
+        operation_id: BytesN<32>,
+    ) -> Result<(u128, u128), ClmmError> {
         Self::require_init(&env)?;
 
         let mut position: Position = env
@@ -281,6 +324,15 @@ impl ClmmCore {
         if amount == 0 || amount > position.liquidity {
             return Err(ClmmError::InsufficientLiquidity);
         }
+
+        let operation_key = Self::operation_key(
+            &env,
+            &position.owner,
+            symbol_short!("burn"),
+            position_id,
+            &operation_id,
+        );
+        Self::require_new_operation(&env, &operation_key)?;
 
         let current_tick: i32 = env.storage().instance().get(&DataKey::CurrentTick).unwrap();
         let sqrt_price: u128 = env
@@ -318,9 +370,18 @@ impl ClmmCore {
             .persistent()
             .set(&DataKey::Position(position_id), &position);
 
+        Self::record_operation(&env, &operation_key);
+
         env.events().publish(
             (symbol_short!("burn"),),
             (position_id, amount, amount0, amount1),
+        );
+        Self::publish_operation(
+            &env,
+            &position.owner,
+            symbol_short!("burn"),
+            position_id,
+            &operation_id,
         );
 
         Ok((amount0, amount1))
@@ -336,6 +397,10 @@ impl ClmmCore {
     ///
     /// # Returns
     /// (amount0, amount1) — Actual amounts swapped (negative = sent, positive = received)
+    ///
+    /// The swap math is intentionally left as-is in this change; the guarded
+    /// fee-growth division is covered by the `liquidity > 0` branch.
+    #[allow(clippy::manual_checked_ops)]
     pub fn swap(
         env: Env,
         recipient: Address,
@@ -520,10 +585,16 @@ impl ClmmCore {
     ///
     /// # Arguments
     /// * `position_id` — Position ID to collect from
+    /// * `operation_id` — Caller-generated identity for this submission,
+    ///   scoped to the position owner, the operation kind and the position.
     ///
     /// # Returns
     /// (amount0, amount1) — Fee amounts collected
-    pub fn collect(env: Env, position_id: u64) -> Result<(u128, u128), ClmmError> {
+    pub fn collect(
+        env: Env,
+        position_id: u64,
+        operation_id: BytesN<32>,
+    ) -> Result<(u128, u128), ClmmError> {
         Self::require_init(&env)?;
 
         let mut position: Position = env
@@ -533,6 +604,15 @@ impl ClmmCore {
             .ok_or(ClmmError::InvalidPosition)?;
 
         position.owner.require_auth();
+
+        let operation_key = Self::operation_key(
+            &env,
+            &position.owner,
+            symbol_short!("collect"),
+            position_id,
+            &operation_id,
+        );
+        Self::require_new_operation(&env, &operation_key)?;
 
         // Calculate fees earned
         let current_tick: i32 = env.storage().instance().get(&DataKey::CurrentTick).unwrap();
@@ -597,9 +677,18 @@ impl ClmmCore {
             .persistent()
             .set(&DataKey::Position(position_id), &position);
 
+        Self::record_operation(&env, &operation_key);
+
         env.events().publish(
             (symbol_short!("collect"),),
             (position_id, collect_0, collect_1),
+        );
+        Self::publish_operation(
+            &env,
+            &position.owner,
+            symbol_short!("collect"),
+            position_id,
+            &operation_id,
         );
 
         Ok((collect_0, collect_1))
@@ -636,6 +725,65 @@ impl ClmmCore {
     }
 
     // ── Internal Helpers ────────────────────────────────────────────
+
+    /// Domain-separated identity of one position operation.
+    ///
+    /// The preimage binds the deployment, owner, operation kind, position and
+    /// caller-supplied id, so the same id cannot be replayed across accounts,
+    /// operations or deployments, and an unrelated caller cannot consume it.
+    fn operation_key(
+        env: &Env,
+        owner: &Address,
+        kind: Symbol,
+        position_id: u64,
+        operation_id: &BytesN<32>,
+    ) -> BytesN<32> {
+        let mut preimage = Bytes::from_slice(env, OPERATION_DOMAIN);
+        preimage.append(
+            &(
+                env.current_contract_address(),
+                owner.clone(),
+                kind,
+                position_id,
+                operation_id.clone(),
+            )
+                .to_xdr(env),
+        );
+        env.crypto().sha256(&preimage).to_bytes()
+    }
+
+    /// Reject an identity already consumed by a successful operation.
+    fn require_new_operation(env: &Env, key: &BytesN<32>) -> Result<(), ClmmError> {
+        if env.storage().persistent().has(key) {
+            return Err(ClmmError::DuplicateOperation);
+        }
+        Ok(())
+    }
+
+    /// Mark an identity consumed once its effect is durable, and keep the
+    /// receipt alive long enough that a delayed retry is still rejected.
+    fn record_operation(env: &Env, key: &BytesN<32>) {
+        env.storage().persistent().set(key, &true);
+        env.storage().persistent().extend_ttl(
+            key,
+            OPERATION_TTL_THRESHOLD,
+            OPERATION_TTL_EXTEND_TO,
+        );
+    }
+
+    /// Emit the retry-correlation event for a consumed operation identity.
+    fn publish_operation(
+        env: &Env,
+        owner: &Address,
+        kind: Symbol,
+        position_id: u64,
+        operation_id: &BytesN<32>,
+    ) {
+        env.events().publish(
+            (symbol_short!("op"),),
+            (owner.clone(), kind, position_id, operation_id.clone()),
+        );
+    }
 
     fn require_init(env: &Env) -> Result<(), ClmmError> {
         if !env.storage().instance().has(&DataKey::Initialized) {
@@ -699,6 +847,37 @@ mod tests {
         admin_client.mint(to, &amount);
     }
 
+    fn balance(env: &Env, token_addr: &Address, who: &Address) -> i128 {
+        soroban_sdk::token::Client::new(env, token_addr).balance(who)
+    }
+
+    /// Deterministic caller-generated operation identity for tests.
+    fn operation_id(env: &Env, seed: u8) -> BytesN<32> {
+        BytesN::from_array(env, &[seed; 32])
+    }
+
+    /// Open a position of 100_000 liquidity over [-60, 60] and return its owner.
+    fn open_position(
+        env: &Env,
+        client: &ClmmCoreClient<'static>,
+        token0: &Address,
+        token1: &Address,
+    ) -> (Address, u64) {
+        let owner = Address::generate(env);
+        mint_tokens(env, token0, &owner, 100_000);
+        mint_tokens(env, token1, &owner, 100_000);
+        let (position_id, ..) = client.mint(
+            &owner,
+            &-60,
+            &60,
+            &100_000,
+            &100_000,
+            &100_000,
+            &operation_id(env, 1),
+        );
+        (owner, position_id)
+    }
+
     #[test]
     fn test_initialize() {
         let (_, client, _token0, _token1) = setup_pool();
@@ -726,14 +905,174 @@ mod tests {
         mint_tokens(&env, &token1, &user, 100_000);
 
         // Mint position with tick range [-60, 60] (smaller range, aligned to tick spacing)
-        let (position_id, amount0, amount1) =
-            client.mint(&user, &-60, &60, &100_000, &100_000, &100_000);
+        let (position_id, amount0, amount1) = client.mint(
+            &user,
+            &-60,
+            &60,
+            &100_000,
+            &100_000,
+            &100_000,
+            &operation_id(&env, 1),
+        );
 
         assert_eq!(position_id, 1);
+        assert!(amount1 > 0);
 
-        // Verify position was created
+        // Verify position was created and the pool received the reported deposit
         let position = client.get_position(&position_id);
         assert_eq!(position.owner, user);
         assert_eq!(position.liquidity, 100_000);
+        assert_eq!(balance(&env, &token0, &client.address), amount0 as i128);
+        assert_eq!(balance(&env, &token1, &client.address), amount1 as i128);
+    }
+
+    #[test]
+    fn test_duplicate_mint_is_rejected_and_state_is_preserved() {
+        let (env, client, token0, token1) = setup_pool();
+        let user = Address::generate(&env);
+        mint_tokens(&env, &token0, &user, 100_000);
+        mint_tokens(&env, &token1, &user, 100_000);
+        let id = operation_id(&env, 7);
+
+        let (position_id, ..) = client.mint(&user, &-60, &60, &100_000, &100_000, &100_000, &id);
+        let user0 = balance(&env, &token0, &user);
+        let user1 = balance(&env, &token1, &user);
+        let pool0 = balance(&env, &token0, &client.address);
+        let pool1 = balance(&env, &token1, &client.address);
+        let liquidity = client.get_liquidity();
+
+        // The same submission again must not create a second position or move funds.
+        let retry = client.try_mint(&user, &-60, &60, &100_000, &100_000, &100_000, &id);
+        assert_eq!(retry, Err(Ok(ClmmError::DuplicateOperation)));
+
+        assert_eq!(balance(&env, &token0, &user), user0);
+        assert_eq!(balance(&env, &token1, &user), user1);
+        assert_eq!(balance(&env, &token0, &client.address), pool0);
+        assert_eq!(balance(&env, &token1, &client.address), pool1);
+        assert_eq!(client.get_liquidity(), liquidity);
+
+        // A distinct id still mints normally, so the rejected retry consumed nothing.
+        let (next_id, ..) = client.mint(
+            &user,
+            &-60,
+            &60,
+            &1_000,
+            &100_000,
+            &100_000,
+            &operation_id(&env, 8),
+        );
+        assert_eq!(next_id, position_id + 1);
+    }
+
+    #[test]
+    fn test_failed_mint_does_not_consume_the_operation_id() {
+        let (env, client, token0, token1) = setup_pool();
+        let user = Address::generate(&env);
+        mint_tokens(&env, &token0, &user, 100_000);
+        mint_tokens(&env, &token1, &user, 100_000);
+        let id = operation_id(&env, 9);
+
+        // Rejected before any transfer: the caps cannot cover the deposit.
+        let failed = client.try_mint(&user, &-60, &60, &100_000, &0, &0, &id);
+        assert_eq!(failed, Err(Ok(ClmmError::InvalidAmount)));
+        assert_eq!(balance(&env, &token0, &user), 100_000);
+        assert_eq!(balance(&env, &token1, &user), 100_000);
+
+        // The same identity is still valid for a retry.
+        let (position_id, ..) = client.mint(&user, &-60, &60, &100_000, &100_000, &100_000, &id);
+        assert_eq!(position_id, 1);
+        assert_eq!(client.get_position(&position_id).liquidity, 100_000);
+    }
+
+    #[test]
+    fn test_duplicate_burn_is_rejected_and_liquidity_is_preserved() {
+        let (env, client, token0, token1) = setup_pool();
+        let (owner, position_id) = open_position(&env, &client, &token0, &token1);
+        let id = operation_id(&env, 2);
+
+        client.burn(&position_id, &40_000, &id);
+        let after = client.get_position(&position_id);
+        let liquidity = client.get_liquidity();
+        let owner0 = balance(&env, &token0, &owner);
+        let owner1 = balance(&env, &token1, &owner);
+
+        let retry = client.try_burn(&position_id, &40_000, &id);
+        assert_eq!(retry, Err(Ok(ClmmError::DuplicateOperation)));
+
+        let now = client.get_position(&position_id);
+        assert_eq!(now.liquidity, after.liquidity);
+        assert_eq!(now.tokens_owed_0, after.tokens_owed_0);
+        assert_eq!(now.tokens_owed_1, after.tokens_owed_1);
+        assert_eq!(client.get_liquidity(), liquidity);
+        assert_eq!(balance(&env, &token0, &owner), owner0);
+        assert_eq!(balance(&env, &token1, &owner), owner1);
+    }
+
+    #[test]
+    fn test_failed_burn_does_not_consume_the_operation_id() {
+        let (env, client, token0, token1) = setup_pool();
+        let (_owner, position_id) = open_position(&env, &client, &token0, &token1);
+        let id = operation_id(&env, 3);
+
+        let failed = client.try_burn(&position_id, &100_001, &id);
+        assert_eq!(failed, Err(Ok(ClmmError::InsufficientLiquidity)));
+        assert_eq!(client.get_position(&position_id).liquidity, 100_000);
+
+        client.burn(&position_id, &40_000, &id);
+        assert_eq!(client.get_position(&position_id).liquidity, 60_000);
+    }
+
+    #[test]
+    fn test_duplicate_collect_is_rejected_and_pays_once() {
+        let (env, client, token0, token1) = setup_pool();
+        let (owner, position_id) = open_position(&env, &client, &token0, &token1);
+        let id = operation_id(&env, 4);
+
+        assert_eq!(client.collect(&position_id, &id), (0, 0));
+        let owner0 = balance(&env, &token0, &owner);
+        let owner1 = balance(&env, &token1, &owner);
+
+        let retry = client.try_collect(&position_id, &id);
+        assert_eq!(retry, Err(Ok(ClmmError::DuplicateOperation)));
+        assert_eq!(balance(&env, &token0, &owner), owner0);
+        assert_eq!(balance(&env, &token1, &owner), owner1);
+
+        // A fresh identity collects later without re-applying the first effect.
+        assert_eq!(client.collect(&position_id, &operation_id(&env, 5)), (0, 0));
+    }
+
+    #[test]
+    fn test_operation_ids_are_scoped_to_the_owner() {
+        let (env, client, token0, token1) = setup_pool();
+        let id = operation_id(&env, 11);
+        let alice = Address::generate(&env);
+        let bob = Address::generate(&env);
+        mint_tokens(&env, &token0, &alice, 50_000);
+        mint_tokens(&env, &token1, &alice, 50_000);
+        mint_tokens(&env, &token0, &bob, 50_000);
+        mint_tokens(&env, &token1, &bob, 50_000);
+
+        let (alice_position, ..) = client.mint(&alice, &-60, &60, &10_000, &50_000, &50_000, &id);
+        let (bob_position, ..) = client.mint(&bob, &-60, &60, &10_000, &50_000, &50_000, &id);
+
+        assert_ne!(alice_position, bob_position);
+        // Alice's id is consumed for her; Bob's identical id was never hers to spend.
+        let replay = client.try_mint(&alice, &-60, &60, &10_000, &50_000, &50_000, &id);
+        assert_eq!(replay, Err(Ok(ClmmError::DuplicateOperation)));
+    }
+
+    #[test]
+    fn test_operation_ids_are_scoped_to_the_operation_kind() {
+        let (env, client, token0, token1) = setup_pool();
+        let (owner, position_id) = open_position(&env, &client, &token0, &token1);
+        let id = operation_id(&env, 12);
+
+        // The mint above used id 1; the same value is free for a burn and a collect.
+        client.burn(&position_id, &1_000, &id);
+        assert!(client.try_collect(&position_id, &id).is_ok());
+
+        let owner_now = client.get_position(&position_id);
+        assert_eq!(owner_now.owner, owner);
+        assert_eq!(owner_now.liquidity, 99_000);
     }
 }
