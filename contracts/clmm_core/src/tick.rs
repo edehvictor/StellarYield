@@ -11,18 +11,23 @@ pub const MIN_TICK: i32 = -887272;
 /// Maximum tick index (887272 for Uniswap V3 compatibility)
 pub const MAX_TICK: i32 = 887272;
 
+/// Empty, uninitialized tick state.
+pub fn empty_tick() -> TickInfo {
+    TickInfo {
+        liquidity_gross: 0,
+        liquidity_net: 0,
+        fee_growth_outside_0_x128: 0,
+        fee_growth_outside_1_x128: 0,
+        initialized: false,
+    }
+}
+
 /// Get tick info, returning empty tick if not initialized.
 pub fn get_tick(env: &Env, tick: i32) -> TickInfo {
     env.storage()
         .persistent()
         .get(&DataKey::Tick(tick))
-        .unwrap_or(TickInfo {
-            liquidity_gross: 0,
-            liquidity_net: 0,
-            fee_growth_outside_0_x128: 0,
-            fee_growth_outside_1_x128: 0,
-            initialized: false,
-        })
+        .unwrap_or_else(empty_tick)
 }
 
 /// Update tick state when liquidity is added or removed.

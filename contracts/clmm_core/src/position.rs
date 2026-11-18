@@ -34,7 +34,6 @@ pub fn get_positions_by_owner(env: &Env, owner: &Address) -> Vec<u64> {
 ///
 /// # Returns
 /// (fees0, fees1) — Uncollected fee amounts
-#[allow(dead_code)]
 pub fn calculate_uncollected_fees(
     _env: &Env,
     position: &Position,
