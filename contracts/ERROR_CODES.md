@@ -105,14 +105,26 @@ Source: `contracts/clmm_core/src/lib.rs`
 | 2    | `AlreadyInitialized`    | `initialize()` called twice                                    | No action needed                                         |
 | 3    | `InvalidTick`           | Tick is not aligned to the pool's tick spacing or is out of range | Use a tick divisible by `TickSpacing` within ±887272 |
 | 4    | `InvalidTickRange`      | `tick_lower` is not below `tick_upper`                         | Order the range correctly                                |
-| 5    | `InsufficientLiquidity` | Burn amount is zero or exceeds the position's liquidity        | Burn no more than the position holds                     |
+| 5    | `InsufficientLiquidity` | Burn or swap amount exceeds the available liquidity            | Burn no more than the position holds                     |
 | 6    | `InvalidAmount`         | Amount is zero or the required deposit exceeds a cap           | Pass a positive amount and sufficient caps               |
 | 7    | `PriceLimitExceeded`    | Swap price limit is on the wrong side of the current price     | Set the limit beyond the current price in the swap direction |
 | 8    | `Unauthorized`          | Caller is not the position owner                               | Use the position owner address                           |
 | 9    | `InvalidPosition`       | No position exists with this id                                | Check the position id                                    |
 | 10   | `DuplicateOperation`    | An operation identity was already consumed by a successful call | Reuse the identity only for a genuine retry of the same call; use a new one for a new operation |
+| 11   | `InvalidFee`            | Fee above 10 000 bps (100%)                                    | Pass `fee <= 10000`                                      |
+| 12   | `InvalidTickSpacing`    | Tick spacing is zero, negative, above 16 384, or corrupt in storage | Re-initialize the pool with a supported tick spacing |
+| 13   | `InvalidSqrtPrice`      | Initial sqrt price below the representable minimum             | Pass a sqrt price within `[MIN_SQRT_RATIO, MAX_SQRT_RATIO]` |
+| 14   | `MathOverflow`          | Checked arithmetic would overflow the accounting domain        | Reduce the amount or liquidity requested                 |
+| 15   | `CorruptedPosition`     | A stored position record fails boundary validation             | Reconcile the record from on-chain events before retrying |
 
-See `docs/contracts/clmm-operations.md` for identity scoping and retry rules.
+`clmm_core` validates every untrusted field at the boundary — `initialize`
+configuration, `mint` / `burn` / `swap` arguments, and position records read back
+from persistent storage — before it changes any state or moves any token. A call
+rejected with one of these codes leaves pool state, tick state, position records
+and token balances untouched, so it is safe to retry with corrected input.
+
+See `docs/contracts/clmm-operations.md` for identity scoping, validation rules
+and retry rules.
 
 ---
 

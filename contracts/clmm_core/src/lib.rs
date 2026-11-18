@@ -8,6 +8,14 @@
 //!
 //! Implements Uniswap V3-style concentrated liquidity with tick-based math,
 //! custom price ranges, and NFT-style position tracking for capital efficiency.
+//!
+//! ## Boundary validation
+//!
+//! Every value that crosses the contract boundary — initialization parameters,
+//! mint/burn/swap arguments, and position records read back from persistent
+//! storage — is validated before it is used for accounting. Invalid values return
+//! a typed [`ClmmError`] and never mutate pool state, tick state, position records,
+//! or token balances.
 
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, symbol_short, token, xdr::ToXdr, Address,
@@ -25,6 +33,11 @@ const OPERATION_TTL_THRESHOLD: u32 = 17_280;
 /// Keep consumed operation identities for ~30 days of ledgers, so a delayed
 /// retry is still rejected instead of being applied a second time.
 const OPERATION_TTL_EXTEND_TO: u32 = 518_400;
+/// Maximum supported swap fee, in basis points (100%).
+pub const MAX_FEE_BPS: u32 = 10_000;
+/// Maximum supported tick spacing. Bounds the tick search loop and rejects
+/// malformed pool configuration read from storage.
+pub const MAX_TICK_SPACING: i32 = 16_384;
 
 // ── Storage Keys ────────────────────────────────────────────────────────
 
@@ -61,7 +74,7 @@ pub struct TickInfo {
 }
 
 #[contracttype]
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Position {
     pub owner: Address,
     pub tick_lower: i32,
@@ -89,6 +102,11 @@ pub enum ClmmError {
     Unauthorized = 8,
     InvalidPosition = 9,
     DuplicateOperation = 10,
+    InvalidFee = 11,
+    InvalidTickSpacing = 12,
+    InvalidSqrtPrice = 13,
+    MathOverflow = 14,
+    CorruptedPosition = 15,
 }
 
 // ── Contract ────────────────────────────────────────────────────────────
@@ -116,6 +134,17 @@ impl ClmmCore {
     ) -> Result<(), ClmmError> {
         if env.storage().instance().has(&DataKey::Initialized) {
             return Err(ClmmError::AlreadyInitialized);
+        }
+
+        // Validate untrusted configuration before writing any state.
+        if fee > MAX_FEE_BPS {
+            return Err(ClmmError::InvalidFee);
+        }
+        if tick_spacing <= 0 || tick_spacing > MAX_TICK_SPACING {
+            return Err(ClmmError::InvalidTickSpacing);
+        }
+        if sqrt_price_x96 < math::MIN_SQRT_RATIO || sqrt_price_x96 > math::MAX_SQRT_RATIO {
+            return Err(ClmmError::InvalidSqrtPrice);
         }
 
         let initial_tick = math::get_tick_at_sqrt_ratio(sqrt_price_x96);
@@ -185,6 +214,11 @@ impl ClmmCore {
             return Err(ClmmError::InvalidAmount);
         }
 
+        // Liquidity is stored and later converted to `i128` for tick accounting.
+        if amount > i128::MAX as u128 {
+            return Err(ClmmError::MathOverflow);
+        }
+
         Self::validate_tick_range(&env, tick_lower, tick_upper)?;
 
         // Mint has no position id yet, so its identity is scoped to the owner
@@ -202,22 +236,35 @@ impl ClmmCore {
 
         // Calculate required token amounts
         let (amount0, amount1) =
-            math::get_amounts_for_liquidity(sqrt_price, tick_lower, tick_upper, amount);
+            math::get_amounts_for_liquidity(sqrt_price, tick_lower, tick_upper, amount)?;
 
         if amount0 > amount0_max || amount1 > amount1_max {
             return Err(ClmmError::InvalidAmount);
         }
 
-        // Update ticks
+        // Compute the next position id up front so an exhausted counter fails
+        // before any token transfer or storage write.
+        let position_id: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::NextPositionId)
+            .unwrap_or(1);
+        let next_position_id = position_id.checked_add(1).ok_or(ClmmError::MathOverflow)?;
+
+        // Update ticks. Both boundaries add gross liquidity; the `upper` flag
+        // records the opposite sign in `liquidity_net`.
         tick::update_tick(&env, tick_lower, amount as i128, false)?;
-        tick::update_tick(&env, tick_upper, -(amount as i128), false)?;
+        tick::update_tick(&env, tick_upper, amount as i128, true)?;
 
         // Update global liquidity if position is active
         if tick_lower <= current_tick && current_tick < tick_upper {
             let liquidity: u128 = env.storage().instance().get(&DataKey::Liquidity).unwrap();
+            let new_liquidity = liquidity
+                .checked_add(amount)
+                .ok_or(ClmmError::MathOverflow)?;
             env.storage()
                 .instance()
-                .set(&DataKey::Liquidity, &(liquidity + amount));
+                .set(&DataKey::Liquidity, &new_liquidity);
         }
 
         // Transfer tokens from owner
@@ -234,12 +281,6 @@ impl ClmmCore {
         }
 
         // Create position NFT
-        let position_id: u64 = env
-            .storage()
-            .instance()
-            .get(&DataKey::NextPositionId)
-            .unwrap();
-
         let fee_growth_global_0: u128 = env
             .storage()
             .instance()
@@ -276,7 +317,7 @@ impl ClmmCore {
             .set(&DataKey::Position(position_id), &position);
         env.storage()
             .instance()
-            .set(&DataKey::NextPositionId, &(position_id + 1));
+            .set(&DataKey::NextPositionId, &next_position_id);
 
         Self::record_operation(&env, &operation_key);
 
@@ -313,15 +354,16 @@ impl ClmmCore {
     ) -> Result<(u128, u128), ClmmError> {
         Self::require_init(&env)?;
 
-        let mut position: Position = env
-            .storage()
-            .persistent()
-            .get(&DataKey::Position(position_id))
-            .ok_or(ClmmError::InvalidPosition)?;
+        // Treat the persisted record as untrusted: validate its fields before
+        // any accounting or state mutation.
+        let mut position = position::load_validated_position(&env, position_id)?;
 
         position.owner.require_auth();
 
-        if amount == 0 || amount > position.liquidity {
+        if amount == 0 {
+            return Err(ClmmError::InvalidAmount);
+        }
+        if amount > position.liquidity {
             return Err(ClmmError::InsufficientLiquidity);
         }
 
@@ -347,24 +389,42 @@ impl ClmmCore {
             position.tick_lower,
             position.tick_upper,
             amount,
-        );
+        )?;
 
-        // Update ticks
-        tick::update_tick(&env, position.tick_lower, -(amount as i128), true)?;
-        tick::update_tick(&env, position.tick_upper, amount as i128, true)?;
+        // Compute the resulting balances before mutating anything.
+        let remaining_liquidity = position
+            .liquidity
+            .checked_sub(amount)
+            .ok_or(ClmmError::InsufficientLiquidity)?;
+        let owed_0 = position
+            .tokens_owed_0
+            .checked_add(amount0)
+            .ok_or(ClmmError::MathOverflow)?;
+        let owed_1 = position
+            .tokens_owed_1
+            .checked_add(amount1)
+            .ok_or(ClmmError::MathOverflow)?;
+
+        // Update ticks. Both boundaries remove gross liquidity; the `upper` flag
+        // records the opposite sign in `liquidity_net`.
+        tick::update_tick(&env, position.tick_lower, -(amount as i128), false)?;
+        tick::update_tick(&env, position.tick_upper, -(amount as i128), true)?;
 
         // Update global liquidity if position is active
         if position.tick_lower <= current_tick && current_tick < position.tick_upper {
             let liquidity: u128 = env.storage().instance().get(&DataKey::Liquidity).unwrap();
+            let new_liquidity = liquidity
+                .checked_sub(amount)
+                .ok_or(ClmmError::InsufficientLiquidity)?;
             env.storage()
                 .instance()
-                .set(&DataKey::Liquidity, &(liquidity - amount));
+                .set(&DataKey::Liquidity, &new_liquidity);
         }
 
         // Update position
-        position.liquidity -= amount;
-        position.tokens_owed_0 += amount0;
-        position.tokens_owed_1 += amount1;
+        position.liquidity = remaining_liquidity;
+        position.tokens_owed_0 = owed_0;
+        position.tokens_owed_1 = owed_1;
 
         env.storage()
             .persistent()
@@ -398,9 +458,9 @@ impl ClmmCore {
     /// # Returns
     /// (amount0, amount1) — Actual amounts swapped (negative = sent, positive = received)
     ///
-    /// The swap math is intentionally left as-is in this change; the guarded
-    /// fee-growth division is covered by the `liquidity > 0` branch.
-    #[allow(clippy::manual_checked_ops)]
+    /// Swap accounting uses checked arithmetic: an amount or liquidity that
+    /// cannot be represented returns [`ClmmError::MathOverflow`] rather than
+    /// aborting the call or wrapping a balance.
     pub fn swap(
         env: Env,
         recipient: Address,
@@ -419,9 +479,17 @@ impl ClmmCore {
             .storage()
             .instance()
             .get(&DataKey::SqrtPriceX96)
-            .unwrap();
-        let mut current_tick: i32 = env.storage().instance().get(&DataKey::CurrentTick).unwrap();
-        let mut liquidity: u128 = env.storage().instance().get(&DataKey::Liquidity).unwrap();
+            .ok_or(ClmmError::NotInitialized)?;
+        let mut current_tick: i32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::CurrentTick)
+            .ok_or(ClmmError::NotInitialized)?;
+        let mut liquidity: u128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::Liquidity)
+            .ok_or(ClmmError::NotInitialized)?;
 
         // Validate price limit
         if zero_for_one {
@@ -465,57 +533,102 @@ impl ClmmCore {
                 sqrt_price_next
             };
 
+            let fee_bps: u32 = env
+                .storage()
+                .instance()
+                .get(&DataKey::Fee)
+                .ok_or(ClmmError::NotInitialized)?;
             let (sqrt_price_new, amount_in, amount_out, fee_amount) = math::compute_swap_step(
                 sqrt_price,
                 sqrt_price_target,
                 liquidity,
                 amount_remaining,
-                env.storage().instance().get(&DataKey::Fee).unwrap(),
-            );
+                fee_bps,
+            )?;
 
             sqrt_price = sqrt_price_new;
 
+            // `amount_in + fee_amount` is an untrusted-derived u128; convert it
+            // with a typed error instead of a wrapping `as i128` cast.
+            let input_delta = i128::try_from(
+                amount_in
+                    .checked_add(fee_amount)
+                    .ok_or(ClmmError::MathOverflow)?,
+            )
+            .map_err(|_| ClmmError::MathOverflow)?;
+            let output_delta = i128::try_from(amount_out).map_err(|_| ClmmError::MathOverflow)?;
+
             if exact_input {
-                amount_remaining -= (amount_in + fee_amount) as i128;
+                amount_remaining = amount_remaining
+                    .checked_sub(input_delta)
+                    .ok_or(ClmmError::MathOverflow)?;
                 if zero_for_one {
-                    amount0 += (amount_in + fee_amount) as i128;
-                    amount1 -= amount_out as i128;
+                    amount0 = amount0
+                        .checked_add(input_delta)
+                        .ok_or(ClmmError::MathOverflow)?;
+                    amount1 = amount1
+                        .checked_sub(output_delta)
+                        .ok_or(ClmmError::MathOverflow)?;
                 } else {
-                    amount1 += (amount_in + fee_amount) as i128;
-                    amount0 -= amount_out as i128;
+                    amount1 = amount1
+                        .checked_add(input_delta)
+                        .ok_or(ClmmError::MathOverflow)?;
+                    amount0 = amount0
+                        .checked_sub(output_delta)
+                        .ok_or(ClmmError::MathOverflow)?;
                 }
             } else {
-                amount_remaining += amount_out as i128;
+                amount_remaining = amount_remaining
+                    .checked_add(output_delta)
+                    .ok_or(ClmmError::MathOverflow)?;
                 if zero_for_one {
-                    amount0 += amount_in as i128;
-                    amount1 -= amount_out as i128;
+                    amount0 = amount0
+                        .checked_add(input_delta)
+                        .ok_or(ClmmError::MathOverflow)?;
+                    amount1 = amount1
+                        .checked_sub(output_delta)
+                        .ok_or(ClmmError::MathOverflow)?;
                 } else {
-                    amount1 += amount_in as i128;
-                    amount0 -= amount_out as i128;
+                    amount1 = amount1
+                        .checked_add(input_delta)
+                        .ok_or(ClmmError::MathOverflow)?;
+                    amount0 = amount0
+                        .checked_sub(output_delta)
+                        .ok_or(ClmmError::MathOverflow)?;
                 }
             }
 
             // Update fee growth
             if liquidity > 0 {
-                let fee_growth_delta = (fee_amount * math::Q128) / liquidity;
+                let fee_growth_delta = fee_amount
+                    .checked_mul(math::Q128)
+                    .ok_or(ClmmError::MathOverflow)?
+                    .checked_div(liquidity)
+                    .ok_or(ClmmError::MathOverflow)?;
                 if zero_for_one {
                     let fg0: u128 = env
                         .storage()
                         .instance()
                         .get(&DataKey::FeeGrowthGlobal0X128)
-                        .unwrap();
+                        .unwrap_or(0);
+                    let new_fg0 = fg0
+                        .checked_add(fee_growth_delta)
+                        .ok_or(ClmmError::MathOverflow)?;
                     env.storage()
                         .instance()
-                        .set(&DataKey::FeeGrowthGlobal0X128, &(fg0 + fee_growth_delta));
+                        .set(&DataKey::FeeGrowthGlobal0X128, &new_fg0);
                 } else {
                     let fg1: u128 = env
                         .storage()
                         .instance()
                         .get(&DataKey::FeeGrowthGlobal1X128)
-                        .unwrap();
+                        .unwrap_or(0);
+                    let new_fg1 = fg1
+                        .checked_add(fee_growth_delta)
+                        .ok_or(ClmmError::MathOverflow)?;
                     env.storage()
                         .instance()
-                        .set(&DataKey::FeeGrowthGlobal1X128, &(fg1 + fee_growth_delta));
+                        .set(&DataKey::FeeGrowthGlobal1X128, &new_fg1);
                 }
             }
 
@@ -523,14 +636,16 @@ impl ClmmCore {
             if sqrt_price == sqrt_price_next {
                 let tick_info = tick::get_tick(&env, tick_next);
                 if tick_info.initialized {
-                    liquidity = if zero_for_one {
-                        liquidity - (tick_info.liquidity_net as u128)
-                    } else {
-                        liquidity + (tick_info.liquidity_net as u128)
-                    };
+                    // `liquidity_net` is signed; never cast it directly to u128.
+                    liquidity = Self::apply_liquidity_net(
+                        liquidity,
+                        tick_info.liquidity_net,
+                        !zero_for_one,
+                    )?;
                 }
                 current_tick = if zero_for_one {
-                    tick_next - 1
+                    // Clamp instead of panicking at the minimum tick.
+                    tick_next.saturating_sub(1).max(tick::MIN_TICK)
                 } else {
                     tick_next
                 };
@@ -597,11 +712,8 @@ impl ClmmCore {
     ) -> Result<(u128, u128), ClmmError> {
         Self::require_init(&env)?;
 
-        let mut position: Position = env
-            .storage()
-            .persistent()
-            .get(&DataKey::Position(position_id))
-            .ok_or(ClmmError::InvalidPosition)?;
+        // Validate the persisted record before computing or transferring fees.
+        let mut position = position::load_validated_position(&env, position_id)?;
 
         position.owner.require_auth();
 
@@ -636,15 +748,26 @@ impl ClmmCore {
             fee_growth_global_1,
         );
 
-        let fees_0 = ((fee_growth_inside_0 - position.fee_growth_inside_0_last_x128)
-            * position.liquidity)
-            / math::Q128;
-        let fees_1 = ((fee_growth_inside_1 - position.fee_growth_inside_1_last_x128)
-            * position.liquidity)
-            / math::Q128;
+        let (fees_0, fees_1) = position::calculate_uncollected_fees(
+            &env,
+            &position,
+            fee_growth_inside_0,
+            fee_growth_inside_1,
+        )?;
 
-        let collect_0 = position.tokens_owed_0 + fees_0;
-        let collect_1 = position.tokens_owed_1 + fees_1;
+        let collect_0 = position
+            .tokens_owed_0
+            .checked_add(fees_0)
+            .ok_or(ClmmError::MathOverflow)?;
+        let collect_1 = position
+            .tokens_owed_1
+            .checked_add(fees_1)
+            .ok_or(ClmmError::MathOverflow)?;
+
+        // Token transfers take `i128`; reject totals outside that domain with a
+        // typed error instead of wrapping.
+        let payout_0 = i128::try_from(collect_0).map_err(|_| ClmmError::MathOverflow)?;
+        let payout_1 = i128::try_from(collect_1).map_err(|_| ClmmError::MathOverflow)?;
 
         // Transfer fees to owner
         let token0_addr: Address = env.storage().instance().get(&DataKey::Token0).unwrap();
@@ -652,19 +775,11 @@ impl ClmmCore {
 
         if collect_0 > 0 {
             let client0 = token::Client::new(&env, &token0_addr);
-            client0.transfer(
-                &env.current_contract_address(),
-                &position.owner,
-                &(collect_0 as i128),
-            );
+            client0.transfer(&env.current_contract_address(), &position.owner, &payout_0);
         }
         if collect_1 > 0 {
             let client1 = token::Client::new(&env, &token1_addr);
-            client1.transfer(
-                &env.current_contract_address(),
-                &position.owner,
-                &(collect_1 as i128),
-            );
+            client1.transfer(&env.current_contract_address(), &position.owner, &payout_1);
         }
 
         // Update position
@@ -697,10 +812,7 @@ impl ClmmCore {
     // ── View Functions ──────────────────────────────────────────────
 
     pub fn get_position(env: Env, position_id: u64) -> Result<Position, ClmmError> {
-        env.storage()
-            .persistent()
-            .get(&DataKey::Position(position_id))
-            .ok_or(ClmmError::InvalidPosition)
+        position::load_validated_position(&env, position_id)
     }
 
     pub fn get_current_tick(env: Env) -> i32 {
@@ -792,12 +904,35 @@ impl ClmmCore {
         Ok(())
     }
 
+    /// Apply a signed tick liquidity delta to the pool's active liquidity.
+    ///
+    /// `add` selects the direction (add when crossing upward, subtract when
+    /// crossing downward) and `net` supplies the magnitude and sign. Returns a
+    /// typed error instead of wrapping on underflow, which is what the previous
+    /// `liquidity_net as u128` cast did for negative net liquidity.
+    fn apply_liquidity_net(liquidity: u128, net: i128, add: bool) -> Result<u128, ClmmError> {
+        let magnitude = net.unsigned_abs();
+        let increasing = add == (net >= 0);
+
+        if increasing {
+            liquidity
+                .checked_add(magnitude)
+                .ok_or(ClmmError::MathOverflow)
+        } else {
+            liquidity
+                .checked_sub(magnitude)
+                .ok_or(ClmmError::InsufficientLiquidity)
+        }
+    }
+
     fn validate_tick_range(env: &Env, tick_lower: i32, tick_upper: i32) -> Result<(), ClmmError> {
         if tick_lower >= tick_upper {
             return Err(ClmmError::InvalidTickRange);
         }
 
-        let tick_spacing: i32 = env.storage().instance().get(&DataKey::TickSpacing).unwrap();
+        // Read through the validating accessor: persisted configuration is
+        // untrusted, and a zero spacing would otherwise panic on `%`.
+        let tick_spacing = tick::get_tick_spacing(env)?;
 
         if tick_lower % tick_spacing != 0 || tick_upper % tick_spacing != 0 {
             return Err(ClmmError::InvalidTick);
@@ -1074,5 +1209,286 @@ mod tests {
         let owner_now = client.get_position(&position_id);
         assert_eq!(owner_now.owner, owner);
         assert_eq!(owner_now.liquidity, 99_000);
+    }
+
+    /// Write a position record directly into persistent storage, simulating
+    /// malformed external data (or a legacy/corrupt record) reconstructed by the
+    /// indexer.
+    fn write_position(env: &Env, contract_id: &Address, position_id: u64, position: &Position) {
+        env.as_contract(contract_id, || {
+            env.storage()
+                .persistent()
+                .set(&DataKey::Position(position_id), position);
+        });
+    }
+
+    #[test]
+    fn test_initialize_rejects_malformed_config() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register(ClmmCore, ());
+        let client = ClmmCoreClient::new(&env, &contract_id);
+
+        let token0 = env
+            .register_stellar_asset_contract_v2(Address::generate(&env))
+            .address();
+        let token1 = env
+            .register_stellar_asset_contract_v2(Address::generate(&env))
+            .address();
+
+        // Fee above 100% is rejected.
+        assert_eq!(
+            client.try_initialize(&token0, &token1, &10_001, &60, &math::Q96),
+            Err(Ok(ClmmError::InvalidFee))
+        );
+
+        // Zero and negative tick spacing are rejected (zero would panic on `%`).
+        assert_eq!(
+            client.try_initialize(&token0, &token1, &3000, &0, &math::Q96),
+            Err(Ok(ClmmError::InvalidTickSpacing))
+        );
+        assert_eq!(
+            client.try_initialize(&token0, &token1, &3000, &-60, &math::Q96),
+            Err(Ok(ClmmError::InvalidTickSpacing))
+        );
+
+        // sqrt price below the representable minimum is rejected.
+        assert_eq!(
+            client.try_initialize(&token0, &token1, &3000, &60, &1u128),
+            Err(Ok(ClmmError::InvalidSqrtPrice))
+        );
+
+        // A failed initialize must leave the pool uninitialized.
+        assert_eq!(
+            client.try_mint(
+                &Address::generate(&env),
+                &-60,
+                &60,
+                &1,
+                &1,
+                &1,
+                &operation_id(&env, 20),
+            ),
+            Err(Ok(ClmmError::NotInitialized))
+        );
+
+        // Safe retry with valid configuration succeeds.
+        assert!(client
+            .try_initialize(&token0, &token1, &3000, &60, &math::Q96)
+            .is_ok());
+        assert_eq!(client.get_sqrt_price(), math::Q96);
+    }
+
+    #[test]
+    fn test_mint_rejects_invalid_fields_without_state_change() {
+        let (env, client, token0, token1) = setup_pool();
+
+        let user = Address::generate(&env);
+        mint_tokens(&env, &token0, &user, 1_000_000);
+        mint_tokens(&env, &token1, &user, 1_000_000);
+        let id = operation_id(&env, 21);
+
+        // Ticks not aligned with the pool tick spacing.
+        assert_eq!(
+            client.try_mint(&user, &-61, &60, &1_000, &u128::MAX, &u128::MAX, &id),
+            Err(Ok(ClmmError::InvalidTick))
+        );
+        // Inverted range.
+        assert_eq!(
+            client.try_mint(&user, &60, &-60, &1_000, &u128::MAX, &u128::MAX, &id),
+            Err(Ok(ClmmError::InvalidTickRange))
+        );
+        // Aligned but outside the supported tick domain.
+        assert_eq!(
+            client.try_mint(&user, &-60, &887_280, &1_000, &u128::MAX, &u128::MAX, &id),
+            Err(Ok(ClmmError::InvalidTick))
+        );
+        // Zero liquidity.
+        assert_eq!(
+            client.try_mint(&user, &-60, &60, &0, &u128::MAX, &u128::MAX, &id),
+            Err(Ok(ClmmError::InvalidAmount))
+        );
+        // Liquidity larger than i128 cannot be represented in tick accounting.
+        assert_eq!(
+            client.try_mint(&user, &-60, &60, &u128::MAX, &u128::MAX, &u128::MAX, &id),
+            Err(Ok(ClmmError::MathOverflow))
+        );
+
+        // No position was created, no liquidity was added, and no funds moved.
+        assert_eq!(client.get_liquidity(), 0);
+        assert_eq!(
+            client.try_get_position(&1),
+            Err(Ok(ClmmError::InvalidPosition))
+        );
+        assert_eq!(balance(&env, &token0, &user), 1_000_000);
+        assert_eq!(balance(&env, &token1, &user), 1_000_000);
+        assert_eq!(balance(&env, &token0, &client.address), 0);
+        assert_eq!(balance(&env, &token1, &client.address), 0);
+
+        // Safe retry with the same operation identity succeeds: the failed
+        // validation pass did not consume it.
+        let (position_id, amount0, amount1) =
+            client.mint(&user, &-60, &60, &100_000, &u128::MAX, &u128::MAX, &id);
+        assert_eq!(position_id, 1);
+        assert_eq!(client.get_position(&position_id).liquidity, 100_000);
+        assert_eq!(client.get_liquidity(), 100_000);
+        assert_eq!(balance(&env, &token0, &client.address), amount0 as i128);
+        assert_eq!(balance(&env, &token1, &client.address), amount1 as i128);
+    }
+
+    #[test]
+    fn test_burn_and_collect_preserve_accounting() {
+        let (env, client, token0, token1) = setup_pool();
+        let (owner, position_id) = open_position(&env, &client, &token0, &token1);
+        let pool0 = balance(&env, &token0, &client.address);
+        let pool1 = balance(&env, &token1, &client.address);
+
+        // Burning half returns exactly the pro-rata share tracked by the position.
+        let (burned0, burned1) = client.burn(&position_id, &50_000, &operation_id(&env, 22));
+        let position = client.get_position(&position_id);
+
+        assert_eq!(position.liquidity, 50_000);
+        assert_eq!(position.tokens_owed_0, burned0);
+        assert_eq!(position.tokens_owed_1, burned1);
+        assert_eq!(client.get_liquidity(), 50_000);
+        // Burning accrues tokens owed; it does not move pool balances.
+        assert_eq!(balance(&env, &token0, &client.address), pool0);
+        assert_eq!(balance(&env, &token1, &client.address), pool1);
+
+        // A zero-amount burn is rejected with a typed error, and the safe
+        // retry leaves the remaining position intact.
+        let retry_id = operation_id(&env, 23);
+        assert_eq!(
+            client.try_burn(&position_id, &0, &retry_id),
+            Err(Ok(ClmmError::InvalidAmount))
+        );
+        assert_eq!(client.get_position(&position_id).liquidity, 50_000);
+        let (reburned0, reburned1) = client.burn(&position_id, &10_000, &retry_id);
+        assert_eq!(client.get_position(&position_id).liquidity, 40_000);
+
+        // Collect pays the recorded tokens once and zeroes the owed balances.
+        let owner0 = balance(&env, &token0, &owner);
+        let owner1 = balance(&env, &token1, &owner);
+        let (collected0, collected1) = client.collect(&position_id, &operation_id(&env, 24));
+        assert_eq!(collected0, burned0 + reburned0);
+        assert_eq!(collected1, burned1 + reburned1);
+        assert_eq!(client.get_position(&position_id).tokens_owed_0, 0);
+        assert_eq!(client.get_position(&position_id).tokens_owed_1, 0);
+        assert_eq!(balance(&env, &token0, &owner), owner0 + collected0 as i128);
+        assert_eq!(balance(&env, &token1, &owner), owner1 + collected1 as i128);
+    }
+
+    #[test]
+    fn test_corrupted_position_is_rejected_without_mutation() {
+        let (env, client, token0, token1) = setup_pool();
+        let (_owner, position_id) = open_position(&env, &client, &token0, &token1);
+
+        let good_position = client.get_position(&position_id);
+        let pool0 = balance(&env, &token0, &client.address);
+        let pool1 = balance(&env, &token1, &client.address);
+
+        // Malformed record: inverted range and liquidity that cannot fit in i128.
+        let mut bad_position = good_position.clone();
+        bad_position.tick_lower = 60;
+        bad_position.tick_upper = -60;
+        bad_position.liquidity = u128::MAX;
+        write_position(&env, &client.address, position_id, &bad_position);
+
+        assert_eq!(
+            client.try_get_position(&position_id),
+            Err(Ok(ClmmError::CorruptedPosition))
+        );
+        assert_eq!(
+            client.try_burn(&position_id, &1_000, &operation_id(&env, 25)),
+            Err(Ok(ClmmError::CorruptedPosition))
+        );
+        assert_eq!(
+            client.try_collect(&position_id, &operation_id(&env, 26)),
+            Err(Ok(ClmmError::CorruptedPosition))
+        );
+
+        // Pool state and balances are untouched by the rejected calls.
+        assert_eq!(client.get_liquidity(), 100_000);
+        assert_eq!(balance(&env, &token0, &client.address), pool0);
+        assert_eq!(balance(&env, &token1, &client.address), pool1);
+
+        // Restoring a valid record makes the operation retryable.
+        write_position(&env, &client.address, position_id, &good_position);
+        assert_eq!(client.get_position(&position_id).liquidity, 100_000);
+        client.burn(&position_id, &10_000, &operation_id(&env, 27));
+        assert_eq!(client.get_position(&position_id).liquidity, 90_000);
+    }
+
+    #[test]
+    fn test_collect_rejects_inconsistent_fee_growth() {
+        let (env, client, token0, token1) = setup_pool();
+        let (_owner, position_id) = open_position(&env, &client, &token0, &token1);
+        let good_position = client.get_position(&position_id);
+
+        let pool0 = balance(&env, &token0, &client.address);
+        let pool1 = balance(&env, &token1, &client.address);
+
+        // A stored "last" fee growth greater than the current growth used to
+        // underflow and panic inside `collect`.
+        let mut bad_position = good_position.clone();
+        bad_position.fee_growth_inside_0_last_x128 = u128::MAX;
+        write_position(&env, &client.address, position_id, &bad_position);
+
+        let id = operation_id(&env, 28);
+        assert_eq!(
+            client.try_collect(&position_id, &id),
+            Err(Ok(ClmmError::CorruptedPosition))
+        );
+        assert_eq!(balance(&env, &token0, &client.address), pool0);
+        assert_eq!(balance(&env, &token1, &client.address), pool1);
+
+        // Safe retry with the same identity after the record is repaired.
+        write_position(&env, &client.address, position_id, &good_position);
+        assert_eq!(client.collect(&position_id, &id), (0, 0));
+        assert_eq!(client.get_position(&position_id).liquidity, 100_000);
+    }
+
+    #[test]
+    fn test_malformed_tick_spacing_is_rejected() {
+        let (env, client, token0, token1) = setup_pool();
+        let (owner, position_id) = open_position(&env, &client, &token0, &token1);
+
+        // Corrupt the persisted pool configuration.
+        env.as_contract(&client.address, || {
+            env.storage().instance().set(&DataKey::TickSpacing, &0i32);
+        });
+
+        assert_eq!(
+            client.try_mint(
+                &owner,
+                &-60,
+                &60,
+                &1_000,
+                &u128::MAX,
+                &u128::MAX,
+                &operation_id(&env, 29)
+            ),
+            Err(Ok(ClmmError::InvalidTickSpacing))
+        );
+        assert_eq!(
+            client.try_get_position(&position_id),
+            Err(Ok(ClmmError::InvalidTickSpacing))
+        );
+
+        // Repair configuration: the same calls now succeed.
+        env.as_contract(&client.address, || {
+            env.storage().instance().set(&DataKey::TickSpacing, &60i32);
+        });
+        assert_eq!(client.get_position(&position_id).liquidity, 100_000);
+        client.mint(
+            &owner,
+            &-120,
+            &120,
+            &10_000,
+            &u128::MAX,
+            &u128::MAX,
+            &operation_id(&env, 30),
+        );
     }
 }

@@ -65,6 +65,36 @@ preimage binding mean:
 - After any other error, fix the cause (caps, liquidity, tick range) and retry
   with the same id.
 
+## Boundary validation and stored position records
+
+Position records live in persistent storage and can be read back after upgrades or
+manual migrations, so `burn`, `collect` and `get_position` treat them as untrusted
+input. A record is rejected with `CorruptedPosition` (15) — before any transfer or
+state write — when it has:
+
+- `tick_lower >= tick_upper`;
+- a tick outside `[-887272, 887272]`;
+- a tick that is not aligned to the pool's current tick spacing;
+- `liquidity > i128::MAX` (not representable in tick accounting).
+
+`collect` additionally rejects a stored `fee_growth_inside_*_last_x128` that is
+greater than the current inside growth, which would otherwise underflow the fee
+calculation.
+
+Untrusted arguments are validated before accounting:
+
+| Call | Checks |
+|---|---|
+| `initialize` | `fee <= 10_000` bps (`InvalidFee`), `1 <= tick_spacing <= 16_384` (`InvalidTickSpacing`), `sqrt_price_x96 >= MIN_SQRT_RATIO` (`InvalidSqrtPrice`) |
+| `mint` | non-zero amount within the deposit caps, `amount <= i128::MAX`, aligned in-domain tick range, checked token-amount and liquidity math |
+| `burn` | non-zero amount not exceeding the position's liquidity, checked owed-token accrual |
+| `swap` | non-zero amount, price limit on the correct side, checked swap-step, fee-growth and signed tick-liquidity math |
+
+Every arithmetic path uses checked operations and reports `MathOverflow` (14)
+instead of panicking or wrapping. A failed call reverts atomically: no pool,
+tick, position or token balance changes, and the operation identity is not
+consumed, so the same id can be retried after the input or record is repaired.
+
 ## Events
 
 Each consumed identity publishes, after the existing operation event:
@@ -93,6 +123,9 @@ See [storage-ttl-strategy.md](./storage-ttl-strategy.md).
 `mint`, `burn` and `collect` gain a trailing `operation_id: BytesN<32>`
 parameter. Clients must supply a unique id per logical operation and treat
 `DuplicateOperation` as "already applied". `ClmmError` gains
-`DuplicateOperation = 10`.
+`DuplicateOperation = 10`, plus the boundary-validation codes
+`InvalidFee = 11`, `InvalidTickSpacing = 12`, `InvalidSqrtPrice = 13`,
+`MathOverflow = 14` and `CorruptedPosition = 15`. A zero-amount `burn` now
+reports `InvalidAmount` (6) rather than `InsufficientLiquidity` (5).
 
 See `contracts/ERROR_CODES.md` for the full error table.
