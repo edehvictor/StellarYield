@@ -67,6 +67,7 @@ Source: `contracts/stableswap/src/lib.rs`
 | 8    | `InvalidFee`            | Fee basis points out of range                | Use a fee value within protocol limits      |
 | 9    | `MathOverflow`          | Arithmetic overflow in invariant calculation | Reduce input amounts                        |
 | 10   | `ZeroInvariant`         | Pool invariant is zero                       | Pool is empty; add liquidity first          |
+| 11   | `InvalidToken`          | Token address is duplicate, LP token, or unrecognized in swap | Use distinct, registered pool tokens |
 
 ---
 
