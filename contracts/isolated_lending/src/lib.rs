@@ -1,10 +1,13 @@
 #![no_std]
 
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, symbol_short, token, Address, Env,
+    contract, contracterror, contractimpl, contracttype, symbol_short, token, xdr::ToXdr, Address,
+    Bytes, BytesN, Env,
 };
 
 const BPS_DENOMINATOR: i128 = 10_000;
+/// Domain separator for the configuration fingerprint (versioned).
+const CONFIG_FINGERPRINT_DOMAIN: &[u8] = b"stellaryield_il_config_v1";
 /// Fixed-point scale of the borrow index (1.0 = `INDEX_SCALE`).
 const INDEX_SCALE: i128 = 1_000_000_000;
 /// Interest rates are parts per billion of the index, per ledger.
@@ -30,10 +33,35 @@ pub struct PairConfig {
 
 /// Borrow eligibility policy for oracle quotes.
 #[contracttype]
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OraclePolicyConfig {
     pub min_confidence_bps: u32,
     pub max_age_ledgers: u32,
+}
+
+/// Immutable snapshot of the admin-controlled configuration that shapes
+/// execution for a market.
+///
+/// Only configuration is included: balances, totals and the oracle quote are
+/// excluded, because they change continuously (and the quote has its own
+/// freshness policy) and must not invalidate a caller's snapshot. Two markets
+/// with identical configuration values produce identical snapshots, and any
+/// admin configuration change produces a different snapshot.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ConfigSnapshot {
+    pub collateral_factor_bps: u32,
+    pub reserve_bps: u32,
+    pub close_factor_bps: u32,
+    pub collateral_price_bps: u32,
+    pub interest_rate_per_ledger: u32,
+    pub protocol_fee_bps: u32,
+    pub oracle: Option<Address>,
+    /// Whether an oracle policy is configured. When false the two policy
+    /// values below are zero and borrowing does not consult the oracle.
+    pub oracle_policy_configured: bool,
+    pub oracle_min_confidence_bps: u32,
+    pub oracle_max_age_ledgers: u32,
 }
 
 /// Latest quote pushed by the configured oracle.
@@ -59,6 +87,11 @@ pub struct HealthFactor {
     pub threshold_bps: u32,
     /// Ledger sequence the components were calculated at.
     pub ledger: u32,
+    /// Fingerprint of the configuration these components were calculated
+    /// under. Pass it to `borrow`, `withdraw_collateral` or `liquidate` so the
+    /// operation fails as stale instead of executing under a configuration the
+    /// caller never saw.
+    pub config_fingerprint: BytesN<32>,
 }
 
 #[contracttype]
@@ -121,6 +154,7 @@ pub enum IsolatedLendingError {
     OracleQuoteMissing = 12,
     OracleQuoteStale = 13,
     OracleConfidenceTooLow = 14,
+    StaleConfig = 15,
 }
 
 #[contract]
@@ -381,12 +415,22 @@ impl IsolatedLendingPair {
         Ok(())
     }
 
-    pub fn borrow(env: Env, user: Address, amount: i128) -> Result<(), IsolatedLendingError> {
+    /// Borrow against posted collateral.
+    ///
+    /// `expected_config_fingerprint` must equal `get_config_fingerprint`; a
+    /// mismatch fails with `StaleConfig` before interest accrues or funds move.
+    pub fn borrow(
+        env: Env,
+        user: Address,
+        amount: i128,
+        expected_config_fingerprint: BytesN<32>,
+    ) -> Result<(), IsolatedLendingError> {
         user.require_auth();
         if amount <= 0 {
             return Err(IsolatedLendingError::InvalidAmount);
         }
         Self::require_init(&env)?;
+        Self::require_config(&env, &expected_config_fingerprint)?;
         Self::check_oracle(&env)?;
         let index = Self::accrue(&env)?;
 
@@ -463,16 +507,22 @@ impl IsolatedLendingPair {
         Self::repay_debt(&env, &payer, &borrower, amount)
     }
 
+    /// Withdraw posted collateral.
+    ///
+    /// `expected_config_fingerprint` must equal `get_config_fingerprint`; a
+    /// mismatch fails with `StaleConfig` before interest accrues or funds move.
     pub fn withdraw_collateral(
         env: Env,
         user: Address,
         amount: i128,
+        expected_config_fingerprint: BytesN<32>,
     ) -> Result<(), IsolatedLendingError> {
         user.require_auth();
         if amount <= 0 {
             return Err(IsolatedLendingError::InvalidAmount);
         }
         Self::require_init(&env)?;
+        Self::require_config(&env, &expected_config_fingerprint)?;
 
         let collateral_key = PairDataKey::Collateral(user.clone());
         let old_collateral: i128 = env.storage().persistent().get(&collateral_key).unwrap_or(0);
@@ -569,6 +619,7 @@ impl IsolatedLendingPair {
         env.storage()
             .instance()
             .set(&PairDataKey::ReserveBps, &reserve_bps);
+        Self::publish_config_update(&env, &admin)?;
         Ok(())
     }
 
@@ -586,6 +637,7 @@ impl IsolatedLendingPair {
         env.storage()
             .instance()
             .set(&PairDataKey::CollateralFactorBps, &collateral_factor_bps);
+        Self::publish_config_update(&env, &admin)?;
         Ok(())
     }
 
@@ -603,6 +655,7 @@ impl IsolatedLendingPair {
         env.storage()
             .instance()
             .set(&PairDataKey::CollateralPriceBps, &price_bps);
+        Self::publish_config_update(&env, &admin)?;
         Ok(())
     }
 
@@ -612,7 +665,9 @@ impl IsolatedLendingPair {
     /// same borrower fails, so a retried call cannot seize collateral twice.
     /// A call that reverts (e.g. a rejected token transfer) does not consume the
     /// id. If the collateral runs out, the remaining debt is written off to bad debt.
-    /// Returns the collateral seized.
+    /// `expected_config_fingerprint` is validated before interest accrues, so a
+    /// caller never liquidates on terms it did not preview. Returns the
+    /// collateral seized.
     ///
     /// ## Market isolation (#1478)
     /// A pair is one market. Everything a liquidation touches belongs to that
@@ -632,12 +687,14 @@ impl IsolatedLendingPair {
         borrower: Address,
         liquidation_id: u64,
         repay_amount: i128,
+        expected_config_fingerprint: BytesN<32>,
     ) -> Result<i128, IsolatedLendingError> {
         liquidator.require_auth();
         if repay_amount <= 0 {
             return Err(IsolatedLendingError::InvalidAmount);
         }
         Self::require_init(&env)?;
+        Self::require_config(&env, &expected_config_fingerprint)?;
         let index = Self::accrue(&env)?;
 
         let liquidation_key = PairDataKey::Liquidation(borrower.clone(), liquidation_id);
@@ -766,6 +823,7 @@ impl IsolatedLendingPair {
         env.storage()
             .instance()
             .set(&PairDataKey::CloseFactorBps, &close_factor_bps);
+        Self::publish_config_update(&env, &admin)?;
         Ok(())
     }
 
@@ -781,6 +839,7 @@ impl IsolatedLendingPair {
         env.storage()
             .instance()
             .set(&PairDataKey::InterestRatePerLedger, &rate_per_ledger);
+        Self::publish_config_update(&env, &admin)?;
         Ok(())
     }
 
@@ -798,6 +857,7 @@ impl IsolatedLendingPair {
         env.storage()
             .instance()
             .set(&PairDataKey::ProtocolFeeBps, &fee_bps);
+        Self::publish_config_update(&env, &admin)?;
         Ok(())
     }
 
@@ -840,6 +900,7 @@ impl IsolatedLendingPair {
     ) -> Result<(), IsolatedLendingError> {
         Self::require_admin(&env, &admin)?;
         env.storage().instance().set(&PairDataKey::Oracle, &oracle);
+        Self::publish_config_update(&env, &admin)?;
         Ok(())
     }
 
@@ -863,6 +924,7 @@ impl IsolatedLendingPair {
                 max_age_ledgers,
             },
         );
+        Self::publish_config_update(&env, &admin)?;
         Ok(())
     }
 
@@ -970,7 +1032,26 @@ impl IsolatedLendingPair {
                 .get(&PairDataKey::CollateralFactorBps)
                 .unwrap(),
             ledger: env.ledger().sequence(),
+            config_fingerprint: Self::config_fingerprint(&env)?,
         })
+    }
+
+    /// Current admin-controlled configuration of this market.
+    pub fn get_config_snapshot(env: Env) -> Result<ConfigSnapshot, IsolatedLendingError> {
+        Self::require_init(&env)?;
+        Ok(Self::config_snapshot(&env))
+    }
+
+    /// SHA-256 fingerprint of `get_config_snapshot`.
+    ///
+    /// Clients capture this before previewing an operation and pass it to
+    /// `borrow`, `withdraw_collateral` or `liquidate`. If any configuration
+    /// changes in between, the fingerprint no longer matches and the operation
+    /// fails with `StaleConfig` before accruing interest or moving funds, so
+    /// the caller can refresh and retry under terms it has actually seen.
+    pub fn get_config_fingerprint(env: Env) -> Result<BytesN<32>, IsolatedLendingError> {
+        Self::require_init(&env)?;
+        Self::config_fingerprint(&env)
     }
 
     pub fn get_totals(env: Env) -> Result<(i128, i128), IsolatedLendingError> {
@@ -999,6 +1080,69 @@ impl IsolatedLendingPair {
             .instance()
             .get(&PairDataKey::CollateralPriceBps)
             .unwrap_or(10_000)
+    }
+
+    /// Read the configuration that execution depends on, applying the same
+    /// defaults the execution paths use.
+    fn config_snapshot(env: &Env) -> ConfigSnapshot {
+        let policy: Option<OraclePolicyConfig> =
+            env.storage().instance().get(&PairDataKey::OraclePolicy);
+        ConfigSnapshot {
+            collateral_factor_bps: env
+                .storage()
+                .instance()
+                .get(&PairDataKey::CollateralFactorBps)
+                .unwrap_or(0),
+            reserve_bps: env
+                .storage()
+                .instance()
+                .get(&PairDataKey::ReserveBps)
+                .unwrap_or(0),
+            close_factor_bps: env
+                .storage()
+                .instance()
+                .get(&PairDataKey::CloseFactorBps)
+                .unwrap_or(10_000),
+            collateral_price_bps: Self::collateral_price_bps(env),
+            interest_rate_per_ledger: env
+                .storage()
+                .instance()
+                .get(&PairDataKey::InterestRatePerLedger)
+                .unwrap_or(0),
+            protocol_fee_bps: env
+                .storage()
+                .instance()
+                .get(&PairDataKey::ProtocolFeeBps)
+                .unwrap_or(0),
+            oracle: env.storage().instance().get(&PairDataKey::Oracle),
+            oracle_policy_configured: policy.is_some(),
+            oracle_min_confidence_bps: policy.as_ref().map(|p| p.min_confidence_bps).unwrap_or(0),
+            oracle_max_age_ledgers: policy.as_ref().map(|p| p.max_age_ledgers).unwrap_or(0),
+        }
+    }
+
+    /// Deterministic SHA-256 fingerprint of the current configuration.
+    fn config_fingerprint(env: &Env) -> Result<BytesN<32>, IsolatedLendingError> {
+        let mut preimage = Bytes::from_slice(env, CONFIG_FINGERPRINT_DOMAIN);
+        preimage.append(&Self::config_snapshot(env).to_xdr(env));
+        Ok(env.crypto().sha256(&preimage).to_bytes())
+    }
+
+    /// Reject an operation whose caller observed a different configuration.
+    fn require_config(env: &Env, expected: &BytesN<32>) -> Result<(), IsolatedLendingError> {
+        if Self::config_fingerprint(env)? != *expected {
+            return Err(IsolatedLendingError::StaleConfig);
+        }
+        Ok(())
+    }
+
+    /// Announce the new configuration fingerprint after an admin change.
+    fn publish_config_update(env: &Env, admin: &Address) -> Result<(), IsolatedLendingError> {
+        env.events().publish(
+            (symbol_short!("config"),),
+            (admin.clone(), Self::config_fingerprint(env)?),
+        );
+        Ok(())
     }
 
     /// `collateral` valued in debt-token units at `price_bps`.
@@ -1300,6 +1444,14 @@ mod test {
         borrower: Address,
     }
 
+    impl Setup {
+        /// Fingerprint a client would have captured before previewing an
+        /// operation on this market, right now.
+        fn fp(&self) -> BytesN<32> {
+            self.pair.get_config_fingerprint()
+        }
+    }
+
     fn mint(env: &Env, token: &Address, to: &Address, amount: i128) {
         StellarAssetClient::new(env, token).mint(to, &amount);
     }
@@ -1331,7 +1483,7 @@ mod test {
         mint(&env, &collateral_token, &borrower, 100);
         pair.supply(&lender, &1_000);
         pair.post_collateral(&borrower, &100);
-        pair.borrow(&borrower, &80);
+        pair.borrow(&borrower, &80, &pair.get_config_fingerprint());
 
         Setup {
             env,
@@ -1398,10 +1550,10 @@ mod test {
         mint(&s.env, &s.collateral_token, &s.borrower, 2_000);
         s.pair.post_collateral(&s.borrower, &2_000);
 
-        s.pair.borrow(&s.borrower, &920);
+        s.pair.borrow(&s.borrower, &920, &s.fp());
 
         assert_eq!(s.pair.get_available_liquidity(), 0);
-        let res = s.pair.try_borrow(&s.borrower, &1);
+        let res = s.pair.try_borrow(&s.borrower, &1, &s.fp());
         assert_eq!(res, Err(Ok(IsolatedLendingError::InsufficientLiquidity)));
     }
 
@@ -1414,9 +1566,9 @@ mod test {
         s.pair.queue_withdrawal(&s.lender, &900);
         assert_eq!(s.pair.get_available_liquidity(), 20);
 
-        let res = s.pair.try_borrow(&s.borrower, &21);
+        let res = s.pair.try_borrow(&s.borrower, &21, &s.fp());
         assert_eq!(res, Err(Ok(IsolatedLendingError::InsufficientLiquidity)));
-        s.pair.borrow(&s.borrower, &20);
+        s.pair.borrow(&s.borrower, &20, &s.fp());
     }
 
     #[test]
@@ -1458,7 +1610,9 @@ mod test {
         let liquidator = Address::generate(&s.env);
         mint(&s.env, &s.debt_token, &liquidator, 80);
 
-        let res = s.pair.try_liquidate(&liquidator, &s.borrower, &1, &80);
+        let res = s
+            .pair
+            .try_liquidate(&liquidator, &s.borrower, &1, &80, &s.fp());
         assert_eq!(res, Err(Ok(IsolatedLendingError::PositionStillBacked)));
     }
 
@@ -1469,7 +1623,7 @@ mod test {
         let liquidator = Address::generate(&s.env);
         mint(&s.env, &s.debt_token, &liquidator, 80);
 
-        let seized = s.pair.liquidate(&liquidator, &s.borrower, &1, &80);
+        let seized = s.pair.liquidate(&liquidator, &s.borrower, &1, &80, &s.fp());
 
         assert_eq!(seized, 80);
         assert_eq!(s.pair.get_position(&s.borrower), (20, 0));
@@ -1486,9 +1640,11 @@ mod test {
         let liquidator = Address::generate(&s.env);
         mint(&s.env, &s.debt_token, &liquidator, 80);
 
-        s.pair.liquidate(&liquidator, &s.borrower, &7, &40);
+        s.pair.liquidate(&liquidator, &s.borrower, &7, &40, &s.fp());
         let after_first = s.pair.get_position(&s.borrower);
-        let res = s.pair.try_liquidate(&liquidator, &s.borrower, &7, &40);
+        let res = s
+            .pair
+            .try_liquidate(&liquidator, &s.borrower, &7, &40, &s.fp());
 
         assert_eq!(res, Err(Ok(IsolatedLendingError::AlreadyLiquidated)));
         assert_eq!(s.pair.get_position(&s.borrower), after_first);
@@ -1504,12 +1660,15 @@ mod test {
         // No debt tokens yet, so the repayment transfer is rejected.
         assert!(s
             .pair
-            .try_liquidate(&liquidator, &s.borrower, &3, &40)
+            .try_liquidate(&liquidator, &s.borrower, &3, &40, &s.fp())
             .is_err());
         assert_eq!(s.pair.get_position(&s.borrower), (100, 80));
 
         mint(&s.env, &s.debt_token, &liquidator, 40);
-        assert_eq!(s.pair.liquidate(&liquidator, &s.borrower, &3, &40), 40);
+        assert_eq!(
+            s.pair.liquidate(&liquidator, &s.borrower, &3, &40, &s.fp()),
+            40
+        );
         assert_eq!(s.pair.get_position(&s.borrower), (60, 40));
     }
 
@@ -1521,7 +1680,7 @@ mod test {
         let liquidator = Address::generate(&s.env);
         mint(&s.env, &s.debt_token, &liquidator, 80);
 
-        let seized = s.pair.liquidate(&liquidator, &s.borrower, &1, &80);
+        let seized = s.pair.liquidate(&liquidator, &s.borrower, &1, &80, &s.fp());
 
         assert_eq!(seized, 100);
         assert_eq!(s.pair.get_position(&s.borrower), (0, 0));
@@ -1554,7 +1713,10 @@ mod test {
         let s = setup();
         let liquidator = unhealthy_with_close_factor(&s);
 
-        assert_eq!(s.pair.liquidate(&liquidator, &s.borrower, &1, &20), 20);
+        assert_eq!(
+            s.pair.liquidate(&liquidator, &s.borrower, &1, &20, &s.fp()),
+            20
+        );
         assert_eq!(s.pair.get_position(&s.borrower), (80, 60));
     }
 
@@ -1563,7 +1725,10 @@ mod test {
         let s = setup();
         let liquidator = unhealthy_with_close_factor(&s);
 
-        assert_eq!(s.pair.liquidate(&liquidator, &s.borrower, &1, &40), 40);
+        assert_eq!(
+            s.pair.liquidate(&liquidator, &s.borrower, &1, &40, &s.fp()),
+            40
+        );
         assert_eq!(s.pair.get_position(&s.borrower), (60, 40));
     }
 
@@ -1573,7 +1738,10 @@ mod test {
         let liquidator = unhealthy_with_close_factor(&s);
 
         // Asked for 80 of 80, but only half the debt may be repaid at once.
-        assert_eq!(s.pair.liquidate(&liquidator, &s.borrower, &1, &80), 40);
+        assert_eq!(
+            s.pair.liquidate(&liquidator, &s.borrower, &1, &80, &s.fp()),
+            40
+        );
         assert_eq!(s.pair.get_position(&s.borrower), (60, 40));
         assert_eq!(balance(&s.env, &s.debt_token, &liquidator), 40);
         assert_eq!(balance(&s.env, &s.collateral_token, &liquidator), 40);
@@ -1757,7 +1925,7 @@ mod test {
         s.pair.push_oracle_quote(&oracle, &10_000, &9_000);
         set_ledger(&s.env, 10);
 
-        s.pair.borrow(&s.borrower, &10);
+        s.pair.borrow(&s.borrower, &10, &s.fp());
         assert_eq!(s.pair.get_position(&s.borrower), (200, 90));
     }
 
@@ -1769,7 +1937,7 @@ mod test {
         s.pair.push_oracle_quote(&oracle, &10_000, &7_999);
 
         assert_eq!(
-            s.pair.try_borrow(&s.borrower, &10),
+            s.pair.try_borrow(&s.borrower, &10, &s.fp()),
             Err(Ok(IsolatedLendingError::OracleConfidenceTooLow))
         );
     }
@@ -1783,7 +1951,7 @@ mod test {
         set_ledger(&s.env, 11);
 
         assert_eq!(
-            s.pair.try_borrow(&s.borrower, &10),
+            s.pair.try_borrow(&s.borrower, &10, &s.fp()),
             Err(Ok(IsolatedLendingError::OracleQuoteStale))
         );
     }
@@ -1794,7 +1962,7 @@ mod test {
         with_oracle_policy(&s);
 
         assert_eq!(
-            s.pair.try_borrow(&s.borrower, &10),
+            s.pair.try_borrow(&s.borrower, &10, &s.fp()),
             Err(Ok(IsolatedLendingError::OracleQuoteMissing))
         );
     }
@@ -1831,7 +1999,7 @@ mod test {
         mint(env, collateral_token, borrower, 100);
         pair.supply(lender, &1_000);
         pair.post_collateral(borrower, &100);
-        pair.borrow(borrower, &80);
+        pair.borrow(borrower, &80, &pair.get_config_fingerprint());
         pair
     }
 
@@ -1907,7 +2075,16 @@ mod test {
             balance(&m.env, &m.debt_b, &m.market_b.address),
         );
 
-        assert_eq!(m.market_a.liquidate(&liquidator, &m.borrower, &1, &80), 80);
+        assert_eq!(
+            m.market_a.liquidate(
+                &liquidator,
+                &m.borrower,
+                &1,
+                &80,
+                &m.market_a.get_config_fingerprint()
+            ),
+            80
+        );
 
         assert_eq!(m.market_a.get_position(&m.borrower), (20, 0));
         let b_after = (
@@ -1930,7 +2107,13 @@ mod test {
         let liquidator = Address::generate(&m.env);
         mint(&m.env, &m.debt_b, &liquidator, 1_000);
 
-        let res = m.market_a.try_liquidate(&liquidator, &m.borrower, &1, &80);
+        let res = m.market_a.try_liquidate(
+            &liquidator,
+            &m.borrower,
+            &1,
+            &80,
+            &m.market_a.get_config_fingerprint(),
+        );
 
         assert!(res.is_err());
         assert_eq!(m.market_a.get_position(&m.borrower), (100, 80));
@@ -1949,13 +2132,28 @@ mod test {
         mint(&m.env, &m.debt_b, &liquidator, 80);
 
         assert_eq!(
-            m.market_a.try_liquidate(&liquidator, &m.borrower, &1, &80),
+            m.market_a.try_liquidate(
+                &liquidator,
+                &m.borrower,
+                &1,
+                &80,
+                &m.market_a.get_config_fingerprint()
+            ),
             Err(Ok(IsolatedLendingError::PositionStillBacked))
         );
         assert_eq!(m.market_a.get_position(&m.borrower), (100, 80));
 
         // The unhealthy market can still be liquidated on its own terms.
-        assert_eq!(m.market_b.liquidate(&liquidator, &m.borrower, &1, &80), 80);
+        assert_eq!(
+            m.market_b.liquidate(
+                &liquidator,
+                &m.borrower,
+                &1,
+                &80,
+                &m.market_b.get_config_fingerprint()
+            ),
+            80
+        );
         assert_eq!(m.market_a.get_position(&m.borrower), (100, 80));
     }
 
@@ -1970,7 +2168,13 @@ mod test {
         // No collateral and no debt: nothing to take.
         assert!(m
             .market_a
-            .try_liquidate(&liquidator, &stranger, &1, &80)
+            .try_liquidate(
+                &liquidator,
+                &stranger,
+                &1,
+                &80,
+                &m.market_a.get_config_fingerprint()
+            )
             .is_err());
         assert_eq!(balance(&m.env, &m.debt_a, &liquidator), 80);
     }
@@ -1985,13 +2189,34 @@ mod test {
         mint(&m.env, &m.debt_b, &liquidator, 80);
 
         // Id 7 is consumed in market A only.
-        m.market_a.liquidate(&liquidator, &m.borrower, &7, &40);
+        m.market_a.liquidate(
+            &liquidator,
+            &m.borrower,
+            &7,
+            &40,
+            &m.market_a.get_config_fingerprint(),
+        );
         assert_eq!(
-            m.market_a.try_liquidate(&liquidator, &m.borrower, &7, &40),
+            m.market_a.try_liquidate(
+                &liquidator,
+                &m.borrower,
+                &7,
+                &40,
+                &m.market_a.get_config_fingerprint()
+            ),
             Err(Ok(IsolatedLendingError::AlreadyLiquidated))
         );
         // The same id in market B is a different liquidation.
-        assert_eq!(m.market_b.liquidate(&liquidator, &m.borrower, &7, &40), 40);
+        assert_eq!(
+            m.market_b.liquidate(
+                &liquidator,
+                &m.borrower,
+                &7,
+                &40,
+                &m.market_b.get_config_fingerprint()
+            ),
+            40
+        );
         assert_eq!(m.market_b.get_position(&m.borrower), (60, 40));
     }
 
@@ -2003,7 +2228,13 @@ mod test {
         let liquidator = Address::generate(&m.env);
         mint(&m.env, &m.debt_a, &liquidator, 80);
 
-        m.market_a.liquidate(&liquidator, &m.borrower, &1, &80);
+        m.market_a.liquidate(
+            &liquidator,
+            &m.borrower,
+            &1,
+            &80,
+            &m.market_a.get_config_fingerprint(),
+        );
 
         assert_eq!(m.market_a.get_bad_debt(), 30);
         assert_eq!(m.market_b.get_bad_debt(), 0);
@@ -2027,7 +2258,13 @@ mod test {
         market_a.set_collateral_factor(&admin, &4_000);
         let liquidator = Address::generate(&env);
         mint(&env, &shared_debt, &liquidator, 80);
-        market_a.liquidate(&liquidator, &borrower, &1, &80);
+        market_a.liquidate(
+            &liquidator,
+            &borrower,
+            &1,
+            &80,
+            &market_a.get_config_fingerprint(),
+        );
 
         // The liquidator's repayment stays with market A.
         assert_eq!(balance(&env, &shared_debt, &market_a.address), 920 + 80);
@@ -2072,7 +2309,13 @@ mod test {
         market_a.set_collateral_price(&admin, &1_000);
         let liquidator = Address::generate(&env);
         mint(&env, &debt_a, &liquidator, 80);
-        let seized = market_a.liquidate(&liquidator, &borrower, &1, &80);
+        let seized = market_a.liquidate(
+            &liquidator,
+            &borrower,
+            &1,
+            &80,
+            &market_a.get_config_fingerprint(),
+        );
 
         assert_eq!(seized, 100);
         assert_eq!(balance(&env, &shared_collateral, &market_a.address), 0);
@@ -2098,7 +2341,8 @@ mod test {
 
         // 80 / 0.09 = 888 collateral would be seized; the pair holds 100.
         assert_eq!(
-            s.pair.try_liquidate(&liquidator, &s.borrower, &1, &80),
+            s.pair
+                .try_liquidate(&liquidator, &s.borrower, &1, &80, &s.fp()),
             Err(Ok(IsolatedLendingError::InsufficientCollateral))
         );
         // Rejected cleanly: no tokens moved and the liquidation id is still free.
@@ -2153,10 +2397,12 @@ mod test {
                 collateral_value: 100,
                 threshold_bps: 8_000,
                 ledger: s.env.ledger().sequence(),
+                config_fingerprint: s.fp(),
             }
         );
         assert_eq!(
-            s.pair.try_liquidate(&liquidator, &s.borrower, &1, &80),
+            s.pair
+                .try_liquidate(&liquidator, &s.borrower, &1, &80, &s.fp()),
             Err(Ok(IsolatedLendingError::PositionStillBacked))
         );
 
@@ -2164,7 +2410,10 @@ mod test {
         s.pair.set_collateral_price(&s.admin, &9_000);
         let health = s.pair.get_health_factor(&s.borrower);
         assert_eq!((health.debt_value, health.collateral_value), (80, 90));
-        assert_eq!(s.pair.liquidate(&liquidator, &s.borrower, &1, &80), 88);
+        assert_eq!(
+            s.pair.liquidate(&liquidator, &s.borrower, &1, &80, &s.fp()),
+            88
+        );
     }
 
     #[test]
@@ -2194,6 +2443,7 @@ mod test {
                 collateral_value: 0,
                 threshold_bps: 8_000,
                 ledger: s.env.ledger().sequence(),
+                config_fingerprint: s.fp(),
             }
         );
     }
@@ -2221,5 +2471,242 @@ mod test {
             s.pair.try_get_health_factor(&s.borrower),
             Err(Ok(IsolatedLendingError::OracleQuoteStale))
         );
+    }
+
+    // ── Configuration fingerprints (#1752) ──────────────────────────
+
+    #[test]
+    fn config_fingerprint_is_deterministic_across_reads_ledgers_and_balances() {
+        let s = setup();
+        let first = s.pair.get_config_fingerprint();
+
+        // Balances, totals and ledger movement are not configuration.
+        let payer = Address::generate(&s.env);
+        mint(&s.env, &s.debt_token, &payer, 10);
+        set_ledger(&s.env, 5);
+        s.pair.repay_for(&payer, &s.borrower, &10);
+        s.pair.get_health_factor(&s.borrower);
+        assert!(s.pair.get_available_liquidity() > 0);
+
+        assert_eq!(s.pair.get_config_fingerprint(), first);
+        // The snapshot is an immutable value that repeats deterministically.
+        assert_eq!(s.pair.get_config_snapshot(), s.pair.get_config_snapshot());
+    }
+
+    #[test]
+    fn config_fingerprint_changes_for_every_admin_config_update() {
+        let s = setup();
+        let mut previous = s.pair.get_config_fingerprint();
+
+        s.pair.set_reserve_bps(&s.admin, &500);
+        let next = s.pair.get_config_fingerprint();
+        assert_ne!(next, previous);
+        previous = next;
+
+        s.pair.set_collateral_factor(&s.admin, &7_000);
+        let next = s.pair.get_config_fingerprint();
+        assert_ne!(next, previous);
+        previous = next;
+
+        s.pair.set_collateral_price(&s.admin, &9_500);
+        let next = s.pair.get_config_fingerprint();
+        assert_ne!(next, previous);
+        previous = next;
+
+        s.pair.set_close_factor(&s.admin, &5_000);
+        let next = s.pair.get_config_fingerprint();
+        assert_ne!(next, previous);
+        previous = next;
+
+        s.pair.set_interest_rate(&s.admin, &RATE);
+        let next = s.pair.get_config_fingerprint();
+        assert_ne!(next, previous);
+        previous = next;
+
+        s.pair.set_protocol_fee_bps(&s.admin, &1_000);
+        let next = s.pair.get_config_fingerprint();
+        assert_ne!(next, previous);
+        previous = next;
+
+        let oracle = Address::generate(&s.env);
+        s.pair.set_oracle(&s.admin, &oracle);
+        let next = s.pair.get_config_fingerprint();
+        assert_ne!(next, previous);
+        previous = next;
+
+        s.pair.set_oracle_policy(&s.admin, &8_000, &10);
+        let next = s.pair.get_config_fingerprint();
+        assert_ne!(next, previous);
+        previous = next;
+
+        // Re-writing the same values does not fabricate a new configuration.
+        s.pair.set_oracle_policy(&s.admin, &8_000, &10);
+        assert_eq!(s.pair.get_config_fingerprint(), previous);
+    }
+
+    #[test]
+    fn borrow_with_current_fingerprint_succeeds() {
+        let s = setup();
+        mint(&s.env, &s.collateral_token, &s.borrower, 100);
+        s.pair.post_collateral(&s.borrower, &100);
+
+        // 200 of collateral at an 80% factor covers 160 of total debt.
+        s.pair.borrow(&s.borrower, &80, &s.fp());
+
+        assert_eq!(s.pair.get_position(&s.borrower), (200, 160));
+        // The setup already borrowed 80; this call added another 80.
+        assert_eq!(balance(&s.env, &s.debt_token, &s.borrower), 160);
+    }
+
+    #[test]
+    fn borrow_with_stale_fingerprint_is_rejected_without_state_change() {
+        let s = setup();
+        mint(&s.env, &s.collateral_token, &s.borrower, 100);
+        s.pair.post_collateral(&s.borrower, &100);
+        let stale = s.fp();
+
+        // The admin changes configuration after the client captured its snapshot.
+        s.pair.set_reserve_bps(&s.admin, &100);
+
+        let position = s.pair.get_position(&s.borrower);
+        let totals = s.pair.get_totals();
+        let borrower_balance = balance(&s.env, &s.debt_token, &s.borrower);
+        let pair_balance = balance(&s.env, &s.debt_token, &s.pair.address);
+
+        assert_eq!(
+            s.pair.try_borrow(&s.borrower, &50, &stale),
+            Err(Ok(IsolatedLendingError::StaleConfig))
+        );
+
+        assert_eq!(s.pair.get_position(&s.borrower), position);
+        assert_eq!(s.pair.get_totals(), totals);
+        assert_eq!(
+            balance(&s.env, &s.debt_token, &s.borrower),
+            borrower_balance
+        );
+        assert_eq!(
+            balance(&s.env, &s.debt_token, &s.pair.address),
+            pair_balance
+        );
+    }
+
+    #[test]
+    fn borrow_retry_with_refreshed_fingerprint_succeeds() {
+        let s = setup();
+        mint(&s.env, &s.collateral_token, &s.borrower, 100);
+        s.pair.post_collateral(&s.borrower, &100);
+        let stale = s.fp();
+        s.pair.set_reserve_bps(&s.admin, &100);
+
+        assert_eq!(
+            s.pair.try_borrow(&s.borrower, &10, &stale),
+            Err(Ok(IsolatedLendingError::StaleConfig))
+        );
+
+        // Refresh, then retry the same logical operation.
+        let current = s.fp();
+        assert_ne!(current, stale);
+        s.pair.borrow(&s.borrower, &10, &current);
+        assert_eq!(s.pair.get_position(&s.borrower), (200, 90));
+    }
+
+    #[test]
+    fn withdraw_collateral_with_stale_fingerprint_preserves_collateral() {
+        let s = setup();
+        mint(&s.env, &s.collateral_token, &s.borrower, 10);
+        s.pair.post_collateral(&s.borrower, &10);
+        let stale = s.fp();
+        s.pair.set_reserve_bps(&s.admin, &100);
+
+        assert_eq!(
+            s.pair.try_withdraw_collateral(&s.borrower, &10, &stale),
+            Err(Ok(IsolatedLendingError::StaleConfig))
+        );
+        assert_eq!(s.pair.get_position(&s.borrower), (110, 80));
+        assert_eq!(balance(&s.env, &s.collateral_token, &s.borrower), 0);
+
+        s.pair.withdraw_collateral(&s.borrower, &10, &s.fp());
+        assert_eq!(s.pair.get_position(&s.borrower), (100, 80));
+        assert_eq!(balance(&s.env, &s.collateral_token, &s.borrower), 10);
+    }
+
+    #[test]
+    fn liquidation_with_stale_fingerprint_keeps_the_id_usable() {
+        let s = setup();
+        // Unhealthy: 80 of debt against 100 of collateral at a 40% factor.
+        s.pair.set_collateral_factor(&s.admin, &4_000);
+        let stale = s.fp();
+        // The collateral price changes after the client captured its snapshot.
+        s.pair.set_collateral_price(&s.admin, &9_000);
+        let liquidator = Address::generate(&s.env);
+        mint(&s.env, &s.debt_token, &liquidator, 80);
+
+        let position = s.pair.get_position(&s.borrower);
+        assert_eq!(
+            s.pair
+                .try_liquidate(&liquidator, &s.borrower, &5, &40, &stale),
+            Err(Ok(IsolatedLendingError::StaleConfig))
+        );
+        assert_eq!(s.pair.get_position(&s.borrower), position);
+        assert_eq!(balance(&s.env, &s.debt_token, &liquidator), 80);
+        assert_eq!(balance(&s.env, &s.collateral_token, &liquidator), 0);
+
+        // Refresh and retry with the same liquidation id: the rejected attempt
+        // consumed neither funds nor the id.
+        assert_eq!(
+            s.pair.liquidate(&liquidator, &s.borrower, &5, &40, &s.fp()),
+            44
+        );
+        assert_eq!(s.pair.get_position(&s.borrower), (56, 40));
+        assert_eq!(balance(&s.env, &s.collateral_token, &liquidator), 44);
+    }
+
+    #[test]
+    fn stale_fingerprint_is_rejected_before_interest_accrues() {
+        let s = setup();
+        s.pair.set_interest_rate(&s.admin, &RATE);
+        let stale = s.fp();
+        s.pair.set_reserve_bps(&s.admin, &100);
+
+        // Read stored accrual markers: views compute pending interest without
+        // writing, so they cannot prove that nothing was persisted.
+        let read_accrual = || {
+            s.env.as_contract(&s.pair.address, || {
+                (
+                    s.env
+                        .storage()
+                        .instance()
+                        .get::<_, i128>(&PairDataKey::BorrowIndex),
+                    s.env
+                        .storage()
+                        .instance()
+                        .get::<_, u32>(&PairDataKey::LastAccrualLedger),
+                    s.env
+                        .storage()
+                        .instance()
+                        .get::<_, i128>(&PairDataKey::TotalDebt),
+                )
+            })
+        };
+
+        set_ledger(&s.env, 3);
+        let before = read_accrual();
+        assert_eq!(
+            s.pair.try_borrow(&s.borrower, &1, &stale),
+            Err(Ok(IsolatedLendingError::StaleConfig))
+        );
+        assert_eq!(read_accrual(), before);
+    }
+
+    #[test]
+    fn health_factor_exposes_the_fingerprint_it_was_computed_under() {
+        let s = setup();
+        let health = s.pair.get_health_factor(&s.borrower);
+        assert_eq!(health.config_fingerprint, s.fp());
+
+        s.pair.set_collateral_factor(&s.admin, &7_000);
+        let refreshed = s.pair.get_health_factor(&s.borrower);
+        assert_ne!(refreshed.config_fingerprint, health.config_fingerprint);
+        assert_eq!(refreshed.threshold_bps, 7_000);
     }
 }

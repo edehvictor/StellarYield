@@ -91,6 +91,28 @@ Source: `contracts/isolated_lending/src/lib.rs`
 | 12   | `OracleQuoteMissing`     | Oracle policy set but no quote pushed | Have the configured oracle push a quote       |
 | 13   | `OracleQuoteStale`       | Oracle quote older than the policy allows | Push a fresh quote                         |
 | 14   | `OracleConfidenceTooLow` | Oracle quote confidence below the policy | Wait for a higher-confidence quote          |
+| 15   | `StaleConfig`            | Configuration changed since the caller captured its fingerprint | Refresh with `get_config_fingerprint` and retry |
+
+---
+
+## clmm_core — `ClmmError`
+
+Source: `contracts/clmm_core/src/lib.rs`
+
+| Code | Name                    | Meaning                                                        | Remediation                                              |
+| ---- | ----------------------- | -------------------------------------------------------------- | -------------------------------------------------------- |
+| 1    | `NotInitialized`        | Pool has not been initialized                                  | Call `initialize()`                                      |
+| 2    | `AlreadyInitialized`    | `initialize()` called twice                                    | No action needed                                         |
+| 3    | `InvalidTick`           | Tick is not aligned to the pool's tick spacing or is out of range | Use a tick divisible by `TickSpacing` within ±887272 |
+| 4    | `InvalidTickRange`      | `tick_lower` is not below `tick_upper`                         | Order the range correctly                                |
+| 5    | `InsufficientLiquidity` | Burn amount is zero or exceeds the position's liquidity        | Burn no more than the position holds                     |
+| 6    | `InvalidAmount`         | Amount is zero or the required deposit exceeds a cap           | Pass a positive amount and sufficient caps               |
+| 7    | `PriceLimitExceeded`    | Swap price limit is on the wrong side of the current price     | Set the limit beyond the current price in the swap direction |
+| 8    | `Unauthorized`          | Caller is not the position owner                               | Use the position owner address                           |
+| 9    | `InvalidPosition`       | No position exists with this id                                | Check the position id                                    |
+| 10   | `DuplicateOperation`    | An operation identity was already consumed by a successful call | Reuse the identity only for a genuine retry of the same call; use a new one for a new operation |
+
+See `docs/contracts/clmm-operations.md` for identity scoping and retry rules.
 
 ---
 
