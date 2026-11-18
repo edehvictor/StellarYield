@@ -1,30 +1,22 @@
 #![no_std]
-// Contract entry points are generated as flat argument lists (`mint` carries
-// the deposit, its two caps and the operation identity), matching the other
-// contracts in this workspace.
-#![allow(clippy::too_many_arguments)]
 
 //! # CLMM Core — Concentrated Liquidity Market Maker Engine
 //!
 //! Implements Uniswap V3-style concentrated liquidity with tick-based math,
 //! custom price ranges, and NFT-style position tracking for capital efficiency.
+//!
+//! Position accounting is journalled: `mint`, `burn` and `collect` snapshot the
+//! pre-operation state, record every completed step, and roll that snapshot back
+//! when a step fails. See `docs/clmm-position-accounting.md`.
 
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, symbol_short, token, xdr::ToXdr, Address,
-    Bytes, BytesN, Env, Symbol,
+    contract, contracterror, contractimpl, contracttype, symbol_short, token, Address, Env,
 };
 
 mod math;
+mod operation;
 mod position;
 mod tick;
-
-/// Domain separator for position operation identities.
-const OPERATION_DOMAIN: &[u8] = b"stellaryield_clmm_op_v1";
-/// Refresh an operation receipt once less than ~1 day of ledgers remains.
-const OPERATION_TTL_THRESHOLD: u32 = 17_280;
-/// Keep consumed operation identities for ~30 days of ledgers, so a delayed
-/// retry is still rejected instead of being applied a second time.
-const OPERATION_TTL_EXTEND_TO: u32 = 518_400;
 
 // ── Storage Keys ────────────────────────────────────────────────────────
 
@@ -44,14 +36,13 @@ pub enum DataKey {
     Tick(i32),
     Position(u64),
     NextPositionId,
-    /// Marks a domain-separated position operation identity as consumed.
-    Operation(BytesN<32>),
+    PendingOperation(Address),
 }
 
 // ── Data Structures ─────────────────────────────────────────────────────
 
 #[contracttype]
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TickInfo {
     pub liquidity_gross: u128,
     pub liquidity_net: i128,
@@ -61,7 +52,7 @@ pub struct TickInfo {
 }
 
 #[contracttype]
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Position {
     pub owner: Address,
     pub tick_lower: i32,
@@ -71,6 +62,40 @@ pub struct Position {
     pub fee_growth_inside_1_last_x128: u128,
     pub tokens_owed_0: u128,
     pub tokens_owed_1: u128,
+}
+
+/// Kind of position operation tracked by the operation journal.
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OperationKind {
+    Mint,
+    Burn,
+    Collect,
+}
+
+/// Durable journal entry for an in-flight position operation.
+///
+/// The entry snapshots the pre-operation state, then records the furthest step
+/// the operation reached and which token transfers already settled. A failure
+/// replays that snapshot in `operation::rollback`, so accounting always matches
+/// the tokens that actually moved and a retry starts from a known state.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PendingOperation {
+    pub owner: Address,
+    pub kind: OperationKind,
+    pub step: u32,
+    pub transfers_settled: u32,
+    pub position_id: u64,
+    pub tick_lower: i32,
+    pub tick_upper: i32,
+    pub tick_lower_before: TickInfo,
+    pub tick_upper_before: TickInfo,
+    pub liquidity_before: u128,
+    pub position_before: Position,
+    pub has_position_before: bool,
+    pub amount_0: u128,
+    pub amount_1: u128,
 }
 
 // ── Errors ──────────────────────────────────────────────────────────────
@@ -88,7 +113,8 @@ pub enum ClmmError {
     PriceLimitExceeded = 7,
     Unauthorized = 8,
     InvalidPosition = 9,
-    DuplicateOperation = 10,
+    OperationPending = 10,
+    TokenTransferFailed = 11,
 }
 
 // ── Contract ────────────────────────────────────────────────────────────
@@ -154,6 +180,11 @@ impl ClmmCore {
 
     /// Mint a new liquidity position with custom price range.
     ///
+    /// Validation, tick accounting, the provisional position and both token
+    /// deposits are tracked by an operation journal. If any step fails the
+    /// journal rolls the accounting back and refunds deposits that already
+    /// settled, so the reserved position id can be retried without gaps.
+    ///
     /// # Arguments
     /// * `owner` — Position owner address
     /// * `tick_lower` — Lower tick boundary
@@ -161,10 +192,6 @@ impl ClmmCore {
     /// * `amount` — Liquidity amount to add
     /// * `amount0_max` — Maximum token0 to deposit
     /// * `amount1_max` — Maximum token1 to deposit
-    /// * `operation_id` — Caller-generated identity for this submission. A
-    ///   retry that reuses an identity already consumed by a successful mint
-    ///   is rejected with `DuplicateOperation`; a call that fails does not
-    ///   consume the identity, so it can be retried safely.
     ///
     /// # Returns
     /// (position_id, amount0, amount1) — Position ID and actual amounts deposited
@@ -176,7 +203,6 @@ impl ClmmCore {
         amount: u128,
         amount0_max: u128,
         amount1_max: u128,
-        operation_id: BytesN<32>,
     ) -> Result<(u64, u128, u128), ClmmError> {
         Self::require_init(&env)?;
         owner.require_auth();
@@ -186,12 +212,7 @@ impl ClmmCore {
         }
 
         Self::validate_tick_range(&env, tick_lower, tick_upper)?;
-
-        // Mint has no position id yet, so its identity is scoped to the owner
-        // and the position id is fixed at zero.
-        let operation_key =
-            Self::operation_key(&env, &owner, symbol_short!("mint"), 0, &operation_id);
-        Self::require_new_operation(&env, &operation_key)?;
+        operation::require_idle(&env, &owner)?;
 
         let current_tick: i32 = env.storage().instance().get(&DataKey::CurrentTick).unwrap();
         let sqrt_price: u128 = env
@@ -208,112 +229,80 @@ impl ClmmCore {
             return Err(ClmmError::InvalidAmount);
         }
 
-        // Update ticks
-        tick::update_tick(&env, tick_lower, amount as i128, false)?;
-        tick::update_tick(&env, tick_upper, -(amount as i128), false)?;
-
-        // Update global liquidity if position is active
-        if tick_lower <= current_tick && current_tick < tick_upper {
-            let liquidity: u128 = env.storage().instance().get(&DataKey::Liquidity).unwrap();
-            env.storage()
-                .instance()
-                .set(&DataKey::Liquidity, &(liquidity + amount));
-        }
-
-        // Transfer tokens from owner
-        let token0_addr: Address = env.storage().instance().get(&DataKey::Token0).unwrap();
-        let token1_addr: Address = env.storage().instance().get(&DataKey::Token1).unwrap();
-
-        if amount0 > 0 {
-            let client0 = token::Client::new(&env, &token0_addr);
-            client0.transfer(&owner, &env.current_contract_address(), &(amount0 as i128));
-        }
-        if amount1 > 0 {
-            let client1 = token::Client::new(&env, &token1_addr);
-            client1.transfer(&owner, &env.current_contract_address(), &(amount1 as i128));
-        }
-
-        // Create position NFT
+        // Reserve the position id without consuming it: a failed mint leaves no
+        // gap, so a retry gets the same id deterministically.
         let position_id: u64 = env
             .storage()
             .instance()
             .get(&DataKey::NextPositionId)
             .unwrap();
 
-        let fee_growth_global_0: u128 = env
-            .storage()
-            .instance()
-            .get(&DataKey::FeeGrowthGlobal0X128)
-            .unwrap();
-        let fee_growth_global_1: u128 = env
-            .storage()
-            .instance()
-            .get(&DataKey::FeeGrowthGlobal1X128)
-            .unwrap();
-
-        let (fee_growth_inside_0, fee_growth_inside_1) = tick::get_fee_growth_inside(
-            &env,
-            tick_lower,
-            tick_upper,
-            current_tick,
-            fee_growth_global_0,
-            fee_growth_global_1,
-        );
-
-        let position = Position {
+        let mut journal = PendingOperation {
             owner: owner.clone(),
+            kind: OperationKind::Mint,
+            step: operation::STEP_PREPARED,
+            transfers_settled: 0,
+            position_id,
             tick_lower,
             tick_upper,
-            liquidity: amount,
-            fee_growth_inside_0_last_x128: fee_growth_inside_0,
-            fee_growth_inside_1_last_x128: fee_growth_inside_1,
-            tokens_owed_0: 0,
-            tokens_owed_1: 0,
+            tick_lower_before: tick::get_tick(&env, tick_lower),
+            tick_upper_before: tick::get_tick(&env, tick_upper),
+            liquidity_before: env.storage().instance().get(&DataKey::Liquidity).unwrap(),
+            // A mint has no position yet; the slot is only read back when
+            // `has_position_before` is set.
+            position_before: Position {
+                owner: owner.clone(),
+                tick_lower,
+                tick_upper,
+                liquidity: 0,
+                fee_growth_inside_0_last_x128: 0,
+                fee_growth_inside_1_last_x128: 0,
+                tokens_owed_0: 0,
+                tokens_owed_1: 0,
+            },
+            has_position_before: false,
+            amount_0: amount0,
+            amount_1: amount1,
         };
 
-        env.storage()
-            .persistent()
-            .set(&DataKey::Position(position_id), &position);
-        env.storage()
-            .instance()
-            .set(&DataKey::NextPositionId, &(position_id + 1));
+        operation::begin(&env, journal.clone())?;
 
-        Self::record_operation(&env, &operation_key);
+        match Self::execute_mint(&env, &owner, amount, current_tick, &mut journal) {
+            Ok(result) => {
+                env.storage()
+                    .instance()
+                    .set(&DataKey::NextPositionId, &(position_id + 1));
+                operation::commit(&env, &journal);
 
-        env.events().publish(
-            (symbol_short!("mint"),),
-            (position_id, owner.clone(), tick_lower, tick_upper, amount),
-        );
-        Self::publish_operation(
-            &env,
-            &owner,
-            symbol_short!("mint"),
-            position_id,
-            &operation_id,
-        );
+                env.events().publish(
+                    (symbol_short!("mint"),),
+                    (position_id, owner, tick_lower, tick_upper, amount),
+                );
 
-        Ok((position_id, amount0, amount1))
+                Ok(result)
+            }
+            Err(err) => {
+                operation::rollback(&env, &journal);
+                Err(err)
+            }
+        }
     }
 
     /// Burn liquidity from an existing position and collect tokens.
     ///
+    /// The position snapshot and tick state are journalled, so a failed burn
+    /// leaves the position, pool liquidity and tick state exactly as they were.
+    ///
     /// # Arguments
     /// * `position_id` — ID of the position to burn
     /// * `amount` — Amount of liquidity to remove
-    /// * `operation_id` — Caller-generated identity for this submission,
-    ///   scoped to the position owner, the operation kind and the position.
     ///
     /// # Returns
     /// (amount0, amount1) — Amounts of token0 and token1 returned
-    pub fn burn(
-        env: Env,
-        position_id: u64,
-        amount: u128,
-        operation_id: BytesN<32>,
-    ) -> Result<(u128, u128), ClmmError> {
+    pub fn burn(env: Env, position_id: u64, amount: u128) -> Result<(u128, u128), ClmmError> {
         Self::require_init(&env)?;
 
-        let mut position: Position = env
+        let position: Position = env
             .storage()
             .persistent()
             .get(&DataKey::Position(position_id))
@@ -325,14 +314,7 @@ impl ClmmCore {
             return Err(ClmmError::InsufficientLiquidity);
         }
 
-        let operation_key = Self::operation_key(
-            &env,
-            &position.owner,
-            symbol_short!("burn"),
-            position_id,
-            &operation_id,
-        );
-        Self::require_new_operation(&env, &operation_key)?;
+        operation::require_idle(&env, &position.owner)?;
 
         let current_tick: i32 = env.storage().instance().get(&DataKey::CurrentTick).unwrap();
         let sqrt_price: u128 = env
@@ -349,42 +331,41 @@ impl ClmmCore {
             amount,
         );
 
-        // Update ticks
-        tick::update_tick(&env, position.tick_lower, -(amount as i128), true)?;
-        tick::update_tick(&env, position.tick_upper, amount as i128, true)?;
-
-        // Update global liquidity if position is active
-        if position.tick_lower <= current_tick && current_tick < position.tick_upper {
-            let liquidity: u128 = env.storage().instance().get(&DataKey::Liquidity).unwrap();
-            env.storage()
-                .instance()
-                .set(&DataKey::Liquidity, &(liquidity - amount));
-        }
-
-        // Update position
-        position.liquidity -= amount;
-        position.tokens_owed_0 += amount0;
-        position.tokens_owed_1 += amount1;
-
-        env.storage()
-            .persistent()
-            .set(&DataKey::Position(position_id), &position);
-
-        Self::record_operation(&env, &operation_key);
-
-        env.events().publish(
-            (symbol_short!("burn"),),
-            (position_id, amount, amount0, amount1),
-        );
-        Self::publish_operation(
-            &env,
-            &position.owner,
-            symbol_short!("burn"),
+        let mut journal = PendingOperation {
+            owner: position.owner.clone(),
+            kind: OperationKind::Burn,
+            step: operation::STEP_PREPARED,
+            transfers_settled: 0,
             position_id,
-            &operation_id,
-        );
+            tick_lower: position.tick_lower,
+            tick_upper: position.tick_upper,
+            tick_lower_before: tick::get_tick(&env, position.tick_lower),
+            tick_upper_before: tick::get_tick(&env, position.tick_upper),
+            liquidity_before: env.storage().instance().get(&DataKey::Liquidity).unwrap(),
+            position_before: position,
+            has_position_before: true,
+            amount_0: amount0,
+            amount_1: amount1,
+        };
 
-        Ok((amount0, amount1))
+        operation::begin(&env, journal.clone())?;
+
+        match Self::execute_burn(&env, amount, current_tick, &mut journal) {
+            Ok(result) => {
+                operation::commit(&env, &journal);
+
+                env.events().publish(
+                    (symbol_short!("burn"),),
+                    (position_id, amount, result.0, result.1),
+                );
+
+                Ok(result)
+            }
+            Err(err) => {
+                operation::rollback(&env, &journal);
+                Err(err)
+            }
+        }
     }
 
     /// Execute a swap between token0 and token1.
@@ -397,10 +378,6 @@ impl ClmmCore {
     ///
     /// # Returns
     /// (amount0, amount1) — Actual amounts swapped (negative = sent, positive = received)
-    ///
-    /// The swap math is intentionally left as-is in this change; the guarded
-    /// fee-growth division is covered by the `liquidity > 0` branch.
-    #[allow(clippy::manual_checked_ops)]
     pub fn swap(
         env: Env,
         recipient: Address,
@@ -496,8 +473,7 @@ impl ClmmCore {
             }
 
             // Update fee growth
-            if liquidity > 0 {
-                let fee_growth_delta = (fee_amount * math::Q128) / liquidity;
+            if let Some(fee_growth_delta) = (fee_amount * math::Q128).checked_div(liquidity) {
                 if zero_for_one {
                     let fg0: u128 = env
                         .storage()
@@ -583,36 +559,27 @@ impl ClmmCore {
 
     /// Collect accumulated fees from a position.
     ///
+    /// Each payout is settled through the operation journal. If the second
+    /// token cannot be paid the first payout stays settled and only the unpaid
+    /// balance is restored, so calling `collect` again pays the remainder
+    /// exactly once.
+    ///
     /// # Arguments
     /// * `position_id` — Position ID to collect from
-    /// * `operation_id` — Caller-generated identity for this submission,
-    ///   scoped to the position owner, the operation kind and the position.
     ///
     /// # Returns
     /// (amount0, amount1) — Fee amounts collected
-    pub fn collect(
-        env: Env,
-        position_id: u64,
-        operation_id: BytesN<32>,
-    ) -> Result<(u128, u128), ClmmError> {
+    pub fn collect(env: Env, position_id: u64) -> Result<(u128, u128), ClmmError> {
         Self::require_init(&env)?;
 
-        let mut position: Position = env
+        let position: Position = env
             .storage()
             .persistent()
             .get(&DataKey::Position(position_id))
             .ok_or(ClmmError::InvalidPosition)?;
 
         position.owner.require_auth();
-
-        let operation_key = Self::operation_key(
-            &env,
-            &position.owner,
-            symbol_short!("collect"),
-            position_id,
-            &operation_id,
-        );
-        Self::require_new_operation(&env, &operation_key)?;
+        operation::require_idle(&env, &position.owner)?;
 
         // Calculate fees earned
         let current_tick: i32 = env.storage().instance().get(&DataKey::CurrentTick).unwrap();
@@ -636,62 +603,51 @@ impl ClmmCore {
             fee_growth_global_1,
         );
 
-        let fees_0 = ((fee_growth_inside_0 - position.fee_growth_inside_0_last_x128)
-            * position.liquidity)
-            / math::Q128;
-        let fees_1 = ((fee_growth_inside_1 - position.fee_growth_inside_1_last_x128)
-            * position.liquidity)
-            / math::Q128;
+        let (fees_0, fees_1) = position::calculate_uncollected_fees(
+            &env,
+            &position,
+            fee_growth_inside_0,
+            fee_growth_inside_1,
+        );
 
         let collect_0 = position.tokens_owed_0 + fees_0;
         let collect_1 = position.tokens_owed_1 + fees_1;
 
-        // Transfer fees to owner
-        let token0_addr: Address = env.storage().instance().get(&DataKey::Token0).unwrap();
-        let token1_addr: Address = env.storage().instance().get(&DataKey::Token1).unwrap();
-
-        if collect_0 > 0 {
-            let client0 = token::Client::new(&env, &token0_addr);
-            client0.transfer(
-                &env.current_contract_address(),
-                &position.owner,
-                &(collect_0 as i128),
-            );
-        }
-        if collect_1 > 0 {
-            let client1 = token::Client::new(&env, &token1_addr);
-            client1.transfer(
-                &env.current_contract_address(),
-                &position.owner,
-                &(collect_1 as i128),
-            );
-        }
-
-        // Update position
-        position.fee_growth_inside_0_last_x128 = fee_growth_inside_0;
-        position.fee_growth_inside_1_last_x128 = fee_growth_inside_1;
-        position.tokens_owed_0 = 0;
-        position.tokens_owed_1 = 0;
-
-        env.storage()
-            .persistent()
-            .set(&DataKey::Position(position_id), &position);
-
-        Self::record_operation(&env, &operation_key);
-
-        env.events().publish(
-            (symbol_short!("collect"),),
-            (position_id, collect_0, collect_1),
-        );
-        Self::publish_operation(
-            &env,
-            &position.owner,
-            symbol_short!("collect"),
+        let mut journal = PendingOperation {
+            owner: position.owner.clone(),
+            kind: OperationKind::Collect,
+            step: operation::STEP_PREPARED,
+            transfers_settled: 0,
             position_id,
-            &operation_id,
-        );
+            tick_lower: position.tick_lower,
+            tick_upper: position.tick_upper,
+            tick_lower_before: tick::get_tick(&env, position.tick_lower),
+            tick_upper_before: tick::get_tick(&env, position.tick_upper),
+            liquidity_before: env.storage().instance().get(&DataKey::Liquidity).unwrap(),
+            position_before: position,
+            has_position_before: true,
+            amount_0: collect_0,
+            amount_1: collect_1,
+        };
 
-        Ok((collect_0, collect_1))
+        operation::begin(&env, journal.clone())?;
+
+        match Self::execute_collect(&env, &mut journal, fee_growth_inside_0, fee_growth_inside_1) {
+            Ok(result) => {
+                operation::commit(&env, &journal);
+
+                env.events().publish(
+                    (symbol_short!("collect"),),
+                    (position_id, result.0, result.1),
+                );
+
+                Ok(result)
+            }
+            Err(err) => {
+                operation::rollback(&env, &journal);
+                Err(err)
+            }
+        }
     }
 
     // ── View Functions ──────────────────────────────────────────────
@@ -701,6 +657,15 @@ impl ClmmCore {
             .persistent()
             .get(&DataKey::Position(position_id))
             .ok_or(ClmmError::InvalidPosition)
+    }
+
+    /// Read the journal entry for an in-flight operation, if one exists.
+    ///
+    /// `None` is the normal state between transactions: a failed operation is
+    /// rolled back before the call returns. The entry is exposed so clients and
+    /// token callbacks can observe that a settlement is still running.
+    pub fn get_pending_operation(env: Env, owner: Address) -> Option<PendingOperation> {
+        operation::load(&env, &owner)
     }
 
     pub fn get_current_tick(env: Env) -> i32 {
@@ -726,65 +691,6 @@ impl ClmmCore {
 
     // ── Internal Helpers ────────────────────────────────────────────
 
-    /// Domain-separated identity of one position operation.
-    ///
-    /// The preimage binds the deployment, owner, operation kind, position and
-    /// caller-supplied id, so the same id cannot be replayed across accounts,
-    /// operations or deployments, and an unrelated caller cannot consume it.
-    fn operation_key(
-        env: &Env,
-        owner: &Address,
-        kind: Symbol,
-        position_id: u64,
-        operation_id: &BytesN<32>,
-    ) -> BytesN<32> {
-        let mut preimage = Bytes::from_slice(env, OPERATION_DOMAIN);
-        preimage.append(
-            &(
-                env.current_contract_address(),
-                owner.clone(),
-                kind,
-                position_id,
-                operation_id.clone(),
-            )
-                .to_xdr(env),
-        );
-        env.crypto().sha256(&preimage).to_bytes()
-    }
-
-    /// Reject an identity already consumed by a successful operation.
-    fn require_new_operation(env: &Env, key: &BytesN<32>) -> Result<(), ClmmError> {
-        if env.storage().persistent().has(key) {
-            return Err(ClmmError::DuplicateOperation);
-        }
-        Ok(())
-    }
-
-    /// Mark an identity consumed once its effect is durable, and keep the
-    /// receipt alive long enough that a delayed retry is still rejected.
-    fn record_operation(env: &Env, key: &BytesN<32>) {
-        env.storage().persistent().set(key, &true);
-        env.storage().persistent().extend_ttl(
-            key,
-            OPERATION_TTL_THRESHOLD,
-            OPERATION_TTL_EXTEND_TO,
-        );
-    }
-
-    /// Emit the retry-correlation event for a consumed operation identity.
-    fn publish_operation(
-        env: &Env,
-        owner: &Address,
-        kind: Symbol,
-        position_id: u64,
-        operation_id: &BytesN<32>,
-    ) {
-        env.events().publish(
-            (symbol_short!("op"),),
-            (owner.clone(), kind, position_id, operation_id.clone()),
-        );
-    }
-
     fn require_init(env: &Env) -> Result<(), ClmmError> {
         if !env.storage().instance().has(&DataKey::Initialized) {
             return Err(ClmmError::NotInitialized);
@@ -809,6 +715,185 @@ impl ClmmCore {
 
         Ok(())
     }
+
+    /// Move tokens without trapping, so a failing token contract is reported as
+    /// a recoverable error the journal can roll back.
+    fn transfer_token(
+        env: &Env,
+        token_addr: &Address,
+        from: &Address,
+        to: &Address,
+        amount: u128,
+    ) -> Result<(), ClmmError> {
+        if amount == 0 {
+            return Ok(());
+        }
+
+        let client = token::Client::new(env, token_addr);
+        match client.try_transfer(from, to, &(amount as i128)) {
+            Ok(Ok(())) => Ok(()),
+            _ => Err(ClmmError::TokenTransferFailed),
+        }
+    }
+
+    fn execute_mint(
+        env: &Env,
+        owner: &Address,
+        amount: u128,
+        current_tick: i32,
+        journal: &mut PendingOperation,
+    ) -> Result<(u64, u128, u128), ClmmError> {
+        // Update ticks
+        tick::update_tick(env, journal.tick_lower, amount as i128, false)?;
+        tick::update_tick(env, journal.tick_upper, -(amount as i128), false)?;
+        operation::advance(env, journal, operation::STEP_TICKS_UPDATED);
+
+        // Update global liquidity if position is active
+        if journal.tick_lower <= current_tick && current_tick < journal.tick_upper {
+            let liquidity: u128 = env.storage().instance().get(&DataKey::Liquidity).unwrap();
+            env.storage()
+                .instance()
+                .set(&DataKey::Liquidity, &(liquidity + amount));
+        }
+
+        let fee_growth_global_0: u128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::FeeGrowthGlobal0X128)
+            .unwrap();
+        let fee_growth_global_1: u128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::FeeGrowthGlobal1X128)
+            .unwrap();
+
+        let (fee_growth_inside_0, fee_growth_inside_1) = tick::get_fee_growth_inside(
+            env,
+            journal.tick_lower,
+            journal.tick_upper,
+            current_tick,
+            fee_growth_global_0,
+            fee_growth_global_1,
+        );
+
+        // Create the position NFT (provisional until the mint commits)
+        let position = Position {
+            owner: owner.clone(),
+            tick_lower: journal.tick_lower,
+            tick_upper: journal.tick_upper,
+            liquidity: amount,
+            fee_growth_inside_0_last_x128: fee_growth_inside_0,
+            fee_growth_inside_1_last_x128: fee_growth_inside_1,
+            tokens_owed_0: 0,
+            tokens_owed_1: 0,
+        };
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::Position(journal.position_id), &position);
+        operation::advance(env, journal, operation::STEP_ACCOUNTING_UPDATED);
+
+        // Transfer tokens from owner, recording each settlement for rollback
+        let token0_addr: Address = env.storage().instance().get(&DataKey::Token0).unwrap();
+        let token1_addr: Address = env.storage().instance().get(&DataKey::Token1).unwrap();
+        let pool = env.current_contract_address();
+
+        Self::transfer_token(env, &token0_addr, owner, &pool, journal.amount_0)?;
+        if journal.amount_0 > 0 {
+            operation::mark_settled(env, journal, operation::SETTLED_TOKEN_0);
+        }
+
+        Self::transfer_token(env, &token1_addr, owner, &pool, journal.amount_1)?;
+        if journal.amount_1 > 0 {
+            operation::mark_settled(env, journal, operation::SETTLED_TOKEN_1);
+        }
+
+        operation::advance(env, journal, operation::STEP_TRANSFERS_SETTLED);
+
+        Ok((journal.position_id, journal.amount_0, journal.amount_1))
+    }
+
+    fn execute_burn(
+        env: &Env,
+        amount: u128,
+        current_tick: i32,
+        journal: &mut PendingOperation,
+    ) -> Result<(u128, u128), ClmmError> {
+        // Update ticks
+        tick::update_tick(env, journal.tick_lower, -(amount as i128), true)?;
+        tick::update_tick(env, journal.tick_upper, amount as i128, true)?;
+        operation::advance(env, journal, operation::STEP_TICKS_UPDATED);
+
+        // Update global liquidity if position is active
+        if journal.tick_lower <= current_tick && current_tick < journal.tick_upper {
+            let liquidity: u128 = env.storage().instance().get(&DataKey::Liquidity).unwrap();
+            env.storage()
+                .instance()
+                .set(&DataKey::Liquidity, &(liquidity - amount));
+        }
+
+        // Update position
+        let mut position: Position = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Position(journal.position_id))
+            .ok_or(ClmmError::InvalidPosition)?;
+
+        position.liquidity -= amount;
+        position.tokens_owed_0 += journal.amount_0;
+        position.tokens_owed_1 += journal.amount_1;
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::Position(journal.position_id), &position);
+        operation::advance(env, journal, operation::STEP_ACCOUNTING_UPDATED);
+
+        Ok((journal.amount_0, journal.amount_1))
+    }
+
+    fn execute_collect(
+        env: &Env,
+        journal: &mut PendingOperation,
+        fee_growth_inside_0: u128,
+        fee_growth_inside_1: u128,
+    ) -> Result<(u128, u128), ClmmError> {
+        let mut position: Position = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Position(journal.position_id))
+            .ok_or(ClmmError::InvalidPosition)?;
+
+        // Claim first: the advanced checkpoint and cleared owed balance make it
+        // impossible to pay the same fees twice if the payout is retried.
+        position.fee_growth_inside_0_last_x128 = fee_growth_inside_0;
+        position.fee_growth_inside_1_last_x128 = fee_growth_inside_1;
+        position.tokens_owed_0 = 0;
+        position.tokens_owed_1 = 0;
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::Position(journal.position_id), &position);
+        operation::advance(env, journal, operation::STEP_ACCOUNTING_UPDATED);
+
+        let token0_addr: Address = env.storage().instance().get(&DataKey::Token0).unwrap();
+        let token1_addr: Address = env.storage().instance().get(&DataKey::Token1).unwrap();
+        let pool = env.current_contract_address();
+        let owner = position.owner.clone();
+
+        Self::transfer_token(env, &token0_addr, &pool, &owner, journal.amount_0)?;
+        if journal.amount_0 > 0 {
+            operation::mark_settled(env, journal, operation::SETTLED_TOKEN_0);
+        }
+
+        Self::transfer_token(env, &token1_addr, &pool, &owner, journal.amount_1)?;
+        if journal.amount_1 > 0 {
+            operation::mark_settled(env, journal, operation::SETTLED_TOKEN_1);
+        }
+
+        operation::advance(env, journal, operation::STEP_TRANSFERS_SETTLED);
+
+        Ok((journal.amount_0, journal.amount_1))
+    }
 }
 
 // ── Tests ───────────────────────────────────────────────────────────────
@@ -817,6 +902,7 @@ impl ClmmCore {
 mod tests {
     use super::*;
     use soroban_sdk::testutils::Address as _;
+    use soroban_sdk::token::{Client as TokenClient, StellarAssetClient};
     use soroban_sdk::Env;
 
     fn setup_pool() -> (Env, ClmmCoreClient<'static>, Address, Address) {
@@ -843,39 +929,21 @@ mod tests {
     }
 
     fn mint_tokens(env: &Env, token_addr: &Address, to: &Address, amount: i128) {
-        let admin_client = soroban_sdk::token::StellarAssetClient::new(env, token_addr);
+        let admin_client = StellarAssetClient::new(env, token_addr);
         admin_client.mint(to, &amount);
     }
 
-    fn balance(env: &Env, token_addr: &Address, who: &Address) -> i128 {
-        soroban_sdk::token::Client::new(env, token_addr).balance(who)
-    }
-
-    /// Deterministic caller-generated operation identity for tests.
-    fn operation_id(env: &Env, seed: u8) -> BytesN<32> {
-        BytesN::from_array(env, &[seed; 32])
-    }
-
-    /// Open a position of 100_000 liquidity over [-60, 60] and return its owner.
-    fn open_position(
+    fn fund_and_mint(
         env: &Env,
-        client: &ClmmCoreClient<'static>,
+        client: &ClmmCoreClient,
+        owner: &Address,
         token0: &Address,
         token1: &Address,
-    ) -> (Address, u64) {
-        let owner = Address::generate(env);
-        mint_tokens(env, token0, &owner, 100_000);
-        mint_tokens(env, token1, &owner, 100_000);
-        let (position_id, ..) = client.mint(
-            &owner,
-            &-60,
-            &60,
-            &100_000,
-            &100_000,
-            &100_000,
-            &operation_id(env, 1),
-        );
-        (owner, position_id)
+        amount: u128,
+    ) -> (u64, u128, u128) {
+        mint_tokens(env, token0, owner, 1_000_000);
+        mint_tokens(env, token1, owner, 1_000_000);
+        client.mint(owner, &-60, &60, &amount, &1_000_000, &1_000_000)
     }
 
     #[test]
@@ -905,174 +973,175 @@ mod tests {
         mint_tokens(&env, &token1, &user, 100_000);
 
         // Mint position with tick range [-60, 60] (smaller range, aligned to tick spacing)
-        let (position_id, amount0, amount1) = client.mint(
-            &user,
-            &-60,
-            &60,
-            &100_000,
-            &100_000,
-            &100_000,
-            &operation_id(&env, 1),
-        );
+        let (position_id, amount0, amount1) =
+            client.mint(&user, &-60, &60, &100_000, &100_000, &100_000);
 
         assert_eq!(position_id, 1);
-        assert!(amount1 > 0);
 
-        // Verify position was created and the pool received the reported deposit
+        // Verify position was created
         let position = client.get_position(&position_id);
         assert_eq!(position.owner, user);
         assert_eq!(position.liquidity, 100_000);
-        assert_eq!(balance(&env, &token0, &client.address), amount0 as i128);
-        assert_eq!(balance(&env, &token1, &client.address), amount1 as i128);
-    }
 
-    #[test]
-    fn test_duplicate_mint_is_rejected_and_state_is_preserved() {
-        let (env, client, token0, token1) = setup_pool();
-        let user = Address::generate(&env);
-        mint_tokens(&env, &token0, &user, 100_000);
-        mint_tokens(&env, &token1, &user, 100_000);
-        let id = operation_id(&env, 7);
-
-        let (position_id, ..) = client.mint(&user, &-60, &60, &100_000, &100_000, &100_000, &id);
-        let user0 = balance(&env, &token0, &user);
-        let user1 = balance(&env, &token1, &user);
-        let pool0 = balance(&env, &token0, &client.address);
-        let pool1 = balance(&env, &token1, &client.address);
-        let liquidity = client.get_liquidity();
-
-        // The same submission again must not create a second position or move funds.
-        let retry = client.try_mint(&user, &-60, &60, &100_000, &100_000, &100_000, &id);
-        assert_eq!(retry, Err(Ok(ClmmError::DuplicateOperation)));
-
-        assert_eq!(balance(&env, &token0, &user), user0);
-        assert_eq!(balance(&env, &token1, &user), user1);
-        assert_eq!(balance(&env, &token0, &client.address), pool0);
-        assert_eq!(balance(&env, &token1, &client.address), pool1);
-        assert_eq!(client.get_liquidity(), liquidity);
-
-        // A distinct id still mints normally, so the rejected retry consumed nothing.
-        let (next_id, ..) = client.mint(
-            &user,
-            &-60,
-            &60,
-            &1_000,
-            &100_000,
-            &100_000,
-            &operation_id(&env, 8),
+        // Deposits were pulled from the owner and parked in the pool
+        assert_eq!(
+            TokenClient::new(&env, &token0).balance(&user),
+            100_000 - amount0 as i128
         );
-        assert_eq!(next_id, position_id + 1);
+        assert_eq!(
+            TokenClient::new(&env, &token1).balance(&user),
+            100_000 - amount1 as i128
+        );
+
+        // Nothing is left in flight once the mint commits
+        assert_eq!(client.get_pending_operation(&user), None);
     }
 
     #[test]
-    fn test_failed_mint_does_not_consume_the_operation_id() {
+    fn test_failed_deposit_rolls_back_and_retry_reuses_position_id() {
         let (env, client, token0, token1) = setup_pool();
         let user = Address::generate(&env);
-        mint_tokens(&env, &token0, &user, 100_000);
-        mint_tokens(&env, &token1, &user, 100_000);
-        let id = operation_id(&env, 9);
+        mint_tokens(&env, &token0, &user, 1_000_000);
 
-        // Rejected before any transfer: the caps cannot cover the deposit.
-        let failed = client.try_mint(&user, &-60, &60, &100_000, &0, &0, &id);
-        assert_eq!(failed, Err(Ok(ClmmError::InvalidAmount)));
-        assert_eq!(balance(&env, &token0, &user), 100_000);
-        assert_eq!(balance(&env, &token1, &user), 100_000);
+        // token1 is never funded, so the second deposit cannot settle
+        let failed = client.try_mint(&user, &-60, &60, &100_000, &1_000_000, &1_000_000);
+        assert!(failed.is_err());
 
-        // The same identity is still valid for a retry.
-        let (position_id, ..) = client.mint(&user, &-60, &60, &100_000, &100_000, &100_000, &id);
+        // Accounting, ids and balances are back to their pre-call values
+        assert_eq!(client.get_liquidity(), 0);
+        assert!(client.try_get_position(&1).is_err());
+        assert_eq!(client.get_pending_operation(&user), None);
+        assert_eq!(TokenClient::new(&env, &token0).balance(&user), 1_000_000);
+        assert_eq!(
+            TokenClient::new(&env, &token1).balance(&client.address),
+            0,
+            "a failed deposit must not leave tokens in the pool"
+        );
+
+        // A funded retry reuses the reserved id instead of skipping it
+        mint_tokens(&env, &token1, &user, 1_000_000);
+        let (position_id, amount0, amount1) =
+            client.mint(&user, &-60, &60, &100_000, &1_000_000, &1_000_000);
+
         assert_eq!(position_id, 1);
+        assert_eq!(client.get_liquidity(), 100_000);
         assert_eq!(client.get_position(&position_id).liquidity, 100_000);
+        assert_eq!(
+            TokenClient::new(&env, &token0).balance(&user),
+            1_000_000 - amount0 as i128
+        );
+        assert_eq!(
+            TokenClient::new(&env, &token1).balance(&user),
+            1_000_000 - amount1 as i128
+        );
     }
 
     #[test]
-    fn test_duplicate_burn_is_rejected_and_liquidity_is_preserved() {
+    fn test_failed_mint_keeps_existing_position_and_liquidity() {
         let (env, client, token0, token1) = setup_pool();
-        let (owner, position_id) = open_position(&env, &client, &token0, &token1);
-        let id = operation_id(&env, 2);
-
-        client.burn(&position_id, &40_000, &id);
-        let after = client.get_position(&position_id);
-        let liquidity = client.get_liquidity();
-        let owner0 = balance(&env, &token0, &owner);
-        let owner1 = balance(&env, &token1, &owner);
-
-        let retry = client.try_burn(&position_id, &40_000, &id);
-        assert_eq!(retry, Err(Ok(ClmmError::DuplicateOperation)));
-
-        let now = client.get_position(&position_id);
-        assert_eq!(now.liquidity, after.liquidity);
-        assert_eq!(now.tokens_owed_0, after.tokens_owed_0);
-        assert_eq!(now.tokens_owed_1, after.tokens_owed_1);
-        assert_eq!(client.get_liquidity(), liquidity);
-        assert_eq!(balance(&env, &token0, &owner), owner0);
-        assert_eq!(balance(&env, &token1, &owner), owner1);
-    }
-
-    #[test]
-    fn test_failed_burn_does_not_consume_the_operation_id() {
-        let (env, client, token0, token1) = setup_pool();
-        let (_owner, position_id) = open_position(&env, &client, &token0, &token1);
-        let id = operation_id(&env, 3);
-
-        let failed = client.try_burn(&position_id, &100_001, &id);
-        assert_eq!(failed, Err(Ok(ClmmError::InsufficientLiquidity)));
-        assert_eq!(client.get_position(&position_id).liquidity, 100_000);
-
-        client.burn(&position_id, &40_000, &id);
-        assert_eq!(client.get_position(&position_id).liquidity, 60_000);
-    }
-
-    #[test]
-    fn test_duplicate_collect_is_rejected_and_pays_once() {
-        let (env, client, token0, token1) = setup_pool();
-        let (owner, position_id) = open_position(&env, &client, &token0, &token1);
-        let id = operation_id(&env, 4);
-
-        assert_eq!(client.collect(&position_id, &id), (0, 0));
-        let owner0 = balance(&env, &token0, &owner);
-        let owner1 = balance(&env, &token1, &owner);
-
-        let retry = client.try_collect(&position_id, &id);
-        assert_eq!(retry, Err(Ok(ClmmError::DuplicateOperation)));
-        assert_eq!(balance(&env, &token0, &owner), owner0);
-        assert_eq!(balance(&env, &token1, &owner), owner1);
-
-        // A fresh identity collects later without re-applying the first effect.
-        assert_eq!(client.collect(&position_id, &operation_id(&env, 5)), (0, 0));
-    }
-
-    #[test]
-    fn test_operation_ids_are_scoped_to_the_owner() {
-        let (env, client, token0, token1) = setup_pool();
-        let id = operation_id(&env, 11);
         let alice = Address::generate(&env);
+        let (position_id, _, _) = fund_and_mint(&env, &client, &alice, &token0, &token1, 50_000);
+
+        let position_before = client.get_position(&position_id);
+        let liquidity_before = client.get_liquidity();
+
+        // Bob can pay token0 but not token1, so his mint must not touch the pool
         let bob = Address::generate(&env);
-        mint_tokens(&env, &token0, &alice, 50_000);
-        mint_tokens(&env, &token1, &alice, 50_000);
-        mint_tokens(&env, &token0, &bob, 50_000);
-        mint_tokens(&env, &token1, &bob, 50_000);
+        mint_tokens(&env, &token0, &bob, 1_000_000);
+        assert!(client
+            .try_mint(&bob, &-60, &60, &100_000, &1_000_000, &1_000_000)
+            .is_err());
 
-        let (alice_position, ..) = client.mint(&alice, &-60, &60, &10_000, &50_000, &50_000, &id);
-        let (bob_position, ..) = client.mint(&bob, &-60, &60, &10_000, &50_000, &50_000, &id);
+        assert_eq!(client.get_position(&position_id), position_before);
+        assert_eq!(client.get_liquidity(), liquidity_before);
+        assert!(client.try_get_position(&2).is_err());
+        assert_eq!(client.get_pending_operation(&bob), None);
 
-        assert_ne!(alice_position, bob_position);
-        // Alice's id is consumed for her; Bob's identical id was never hers to spend.
-        let replay = client.try_mint(&alice, &-60, &60, &10_000, &50_000, &50_000, &id);
-        assert_eq!(replay, Err(Ok(ClmmError::DuplicateOperation)));
+        // Tick state was restored too: a funded retry enters the same range
+        mint_tokens(&env, &token1, &bob, 1_000_000);
+        let (bob_position_id, _, _) =
+            client.mint(&bob, &-60, &60, &100_000, &1_000_000, &1_000_000);
+
+        assert_eq!(bob_position_id, 2);
+        assert_eq!(client.get_liquidity(), liquidity_before + 100_000);
     }
 
     #[test]
-    fn test_operation_ids_are_scoped_to_the_operation_kind() {
+    fn test_burn_validation_failure_preserves_state() {
         let (env, client, token0, token1) = setup_pool();
-        let (owner, position_id) = open_position(&env, &client, &token0, &token1);
-        let id = operation_id(&env, 12);
+        let user = Address::generate(&env);
+        let (position_id, _, _) = fund_and_mint(&env, &client, &user, &token0, &token1, 50_000);
 
-        // The mint above used id 1; the same value is free for a burn and a collect.
-        client.burn(&position_id, &1_000, &id);
-        assert!(client.try_collect(&position_id, &id).is_ok());
+        let position_before = client.get_position(&position_id);
+        let liquidity_before = client.get_liquidity();
 
-        let owner_now = client.get_position(&position_id);
-        assert_eq!(owner_now.owner, owner);
-        assert_eq!(owner_now.liquidity, 99_000);
+        assert!(client.try_burn(&position_id, &0).is_err());
+        assert!(client.try_burn(&position_id, &50_001).is_err());
+
+        assert_eq!(client.get_position(&position_id), position_before);
+        assert_eq!(client.get_liquidity(), liquidity_before);
+
+        // The valid retry still works and accrues the payout on the position
+        let (amount0, amount1) = client.burn(&position_id, &50_000);
+        let after = client.get_position(&position_id);
+
+        assert_eq!(after.liquidity, 0);
+        assert_eq!(after.tokens_owed_0, amount0);
+        assert_eq!(after.tokens_owed_1, amount1);
+        assert_eq!(client.get_liquidity(), 0);
+    }
+
+    #[test]
+    fn test_failed_collect_preserves_unpaid_balance_for_retry() {
+        let (env, client, token0, token1) = setup_pool();
+        let user = Address::generate(&env);
+        let (position_id, deposited0, deposited1) =
+            fund_and_mint(&env, &client, &user, &token0, &token1, 50_000);
+
+        let (owed0, owed1) = client.burn(&position_id, &50_000);
+        // The simplified amount math charges token1 for an in-range position.
+        assert_eq!(owed0, 0);
+        assert!(owed1 > 0);
+
+        // Drain the pool's token1 balance so only the second payout can fail
+        let pool = client.address.clone();
+        TokenClient::new(&env, &token1).burn(&pool, &(owed1 as i128));
+
+        assert!(client.try_collect(&position_id).is_err());
+
+        let after_failure = client.get_position(&position_id);
+        assert_eq!(
+            after_failure.tokens_owed_1, owed1,
+            "the unpaid payout must survive for a retry"
+        );
+        assert_eq!(
+            TokenClient::new(&env, &token0).balance(&user),
+            1_000_000 - deposited0 as i128 + owed0 as i128,
+            "a failed payout must not move tokens"
+        );
+        assert_eq!(
+            TokenClient::new(&env, &token1).balance(&user),
+            1_000_000 - deposited1 as i128,
+            "a failed payout must not credit the owner"
+        );
+
+        // Restoring the pool balance lets the retry settle the remainder once
+        mint_tokens(&env, &token1, &pool, owed1 as i128);
+
+        let (retry0, retry1) = client.collect(&position_id);
+        assert_eq!(retry0, 0);
+        assert_eq!(retry1, owed1);
+        assert_eq!(client.get_pending_operation(&user), None);
+        assert_eq!(
+            TokenClient::new(&env, &token1).balance(&user),
+            1_000_000 - deposited1 as i128 + owed1 as i128
+        );
+
+        let settled = client.get_position(&position_id);
+        assert_eq!(settled.tokens_owed_0, 0);
+        assert_eq!(settled.tokens_owed_1, 0);
+
+        // Nothing more is owed, so another collect pays nothing
+        assert_eq!(client.collect(&position_id), (0, 0));
     }
 }
