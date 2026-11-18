@@ -111,8 +111,9 @@ Source: `contracts/clmm_core/src/lib.rs`
 | 8    | `Unauthorized`          | Caller is not the position owner                               | Use the position owner address                           |
 | 9    | `InvalidPosition`       | No position exists with this id                                | Check the position id                                    |
 | 10   | `DuplicateOperation`    | An operation identity was already consumed by a successful call | Reuse the identity only for a genuine retry of the same call; use a new one for a new operation |
+| 11   | `ConcurrentModification` | Position sequence does not match; position state was modified concurrently | Query current sequence via `get_position()` / `get_position_sequence()` and retry |
 
-See `docs/contracts/clmm-operations.md` for identity scoping and retry rules.
+See `docs/contracts/clmm-operations.md` for identity scoping, optimistic concurrency, and retry rules.
 
 ---
 
