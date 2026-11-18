@@ -105,7 +105,7 @@ Source: `contracts/clmm_core/src/lib.rs`
 | 2    | `AlreadyInitialized`    | `initialize()` called twice                                    | No action needed                                         |
 | 3    | `InvalidTick`           | Tick is not aligned to the pool's tick spacing or is out of range | Use a tick divisible by `TickSpacing` within ±887272 |
 | 4    | `InvalidTickRange`      | `tick_lower` is not below `tick_upper`                         | Order the range correctly                                |
-| 5    | `InsufficientLiquidity` | Burn amount is zero or exceeds the position's liquidity        | Burn no more than the position holds                     |
+| 5    | `InsufficientLiquidity` | Burn or swap amount exceeds the available liquidity            | Burn no more than the position holds                     |
 | 6    | `InvalidAmount`         | Amount is zero or the required deposit exceeds a cap           | Pass a positive amount and sufficient caps               |
 | 7    | `PriceLimitExceeded`    | Swap price limit is on the wrong side of the current price     | Set the limit beyond the current price in the swap direction |
 | 8    | `Unauthorized`          | Caller is not the position owner                               | Use the position owner address                           |
