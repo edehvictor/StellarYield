@@ -67,6 +67,11 @@ Source: `contracts/stableswap/src/lib.rs`
 | 8    | `InvalidFee`            | Fee basis points out of range                | Use a fee value within protocol limits      |
 | 9    | `MathOverflow`          | Arithmetic overflow in invariant calculation | Reduce input amounts                        |
 | 10   | `ZeroInvariant`         | Pool invariant is zero                       | Pool is empty; add liquidity first          |
+| 11   | `UnknownToken`          | `token_in` is not one of the pool's tokens   | Pass the pool's token0 or token1 address    |
+
+Use `preview_swap` / `preview_add_liquidity` to get a privacy-safe `Diagnostic`
+(failed stage, error code, remediation path) without mutating state. See
+`contracts/stableswap/README.md` for the stage and remediation enums.
 
 ---
 

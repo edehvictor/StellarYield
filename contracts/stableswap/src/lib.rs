@@ -74,6 +74,130 @@ pub enum StableSwapError {
     InvalidFee = 8,
     MathOverflow = 9,
     ZeroInvariant = 10,
+    /// `token_in` is neither of the pool's two tokens.
+    UnknownToken = 11,
+}
+
+// ── Diagnostics ─────────────────────────────────────────────────────────
+
+/// Stage of an operation at which a failure occurred.
+///
+/// Diagnostics intentionally carry only these coarse enums and the numeric
+/// `StableSwapError` code — never addresses, amounts, reserves or balances —
+/// so they are safe to log, surface in UIs and relay off-chain.
+#[contracttype]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[repr(u32)]
+pub enum FailureStage {
+    /// No failure.
+    None = 0,
+    /// Pool is not initialized or has no usable liquidity.
+    PoolState = 1,
+    /// Caller-supplied arguments were rejected.
+    InputValidation = 2,
+    /// Dynamic fee computation failed.
+    FeeComputation = 3,
+    /// Invariant (D / y) solving failed.
+    Invariant = 4,
+    /// Result fell below the caller's slippage bound.
+    Slippage = 5,
+}
+
+/// Suggested next step for the caller.
+#[contracttype]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[repr(u32)]
+pub enum RemediationPath {
+    /// Nothing to do; the operation would succeed.
+    None = 0,
+    /// Initialize the pool first.
+    InitializePool = 1,
+    /// Fix the call arguments and retry.
+    FixInput = 2,
+    /// Add liquidity (or use a smaller size) and retry.
+    AddLiquidity = 3,
+    /// Reduce the amount and retry.
+    ReduceAmount = 4,
+    /// Loosen the minimum-output bound or reduce size, then retry.
+    RelaxSlippage = 5,
+    /// Not caller-fixable; contact the pool admin.
+    ContactAdmin = 6,
+}
+
+/// Privacy-safe result of a dry-run (`preview_*`) call.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Diagnostic {
+    pub ok: bool,
+    pub stage: FailureStage,
+    /// `StableSwapError` discriminant, or 0 when `ok`.
+    pub error_code: u32,
+    pub remediation: RemediationPath,
+}
+
+/// Internal failure carrying the stage alongside the error.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+struct Failure {
+    stage: FailureStage,
+    error: StableSwapError,
+}
+
+fn at(stage: FailureStage) -> impl Fn(StableSwapError) -> Failure {
+    move |error| Failure { stage, error }
+}
+
+fn fail(stage: FailureStage, error: StableSwapError) -> Failure {
+    Failure { stage, error }
+}
+
+fn remediation_for(f: &Failure) -> RemediationPath {
+    match f.error {
+        StableSwapError::NotInitialized => RemediationPath::InitializePool,
+        StableSwapError::InvalidAmount | StableSwapError::UnknownToken => RemediationPath::FixInput,
+        StableSwapError::InsufficientLiquidity | StableSwapError::ZeroInvariant => {
+            RemediationPath::AddLiquidity
+        }
+        StableSwapError::InsufficientOutput => RemediationPath::RelaxSlippage,
+        StableSwapError::MathOverflow => RemediationPath::ReduceAmount,
+        _ => RemediationPath::ContactAdmin,
+    }
+}
+
+fn diagnostic_of<T>(r: Result<T, Failure>) -> Diagnostic {
+    match r {
+        Ok(_) => Diagnostic {
+            ok: true,
+            stage: FailureStage::None,
+            error_code: 0,
+            remediation: RemediationPath::None,
+        },
+        Err(f) => Diagnostic {
+            ok: false,
+            stage: f.stage,
+            error_code: f.error as u32,
+            remediation: remediation_for(&f),
+        },
+    }
+}
+
+/// Fully validated add-liquidity outcome; nothing is written until it exists.
+struct AddLiquidityPlan {
+    token0: Address,
+    token1: Address,
+    new_reserve0: i128,
+    new_reserve1: i128,
+    mint_amount: i128,
+    new_supply: i128,
+}
+
+/// Fully validated swap outcome; nothing is written until it exists.
+struct SwapPlan {
+    token_out: Address,
+    token_in_is_0: bool,
+    new_reserve_in: i128,
+    new_reserve_out: i128,
+    amount_out: i128,
+    fee: i128,
 }
 
 // ── Contract ─────────────────────────────────────────────────────────────
@@ -131,6 +255,10 @@ impl StableSwap {
 
     /// Deposit `amount0` of token0 and `amount1` of token1, receive LP tokens.
     /// `min_mint_amount` guards against sandwich attacks on the initial ratio.
+    ///
+    /// All validation and math run before any token transfer or storage write,
+    /// so a failure leaves reserves, supply and LP balances untouched and the
+    /// call can be retried safely with corrected arguments.
     pub fn add_liquidity(
         env: Env,
         sender: Address,
@@ -139,92 +267,59 @@ impl StableSwap {
         min_mint_amount: i128,
     ) -> Result<i128, StableSwapError> {
         sender.require_auth();
-        Self::assert_initialized(&env)?;
+        let plan = Self::plan_add_liquidity(&env, amount0, amount1, min_mint_amount)
+            .map_err(|f| f.error)?;
 
-        if amount0 <= 0 || amount1 <= 0 {
-            return Err(StableSwapError::InvalidAmount);
-        }
-
-        let token0: Address = env.storage().instance().get(&DataKey::Token0).unwrap();
-        let token1: Address = env.storage().instance().get(&DataKey::Token1).unwrap();
-
-        let reserve0: i128 = env.storage().instance().get(&DataKey::Reserve0).unwrap();
-        let reserve1: i128 = env.storage().instance().get(&DataKey::Reserve1).unwrap();
-        let total_supply: i128 = env.storage().instance().get(&DataKey::TotalSupply).unwrap();
-        let amp_coeff: u32 = env.storage().instance().get(&DataKey::AmpCoeff).unwrap();
+        let lp_key = DataKey::LpBalance(sender.clone());
+        let old_lp: i128 = env.storage().persistent().get(&lp_key).unwrap_or(0);
+        let new_lp = old_lp
+            .checked_add(plan.mint_amount)
+            .ok_or(StableSwapError::MathOverflow)?;
 
         // Pull tokens from sender
-        token::Client::new(&env, &token0).transfer(
+        token::Client::new(&env, &plan.token0).transfer(
             &sender,
             &env.current_contract_address(),
             &amount0,
         );
-        token::Client::new(&env, &token1).transfer(
+        token::Client::new(&env, &plan.token1).transfer(
             &sender,
             &env.current_contract_address(),
             &amount1,
         );
 
-        let new_reserve0 = reserve0
-            .checked_add(amount0)
-            .ok_or(StableSwapError::MathOverflow)?;
-        let new_reserve1 = reserve1
-            .checked_add(amount1)
-            .ok_or(StableSwapError::MathOverflow)?;
-
-        let d0 = if total_supply == 0 {
-            0
-        } else {
-            Self::compute_d(reserve0, reserve1, amp_coeff)?
-        };
-        let d1 = Self::compute_d(new_reserve0, new_reserve1, amp_coeff)?;
-
-        if d1 <= d0 {
-            return Err(StableSwapError::ZeroInvariant);
-        }
-
-        let mint_amount = if total_supply == 0 {
-            d1
-        } else {
-            total_supply
-                .checked_mul(d1 - d0)
-                .ok_or(StableSwapError::MathOverflow)?
-                .checked_div(d0)
-                .ok_or(StableSwapError::MathOverflow)?
-        };
-
-        if mint_amount < min_mint_amount {
-            return Err(StableSwapError::InsufficientOutput);
-        }
-
-        // Update state
         env.storage()
             .instance()
-            .set(&DataKey::Reserve0, &new_reserve0);
+            .set(&DataKey::Reserve0, &plan.new_reserve0);
         env.storage()
             .instance()
-            .set(&DataKey::Reserve1, &new_reserve1);
-        let new_supply = total_supply
-            .checked_add(mint_amount)
-            .ok_or(StableSwapError::MathOverflow)?;
+            .set(&DataKey::Reserve1, &plan.new_reserve1);
         env.storage()
             .instance()
-            .set(&DataKey::TotalSupply, &new_supply);
-
-        let lp_key = DataKey::LpBalance(sender.clone());
-        let old_lp: i128 = env.storage().persistent().get(&lp_key).unwrap_or(0);
-        env.storage().persistent().set(
-            &lp_key,
-            &(old_lp
-                .checked_add(mint_amount)
-                .ok_or(StableSwapError::MathOverflow)?),
-        );
+            .set(&DataKey::TotalSupply, &plan.new_supply);
+        env.storage().persistent().set(&lp_key, &new_lp);
 
         env.events().publish(
             (symbol_short!("add_liq"),),
-            (sender, amount0, amount1, mint_amount),
+            (sender, amount0, amount1, plan.mint_amount),
         );
-        Ok(mint_amount)
+        Ok(plan.mint_amount)
+    }
+
+    /// Read-only dry run of `add_liquidity`. Never mutates state and returns a
+    /// privacy-safe [`Diagnostic`] (failed stage, error code, remediation).
+    pub fn preview_add_liquidity(
+        env: Env,
+        amount0: i128,
+        amount1: i128,
+        min_mint_amount: i128,
+    ) -> Diagnostic {
+        diagnostic_of(Self::plan_add_liquidity(
+            &env,
+            amount0,
+            amount1,
+            min_mint_amount,
+        ))
     }
 
     /// Burn `lp_amount` LP tokens and withdraw proportional pool assets.
@@ -297,6 +392,9 @@ impl StableSwap {
     ///
     /// Applies a dynamic fee that increases when the pool is more imbalanced.
     /// `min_out` provides slippage protection for the caller.
+    ///
+    /// The whole swap is planned and validated before any transfer or write, so
+    /// a failure leaves reserves untouched and the call can be retried safely.
     pub fn swap(
         env: Env,
         sender: Address,
@@ -305,58 +403,7 @@ impl StableSwap {
         min_out: i128,
     ) -> Result<i128, StableSwapError> {
         sender.require_auth();
-        Self::assert_initialized(&env)?;
-
-        if amount_in <= 0 {
-            return Err(StableSwapError::InvalidAmount);
-        }
-
-        let token0: Address = env.storage().instance().get(&DataKey::Token0).unwrap();
-        let token1: Address = env.storage().instance().get(&DataKey::Token1).unwrap();
-
-        let (reserve_in, reserve_out, token_out) = if token_in == token0 {
-            let r0: i128 = env.storage().instance().get(&DataKey::Reserve0).unwrap();
-            let r1: i128 = env.storage().instance().get(&DataKey::Reserve1).unwrap();
-            (r0, r1, token1.clone())
-        } else if token_in == token1 {
-            let r0: i128 = env.storage().instance().get(&DataKey::Reserve0).unwrap();
-            let r1: i128 = env.storage().instance().get(&DataKey::Reserve1).unwrap();
-            (r1, r0, token0.clone())
-        } else {
-            return Err(StableSwapError::InvalidAmount);
-        };
-
-        let amp_coeff: u32 = env.storage().instance().get(&DataKey::AmpCoeff).unwrap();
-        let base_fee: u32 = env.storage().instance().get(&DataKey::BaseFee).unwrap();
-        let fee_multiplier: u32 = env
-            .storage()
-            .instance()
-            .get(&DataKey::FeeMultiplier)
-            .unwrap();
-
-        // Compute dynamic fee based on imbalance before the swap
-        let fee = Self::compute_dynamic_fee(reserve_in, reserve_out, base_fee, fee_multiplier)?;
-
-        // Amount after fee deduction
-        let amount_in_after_fee = amount_in
-            .checked_mul(FEE_PRECISION - fee)
-            .ok_or(StableSwapError::MathOverflow)?
-            .checked_div(FEE_PRECISION)
-            .ok_or(StableSwapError::MathOverflow)?;
-
-        // Compute new reserve_out using the invariant
-        let new_reserve_in = reserve_in
-            .checked_add(amount_in_after_fee)
-            .ok_or(StableSwapError::MathOverflow)?;
-        let new_reserve_out = Self::compute_y(new_reserve_in, reserve_in + reserve_out, amp_coeff)?;
-
-        let amount_out = reserve_out
-            .checked_sub(new_reserve_out)
-            .ok_or(StableSwapError::MathOverflow)?;
-
-        if amount_out < min_out {
-            return Err(StableSwapError::InsufficientOutput);
-        }
+        let plan = Self::plan_swap(&env, &token_in, amount_in, min_out).map_err(|f| f.error)?;
 
         // Transfer tokens
         token::Client::new(&env, &token_in).transfer(
@@ -364,26 +411,32 @@ impl StableSwap {
             &env.current_contract_address(),
             &amount_in,
         );
-        token::Client::new(&env, &token_out).transfer(
+        token::Client::new(&env, &plan.token_out).transfer(
             &env.current_contract_address(),
             &sender,
-            &amount_out,
+            &plan.amount_out,
         );
 
         // Update reserves
-        let (new_r0, new_r1) = if token_in == token0 {
-            (new_reserve_in, new_reserve_out)
+        let (new_r0, new_r1) = if plan.token_in_is_0 {
+            (plan.new_reserve_in, plan.new_reserve_out)
         } else {
-            (new_reserve_out, new_reserve_in)
+            (plan.new_reserve_out, plan.new_reserve_in)
         };
         env.storage().instance().set(&DataKey::Reserve0, &new_r0);
         env.storage().instance().set(&DataKey::Reserve1, &new_r1);
 
         env.events().publish(
             (symbol_short!("swap"),),
-            (sender, token_in, amount_in, amount_out, fee),
+            (sender, token_in, amount_in, plan.amount_out, plan.fee),
         );
-        Ok(amount_out)
+        Ok(plan.amount_out)
+    }
+
+    /// Read-only dry run of `swap`. Never mutates state and returns a
+    /// privacy-safe [`Diagnostic`] (failed stage, error code, remediation).
+    pub fn preview_swap(env: Env, token_in: Address, amount_in: i128, min_out: i128) -> Diagnostic {
+        diagnostic_of(Self::plan_swap(&env, &token_in, amount_in, min_out))
     }
 
     // ── View helpers ───────────────────────────────────────────────────
@@ -407,6 +460,199 @@ impl StableSwap {
             .instance()
             .get(&DataKey::TotalSupply)
             .unwrap_or(0)
+    }
+
+    // ── Planning (pure validation + math, no writes) ───────────────────
+
+    fn plan_add_liquidity(
+        env: &Env,
+        amount0: i128,
+        amount1: i128,
+        min_mint_amount: i128,
+    ) -> Result<AddLiquidityPlan, Failure> {
+        Self::assert_initialized(env).map_err(at(FailureStage::PoolState))?;
+
+        if amount0 <= 0 || amount1 <= 0 {
+            return Err(fail(
+                FailureStage::InputValidation,
+                StableSwapError::InvalidAmount,
+            ));
+        }
+
+        let s = env.storage().instance();
+        let token0: Address = s.get(&DataKey::Token0).unwrap();
+        let token1: Address = s.get(&DataKey::Token1).unwrap();
+        let reserve0: i128 = s.get(&DataKey::Reserve0).unwrap();
+        let reserve1: i128 = s.get(&DataKey::Reserve1).unwrap();
+        let total_supply: i128 = s.get(&DataKey::TotalSupply).unwrap();
+        let amp_coeff: u32 = s.get(&DataKey::AmpCoeff).unwrap();
+
+        let inv = at(FailureStage::Invariant);
+        let overflow = || StableSwapError::MathOverflow;
+
+        let new_reserve0 = reserve0
+            .checked_add(amount0)
+            .ok_or_else(overflow)
+            .map_err(&inv)?;
+        let new_reserve1 = reserve1
+            .checked_add(amount1)
+            .ok_or_else(overflow)
+            .map_err(&inv)?;
+
+        let d0 = if total_supply == 0 {
+            0
+        } else {
+            Self::compute_d(reserve0, reserve1, amp_coeff).map_err(&inv)?
+        };
+        let d1 = Self::compute_d(new_reserve0, new_reserve1, amp_coeff).map_err(&inv)?;
+
+        if d1 <= d0 {
+            return Err(fail(
+                FailureStage::Invariant,
+                StableSwapError::ZeroInvariant,
+            ));
+        }
+
+        let mint_amount = if total_supply == 0 {
+            d1
+        } else {
+            total_supply
+                .checked_mul(d1 - d0)
+                .ok_or_else(overflow)
+                .map_err(&inv)?
+                .checked_div(d0)
+                .ok_or_else(overflow)
+                .map_err(&inv)?
+        };
+
+        if mint_amount < min_mint_amount {
+            return Err(fail(
+                FailureStage::Slippage,
+                StableSwapError::InsufficientOutput,
+            ));
+        }
+
+        let new_supply = total_supply
+            .checked_add(mint_amount)
+            .ok_or_else(overflow)
+            .map_err(&inv)?;
+
+        Ok(AddLiquidityPlan {
+            token0,
+            token1,
+            new_reserve0,
+            new_reserve1,
+            mint_amount,
+            new_supply,
+        })
+    }
+
+    fn plan_swap(
+        env: &Env,
+        token_in: &Address,
+        amount_in: i128,
+        min_out: i128,
+    ) -> Result<SwapPlan, Failure> {
+        Self::assert_initialized(env).map_err(at(FailureStage::PoolState))?;
+
+        if amount_in <= 0 {
+            return Err(fail(
+                FailureStage::InputValidation,
+                StableSwapError::InvalidAmount,
+            ));
+        }
+
+        let s = env.storage().instance();
+        let token0: Address = s.get(&DataKey::Token0).unwrap();
+        let token1: Address = s.get(&DataKey::Token1).unwrap();
+        let r0: i128 = s.get(&DataKey::Reserve0).unwrap();
+        let r1: i128 = s.get(&DataKey::Reserve1).unwrap();
+
+        let (token_in_is_0, reserve_in, reserve_out, token_out) = if *token_in == token0 {
+            (true, r0, r1, token1)
+        } else if *token_in == token1 {
+            (false, r1, r0, token0)
+        } else {
+            return Err(fail(
+                FailureStage::InputValidation,
+                StableSwapError::UnknownToken,
+            ));
+        };
+
+        // An empty (or one-sided) pool cannot price a swap.
+        if reserve_in <= 0 || reserve_out <= 0 {
+            return Err(fail(
+                FailureStage::PoolState,
+                StableSwapError::InsufficientLiquidity,
+            ));
+        }
+
+        let amp_coeff: u32 = s.get(&DataKey::AmpCoeff).unwrap();
+        let base_fee: u32 = s.get(&DataKey::BaseFee).unwrap();
+        let fee_multiplier: u32 = s.get(&DataKey::FeeMultiplier).unwrap();
+
+        let fee_stage = at(FailureStage::FeeComputation);
+        let inv = at(FailureStage::Invariant);
+        let overflow = || StableSwapError::MathOverflow;
+
+        // Compute dynamic fee based on imbalance before the swap
+        let fee = Self::compute_dynamic_fee(reserve_in, reserve_out, base_fee, fee_multiplier)
+            .map_err(&fee_stage)?;
+        if !(0..=FEE_PRECISION).contains(&fee) {
+            return Err(fail(
+                FailureStage::FeeComputation,
+                StableSwapError::InvalidFee,
+            ));
+        }
+
+        // Amount after fee deduction
+        let amount_in_after_fee = amount_in
+            .checked_mul(FEE_PRECISION - fee)
+            .ok_or_else(overflow)
+            .map_err(&fee_stage)?
+            .checked_div(FEE_PRECISION)
+            .ok_or_else(overflow)
+            .map_err(&fee_stage)?;
+
+        // Compute new reserve_out using the invariant
+        let new_reserve_in = reserve_in
+            .checked_add(amount_in_after_fee)
+            .ok_or_else(overflow)
+            .map_err(&inv)?;
+        let sum = reserve_in
+            .checked_add(reserve_out)
+            .ok_or_else(overflow)
+            .map_err(&inv)?;
+        let new_reserve_out = Self::compute_y(new_reserve_in, sum, amp_coeff).map_err(&inv)?;
+
+        let amount_out = reserve_out
+            .checked_sub(new_reserve_out)
+            .ok_or_else(overflow)
+            .map_err(&inv)?;
+
+        // The pool must never pay out more than it holds, nor a non-positive amount.
+        if amount_out <= 0 || amount_out >= reserve_out {
+            return Err(fail(
+                FailureStage::Invariant,
+                StableSwapError::InsufficientLiquidity,
+            ));
+        }
+
+        if amount_out < min_out {
+            return Err(fail(
+                FailureStage::Slippage,
+                StableSwapError::InsufficientOutput,
+            ));
+        }
+
+        Ok(SwapPlan {
+            token_out,
+            token_in_is_0,
+            new_reserve_in,
+            new_reserve_out,
+            amount_out,
+            fee,
+        })
     }
 
     // ── Math internals ─────────────────────────────────────────────────
@@ -765,5 +1011,196 @@ mod tests {
         let client = StableSwapClient::new(&env, &contract_id);
         let result = client.try_initialize(&admin, &t0, &t1, &lp, &100, &30_000, &20_000);
         assert!(result.is_err());
+    }
+
+    // ── Diagnostics, state preservation and safe retry ─────────────────
+
+    use soroban_sdk::token::{Client as TokenClient, StellarAssetClient};
+
+    /// Deploy a pool backed by real token contracts and a funded user.
+    fn funded_pool(env: &Env) -> (StableSwapClient<'_>, Address, Address, Address) {
+        env.mock_all_auths();
+        let issuer = Address::generate(env);
+        let t0 = env
+            .register_stellar_asset_contract_v2(issuer.clone())
+            .address();
+        let t1 = env.register_stellar_asset_contract_v2(issuer).address();
+        let user = Address::generate(env);
+        StellarAssetClient::new(env, &t0).mint(&user, &10_000_000);
+        StellarAssetClient::new(env, &t1).mint(&user, &10_000_000);
+
+        let contract_id = env.register(StableSwap, ());
+        let client = StableSwapClient::new(env, &contract_id);
+        let lp = Address::generate(env);
+        client.initialize(
+            &Address::generate(env),
+            &t0,
+            &t1,
+            &lp,
+            &100,
+            &30_000,
+            &20_000,
+        );
+        (client, t0, t1, user)
+    }
+
+    /// Snapshot of everything a failed call must leave untouched.
+    fn snapshot(
+        env: &Env,
+        client: &StableSwapClient<'_>,
+        t0: &Address,
+        t1: &Address,
+        user: &Address,
+    ) -> ((i128, i128), i128, i128, i128, i128) {
+        (
+            client.get_reserves(),
+            client.get_total_supply(),
+            client.get_lp_balance(user),
+            TokenClient::new(env, t0).balance(user),
+            TokenClient::new(env, t1).balance(user),
+        )
+    }
+
+    #[test]
+    fn test_swap_normal_operation_and_preview_ok() {
+        let env = Env::default();
+        let (client, t0, t1, user) = funded_pool(&env);
+        client.add_liquidity(&user, &1_000_000, &1_000_000, &0);
+
+        let preview = client.preview_swap(&t0, &10_000, &0);
+        assert!(preview.ok);
+        assert_eq!(preview.stage, FailureStage::None);
+        assert_eq!(preview.error_code, 0);
+        assert_eq!(preview.remediation, RemediationPath::None);
+
+        let out = client.swap(&user, &t0, &10_000, &0);
+        assert!(out > 0 && out < 10_000);
+        let (r0, r1) = client.get_reserves();
+        assert!(r0 > 1_000_000 && r1 < 1_000_000);
+        assert_eq!(TokenClient::new(&env, &t1).balance(&user), 9_000_000 + out);
+    }
+
+    #[test]
+    fn test_swap_slippage_failure_preserves_state_and_retry_succeeds() {
+        let env = Env::default();
+        let (client, t0, t1, user) = funded_pool(&env);
+        client.add_liquidity(&user, &1_000_000, &1_000_000, &0);
+        let before = snapshot(&env, &client, &t0, &t1, &user);
+
+        // Unreachable min_out -> slippage failure.
+        let res = client.try_swap(&user, &t0, &10_000, &10_000);
+        assert_eq!(res, Err(Ok(StableSwapError::InsufficientOutput)));
+        assert_eq!(snapshot(&env, &client, &t0, &t1, &user), before);
+
+        let diag = client.preview_swap(&t0, &10_000, &10_000);
+        assert!(!diag.ok);
+        assert_eq!(diag.stage, FailureStage::Slippage);
+        assert_eq!(diag.error_code, StableSwapError::InsufficientOutput as u32);
+        assert_eq!(diag.remediation, RemediationPath::RelaxSlippage);
+
+        // Safe retry with a sane bound succeeds from the identical state.
+        let out = client.swap(&user, &t0, &10_000, &9_000);
+        assert!(out >= 9_000);
+    }
+
+    #[test]
+    fn test_swap_invalid_inputs_report_stage_and_preserve_state() {
+        let env = Env::default();
+        let (client, t0, t1, user) = funded_pool(&env);
+        client.add_liquidity(&user, &1_000_000, &1_000_000, &0);
+        let before = snapshot(&env, &client, &t0, &t1, &user);
+
+        let res = client.try_swap(&user, &t0, &0, &0);
+        assert_eq!(res, Err(Ok(StableSwapError::InvalidAmount)));
+        let d = client.preview_swap(&t0, &-1, &0);
+        assert_eq!(d.stage, FailureStage::InputValidation);
+        assert_eq!(d.remediation, RemediationPath::FixInput);
+
+        let stranger = Address::generate(&env);
+        let res = client.try_swap(&user, &stranger, &1_000, &0);
+        assert_eq!(res, Err(Ok(StableSwapError::UnknownToken)));
+        let d = client.preview_swap(&stranger, &1_000, &0);
+        assert_eq!(d.stage, FailureStage::InputValidation);
+        assert_eq!(d.error_code, StableSwapError::UnknownToken as u32);
+
+        assert_eq!(snapshot(&env, &client, &t0, &t1, &user), before);
+    }
+
+    #[test]
+    fn test_swap_on_empty_pool_reports_pool_state() {
+        let env = Env::default();
+        let (client, t0, t1, user) = funded_pool(&env);
+        let before = snapshot(&env, &client, &t0, &t1, &user);
+
+        let res = client.try_swap(&user, &t0, &1_000, &0);
+        assert_eq!(res, Err(Ok(StableSwapError::InsufficientLiquidity)));
+        let d = client.preview_swap(&t0, &1_000, &0);
+        assert_eq!(d.stage, FailureStage::PoolState);
+        assert_eq!(d.remediation, RemediationPath::AddLiquidity);
+        assert_eq!(snapshot(&env, &client, &t0, &t1, &user), before);
+    }
+
+    #[test]
+    fn test_swap_overflow_reports_stage_and_preserves_state() {
+        let env = Env::default();
+        let (client, t0, t1, user) = funded_pool(&env);
+        client.add_liquidity(&user, &1_000_000, &1_000_000, &0);
+        let before = snapshot(&env, &client, &t0, &t1, &user);
+
+        let res = client.try_swap(&user, &t0, &i128::MAX, &0);
+        assert!(res.is_err());
+        let d = client.preview_swap(&t0, &i128::MAX, &0);
+        assert!(!d.ok);
+        assert!(matches!(
+            d.stage,
+            FailureStage::FeeComputation | FailureStage::Invariant
+        ));
+        assert_eq!(d.remediation, RemediationPath::ReduceAmount);
+        assert_eq!(snapshot(&env, &client, &t0, &t1, &user), before);
+    }
+
+    #[test]
+    fn test_add_liquidity_failure_moves_no_tokens_and_retry_succeeds() {
+        let env = Env::default();
+        let (client, t0, t1, user) = funded_pool(&env);
+        let before = snapshot(&env, &client, &t0, &t1, &user);
+
+        // Invalid amount.
+        let res = client.try_add_liquidity(&user, &0, &1_000, &0);
+        assert_eq!(res, Err(Ok(StableSwapError::InvalidAmount)));
+        let d = client.preview_add_liquidity(&0, &1_000, &0);
+        assert_eq!(d.stage, FailureStage::InputValidation);
+
+        // Slippage bound that cannot be met: tokens must NOT have moved.
+        let res = client.try_add_liquidity(&user, &1_000_000, &1_000_000, &i128::MAX);
+        assert_eq!(res, Err(Ok(StableSwapError::InsufficientOutput)));
+        let d = client.preview_add_liquidity(&1_000_000, &1_000_000, &i128::MAX);
+        assert_eq!(d.stage, FailureStage::Slippage);
+        assert_eq!(d.remediation, RemediationPath::RelaxSlippage);
+        assert_eq!(snapshot(&env, &client, &t0, &t1, &user), before);
+
+        // Safe retry.
+        let minted = client.add_liquidity(&user, &1_000_000, &1_000_000, &0);
+        assert!(minted > 0);
+        assert_eq!(client.get_lp_balance(&user), minted);
+        assert_eq!(client.get_reserves(), (1_000_000, 1_000_000));
+    }
+
+    #[test]
+    fn test_preview_on_uninitialized_pool_reports_pool_state() {
+        let env = Env::default();
+        let contract_id = env.register(StableSwap, ());
+        let client = StableSwapClient::new(&env, &contract_id);
+        let any = Address::generate(&env);
+
+        let d = client.preview_swap(&any, &1_000, &0);
+        assert!(!d.ok);
+        assert_eq!(d.stage, FailureStage::PoolState);
+        assert_eq!(d.error_code, StableSwapError::NotInitialized as u32);
+        assert_eq!(d.remediation, RemediationPath::InitializePool);
+
+        let d = client.preview_add_liquidity(&1_000, &1_000, &0);
+        assert_eq!(d.stage, FailureStage::PoolState);
+        assert_eq!(d.remediation, RemediationPath::InitializePool);
     }
 }
