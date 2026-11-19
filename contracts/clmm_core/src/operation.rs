@@ -172,6 +172,10 @@ fn rollback_collect(env: &Env, operation: &PendingOperation) {
         position.fee_growth_inside_1_last_x128 = before.fee_growth_inside_1_last_x128;
     }
 
+    // The claim advanced the optimistic-concurrency sequence. A failed payout
+    // must not force the caller to re-read it before retrying the remainder.
+    position.sequence = before.sequence;
+
     env.storage()
         .persistent()
         .set(&DataKey::Position(operation.position_id), &position);
@@ -207,10 +211,10 @@ fn refund(
         return;
     };
 
+    let Ok(value) = i128::try_from(amount) else {
+        return;
+    };
+
     let client = token::Client::new(env, &token_addr);
-    let _ = client.try_transfer(
-        &env.current_contract_address(),
-        &operation.owner,
-        &(amount as i128),
-    );
+    let _ = client.try_transfer(&env.current_contract_address(), &operation.owner, &value);
 }

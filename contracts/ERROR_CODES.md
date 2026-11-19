@@ -67,6 +67,7 @@ Source: `contracts/stableswap/src/lib.rs`
 | 8    | `InvalidFee`            | Fee basis points out of range                | Use a fee value within protocol limits      |
 | 9    | `MathOverflow`          | Arithmetic overflow in invariant calculation | Reduce input amounts                        |
 | 10   | `ZeroInvariant`         | Pool invariant is zero                       | Pool is empty; add liquidity first          |
+| 11   | `InvalidToken`          | Token address is duplicate, LP token, or unrecognized in swap | Use distinct, registered pool tokens |
 
 ---
 
@@ -90,6 +91,37 @@ Source: `contracts/isolated_lending/src/lib.rs`
 | 12   | `OracleQuoteMissing`     | Oracle policy set but no quote pushed | Have the configured oracle push a quote       |
 | 13   | `OracleQuoteStale`       | Oracle quote older than the policy allows | Push a fresh quote                         |
 | 14   | `OracleConfidenceTooLow` | Oracle quote confidence below the policy | Wait for a higher-confidence quote          |
+| 15   | `StaleConfig`            | Configuration changed since the caller captured its fingerprint | Refresh with `get_config_fingerprint` and retry |
+
+---
+
+## clmm_core — `ClmmError`
+
+Source: `contracts/clmm_core/src/lib.rs`. Position operations are journalled and
+rolled back on failure; see
+[the position accounting guide](../docs/clmm-position-accounting.md) and
+`docs/contracts/clmm-operations.md`.
+
+| Code | Name                      | Meaning                                                          | Remediation                                                        |
+| ---- | ------------------------- | ---------------------------------------------------------------- | ------------------------------------------------------------------ |
+| 1    | `NotInitialized`          | Pool has not been initialized                                    | Call `initialize()`                                                |
+| 2    | `AlreadyInitialized`      | `initialize()` ran twice                                         | No action needed; the pool already exists                          |
+| 3    | `InvalidTick`             | Tick is not aligned to the tick spacing or is out of range       | Round the tick to a multiple of `tick_spacing` inside ±887272      |
+| 4    | `InvalidTickRange`        | `tick_lower >= tick_upper`                                       | Pass a lower tick strictly below the upper tick                    |
+| 5    | `InsufficientLiquidity`   | Burn amount is zero or exceeds the position's liquidity          | Read the position and burn at most `position.liquidity`            |
+| 6    | `InvalidAmount`           | Mint amount is zero, or the deposit exceeds `amount0_max`/`amount1_max` | Raise the maximums or lower the liquidity amount            |
+| 7    | `PriceLimitExceeded`      | Swap price limit is on the wrong side of the current price       | Pass a limit below spot for `zero_for_one`, above it otherwise     |
+| 8    | `Unauthorized`            | Caller is not the position owner                                 | Call from the position owner address                               |
+| 9    | `InvalidPosition`         | Position id does not exist                                       | Use an id returned by `mint`                                       |
+| 10   | `DuplicateOperation`      | An operation identity was already consumed by a successful call  | Reuse the identity only for a genuine retry; use a new one for a new operation |
+| 11   | `ConcurrentModification`  | Position sequence does not match the caller's `expected_sequence` | Re-read `get_position_sequence()` and retry with the new sequence |
+| 12   | `InvalidFee`              | `initialize()` fee is above `MAX_FEE_BPS` (10 000)               | Pass a fee of at most 10 000 basis points                          |
+| 13   | `InvalidTickSpacing`      | Tick spacing is zero, negative, above `MAX_TICK_SPACING`, or persisted that way | Pass a spacing in `1..=16 384`                        |
+| 14   | `MathOverflow`            | Checked arithmetic overflowed or an amount does not fit `i128`   | Reduce the amount or the position size                             |
+| 15   | `CorruptedPosition`       | Stored position record failed validation                         | Repair the record; no state was changed                            |
+| 16   | `InvalidSqrtPrice`        | `initialize()` sqrt price outside `MIN_SQRT_RATIO..=MAX_SQRT_RATIO` | Pass an in-range Q64.96 price                                   |
+| 17   | `OperationPending`        | Another journalled operation is open for this owner              | Wait for the in-flight call to finish, then retry                  |
+| 18   | `TokenTransferFailed`     | A token transfer returned an error and the journal rolled back   | Check balances and allowances; state and balances are unchanged    |
 
 ---
 
@@ -243,26 +275,6 @@ Source: `contracts/stealth_addresses/src/lib.rs`
 | 7    | `Unauthorized`        | Caller is not the deposit recipient | Use the correct recipient key                 |
 | 8    | `MetaLabelTooLong`    | Metadata label exceeds length limit | Shorten the label string                      |
 | 9    | `MetaAddressNotFound` | Meta-address not registered         | Register the meta-address first               |
-
----
-
-## clmm_core — `ClmmError`
-
-Source: `contracts/clmm_core/src/lib.rs`. Position operations are journalled and rolled back on failure; see [the position accounting guide](../docs/clmm-position-accounting.md).
-
-| Code | Name                  | Meaning                                                      | Remediation                                                        |
-| ---- | --------------------- | ------------------------------------------------------------ | ------------------------------------------------------------------ |
-| 1    | `NotInitialized`      | Pool has not been initialized                                | Call `initialize(token0, token1, fee, tick_spacing, sqrt_price)`   |
-| 2    | `AlreadyInitialized`  | `initialize()` ran twice                                     | No action needed; the pool already exists                          |
-| 3    | `InvalidTick`         | Tick is not aligned to the tick spacing or is out of range   | Round the tick to a multiple of `tick_spacing` inside ±887272      |
-| 4    | `InvalidTickRange`    | `tick_lower >= tick_upper`                                   | Pass a lower tick strictly below the upper tick                    |
-| 5    | `InsufficientLiquidity` | Burn amount is zero or exceeds the position's liquidity    | Read the position and burn at most `position.liquidity`            |
-| 6    | `InvalidAmount`       | Mint amount is zero, or the deposit exceeds `amount0_max`/`amount1_max` | Raise the maximums or lower the liquidity amount         |
-| 7    | `PriceLimitExceeded`  | Swap price limit is on the wrong side of the current price   | Pass a limit below spot for `zero_for_one`, above it otherwise     |
-| 8    | `Unauthorized`        | Caller is not the position owner                             | Call from the position owner address                               |
-| 9    | `InvalidPosition`     | Position id does not exist                                   | Use an id returned by `mint`                                       |
-| 10   | `OperationPending`    | Another journalled operation is open for this owner          | Wait for the in-flight call to finish, then retry                  |
-| 11   | `TokenTransferFailed` | A token transfer returned an error and the journal rolled back | Check balances and allowances; state and balances are unchanged   |
 
 ---
 
