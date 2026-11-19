@@ -8,8 +8,9 @@
 
 - `initialize(admin, oracle)`
 - `mint(minter, option_type, underlying_asset, quote_asset, strike_price, opening_time, expiration_time, collateral_amount)`
-- `exercise(exerciser, option_id, expected_config_fingerprint)` exercises all remaining collateral
-- `exercise_partial(exerciser, option_id, amount, expected_config_fingerprint)` exercises part of the collateral
+- `exercise(exerciser, option_id, expected_config_fingerprint, operation_id)` exercises all remaining collateral
+- `exercise_partial(exerciser, option_id, amount, expected_config_fingerprint, operation_id)` exercises part of the collateral
+- `is_operation_consumed(exerciser, kind, option_id, operation_id)` checks whether a settlement operation identity was already consumed
 - `get_config_snapshot()` / `get_config_fingerprint()` expose the configuration settlement is validated against
 - `cancel(minter, option_id)` cancels an unexpired option and returns its unexercised collateral
 - `expire(option_id)`
@@ -33,6 +34,10 @@ and ledger timestamp.
 - `expire` — unexercised collateral returned after expiry
 - `cancel` — unexercised collateral returned to the minter
 
+Successful settlement calls also publish an `op` event with topics `(op,)` and
+the payload `(exerciser, kind, option_id, operation_id)` to allow clients to
+correlate submissions with on-chain execution.
+
 `deposit` and `withdraw` continue to emit their existing collateral events.
 
 Admin configuration changes (`migrate`, `set_oracle_max_age`,
@@ -42,7 +47,36 @@ fingerprint immediately.
 
 ## Errors
 
-`OptionsError` covers initialization, authorization, invalid option state, expiry windows, and amount/price validation.
+`OptionsError` covers initialization, authorization, invalid option state,
+expiry windows, amount/price validation, `StaleConfig` (21), and
+`DuplicateOperation` (22) for retry-safe deduplication.
+
+## Operation Identity and Safe Retries
+
+Settlement calls (`exercise` and `exercise_partial`) require an `operation_id: BytesN<32>`
+supplied by the caller.
+
+```
+operation_key = SHA-256(
+    "stellaryield_options_op_v1" ||
+    XDR(current_contract_address, exerciser, kind, option_id, operation_id)
+)
+```
+
+The domain separator and preimage binding ensure:
+- An id consumed for one **exerciser** never blocks another exerciser;
+- An id consumed for one **operation kind** (`exercise` vs `partial`) is independent;
+- An id consumed on one **option** is free on another option;
+- An id cannot be replayed against a different deployment of this contract.
+
+### Safe Retry Semantics
+
+1. The configuration snapshot and operation identity are validated before any collateral moves or state is altered.
+2. If the `operation_id` has already been consumed by a successful settlement, the call fails immediately with `DuplicateOperation` (22) without modifying balances, reserves, or position state.
+3. If validation fails (e.g., `StaleConfig`, `TooEarly`, `ExceedsCollateral`), the transaction reverts cleanly. The `operation_id` is **not** consumed, permitting a safe retry with the same id once conditions are satisfied.
+4. The operation receipt is recorded in persistent storage only after all checks pass and collateral is transferred.
+5. Receipts are kept alive with an explicit TTL (`OPERATION_TTL_THRESHOLD = 17_280`, `OPERATION_TTL_EXTEND_TO = 518_400`, ~30 days) to protect against delayed network replays.
+6. Clients can call `is_operation_consumed(exerciser, kind, option_id, operation_id)` to check whether a submission landed before initiating a retry.
 
 ## Configuration Fingerprint
 
