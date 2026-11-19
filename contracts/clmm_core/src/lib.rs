@@ -57,6 +57,8 @@ pub enum DataKey {
     FeeGrowthGlobal1X128,
     Tick(i32),
     Position(u64),
+    PositionConfigFingerprint(u64),
+    ConfigFingerprint,
     NextPositionId,
     /// Marks a domain-separated position operation identity as consumed.
     Operation(BytesN<32>),
@@ -215,6 +217,10 @@ impl ClmmCore {
             .instance()
             .set(&DataKey::NextPositionId, &1u64);
         env.storage().instance().set(&DataKey::Initialized, &true);
+        let fingerprint = Self::configuration_fingerprint(&env);
+        env.storage()
+            .instance()
+            .set(&DataKey::ConfigFingerprint, &fingerprint);
 
         env.events().publish(
             (symbol_short!("init"),),
@@ -251,6 +257,7 @@ impl ClmmCore {
         operation_id: BytesN<32>,
     ) -> Result<(u64, u128, u128), ClmmError> {
         Self::require_init(&env)?;
+        Self::validate_configuration(&env, None)?;
         owner.require_auth();
 
         if amount == 0 {
@@ -330,6 +337,7 @@ impl ClmmCore {
             amount_1: amount1,
         };
 
+feat/issue-1773-clmm-position-accounting
         operation::begin(&env, journal.clone())?;
 
         match Self::execute_mint(&env, &owner, amount, current_tick, &mut journal) {
@@ -362,6 +370,39 @@ impl ClmmCore {
                 Err(err)
             }
         }
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::Position(position_id), &position);
+        let fingerprint = Self::configuration_fingerprint(&env);
+        env.storage().persistent().set(
+            &DataKey::PositionConfigFingerprint(position_id),
+            &fingerprint,
+        );
+        env.storage()
+            .instance()
+            .set(&DataKey::NextPositionId, &next_position_id);
+
+        Self::record_operation(&env, &operation_key);
+
+        env.events().publish(
+            (symbol_short!("mint"),),
+            (position_id, owner.clone(), tick_lower, tick_upper, amount),
+        );
+        env.events().publish(
+            (symbol_short!("pos_seq"),),
+            (position_id, position.sequence),
+        );
+        Self::publish_operation(
+            &env,
+            &owner,
+            symbol_short!("mint"),
+            position_id,
+            &operation_id,
+        );
+
+        Ok((position_id, amount0, amount1))
+ dev
     }
 
     /// Burn liquidity from an existing position and collect tokens.
@@ -391,6 +432,8 @@ impl ClmmCore {
         // any accounting or state mutation.
         let position = position::load_validated_position(&env, position_id)?;
 
+        Self::validate_configuration(&env, Some(position_id))?;
+
         position.owner.require_auth();
 
         let operation_key = Self::operation_key(
@@ -408,6 +451,9 @@ impl ClmmCore {
 
         if amount == 0 || amount > position.liquidity {
             return Err(ClmmError::InsufficientLiquidity);
+        }
+        if amount > i128::MAX as u128 {
+            return Err(ClmmError::ArithmeticError);
         }
 
         let current_tick: i32 = env.storage().instance().get(&DataKey::CurrentTick).unwrap();
@@ -763,6 +809,8 @@ impl ClmmCore {
 
         // Validate the persisted record before computing or transferring fees.
         let position = position::load_validated_position(&env, position_id)?;
+
+        Self::validate_configuration(&env, Some(position_id))?;
 
         position.owner.require_auth();
 
@@ -1323,8 +1371,8 @@ mod tests {
         let (env, client, token0, token1) = setup_pool();
 
         let user = Address::generate(&env);
-        mint_tokens(&env, &token0, &user, 100_000);
-        mint_tokens(&env, &token1, &user, 100_000);
+        mint_tokens(&env, &token0, &user, 1_000_000_000_000_000_000);
+        mint_tokens(&env, &token1, &user, 1_000_000_000_000_000_000);
 
         // Mint position with tick range [-60, 60] (smaller range, aligned to tick spacing)
         let (position_id, amount0, amount1) = client.mint(
@@ -1984,6 +2032,7 @@ mod tests {
         );
     }
 
+ feat/issue-1773-clmm-position-accounting
     // ── Operation journal: partial completion and retry ─────────────
 
     #[test]
@@ -2154,5 +2203,57 @@ mod tests {
         );
         assert_eq!(client.get_position(&position_id).tokens_owed_1, 0);
         assert_eq!(client.get_position(&position_id).sequence, 3);
+
+    #[test]
+    fn stale_configuration_preserves_position_and_allows_retry() {
+        let (env, client, token0, token1) = setup_pool();
+        let owner = Address::generate(&env);
+        mint_tokens(&env, &token0, &owner, 1_000_000_000_000_000_000);
+        mint_tokens(&env, &token1, &owner, 1_000_000_000_000_000_000);
+        let (position_id, _, _) = client.mint(
+            &owner,
+            &-60,
+            &60,
+            &100_000,
+            &1_000_000_000_000_000_000,
+            &1_000_000_000_000_000_000,
+        );
+        let contract_id = client.address.clone();
+
+        env.as_contract(&contract_id, || {
+            let original = env
+                .storage()
+                .instance()
+                .get::<_, u32>(&DataKey::Fee)
+                .unwrap();
+            let position_before: Position = env
+                .storage()
+                .persistent()
+                .get(&DataKey::Position(position_id))
+                .unwrap();
+            env.storage().instance().set(&DataKey::Fee, &(original + 1));
+            assert_eq!(
+                ClmmCore::validate_configuration(&env, Some(position_id)),
+                Err(ClmmError::StaleConfiguration)
+            );
+            let position_after: Position = env
+                .storage()
+                .persistent()
+                .get(&DataKey::Position(position_id))
+                .unwrap();
+            assert_eq!(position_after.liquidity, position_before.liquidity);
+            assert_eq!(position_after.tokens_owed_0, position_before.tokens_owed_0);
+            assert_eq!(position_after.tokens_owed_1, position_before.tokens_owed_1);
+            env.storage().instance().set(&DataKey::Fee, &original);
+            assert_eq!(
+                ClmmCore::validate_configuration(&env, Some(position_id)),
+                Ok(())
+            );
+        });
+
+        let (amount0, amount1) = client.burn(&position_id, &100_000);
+        assert_eq!(client.get_position(&position_id).liquidity, 0);
+        assert!(amount0 > 0 || amount1 > 0);
+ dev
     }
 }

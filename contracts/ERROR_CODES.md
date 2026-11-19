@@ -94,12 +94,20 @@ Source: `contracts/isolated_lending/src/lib.rs`
 | 7    | `InsufficientLiquidity`  | Not enough liquidity to borrow       | Reduce borrow amount or add liquidity          |
 | 8    | `InsufficientCollateral` | Collateral below required ratio, or a liquidation would pay out collateral the market does not hold | Add more collateral; check the position is backed by this market's funds |
 | 9    | `PositionStillBacked`    | Position cannot be liquidated yet    | Wait until health factor drops below threshold |
-| 10   | `MathOverflow`           | Arithmetic overflow                  | Reduce input amounts                           |
+| 10   | `MathOverflow`           | A checked intermediate cannot be represented in `i128` | Reduce input amounts; see `docs/contracts/isolated-lending.md` |
 | 11   | `AlreadyLiquidated`      | Liquidation id already used for this borrower | Use a new liquidation id               |
 | 12   | `OracleQuoteMissing`     | Oracle policy set but no quote pushed | Have the configured oracle push a quote       |
 | 13   | `OracleQuoteStale`       | Oracle quote older than the policy allows | Push a fresh quote                         |
 | 14   | `OracleConfidenceTooLow` | Oracle quote confidence below the policy | Wait for a higher-confidence quote          |
 | 15   | `StaleConfig`            | Configuration changed since the caller captured its fingerprint | Refresh with `get_config_fingerprint` and retry |
+
+`isolated_lending` uses checked arithmetic and documented floor rounding for
+values, limits, interest, fees and liquidation payouts (the close-factor cap is
+the one upward rounding, capped at the debt). Every checked value is computed
+before tokens move or storage is written, so a call that fails with any code
+above leaves balances, positions, totals, pending withdrawals and configuration
+unchanged and can be retried with corrected inputs. See
+`docs/contracts/isolated-lending.md` for the rounding table and numeric limits.
 
 ---
 
