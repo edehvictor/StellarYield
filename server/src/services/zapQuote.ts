@@ -18,6 +18,12 @@ import {
 } from "../../../shared/types/quoteAssumptionFingerprint";
 import type { ZapQuoteRouteAssumptions } from "../../../shared/types/routeAssumptions";
 import { buildZapQuoteRouteAssumptions } from "./routeAssumptionsService";
+import {
+  applySlippageFloor,
+  mulDivFloor,
+  parseStroopsAmount,
+  sanitizeSlippageFraction,
+} from "./stroopsMath";
 
 export interface ZapQuoteBody {
   inputTokenContract: string;
@@ -225,14 +231,17 @@ export function detectFeeDrift(
 
 const rpcUrl = process.env.SOROBAN_RPC_URL ?? "https://soroban-testnet.stellar.org";
 
+/**
+ * Checked `amountIn * numerator / denominator` (floor). A zero or invalid
+ * denominator/numerator yields "0" instead of throwing, preserving the prior
+ * fallback behavior; overflow past i128 still throws via {@link mulDivFloor}.
+ */
 function mulDivStroops(amountIn: string, numerator: string, denominator: string): string {
-  const a = BigInt(amountIn);
-  const n = BigInt(numerator);
-  const d = BigInt(denominator);
-  if (d === BigInt(0)) {
-    return "0";
-  }
-  return ((a * n) / d).toString();
+  const n = /^\d+$/.test(numerator) ? BigInt(numerator) : null;
+  const d = /^\d+$/.test(denominator) ? BigInt(denominator) : null;
+  if (n === null || d === null) return "0";
+  const result = mulDivFloor(parseStroopsAmount(amountIn), n, d);
+  return result === null ? "0" : result.toString();
 }
 
 export function getAssetConfigVersion(): string {
@@ -386,20 +395,27 @@ export async function getZapQuote(body: ZapQuoteBody): Promise<ZapQuoteResult> {
 
   const yieldData = await getYieldData();
   const protocolData = yieldData.find(y => y.protocolName.toLowerCase() === protocol.toLowerCase());
-  const tvl = BigInt(Math.floor(protocolData?.tvl || 10_000_000));
+  // Guard TVL: NaN/Infinity/negative would make BigInt() throw or poison the model.
+  const rawTvl = protocolData?.tvl;
+  const tvlNumber =
+    typeof rawTvl === "number" && Number.isFinite(rawTvl) && rawTvl >= 0 ? rawTvl : 10_000_000;
+  const tvl = BigInt(Math.floor(tvlNumber));
 
-  const amountIn = BigInt(body.amountInStroops);
-  const slippage = model.calculateSlippage(amountIn, tvl);
+  // Validate first so zero / negative / over-i128 amounts fail before any math.
+  const amountIn = parseStroopsAmount(body.amountInStroops);
+  const slippage = sanitizeSlippageFraction(model.calculateSlippage(amountIn, tvl), 0);
 
-  const userSlippage = body.slippageTolerance !== undefined
-    ? Math.min(Math.max(body.slippageTolerance, 0.001), 0.15)
-    : slippage;
+  // User tolerance is clamped to [0.001, 0.15]; non-finite input is ignored.
+  const userSlippage =
+    typeof body.slippageTolerance === "number" && Number.isFinite(body.slippageTolerance)
+      ? Math.min(Math.max(body.slippageTolerance, 0.001), 0.15)
+      : slippage;
 
   const effectiveSlippage = Math.max(slippage, userSlippage);
 
+  // Integer-only: slippage rounded to 1e-6, minimum output rounded down.
   const expectedOut = BigInt(sim.expectedAmountOutStroops);
-  const multiplier = 1 - effectiveSlippage;
-  const outAfterSlippage = (expectedOut * BigInt(Math.floor(multiplier * 10000))) / BigInt(10000);
+  const outAfterSlippage = applySlippageFloor(expectedOut, effectiveSlippage);
 
   const now = Date.now();
   const quotedAtMs = new Date(quotedAt).getTime();
