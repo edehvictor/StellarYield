@@ -36,6 +36,67 @@ export type {
 } from "./yieldParity";
 
 export function normalizeYield(rawYield: RawProtocolYield): NormalizedYield {
+  // Validate untrusted fields at the boundary - reject malformed data
+  // without mutating state. Return early with safe defaults.
+  if (!rawYield?.protocolName || 
+      !['blend', 'soroswap', 'defindex'].includes(rawYield.protocolType) ||
+      typeof rawYield.apyBps !== 'number' ||
+      rawYield.tvlUsd == null ||
+      typeof rawYield.volatilityPct !== 'number' ||
+      typeof rawYield.protocolAgeDays !== 'number' ||
+      !rawYield.source ||
+      !rawYield.fetchedAt ||
+      rawYield.managementFeeBps == null ||
+      rawYield.performanceFeeBps == null ||
+      typeof rawYield.capitalEfficiencyPct !== 'number') {
+    // Return a safe default yield rather than crashing or mutating state
+    return {
+      protocol: 'USDC',
+      asset: 'USDC',
+      risk: 'Medium',
+      protocolName: 'Unknown',
+      apy: 0,
+      rewardApy: 0,
+      totalApy: 0,
+      netApy: 0,
+      feeDragApy: 0,
+      tvl: 0,
+      riskScore: 50,
+      source: '',
+      fetchedAt: new Date().toISOString(),
+      liquidityUsd: 0,
+      rebalancingBehavior: 'Standard',
+      managementFeeBps: 0,
+      performanceFeeBps: 0,
+      capitalEfficiencyPct: 0,
+      netYieldAssumptions: {
+        protocolFeeBps: 0,
+        vaultFeeBps: 0,
+        rebalanceCostBps: 0,
+        slippageBps: 0,
+      },
+      netYieldSensitivity: [],
+      capitalEfficiency: {
+        score: 0,
+        grade: 'C',
+        components: {
+          utilization: 0,
+          feeDrag: 0,
+          rotationCost: 0,
+          liquidityDepth: 0,
+        },
+        hasMissingInputs: true,
+      },
+      rewards: [],
+      attribution: {
+        baseYield: 0,
+        incentives: 0,
+        compounding: 0,
+        tacticalRotation: 0,
+      },
+    };
+  }
+
   const risk = calculateRiskScore({
     tvlUsd: rawYield.tvlUsd,
     ilVolatilityPct: rawYield.volatilityPct,

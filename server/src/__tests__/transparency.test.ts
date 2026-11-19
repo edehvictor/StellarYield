@@ -1,6 +1,7 @@
 import request from "supertest";
 import { createApp } from "../app";
 import { aggregateTransparencyData } from "../routes/transparency";
+import { failoverIncidentHistoryService } from "../services/failoverIncidentHistoryService";
 
 describe("GET /api/transparency/summary", () => {
     it("returns 200 with all required fields", async () => {
@@ -53,5 +54,58 @@ describe("aggregateTransparencyData (direct)", () => {
         const first = await aggregateTransparencyData();
         const second = await aggregateTransparencyData();
         expect(first).toBe(second); // same reference means cache was used
+    });
+});
+
+describe("failover incident history validation and retries", () => {
+    beforeEach(() => failoverIncidentHistoryService.reset());
+
+    it("rejects invalid incident data without creating a partial record", async () => {
+        const app = createApp();
+        const invalid = await request(app).post("/api/transparency/failover-history").send({
+            protocolId: "blend",
+            protocolName: "Blend",
+            reasons: ["down"],
+            startedAt: "not-a-timestamp",
+        });
+        expect(invalid.status).toBe(400);
+        expect((await request(app).get("/api/transparency/failover-history")).body.incidents).toEqual([]);
+
+        const valid = await request(app).post("/api/transparency/failover-history").send({
+            protocolId: "blend",
+            protocolName: "Blend",
+            reasons: ["down"],
+            startedAt: "2026-01-01T00:00:00.000Z",
+        });
+        expect(valid.status).toBe(201);
+        expect(valid.body.id).toBe("1");
+    });
+
+    it("keeps an incident open after an invalid resolution and accepts a safe retry", async () => {
+        const app = createApp();
+        const created = await request(app).post("/api/transparency/failover-history").send({
+            protocolId: "blend",
+            protocolName: "Blend",
+            reasons: ["status=down"],
+            startedAt: "2026-01-01T00:00:00.000Z",
+        });
+        const failed = await request(app)
+            .post("/api/transparency/failover-history/blend/resolve")
+            .send({ recoveredAt: "2025-12-31T23:59:00.000Z" });
+        expect(failed.status).toBe(400);
+        expect(failoverIncidentHistoryService.getHistory("blend")[0].resolved).toBe(false);
+
+        const recovery = "2026-01-01T00:05:00.000Z";
+        const resolved = await request(app)
+            .post("/api/transparency/failover-history/blend/resolve")
+            .send({ recoveredAt: recovery });
+        const retried = await request(app)
+            .post("/api/transparency/failover-history/blend/resolve")
+            .send({ recoveredAt: recovery });
+        expect(resolved.status).toBe(200);
+        expect(retried.status).toBe(200);
+        expect(retried.body.id).toBe(created.body.id);
+        expect(retried.body.durationMs).toBe(300_000);
+        expect(failoverIncidentHistoryService.getHistory("blend")).toHaveLength(1);
     });
 });
