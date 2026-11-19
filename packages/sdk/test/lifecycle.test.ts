@@ -120,6 +120,22 @@ describe("Soroban SDK Bindings & Lifecycle", () => {
 
       expect(signedXdr).not.toBe(unsignedXdr);
     });
+
+    it("refreshes the wallet snapshot and rejects account changes during signing", async () => {
+      let calls = 0;
+      const provider = {
+        getPublicKey: async () => {
+          calls += 1;
+          return calls < 2 ? sourceKeypair.publicKey() : Keypair.random().publicKey();
+        },
+        signTransaction: async (xdr: string) => xdr,
+      };
+      const signer = new FreighterSigner(provider);
+
+      await expect(signer.signTransaction(createUnsignedXdr(), {
+        networkPassphrase: dummyPassphrase,
+      })).rejects.toThrow("configuration changed");
+    });
   });
 
   describe("Provider Adapter Compatibility", () => {
