@@ -63,6 +63,12 @@ export interface ApiConfig extends SdkEndpointConfig {}
 /** Options for a single ApiClient request. */
 export interface ApiRequestOptions {
   /**
+   * Stable idempotency key for a logical operation. The client sends it as
+   * `Idempotency-Key` on every attempt, so a retry can be recognized by the
+   * server instead of applying a state-changing effect twice.
+   */
+  operationId?: string;
+  /**
    * Mark a non-idempotent method (POST/PUT/PATCH/DELETE) as safe to retry.
    * GET/HEAD are always treated as idempotent.
    */
