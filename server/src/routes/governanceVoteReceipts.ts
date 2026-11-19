@@ -6,6 +6,7 @@
  * statuses once on-chain events are confirmed.
  */
 import { Router, Request, Response } from "express";
+import { idempotency } from "../middleware/idempotency";
 import {
   submitVoteReceipt,
   reconcileVoteReceipts,
@@ -23,7 +24,10 @@ const router = Router();
  *
  * Body: { proposalId: string, voter: string, choice: string }
  */
-router.post("/vote-receipts", (req: Request, res: Response) => {
+router.post(
+  "/vote-receipts",
+  idempotency({ scope: "governance.vote-receipts" }),
+  (req: Request, res: Response) => {
   const { proposalId, voter, choice } = req.body as {
     proposalId?: string;
     voter?: string;

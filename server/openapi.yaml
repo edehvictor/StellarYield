@@ -5037,6 +5037,50 @@ components:
         severity:
           type: string
         type:
+  
+  GovernanceExecutionAttempt:
+    type: object
+    description: Durable record of a governance proposal execution attempt (#1899).
+    properties:
+      attemptId:
+        type: string
+        description: Server-generated attempt id.
+      proposalId:
+        type: string
+        description: The governance proposal the attempt belongs to.
+      txHash:
+        type: string
+        description: On-chain transaction hash once the attempt reached the network.
+      status:
+        type: string
+        enum: [submitted, polling, succeeded, failed, rolled_back]
+        description: Lifecycle status of the execution attempt.
+      phase:
+        type: string
+        description: Last observed transaction phase.
+      attemptNumber:
+        type: integer
+        description: 1-based attempt number for this proposal.
+      error:
+        type: string
+        description: Human-readable failure reason when status is failed.
+      failedAtPhase:
+        type: string
+        description: Phase the attempt failed at, when applicable.
+      createdAt:
+        type: string
+        format: date-time
+        description: When the attempt was first recorded.
+      updatedAt:
+        type: string
+        format: date-time
+        description: When the attempt was last updated.
+      completedAt:
+        type: string
+        format: date-time
+        description: When the attempt reached a terminal state, if any.
+
+Incident:
           type: string
         title:
           type: string

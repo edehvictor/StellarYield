@@ -2,7 +2,10 @@ import { useRef, useState } from "react";
 import freighter from "@stellar/freighter-api";
 import TxStatusTimeline from "../../components/transaction/TxStatusTimeline";
 import { useWallet } from "../../context/useWallet";
-import { submitSignedXdrAndPoll } from "../../services/soroban";
+import {
+  resumeSubmittedTransaction,
+  submitSignedXdrAndPoll,
+} from "../../services/soroban";
 import type { TxPhase } from "../../services/transactionPhase";
 import {
   TX_PHASE_SUBMIT_POLL,
@@ -25,7 +28,11 @@ const NETWORK_PASSPHRASE = getNetworkPassphrase();
 interface PendingTransactionCardProps {
   transaction: PendingTransaction;
   onSign: (txId: string, publicKey: string) => void;
-  onExecute: (txId: string) => void;
+  onBeginExecute: (txId: string) => GovernanceExecutionState | null;
+  onExecutionSubmitted: (txId: string, txHash: string) => void;
+  onExecutionFailed: (txId: string, error: string, failedAtPhase: TxPhase) => void;
+  onExecutionRolledBack?: (txId: string) => void;
+  onExecute: (txId: string, txHash?: string) => void;
   /** Governance config used to render per-signer quorum progress (#1310). */
   config?: Pick<GovernanceConfig, "signers">;
 }
@@ -33,6 +40,10 @@ interface PendingTransactionCardProps {
 export default function PendingTransactionCard({
   transaction,
   onSign,
+  onBeginExecute,
+  onExecutionSubmitted,
+  onExecutionFailed,
+  onExecutionRolledBack,
   onExecute,
   config,
 }: PendingTransactionCardProps) {
@@ -45,6 +56,22 @@ export default function PendingTransactionCard({
   const [signError, setSignError] = useState<string | null>(null);
   const [signDiagnostics, setSignDiagnostics] = useState<GovernanceDiagnostic[]>([]);
 
+  const persistedOperation = transaction.operation;
+  const [execPhase, setExecPhase] = useState<TxPhase>(() =>
+    executionPhaseFor(persistedOperation),
+  );
+  const [execError, setExecError] = useState<string | null>(() =>
+    persistedOperation?.status === "failed"
+      ? persistedOperation.error ?? "Execution failed"
+      : null,
+  );
+  const [execHash, setExecHash] = useState<string | null>(
+    () => persistedOperation?.txHash ?? null,
+  );
+  const lastExecPhaseRef = useRef<TxPhase>(
+    persistedOperation?.failedAtPhase ??
+      (persistedOperation?.txHash ? "polling" : "submitting"),
+  );
   const [execPhase, setExecPhase] = useState<TxPhase>("idle");
   const [execError, setExecError] = useState<string | null>(null);
   const [execDiagnostics, setExecDiagnostics] = useState<GovernanceDiagnostic[]>([]);
@@ -100,21 +127,58 @@ export default function PendingTransactionCard({
     setExecHash(null);
     lastExecPhaseRef.current = "idle";
 
+    let operation: GovernanceExecutionState | null;
     try {
-      const result = await submitSignedXdrAndPoll(transaction.xdr, (p) => {
-        setExecPhase(p);
-        if (p !== "success" && p !== "failure") {
-          lastExecPhaseRef.current = p;
-        }
-      });
+      operation = onBeginExecute(transaction.id);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setExecError(msg);
+      setError(msg);
+      setExecPhase("failure");
+      setExecuting(false);
+      return;
+    }
+    if (!operation) {
+      setExecuting(false);
+      return;
+    }
+
+    setExecPhase(executionPhaseFor(operation));
+    setExecHash(operation.txHash ?? null);
+    lastExecPhaseRef.current = operation.txHash ? "polling" : "submitting";
+
+    const recordPhase = (p: TxPhase) => {
+      setExecPhase(p);
+      if (p !== "success" && p !== "failure") {
+        lastExecPhaseRef.current = p;
+      }
+    };
+
+    try {
+      const result = operation.txHash
+        ? await resumeSubmittedTransaction(operation.txHash, recordPhase)
+        : await submitSignedXdrAndPoll(transaction.xdr, recordPhase, (hash) => {
+            setExecHash(hash);
+            try {
+              onExecutionSubmitted(transaction.id, hash);
+            } catch {
+              setExecError(
+                "Transaction was submitted, but its hash could not be saved. Check the network before retrying.",
+              );
+            }
+          });
 
       if (result.success) {
-        setExecHash(result.hash ?? null);
-        onExecute(transaction.id);
+        setExecHash(result.hash ?? operation.txHash ?? null);
+        onExecute(transaction.id, result.hash);
       } else {
         const msg = result.error ?? "Transaction failed";
+        const failedAtPhase = lastExecPhaseRef.current === "idle"
+          ? "submitting"
+          : lastExecPhaseRef.current;
         setExecError(msg);
         setError(msg);
+        onExecutionFailed(transaction.id, msg, failedAtPhase);
         setExecDiagnostics(
           buildExecutionDiagnostics(
             lastExecPhaseRef.current === "submitting" ? "submitting" : "polling",
@@ -123,8 +187,12 @@ export default function PendingTransactionCard({
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
+      const failedAtPhase = lastExecPhaseRef.current === "idle"
+        ? "submitting"
+        : lastExecPhaseRef.current;
       setExecError(msg);
       setError(msg);
+      onExecutionFailed(transaction.id, msg, failedAtPhase);
       setExecDiagnostics(
         buildExecutionDiagnostics(
           lastExecPhaseRef.current === "submitting" ? "submitting" : "polling",
@@ -141,6 +209,18 @@ export default function PendingTransactionCard({
     setError(null);
     void handleExecute();
   };
+
+  const rollbackExecute = () => {
+    if (!onExecutionRolledBack) return;
+    onExecutionRolledBack(transaction.id);
+    setExecError(null);
+    setError(null);
+    setExecHash(null);
+    setExecPhase("idle");
+    lastExecPhaseRef.current = "idle";
+  };
+
+  const canResumeExecution = Boolean(transaction.operation?.txHash);
 
   const retrySign = () => {
     setSignError(null);
@@ -200,6 +280,18 @@ export default function PendingTransactionCard({
         <p className="text-sm text-red-400">{error}</p>
       )}
 
+      {!isExecuted && isExecutionInterrupted(transaction.operation) && !executing && (
+        <p
+          role="status"
+          className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-xs text-amber-200"
+        >
+          Execution was interrupted.{" "}
+          {canResumeExecution
+            ? "Retry resumes polling the saved transaction hash; the transaction is not submitted again."
+            : "Retry starts a new attempt; existing signatures and the proposal are preserved."}
+        </p>
+      )}
+
       {!isExecuted && (
         <div className="flex flex-col gap-4">
           {!hasSigned && (
@@ -248,8 +340,23 @@ export default function PendingTransactionCard({
                 disabled={executing}
                 className="w-full bg-gradient-to-r from-green-500 to-emerald-600 text-white font-semibold py-2 rounded-lg disabled:opacity-50 transition-opacity"
               >
-                {executing ? "Executing..." : "Execute"}
+                {executing
+                  ? "Executing..."
+                  : canResumeExecution
+                    ? "Resume Execution"
+                    : "Execute"}
               </button>
+              {execPhase === "failure" &&
+                canRollbackExecution(transaction.operation) &&
+                onExecutionRolledBack && (
+                  <button
+                    type="button"
+                    onClick={rollbackExecute}
+                    className="w-full border border-gray-600 text-gray-300 font-semibold py-2 rounded-lg hover:bg-white/5 transition-colors"
+                  >
+                    Discard Failed Attempt
+                  </button>
+                )}
             </div>
           )}
         </div>
