@@ -13,15 +13,15 @@ import {
 
 // Mock freighter api
 vi.mock("@stellar/freighter-api", () => ({
-  isConnected: vi.fn().mockResolvedValue({ isConnected: true }),
+  isConnected: vi.fn().mockResolved({ isConnected: true }),
 }));
 
 // Mock wallet adapters
 vi.mock("../../auth/walletAdapters", () => ({
   getAdapter: vi.fn().mockReturnValue({
-    isAvailable: vi.fn().mockResolvedValue(true),
-    getPublicKey: vi.fn().mockResolvedValue("GACCOUNT_A"),
-    signTransaction: vi.fn().mockResolvedValue("signed_xdr"),
+    isAvailable: vi.fn().mockResolved(true),
+    getPublicKey: vi.fn().mockResolved("GACCOUNT_A"),
+    signTransaction: vi.fn().mockResolved("signed_xdr"),
   }),
 }));
 
@@ -48,7 +48,7 @@ describe("Wallet Disconnect & State Cleanup (#1046)", () => {
 
   it("clears pending transaction drafts when active wallet disconnects", async () => {
     const { getAdapter } = await import("../../auth/walletAdapters");
-    (getAdapter as any)().getPublicKey.mockResolvedValue("GACCOUNT_A");
+    (getAdapter as any)().getPublicKey.mockResolved("GACCOUNT_A");
 
     render(
       <WalletProvider>
@@ -102,7 +102,7 @@ describe("Wallet Disconnect & State Cleanup (#1046)", () => {
     );
 
     // 1. Connect Account A
-    adapter.getPublicKey.mockResolvedValue("GACCOUNT_A");
+    adapter.getPublicKey.mockResolved("GACCOUNT_A");
     await act(async () => {
       fireEvent.click(screen.getByText("Connect"));
     });
@@ -118,13 +118,13 @@ describe("Wallet Disconnect & State Cleanup (#1046)", () => {
     expect(getTransactionDraft("GACCOUNT_A")?.id).toBe("draft-A");
 
     // 3. Switch account to Account B and reconnect
-    adapter.getPublicKey.mockResolvedValue("GACCOUNT_B");
+    adapter.getPublicKey.mockResolved("GACCOUNT_B");
     await act(async () => {
       fireEvent.click(screen.getByText("Connect"));
     });
     expect(screen.getByTestId("address")).toHaveTextContent("GACCOUNT_B");
 
-    // 4. Account B should NOT see Account A's draft
+    // 4. Account B should NOT see Account A draft
     expect(getTransactionDraft("GACCOUNT_B")).toBeNull();
     expect(getTransactionDraft("GACCOUNT_A")).toBeNull();
   });
@@ -132,7 +132,7 @@ describe("Wallet Disconnect & State Cleanup (#1046)", () => {
   it("does not reuse stale payloads on reconnect", async () => {
     const { getAdapter } = await import("../../auth/walletAdapters");
     const adapter = (getAdapter as any)();
-    adapter.getPublicKey.mockResolvedValue("GACCOUNT_A");
+    adapter.getPublicKey.mockResolved("GACCOUNT_A");
 
     render(
       <WalletProvider>

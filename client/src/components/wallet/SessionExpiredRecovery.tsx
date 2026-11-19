@@ -15,6 +15,8 @@ export interface SessionExpiredRecoveryProps {
   onCancel: () => void;
   onRetry: () => void;
   isReconnecting?: boolean;
+  /** Optional human-readable summary of the persisted operation phase. */
+  pendingPhaseLabel?: string;
 }
 
 export default function SessionExpiredRecovery({
@@ -23,6 +25,7 @@ export default function SessionExpiredRecovery({
   onCancel,
   onRetry,
   isReconnecting = false,
+  pendingPhaseLabel,
 }: SessionExpiredRecoveryProps) {
   return (
     <div
@@ -36,9 +39,14 @@ export default function SessionExpiredRecovery({
         <div className="flex-1">
           <p className="font-medium text-amber-300">Wallet session expired</p>
           <p className="text-xs text-amber-200/70 mt-0.5">
-            Your wallet session expired before "{actionLabel}" could complete.
+            Your wallet session expired before {"\""}{actionLabel}{"\""} could complete.
             Reconnect to pick up right where you left off.
           </p>
+          {pendingPhaseLabel ? (
+            <p className="text-xs text-amber-200/60 mt-1">
+              Saved progress: {pendingPhaseLabel}. Your balances will not change until the operation is confirmed.
+            </p>
+          ) : null}
           <div className="mt-3 flex flex-wrap gap-2">
             <button
               type="button"
