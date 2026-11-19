@@ -282,6 +282,33 @@ fn test_repeated_exercise_rejected() {
     assert_eq!(result, Err(Ok(crate::OptionsError::AlreadyExercised)));
 }
 
+#[test]
+fn test_settlement_sequence_rejects_stale_state_and_allows_retry() {
+    let (env, client, _, _, underlying, quote) = setup_env();
+    let (option_id, _) = mint_call_option(&env, &client, &underlying, &quote);
+    let exerciser = Address::generate(&env);
+    mint_tokens(&env, &quote, &exerciser, 200_000_000);
+    env.ledger().set_timestamp(750);
+
+    assert_eq!(client.get_settlement_sequence(&option_id), 1);
+    client.exercise_partial_with_sequence(&exerciser, &option_id, &4_000_000, &1);
+    assert_eq!(client.get_settlement_sequence(&option_id), 2);
+
+    let underlying_client = soroban_sdk::token::Client::new(&env, &underlying);
+    let balance_before_retry = underlying_client.balance(&exerciser);
+    let stale = client.try_exercise_partial_with_sequence(&exerciser, &option_id, &1_000_000, &1);
+    assert_eq!(stale, Err(Ok(crate::OptionsError::ConcurrentModification)));
+    assert_eq!(underlying_client.balance(&exerciser), balance_before_retry);
+    assert_eq!(client.get_settlement_sequence(&option_id), 2);
+
+    client.exercise_partial_with_sequence(&exerciser, &option_id, &1_000_000, &2);
+    assert_eq!(
+        underlying_client.balance(&exerciser),
+        balance_before_retry + 1_000_000
+    );
+    assert_eq!(client.get_settlement_sequence(&option_id), 3);
+}
+
 // ── Expire ────────────────────────────────────────────────────────────────
 
 #[test]
