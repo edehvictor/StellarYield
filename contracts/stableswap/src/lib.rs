@@ -45,7 +45,7 @@
 //! `i128` domain is rejected with `MathOverflow` rather than wrapping.
 
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, symbol_short, token, Address, Env,
+    contract, contracterror, contractimpl, contracttype, symbol_short, token, Address, BytesN, Env,
 };
 
 // ── Constants ───────────────────────────────────────────────────────────
@@ -58,6 +58,9 @@ const MAX_A: u32 = 1_000_000;
 const MAX_BASE_FEE_BPS: u32 = 1_000_000;
 /// Newton's method convergence iterations
 const NEWTON_ITERS: u32 = 255;
+/// Current pool context version. Version zero is a pool initialized before
+/// context binding existed; it keeps working and is bound by `migrate`.
+const CURRENT_POOL_VERSION: u32 = 1;
 /// Number of tokens in the pool
 const N_COINS: i128 = 2;
 
@@ -84,6 +87,10 @@ enum DataKey {
     TotalSupply,
     /// LP balance per account
     LpBalance(Address),
+    /// SHA-256 of the network passphrase this pool's state is bound to.
+    NetworkId,
+    /// Pool context version of the stored state.
+    StorageVersion,
 }
 
 // ── Errors ──────────────────────────────────────────────────────────────
@@ -103,6 +110,33 @@ pub enum StableSwapError {
     MathOverflow = 9,
     ZeroInvariant = 10,
     InvalidToken = 11,
+    /// The live ledger or the caller's context belongs to another network than
+    /// the pool's stored state, or the pool is already bound to another network.
+    WrongNetwork = 12,
+    /// The caller's context names a different pool deployment.
+    WrongContract = 13,
+    /// The stored state or the caller's context is not at the pool context
+    /// version this code understands.
+    WrongVersion = 14,
+}
+
+// ── Pool context ────────────────────────────────────────────────────────
+
+/// Explicit network, deployment and version context of a pool.
+///
+/// Callers capture this with `get_pool_context()` and pass it to
+/// `add_liquidity`, `remove_liquidity` and `swap`. An operation executes only
+/// if the live ledger network, the network the pool state was created on, the
+/// deployment address and the stored context version all match.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PoolContext {
+    /// SHA-256 of the network passphrase the pool state is bound to.
+    pub network_id: BytesN<32>,
+    /// Address of this pool deployment.
+    pub contract: Address,
+    /// Pool context version of the stored state.
+    pub version: u32,
 }
 
 // ── Contract ─────────────────────────────────────────────────────────────
@@ -161,25 +195,96 @@ impl StableSwap {
         s.set(&DataKey::Reserve0, &0_i128);
         s.set(&DataKey::Reserve1, &0_i128);
         s.set(&DataKey::TotalSupply, &0_i128);
+        // Bind the pool's state to the network it was created on, and stamp the
+        // context version so later network or layout transitions are detectable.
+        s.set(&DataKey::NetworkId, &env.ledger().network_id());
+        s.set(&DataKey::StorageVersion, &CURRENT_POOL_VERSION);
 
         env.events()
             .publish((symbol_short!("init"),), (admin, amp_coeff, base_fee));
         Ok(())
     }
 
+    /// Bind a pool created before context binding existed to the live network
+    /// and to the current context version. Admin only.
+    ///
+    /// Existing pools keep operating unchanged before this is called: with no
+    /// stored binding they adopt the live network. `migrate` pins that binding,
+    /// so afterwards state restored on a different network or read by code with
+    /// a different context version is rejected instead of being silently used.
+    ///
+    /// Migration is idempotent and never re-binds a pool that is already bound
+    /// to another network; that returns `WrongNetwork` and changes nothing.
+    pub fn migrate(env: Env) -> Result<PoolContext, StableSwapError> {
+        Self::assert_initialized(&env)?;
+        let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+        admin.require_auth();
+
+        let live_network = env.ledger().network_id();
+        let stored_network: Option<BytesN<32>> = env.storage().instance().get(&DataKey::NetworkId);
+        match stored_network {
+            Some(bound) if bound != live_network => return Err(StableSwapError::WrongNetwork),
+            Some(_) => {}
+            None => env
+                .storage()
+                .instance()
+                .set(&DataKey::NetworkId, &live_network),
+        }
+
+        let version = Self::read_version(&env);
+        // Code older than the stored layout must not interpret it.
+        if version > CURRENT_POOL_VERSION {
+            return Err(StableSwapError::WrongVersion);
+        }
+        if version < CURRENT_POOL_VERSION {
+            env.storage()
+                .instance()
+                .set(&DataKey::StorageVersion, &CURRENT_POOL_VERSION);
+        }
+
+        let context = PoolContext {
+            network_id: live_network.clone(),
+            contract: env.current_contract_address(),
+            version: CURRENT_POOL_VERSION,
+        };
+        env.events().publish(
+            (symbol_short!("migrate"),),
+            (admin, live_network, CURRENT_POOL_VERSION),
+        );
+        Ok(context)
+    }
+
+    /// Explicit network, deployment and version context of this pool.
+    ///
+    /// Pass the returned value to `add_liquidity`, `remove_liquidity` and
+    /// `swap`. Refresh it after `migrate`, which changes the version.
+    pub fn get_pool_context(env: Env) -> Result<PoolContext, StableSwapError> {
+        Self::assert_initialized(&env)?;
+        Ok(PoolContext {
+            network_id: Self::bound_network(&env),
+            contract: env.current_contract_address(),
+            version: Self::read_version(&env),
+        })
+    }
+
     // ── Liquidity ──────────────────────────────────────────────────────
 
     /// Deposit `amount0` of token0 and `amount1` of token1, receive LP tokens.
     /// `min_mint_amount` guards against sandwich attacks on the initial ratio.
+    ///
+    /// `expected_context` must equal `get_pool_context()`: a network, deployment
+    /// or version mismatch is rejected before any reserve or balance changes.
     pub fn add_liquidity(
         env: Env,
         sender: Address,
         amount0: i128,
         amount1: i128,
         min_mint_amount: i128,
+        expected_context: PoolContext,
     ) -> Result<i128, StableSwapError> {
         sender.require_auth();
         Self::assert_initialized(&env)?;
+        Self::require_context(&env, &expected_context)?;
 
         if amount0 <= 0 || amount1 <= 0 || min_mint_amount < 0 {
             return Err(StableSwapError::InvalidAmount);
@@ -267,15 +372,18 @@ impl StableSwap {
     }
 
     /// Burn `lp_amount` LP tokens and withdraw proportional pool assets.
+    /// `expected_context` must equal `get_pool_context()`.
     pub fn remove_liquidity(
         env: Env,
         sender: Address,
         lp_amount: i128,
         min_amount0: i128,
         min_amount1: i128,
+        expected_context: PoolContext,
     ) -> Result<(i128, i128), StableSwapError> {
         sender.require_auth();
         Self::assert_initialized(&env)?;
+        Self::require_context(&env, &expected_context)?;
 
         if lp_amount <= 0 || min_amount0 < 0 || min_amount1 < 0 {
             return Err(StableSwapError::InvalidAmount);
@@ -355,15 +463,18 @@ impl StableSwap {
     ///
     /// Applies a dynamic fee that increases when the pool is more imbalanced.
     /// `min_out` provides slippage protection for the caller.
+    /// `expected_context` must equal `get_pool_context()`.
     pub fn swap(
         env: Env,
         sender: Address,
         token_in: Address,
         amount_in: i128,
         min_out: i128,
+        expected_context: PoolContext,
     ) -> Result<i128, StableSwapError> {
         sender.require_auth();
         Self::assert_initialized(&env)?;
+        Self::require_context(&env, &expected_context)?;
 
         if amount_in <= 0 || min_out < 0 {
             return Err(StableSwapError::InvalidAmount);
@@ -472,8 +583,11 @@ impl StableSwap {
 
     // ── View helpers ───────────────────────────────────────────────────
 
+    /// Reserves of the pool. Reading state that was created on another network
+    /// is rejected instead of being returned as if it were live.
     pub fn get_reserves(env: Env) -> Result<(i128, i128), StableSwapError> {
         Self::assert_initialized(&env)?;
+        Self::require_live_network(&env)?;
         let r0: i128 = env.storage().instance().get(&DataKey::Reserve0).unwrap();
         let r1: i128 = env.storage().instance().get(&DataKey::Reserve1).unwrap();
         Ok((r0, r1))
@@ -718,6 +832,50 @@ impl StableSwap {
         }
         Ok(())
     }
+
+    /// Network the stored state is bound to. Pools initialized before context
+    /// binding have no stored network and adopt the live ledger network, so
+    /// they behave exactly as before until an admin calls `migrate`.
+    fn bound_network(env: &Env) -> BytesN<32> {
+        env.storage()
+            .instance()
+            .get(&DataKey::NetworkId)
+            .unwrap_or_else(|| env.ledger().network_id())
+    }
+
+    fn read_version(env: &Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey::StorageVersion)
+            .unwrap_or(0)
+    }
+
+    /// Reject reads of state that does not belong to the live network.
+    fn require_live_network(env: &Env) -> Result<(), StableSwapError> {
+        if Self::bound_network(env) != env.ledger().network_id() {
+            return Err(StableSwapError::WrongNetwork);
+        }
+        Ok(())
+    }
+
+    /// Reject operations bound to a different network, deployment or context
+    /// version. Checked before any reserve math, transfer or storage write.
+    fn require_context(env: &Env, expected: &PoolContext) -> Result<(), StableSwapError> {
+        Self::require_live_network(env)?;
+        if expected.network_id != Self::bound_network(env) {
+            return Err(StableSwapError::WrongNetwork);
+        }
+        if expected.contract != env.current_contract_address() {
+            return Err(StableSwapError::WrongContract);
+        }
+        let version = Self::read_version(env);
+        // A version newer than this code is an unknown layout: refuse it rather
+        // than misinterpreting stored state after a code downgrade.
+        if version > CURRENT_POOL_VERSION || expected.version != version {
+            return Err(StableSwapError::WrongVersion);
+        }
+        Ok(())
+    }
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────
@@ -726,6 +884,11 @@ impl StableSwap {
 mod tests {
     use super::*;
     use soroban_sdk::{testutils::Address as _, Env};
+
+    /// Current context a caller would capture before an operation.
+    fn ctx(client: &StableSwapClient) -> PoolContext {
+        client.get_pool_context()
+    }
 
     /// Helper: deploy and initialize a pool
     fn setup_pool(env: &Env, amp: u32) -> (Address, Address, Address, Address, Address) {
@@ -938,7 +1101,7 @@ mod tests {
         let t1_client = token::Client::new(&env, &token1);
 
         // 1. Add liquidity
-        let mint = client.add_liquidity(&user, &1_000_000, &1_000_000, &1_000_000);
+        let mint = client.add_liquidity(&user, &1_000_000, &1_000_000, &1_000_000, &ctx(&client));
         assert!(mint >= 1_000_000);
         assert_eq!(t0_client.balance(&user), 9_000_000);
         assert_eq!(t1_client.balance(&user), 9_000_000);
@@ -947,14 +1110,14 @@ mod tests {
         assert_eq!(client.get_total_supply(), mint);
 
         // 2. Swap token0 for token1
-        let swapped_out = client.swap(&user, &token0, &100_000, &90_000);
+        let swapped_out = client.swap(&user, &token0, &100_000, &90_000, &ctx(&client));
         assert!(swapped_out >= 90_000);
         assert_eq!(t0_client.balance(&user), 8_900_000);
         assert_eq!(t1_client.balance(&user), 9_000_000 + swapped_out);
 
         // 3. Remove liquidity
         let half_lp = mint / 2;
-        let (out0, out1) = client.remove_liquidity(&user, &half_lp, &1, &1);
+        let (out0, out1) = client.remove_liquidity(&user, &half_lp, &1, &1, &ctx(&client));
         assert!(out0 > 0 && out1 > 0);
         assert_eq!(client.get_lp_balance(&user), mint - half_lp);
         assert_eq!(client.get_total_supply(), mint - half_lp);
@@ -1034,26 +1197,27 @@ mod tests {
         let initial_b1 = t1_client.balance(&user);
 
         // 1. Zero amount0 rejected
-        let res0 = client.try_add_liquidity(&user, &0, &100_000, &0);
+        let res0 = client.try_add_liquidity(&user, &0, &100_000, &0, &ctx(&client));
         assert_eq!(res0, Err(Ok(StableSwapError::InvalidAmount)));
         assert_eq!(t0_client.balance(&user), initial_b0);
         assert_eq!(t1_client.balance(&user), initial_b1);
         assert_eq!(client.get_reserves(), (0, 0));
 
         // 2. Negative amount1 rejected
-        let res1 = client.try_add_liquidity(&user, &100_000, &-5, &0);
+        let res1 = client.try_add_liquidity(&user, &100_000, &-5, &0, &ctx(&client));
         assert_eq!(res1, Err(Ok(StableSwapError::InvalidAmount)));
         assert_eq!(t0_client.balance(&user), initial_b0);
         assert_eq!(t1_client.balance(&user), initial_b1);
 
         // 3. Negative min_mint_amount rejected
-        let res_neg_min = client.try_add_liquidity(&user, &100_000, &100_000, &-1);
+        let res_neg_min = client.try_add_liquidity(&user, &100_000, &100_000, &-1, &ctx(&client));
         assert_eq!(res_neg_min, Err(Ok(StableSwapError::InvalidAmount)));
         assert_eq!(t0_client.balance(&user), initial_b0);
         assert_eq!(t1_client.balance(&user), initial_b1);
 
         // 4. Slippage exceeded: min_mint_amount higher than minted LP
-        let res_slip = client.try_add_liquidity(&user, &100_000, &100_000, &999_999_999);
+        let res_slip =
+            client.try_add_liquidity(&user, &100_000, &100_000, &999_999_999, &ctx(&client));
         assert_eq!(res_slip, Err(Ok(StableSwapError::InsufficientOutput)));
         // BALANCES AND STATE COMPLETELY PRESERVED
         assert_eq!(t0_client.balance(&user), initial_b0);
@@ -1072,13 +1236,14 @@ mod tests {
         let t1_client = token::Client::new(&env, &token1);
 
         // Attempt 1: excessive slippage tolerance fails
-        let fail_res = client.try_add_liquidity(&user, &500_000, &500_000, &10_000_000);
+        let fail_res =
+            client.try_add_liquidity(&user, &500_000, &500_000, &10_000_000, &ctx(&client));
         assert_eq!(fail_res, Err(Ok(StableSwapError::InsufficientOutput)));
         assert_eq!(t0_client.balance(&user), 10_000_000);
         assert_eq!(t1_client.balance(&user), 10_000_000);
 
         // Retry: with realistic min_mint_amount succeeds
-        let success_mint = client.add_liquidity(&user, &500_000, &500_000, &500_000);
+        let success_mint = client.add_liquidity(&user, &500_000, &500_000, &500_000, &ctx(&client));
         assert!(success_mint >= 500_000);
         assert_eq!(t0_client.balance(&user), 9_500_000);
         assert_eq!(t1_client.balance(&user), 9_500_000);
@@ -1094,37 +1259,37 @@ mod tests {
         let t1_client = token::Client::new(&env, &token1);
 
         // 1. Swap on empty pool fails with InsufficientLiquidity without modifying balances
-        let res_empty = client.try_swap(&user, &token0, &100_000, &0);
+        let res_empty = client.try_swap(&user, &token0, &100_000, &0, &ctx(&client));
         assert_eq!(res_empty, Err(Ok(StableSwapError::InsufficientLiquidity)));
         assert_eq!(t0_client.balance(&user), 10_000_000);
 
         // Bootstrap pool liquidity
-        client.add_liquidity(&user, &1_000_000, &1_000_000, &1_000_000);
+        client.add_liquidity(&user, &1_000_000, &1_000_000, &1_000_000, &ctx(&client));
         let bal0_after_liq = t0_client.balance(&user);
         let bal1_after_liq = t1_client.balance(&user);
         let reserves_after_liq = client.get_reserves();
 
         // 2. Zero amount_in rejected
-        let res_zero = client.try_swap(&user, &token0, &0, &0);
+        let res_zero = client.try_swap(&user, &token0, &0, &0, &ctx(&client));
         assert_eq!(res_zero, Err(Ok(StableSwapError::InvalidAmount)));
         assert_eq!(t0_client.balance(&user), bal0_after_liq);
         assert_eq!(t1_client.balance(&user), bal1_after_liq);
 
         // 3. Negative min_out rejected
-        let res_neg_out = client.try_swap(&user, &token0, &10_000, &-1);
+        let res_neg_out = client.try_swap(&user, &token0, &10_000, &-1, &ctx(&client));
         assert_eq!(res_neg_out, Err(Ok(StableSwapError::InvalidAmount)));
         assert_eq!(t0_client.balance(&user), bal0_after_liq);
 
         // 4. Untrusted token address rejected with typed InvalidToken
         let bogus_token = Address::generate(&env);
-        let res_bogus = client.try_swap(&user, &bogus_token, &10_000, &0);
+        let res_bogus = client.try_swap(&user, &bogus_token, &10_000, &0, &ctx(&client));
         assert_eq!(res_bogus, Err(Ok(StableSwapError::InvalidToken)));
         assert_eq!(t0_client.balance(&user), bal0_after_liq);
         assert_eq!(t1_client.balance(&user), bal1_after_liq);
         assert_eq!(client.get_reserves(), reserves_after_liq);
 
         // 5. Slippage exceeded rejected with InsufficientOutput and state preserved
-        let res_slip = client.try_swap(&user, &token0, &10_000, &999_999);
+        let res_slip = client.try_swap(&user, &token0, &10_000, &999_999, &ctx(&client));
         assert_eq!(res_slip, Err(Ok(StableSwapError::InsufficientOutput)));
         assert_eq!(t0_client.balance(&user), bal0_after_liq);
         assert_eq!(t1_client.balance(&user), bal1_after_liq);
@@ -1135,7 +1300,7 @@ mod tests {
     fn test_swap_safe_retry_after_failure() {
         let env = Env::default();
         let (client, user, token0, token1, _) = setup_pool_with_tokens(&env, 100);
-        client.add_liquidity(&user, &1_000_000, &1_000_000, &1_000_000);
+        client.add_liquidity(&user, &1_000_000, &1_000_000, &1_000_000, &ctx(&client));
 
         let t0_client = token::Client::new(&env, &token0);
         let t1_client = token::Client::new(&env, &token1);
@@ -1145,20 +1310,20 @@ mod tests {
         // Fail 1: malformed token
         let fake_token = Address::generate(&env);
         assert_eq!(
-            client.try_swap(&user, &fake_token, &50_000, &0),
+            client.try_swap(&user, &fake_token, &50_000, &0, &ctx(&client)),
             Err(Ok(StableSwapError::InvalidToken))
         );
         assert_eq!(t0_client.balance(&user), b0);
 
         // Fail 2: impossible slippage
         assert_eq!(
-            client.try_swap(&user, &token0, &50_000, &200_000),
+            client.try_swap(&user, &token0, &50_000, &200_000, &ctx(&client)),
             Err(Ok(StableSwapError::InsufficientOutput))
         );
         assert_eq!(t0_client.balance(&user), b0);
 
         // Retry: valid swap succeeds
-        let out = client.swap(&user, &token0, &50_000, &45_000);
+        let out = client.swap(&user, &token0, &50_000, &45_000, &ctx(&client));
         assert!(out >= 45_000);
         assert_eq!(t0_client.balance(&user), b0 - 50_000);
         assert_eq!(t1_client.balance(&user), b1 + out);
@@ -1172,33 +1337,34 @@ mod tests {
         let t0_client = token::Client::new(&env, &token0);
         let t1_client = token::Client::new(&env, &token1);
 
-        let mint = client.add_liquidity(&user, &1_000_000, &1_000_000, &1_000_000);
+        let mint = client.add_liquidity(&user, &1_000_000, &1_000_000, &1_000_000, &ctx(&client));
         let bal0 = t0_client.balance(&user);
         let bal1 = t1_client.balance(&user);
         let reserves = client.get_reserves();
 
         // 1. Zero lp_amount rejected
-        let res_zero = client.try_remove_liquidity(&user, &0, &0, &0);
+        let res_zero = client.try_remove_liquidity(&user, &0, &0, &0, &ctx(&client));
         assert_eq!(res_zero, Err(Ok(StableSwapError::InvalidAmount)));
         assert_eq!(client.get_lp_balance(&user), mint);
 
         // 2. Negative min_amount0 rejected
-        let res_neg0 = client.try_remove_liquidity(&user, &100, &-1, &0);
+        let res_neg0 = client.try_remove_liquidity(&user, &100, &-1, &0, &ctx(&client));
         assert_eq!(res_neg0, Err(Ok(StableSwapError::InvalidAmount)));
 
         // 3. Negative min_amount1 rejected
-        let res_neg1 = client.try_remove_liquidity(&user, &100, &0, &-1);
+        let res_neg1 = client.try_remove_liquidity(&user, &100, &0, &-1, &ctx(&client));
         assert_eq!(res_neg1, Err(Ok(StableSwapError::InvalidAmount)));
 
         // 4. lp_amount greater than user balance rejected
-        let res_too_much = client.try_remove_liquidity(&user, &(mint + 1), &0, &0);
+        let res_too_much = client.try_remove_liquidity(&user, &(mint + 1), &0, &0, &ctx(&client));
         assert_eq!(
             res_too_much,
             Err(Ok(StableSwapError::InsufficientLiquidity))
         );
 
         // 5. Slippage exceeded rejected
-        let res_slip = client.try_remove_liquidity(&user, &(mint / 2), &999_999_999, &0);
+        let res_slip =
+            client.try_remove_liquidity(&user, &(mint / 2), &999_999_999, &0, &ctx(&client));
         assert_eq!(res_slip, Err(Ok(StableSwapError::InsufficientOutput)));
 
         // Verify balances, LP and reserves completely preserved
@@ -1213,7 +1379,7 @@ mod tests {
     fn test_remove_liquidity_safe_retry_after_failure() {
         let env = Env::default();
         let (client, user, token0, token1, _) = setup_pool_with_tokens(&env, 100);
-        let mint = client.add_liquidity(&user, &1_000_000, &1_000_000, &1_000_000);
+        let mint = client.add_liquidity(&user, &1_000_000, &1_000_000, &1_000_000, &ctx(&client));
 
         let t0_client = token::Client::new(&env, &token0);
         let t1_client = token::Client::new(&env, &token1);
@@ -1221,13 +1387,15 @@ mod tests {
         let b1 = t1_client.balance(&user);
 
         // Excessive min_out fails
-        let fail_res = client.try_remove_liquidity(&user, &(mint / 2), &5_000_000, &0);
+        let fail_res =
+            client.try_remove_liquidity(&user, &(mint / 2), &5_000_000, &0, &ctx(&client));
         assert_eq!(fail_res, Err(Ok(StableSwapError::InsufficientOutput)));
         assert_eq!(client.get_lp_balance(&user), mint);
 
         // Safe retry with acceptable minimums succeeds
         let burn_amount = mint / 2;
-        let (out0, out1) = client.remove_liquidity(&user, &burn_amount, &100_000, &100_000);
+        let (out0, out1) =
+            client.remove_liquidity(&user, &burn_amount, &100_000, &100_000, &ctx(&client));
         assert!(out0 >= 100_000);
         assert!(out1 >= 100_000);
         assert_eq!(client.get_lp_balance(&user), mint - burn_amount);
@@ -1375,7 +1543,7 @@ mod tests {
         let (client, user, _token0, _token1, _) = setup_pool_with_tokens(&env, 100);
 
         // Smallest meaningful deposit.
-        let mint = client.add_liquidity(&user, &1, &1, &0);
+        let mint = client.add_liquidity(&user, &1, &1, &0, &ctx(&client));
         assert!(mint > 0);
         assert_eq!(client.get_reserves(), (1, 1));
 
@@ -1383,7 +1551,7 @@ mod tests {
         // LP balance, supply, and reserves untouched.
         let tiny = mint / 2;
         if tiny > 0 {
-            let res = client.try_remove_liquidity(&user, &tiny, &0, &0);
+            let res = client.try_remove_liquidity(&user, &tiny, &0, &0, &ctx(&client));
             assert_eq!(res, Err(Ok(StableSwapError::InsufficientLiquidity)));
             assert_eq!(client.get_lp_balance(&user), mint);
             assert_eq!(client.get_total_supply(), mint);
@@ -1391,7 +1559,7 @@ mod tests {
         }
 
         // Full exit returns exactly the reserves (floor division is exact here).
-        let (out0, out1) = client.remove_liquidity(&user, &mint, &0, &0);
+        let (out0, out1) = client.remove_liquidity(&user, &mint, &0, &0, &ctx(&client));
         assert_eq!((out0, out1), (1, 1));
         assert_eq!(client.get_reserves(), (0, 0));
         assert_eq!(client.get_total_supply(), 0);
@@ -1402,11 +1570,11 @@ mod tests {
         let env = Env::default();
         let (client, user, _token0, _token1, _) = setup_pool_with_tokens(&env, 100);
 
-        let mint = client.add_liquidity(&user, &1_000_000, &1_000_000, &0);
+        let mint = client.add_liquidity(&user, &1_000_000, &1_000_000, &0, &ctx(&client));
         let (reserve0, reserve1) = client.get_reserves();
         let lp_amount = mint / 3;
 
-        let (out0, out1) = client.remove_liquidity(&user, &lp_amount, &0, &0);
+        let (out0, out1) = client.remove_liquidity(&user, &lp_amount, &0, &0, &ctx(&client));
 
         // Payouts must equal floor(reserve * lp / supply): the pool never pays
         // out more than the proportional share.
@@ -1423,7 +1591,7 @@ mod tests {
         let t0_client = token::Client::new(&env, &token0);
         let t1_client = token::Client::new(&env, &token1);
 
-        client.add_liquidity(&user, &1_000, &1_000, &0);
+        client.add_liquidity(&user, &1_000, &1_000, &0, &ctx(&client));
         let reserves = client.get_reserves();
         let supply = client.get_total_supply();
         let bal0 = t0_client.balance(&user);
@@ -1431,7 +1599,7 @@ mod tests {
 
         // reserve + i128::MAX overflows: typed failure before any transfer.
         assert_eq!(
-            client.try_add_liquidity(&user, &i128::MAX, &1, &0),
+            client.try_add_liquidity(&user, &i128::MAX, &1, &0, &ctx(&client)),
             Err(Ok(StableSwapError::MathOverflow))
         );
         assert_eq!(client.get_reserves(), reserves);
@@ -1440,7 +1608,7 @@ mod tests {
         assert_eq!(t1_client.balance(&user), bal1);
 
         // Safe retry with a representable amount succeeds.
-        let mint = client.add_liquidity(&user, &1_000, &1_000, &0);
+        let mint = client.add_liquidity(&user, &1_000, &1_000, &0, &ctx(&client));
         assert!(mint > 0);
         assert_eq!(t0_client.balance(&user), bal0 - 1_000);
         assert_eq!(t1_client.balance(&user), bal1 - 1_000);
@@ -1453,14 +1621,14 @@ mod tests {
         let t0_client = token::Client::new(&env, &token0);
         let t1_client = token::Client::new(&env, &token1);
 
-        client.add_liquidity(&user, &1_000_000, &1_000_000, &0);
+        client.add_liquidity(&user, &1_000_000, &1_000_000, &0, &ctx(&client));
         let reserves = client.get_reserves();
         let bal0 = t0_client.balance(&user);
         let bal1 = t1_client.balance(&user);
 
         // `amount_in * fee_factor` cannot be represented: typed failure.
         assert_eq!(
-            client.try_swap(&user, &token0, &i128::MAX, &0),
+            client.try_swap(&user, &token0, &i128::MAX, &0, &ctx(&client)),
             Err(Ok(StableSwapError::MathOverflow))
         );
         assert_eq!(client.get_reserves(), reserves);
@@ -1468,9 +1636,279 @@ mod tests {
         assert_eq!(t1_client.balance(&user), bal1);
 
         // Safe retry.
-        let out = client.swap(&user, &token0, &100_000, &0);
+        let out = client.swap(&user, &token0, &100_000, &0, &ctx(&client));
         assert!(out > 0);
         assert_eq!(t0_client.balance(&user), bal0 - 100_000);
         assert_eq!(t1_client.balance(&user), bal1 + out);
+    }
+
+    // ── Network, ledger and version context binding (#1766) ────────────
+
+    mod pool_context_binding {
+        use super::*;
+        use soroban_sdk::testutils::Ledger;
+
+        const NET_A: [u8; 32] = [0xA1; 32];
+        const NET_B: [u8; 32] = [0xB2; 32];
+
+        /// Drop the context keys an older deployment never wrote, turning an
+        /// initialized pool into a legacy (version 0) pool.
+        fn degrade_to_legacy_pool(env: &Env, contract: &Address) {
+            env.as_contract(contract, || {
+                env.storage().instance().remove(&DataKey::NetworkId);
+                env.storage().instance().remove(&DataKey::StorageVersion);
+            });
+        }
+
+        fn set_version(env: &Env, contract: &Address, version: u32) {
+            env.as_contract(contract, || {
+                env.storage()
+                    .instance()
+                    .set(&DataKey::StorageVersion, &version);
+            });
+        }
+
+        #[test]
+        fn context_is_bound_to_network_deployment_and_version() {
+            let env = Env::default();
+            env.ledger().set_network_id(NET_A);
+            let (client, user, token0, _, _) = setup_pool_with_tokens(&env, 100);
+
+            let context = client.get_pool_context();
+            assert_eq!(context.network_id, BytesN::from_array(&env, &NET_A));
+            assert_eq!(context.contract, client.address);
+            assert_eq!(context.version, CURRENT_POOL_VERSION);
+
+            // Normal operation: every entry point accepts the captured context,
+            // and pool activity does not change it.
+            let mint = client.add_liquidity(&user, &1_000_000, &1_000_000, &0, &context);
+            client.swap(&user, &token0, &100_000, &0, &context);
+            client.remove_liquidity(&user, &(mint / 2), &0, &0, &context);
+            assert_eq!(client.get_pool_context(), context);
+            assert_eq!(client.get_lp_balance(&user), mint - mint / 2);
+        }
+
+        #[test]
+        fn legacy_pool_operates_until_migration_pins_the_binding() {
+            let env = Env::default();
+            env.ledger().set_network_id(NET_A);
+            let (client, user, token0, _, _) = setup_pool_with_tokens(&env, 100);
+            degrade_to_legacy_pool(&env, &client.address);
+
+            // No stored binding: the pool adopts the live network and stays at
+            // version 0, so pre-existing deployments keep working unchanged.
+            let legacy = client.get_pool_context();
+            assert_eq!(legacy.network_id, BytesN::from_array(&env, &NET_A));
+            assert_eq!(legacy.version, 0);
+            client.add_liquidity(&user, &1_000_000, &1_000_000, &0, &legacy);
+
+            let reserves = client.get_reserves();
+            let supply = client.get_total_supply();
+            let lp = client.get_lp_balance(&user);
+
+            // Migration pins the network and bumps the version without touching
+            // reserves, LP supply or balances.
+            let migrated = client.migrate();
+            assert_eq!(migrated.network_id, BytesN::from_array(&env, &NET_A));
+            assert_eq!(migrated.version, CURRENT_POOL_VERSION);
+            assert_eq!(client.get_reserves(), reserves);
+            assert_eq!(client.get_total_supply(), supply);
+            assert_eq!(client.get_lp_balance(&user), lp);
+
+            // Idempotent, and the bound context is what an operation accepts.
+            assert_eq!(client.migrate(), migrated);
+            let out = client.swap(&user, &token0, &10_000, &0, &migrated);
+            assert!(out > 0);
+        }
+
+        #[test]
+        fn stale_version_context_is_rejected_and_a_refreshed_retry_succeeds() {
+            let env = Env::default();
+            env.ledger().set_network_id(NET_A);
+            let (client, user, token0, token1, _) = setup_pool_with_tokens(&env, 100);
+            degrade_to_legacy_pool(&env, &client.address);
+
+            let legacy = client.get_pool_context();
+            client.add_liquidity(&user, &1_000_000, &1_000_000, &0, &legacy);
+            let reserves = client.get_reserves();
+            let supply = client.get_total_supply();
+            let lp = client.get_lp_balance(&user);
+            let t0 = token::Client::new(&env, &token0);
+            let t1 = token::Client::new(&env, &token1);
+            let bal0 = t0.balance(&user);
+            let bal1 = t1.balance(&user);
+
+            // The pool is migrated after the caller captured its context: the
+            // caller's snapshot is now from another version of the pool.
+            client.migrate();
+            assert_eq!(
+                client.try_swap(&user, &token0, &10_000, &0, &legacy),
+                Err(Ok(StableSwapError::WrongVersion))
+            );
+            assert_eq!(
+                client.try_remove_liquidity(&user, &(lp / 2), &0, &0, &legacy),
+                Err(Ok(StableSwapError::WrongVersion))
+            );
+            // Nothing moved and no LP was burned.
+            assert_eq!(t0.balance(&user), bal0);
+            assert_eq!(t1.balance(&user), bal1);
+            assert_eq!(client.get_reserves(), reserves);
+            assert_eq!(client.get_total_supply(), supply);
+            assert_eq!(client.get_lp_balance(&user), lp);
+
+            // Refresh the context and retry the same swap: it settles once.
+            let refreshed = client.get_pool_context();
+            let out = client.swap(&user, &token0, &10_000, &0, &refreshed);
+            assert!(out > 0);
+            assert_eq!(t0.balance(&user), bal0 - 10_000);
+            assert_eq!(t1.balance(&user), bal1 + out);
+        }
+
+        #[test]
+        fn state_read_on_another_network_is_rejected_and_recovers() {
+            let env = Env::default();
+            env.ledger().set_network_id(NET_A);
+            let (client, user, token0, _, _) = setup_pool_with_tokens(&env, 100);
+            let context = client.get_pool_context();
+            client.add_liquidity(&user, &1_000_000, &1_000_000, &0, &context);
+
+            let supply = client.get_total_supply();
+            let lp = client.get_lp_balance(&user);
+            let t0 = token::Client::new(&env, &token0);
+            let bal0 = t0.balance(&user);
+
+            // Ledger transition: the same entries are now read on another
+            // network, so they no longer describe a pool on this chain.
+            env.ledger().set_network_id(NET_B);
+            assert_eq!(
+                client.try_get_reserves(),
+                Err(Ok(StableSwapError::WrongNetwork))
+            );
+            assert_eq!(
+                client.try_swap(&user, &token0, &10_000, &0, &context),
+                Err(Ok(StableSwapError::WrongNetwork))
+            );
+            assert_eq!(
+                client.try_add_liquidity(&user, &1_000, &1_000, &0, &context),
+                Err(Ok(StableSwapError::WrongNetwork))
+            );
+            assert_eq!(
+                client.try_remove_liquidity(&user, &(lp / 2), &0, &0, &context),
+                Err(Ok(StableSwapError::WrongNetwork))
+            );
+            // A context captured on the other network is refused as well.
+            let mut foreign = context.clone();
+            foreign.network_id = BytesN::from_array(&env, &NET_B);
+            assert_eq!(
+                client.try_swap(&user, &token0, &10_000, &0, &foreign),
+                Err(Ok(StableSwapError::WrongNetwork))
+            );
+
+            // State and balances are untouched.
+            assert_eq!(t0.balance(&user), bal0);
+            assert_eq!(client.get_total_supply(), supply);
+            assert_eq!(client.get_lp_balance(&user), lp);
+
+            // Back on the bound network, the original context works again.
+            env.ledger().set_network_id(NET_A);
+            let out = client.swap(&user, &token0, &10_000, &0, &context);
+            assert!(out > 0);
+            assert_eq!(t0.balance(&user), bal0 - 10_000);
+            let (reserve0, _) = client.get_reserves();
+            assert!(reserve0 > 0);
+        }
+
+        #[test]
+        fn context_for_another_deployment_is_rejected_without_state_change() {
+            let env = Env::default();
+            env.ledger().set_network_id(NET_A);
+            let (client, user, _, _, _) = setup_pool_with_tokens(&env, 100);
+            client.add_liquidity(&user, &1_000_000, &1_000_000, &0, &ctx(&client));
+
+            let reserves = client.get_reserves();
+            let supply = client.get_total_supply();
+            let lp = client.get_lp_balance(&user);
+
+            let mut foreign = client.get_pool_context();
+            foreign.contract = Address::generate(&env);
+            assert_eq!(
+                client.try_add_liquidity(&user, &1_000, &1_000, &0, &foreign),
+                Err(Ok(StableSwapError::WrongContract))
+            );
+            assert_eq!(
+                client.try_remove_liquidity(&user, &(lp / 2), &0, &0, &foreign),
+                Err(Ok(StableSwapError::WrongContract))
+            );
+
+            assert_eq!(client.get_reserves(), reserves);
+            assert_eq!(client.get_total_supply(), supply);
+            assert_eq!(client.get_lp_balance(&user), lp);
+        }
+
+        #[test]
+        fn newer_stored_version_is_refused_rather_than_interpreted() {
+            let env = Env::default();
+            env.ledger().set_network_id(NET_A);
+            let (client, user, token0, _, _) = setup_pool_with_tokens(&env, 100);
+            client.add_liquidity(&user, &1_000_000, &1_000_000, &0, &ctx(&client));
+
+            let reserves = client.get_reserves();
+            let supply = client.get_total_supply();
+            let lp = client.get_lp_balance(&user);
+
+            // Code downgrade: the stored layout belongs to a newer version.
+            set_version(&env, &client.address, CURRENT_POOL_VERSION + 1);
+            let context = client.get_pool_context();
+            assert_eq!(context.version, CURRENT_POOL_VERSION + 1);
+
+            assert_eq!(
+                client.try_swap(&user, &token0, &10_000, &0, &context),
+                Err(Ok(StableSwapError::WrongVersion))
+            );
+            assert_eq!(client.try_migrate(), Err(Ok(StableSwapError::WrongVersion)));
+
+            assert_eq!(client.get_reserves(), reserves);
+            assert_eq!(client.get_total_supply(), supply);
+            assert_eq!(client.get_lp_balance(&user), lp);
+        }
+
+        #[test]
+        fn migration_never_rebinds_state_from_another_network() {
+            let env = Env::default();
+            env.ledger().set_network_id(NET_A);
+            let (client, user, _, _, _) = setup_pool_with_tokens(&env, 100);
+            client.add_liquidity(&user, &1_000_000, &1_000_000, &0, &ctx(&client));
+
+            env.ledger().set_network_id(NET_B);
+            assert_eq!(client.try_migrate(), Err(Ok(StableSwapError::WrongNetwork)));
+
+            // The original binding survived the rejected migration.
+            env.ledger().set_network_id(NET_A);
+            assert_eq!(
+                client.get_pool_context().network_id,
+                BytesN::from_array(&env, &NET_A)
+            );
+        }
+
+        #[test]
+        fn migration_requires_admin_authorization() {
+            let env = Env::default();
+            env.ledger().set_network_id(NET_A);
+            let (client, user, _, _, _) = setup_pool_with_tokens(&env, 100);
+            client.add_liquidity(&user, &1_000_000, &1_000_000, &0, &ctx(&client));
+            degrade_to_legacy_pool(&env, &client.address);
+
+            let reserves = client.get_reserves();
+            let supply = client.get_total_supply();
+
+            env.mock_auths(&[]);
+            assert!(client.try_migrate().is_err());
+
+            // Still an unbound legacy pool; nothing was migrated.
+            let context = client.get_pool_context();
+            assert_eq!(context.version, 0);
+            assert_eq!(client.get_reserves(), reserves);
+            assert_eq!(client.get_total_supply(), supply);
+        }
     }
 }
