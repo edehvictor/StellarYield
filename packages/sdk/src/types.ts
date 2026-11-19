@@ -1,9 +1,24 @@
 import { InvalidAmountError } from "./errors";
+import type { EndpointDiagnosticContext, SdkEndpointConfig } from "./endpoint";
+import type { SdkDiagnostic, SdkDiagnosticCode, SdkDiagnosticSeverity, SdkStage } from "./diagnostics";
+
+export type {
+  EndpointDiagnosticContext,
+  SdkEndpointConfig,
+  SdkDiagnostic,
+  SdkDiagnosticCode,
+  SdkDiagnosticSeverity,
+  SdkStage,
+};
 
 export interface VaultConfig {
   contractId: string;
   networkPassphrase: string;
   rpcUrl: string;
+  /** Optional backup/fallback RPC endpoint URLs. */
+  fallbackRpcUrls?: string[];
+  /** Optional diagnostic context. */
+  diagnosticContext?: EndpointDiagnosticContext;
   specHash?: string;
 }
 
@@ -37,11 +52,7 @@ export interface ApiCacheStore {
   set<T>(key: string, entry: ApiCacheEntry<T>): void | Promise<void>;
 }
 
-export interface ApiConfig extends ApiRetryConfig {
-  baseUrl: string;
-  /** Enables {@link ApiClient.cachedGet} offline/cache fallback. */
-  cacheStore?: ApiCacheStore;
-}
+export interface ApiConfig extends SdkEndpointConfig {}
 
 /** Options for a single ApiClient request. */
 export interface ApiRequestOptions {

@@ -99,6 +99,14 @@ const vaultData = await api.getVaultData('vault-contract-id');
   - `getTVL()`: Get Total Value Locked
   - `getHistoricalData()`: Get APY/TVL history
   - `getVaultData()`: Get complete vault data
+  - `configureEndpoint()`: Dynamically reconfigure endpoint parameters safely
+
+- **Endpoint Configuration & Privacy-Safe Diagnostics**:
+  - `validateEndpointConfig()` & `validateEndpointUrl()`: Validate base URLs, protocols, credentials, and retry parameters before network dispatch.
+  - Privacy-safe diagnostic contract: Errors carry structured `diagnostics` with `stage`, `code`, `summary`, `remediation`, and `retryable`.
+  - Secrets and credentials (passwords, tokens, secret seeds, addresses, internal paths) are automatically redacted with `privacySafe: true`.
+  - State & balance preservation: Failed validations or execution outages never mutate state; every failure diagnostic includes a `STATE_PRESERVED` entry (`stage: "state-persistence"`).
+  - Insufficient diagnostic context: When an endpoint returns empty, non-JSON, or missing diagnostic details, the SDK safely returns `CONTEXT_INSUFFICIENT` and indicates whether safe retry is possible.
 
 ## Deposit simulation fixtures
 
