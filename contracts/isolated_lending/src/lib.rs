@@ -204,6 +204,38 @@ pub enum PairDataKey {
     StorageVersion,
 }
 
+/// Operation that a caller can preflight without exposing balances or account data.
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DiagnosticOperation {
+    Supply,
+    Withdraw,
+    PostCollateral,
+    Borrow,
+    Repay,
+    WithdrawCollateral,
+}
+
+/// Safe next step for a failed preflight. These values are intentionally
+/// coarse so diagnostics never disclose private amounts or positions.
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DiagnosticRemediation {
+    InitializePair,
+    UsePositiveAmount,
+    SupplyLiquidity,
+    AddCollateral,
+    ReduceAmount,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FailureDiagnostic {
+    pub operation: DiagnosticOperation,
+    pub error_code: u32,
+    pub remediation: DiagnosticRemediation,
+}
+
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 #[repr(u32)]
@@ -339,6 +371,176 @@ pub struct IsolatedLendingPair;
 
 #[contractimpl]
 impl IsolatedLendingPair {
+    /// Return a privacy-safe explanation before attempting a state-changing
+    /// operation. This is read-only and never returns balances or amounts.
+    pub fn diagnose(
+        env: Env,
+        user: Address,
+        operation: DiagnosticOperation,
+        amount: i128,
+    ) -> Option<FailureDiagnostic> {
+        let diagnostic = |error: IsolatedLendingError, remediation: DiagnosticRemediation| {
+            Some(FailureDiagnostic {
+                operation,
+                error_code: error as u32,
+                remediation,
+            })
+        };
+
+        if !env.storage().instance().has(&PairDataKey::Initialized) {
+            return diagnostic(
+                IsolatedLendingError::NotInitialized,
+                DiagnosticRemediation::InitializePair,
+            );
+        }
+        if amount <= 0 {
+            return diagnostic(
+                IsolatedLendingError::InvalidAmount,
+                DiagnosticRemediation::UsePositiveAmount,
+            );
+        }
+
+        match operation {
+            DiagnosticOperation::Supply | DiagnosticOperation::PostCollateral => None,
+            DiagnosticOperation::Withdraw => {
+                let supplied: i128 = env
+                    .storage()
+                    .persistent()
+                    .get(&PairDataKey::Supply(user))
+                    .unwrap_or(0);
+                if supplied < amount {
+                    diagnostic(
+                        IsolatedLendingError::InsufficientLiquidity,
+                        DiagnosticRemediation::SupplyLiquidity,
+                    )
+                } else {
+                    None
+                }
+            }
+            DiagnosticOperation::Repay => {
+                let debt: i128 = env
+                    .storage()
+                    .persistent()
+                    .get(&PairDataKey::Debt(user))
+                    .unwrap_or(0);
+                if debt < amount {
+                    diagnostic(
+                        IsolatedLendingError::InvalidAmount,
+                        DiagnosticRemediation::ReduceAmount,
+                    )
+                } else {
+                    None
+                }
+            }
+            DiagnosticOperation::Borrow => {
+                let factor: u32 = env
+                    .storage()
+                    .instance()
+                    .get(&PairDataKey::CollateralFactorBps)
+                    .unwrap_or(0);
+                let collateral: i128 = env
+                    .storage()
+                    .persistent()
+                    .get(&PairDataKey::Collateral(user.clone()))
+                    .unwrap_or(0);
+                let debt: i128 = env
+                    .storage()
+                    .persistent()
+                    .get(&PairDataKey::Debt(user))
+                    .unwrap_or(0);
+                let new_debt = match debt.checked_add(amount) {
+                    Some(value) => value,
+                    None => {
+                        return diagnostic(
+                            IsolatedLendingError::MathOverflow,
+                            DiagnosticRemediation::ReduceAmount,
+                        )
+                    }
+                };
+                let limit = match collateral
+                    .checked_mul(factor as i128)
+                    .and_then(|value| value.checked_div(BPS_DENOMINATOR))
+                {
+                    Some(value) => value,
+                    None => {
+                        return diagnostic(
+                            IsolatedLendingError::MathOverflow,
+                            DiagnosticRemediation::AddCollateral,
+                        )
+                    }
+                };
+                if new_debt > limit {
+                    return diagnostic(
+                        IsolatedLendingError::InsufficientCollateral,
+                        DiagnosticRemediation::AddCollateral,
+                    );
+                }
+                let supplied: i128 = env
+                    .storage()
+                    .instance()
+                    .get(&PairDataKey::TotalSupplied)
+                    .unwrap_or(0);
+                let total_debt: i128 = env
+                    .storage()
+                    .instance()
+                    .get(&PairDataKey::TotalDebt)
+                    .unwrap_or(0);
+                if supplied.checked_sub(total_debt).unwrap_or(i128::MIN) < amount {
+                    diagnostic(
+                        IsolatedLendingError::InsufficientLiquidity,
+                        DiagnosticRemediation::SupplyLiquidity,
+                    )
+                } else {
+                    None
+                }
+            }
+            DiagnosticOperation::WithdrawCollateral => {
+                let collateral: i128 = env
+                    .storage()
+                    .persistent()
+                    .get(&PairDataKey::Collateral(user.clone()))
+                    .unwrap_or(0);
+                if collateral < amount {
+                    return diagnostic(
+                        IsolatedLendingError::InsufficientCollateral,
+                        DiagnosticRemediation::AddCollateral,
+                    );
+                }
+                let debt: i128 = env
+                    .storage()
+                    .persistent()
+                    .get(&PairDataKey::Debt(user))
+                    .unwrap_or(0);
+                let factor: u32 = env
+                    .storage()
+                    .instance()
+                    .get(&PairDataKey::CollateralFactorBps)
+                    .unwrap_or(0);
+                let remaining = collateral - amount;
+                let limit = match remaining
+                    .checked_mul(factor as i128)
+                    .and_then(|value| value.checked_div(BPS_DENOMINATOR))
+                {
+                    Some(value) => value,
+                    None => {
+                        return diagnostic(
+                            IsolatedLendingError::MathOverflow,
+                            DiagnosticRemediation::ReduceAmount,
+                        )
+                    }
+                };
+                if debt > limit {
+                    diagnostic(
+                        IsolatedLendingError::PositionStillBacked,
+                        DiagnosticRemediation::ReduceAmount,
+                    )
+                } else {
+                    None
+                }
+            }
+        }
+    }
+
     pub fn initialize(
         env: Env,
         admin: Address,
