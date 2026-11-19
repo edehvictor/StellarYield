@@ -224,4 +224,69 @@ describe("PortfolioDashboard — Distinguish unavailable valuations from zero ba
     });
     expect(screen.queryByTestId("valuation-refresh-error-banner")).not.toBeInTheDocument();
   });
+
+  it("rejects malformed refresh payloads, preserves state, and allows a safe retry", async () => {
+    const initial: VaultPosition[] = [
+      {
+        protocol: "Blend",
+        asset: "USDC",
+        deposited: 1000,
+        currentValue: 1050,
+        apy: 5.0,
+        shares: 1000,
+      },
+    ];
+
+    let malformed = true;
+    const onRefreshMock = vi.fn(async () => {
+      if (malformed) {
+        return [
+          {
+            protocol: "Blend",
+            asset: "USDC",
+            deposited: "not-a-number",
+            currentValue: 2000,
+            apy: 5.0,
+            shares: 1000,
+          },
+        ] as unknown as VaultPosition[];
+      }
+      return [
+        {
+          protocol: "Blend",
+          asset: "USDC",
+          deposited: 1000,
+          currentValue: 1100,
+          apy: 5.0,
+          shares: 1000,
+        },
+      ];
+    });
+
+    render(
+      <PortfolioDashboard
+        walletAddress={WALLET}
+        initialPositions={initial}
+        onRefresh={onRefreshMock}
+      />,
+    );
+
+    expect(screen.getByTestId("priced-holding-value")).toHaveTextContent("$1,050.00");
+
+    fireEvent.click(screen.getByTestId("refresh-portfolio-button"));
+
+    const errorBanner = await screen.findByTestId("valuation-refresh-error-banner");
+    expect(errorBanner).toHaveTextContent(
+      "Received invalid portfolio valuation data. Displaying last known positions.",
+    );
+    expect(screen.getByTestId("priced-holding-value")).toHaveTextContent("$1,050.00");
+
+    malformed = false;
+    fireEvent.click(screen.getByTestId("retry-refresh-button"));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("priced-holding-value")).toHaveTextContent("$1,100.00");
+    });
+    expect(screen.queryByTestId("valuation-refresh-error-banner")).not.toBeInTheDocument();
+  });
 });

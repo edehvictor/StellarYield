@@ -19,6 +19,7 @@ import {
   ApiRateLimitError,
   ApiServerError,
 } from "../errors";
+import { assertDepositSimulationParams } from "../simulationMath";
 
 export interface ApiRegisteredEndpoint {
   method: "GET" | "POST" | "PUT" | "DELETE" | "PATCH";
@@ -443,6 +444,7 @@ export class ApiClient {
     params: DepositSimulationParams,
     requestOptions?: ApiRequestOptions
   ): Promise<any> {
+    assertDepositSimulationParams(params);
     return this.request<any>(
       "/api/simulator/deposit",
       {
