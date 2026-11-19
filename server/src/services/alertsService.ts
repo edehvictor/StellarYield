@@ -82,13 +82,118 @@ export interface CreateAlertInput {
   thresholdValue: number;
   email: string;
   preferences?: AlertPreferences;
+  operationIdentity?: string;
+}
+
+export const ALERT_OPERATION_TTL_MS = 24 * 60 * 60 * 1000;
+
+export interface AlertOperationRecord {
+  operationIdentity: string;
+  fingerprint: string;
+  result: any;
+  createdAt: number;
 }
 
 const alertPreferencesStore = new Map<string, AlertPreferences>();
 const alertLastTriggeredStore = new Map<string, number>();
+const alertOperationStore = new Map<string, AlertOperationRecord>();
 
 function toAlertKey(walletAddress: string, vaultId: string) {
   return `${walletAddress.toLowerCase()}::${vaultId.toLowerCase()}`;
+}
+
+export function computeAlertFingerprint(input: {
+  walletAddress: string;
+  vaultId: string;
+  condition: AlertCondition;
+  thresholdValue: number;
+  email: string;
+  preferences?: AlertPreferences;
+}): string {
+  return JSON.stringify({
+    walletAddress: input.walletAddress.trim().toLowerCase(),
+    vaultId: input.vaultId.trim().toLowerCase(),
+    condition: input.condition,
+    thresholdValue: Number(input.thresholdValue),
+    email: input.email.trim().toLowerCase(),
+    preferences: input.preferences
+      ? {
+          channel: input.preferences.channel,
+          cooldownMinutes: Number(input.preferences.cooldownMinutes),
+          severityThreshold: Number(input.preferences.severityThreshold),
+          quietHoursStart: Number(input.preferences.quietHoursStart),
+          quietHoursEnd: Number(input.preferences.quietHoursEnd),
+        }
+      : null,
+  });
+}
+
+// ── Alert Preferences & Operation Identity ──────────────────────────────
+
+export function getAlertPreferences(
+  walletAddress: string,
+  vaultId: string,
+): AlertPreferences | undefined {
+  return alertPreferencesStore.get(toAlertKey(walletAddress, vaultId));
+}
+
+export function setAlertPreferences(
+  walletAddress: string,
+  vaultId: string,
+  preferences: AlertPreferences,
+  operationIdentity?: string,
+): { preferences: AlertPreferences; replayed: boolean } {
+  const key = toAlertKey(walletAddress, vaultId);
+  const currentFingerprint = JSON.stringify({
+    walletAddress: walletAddress.trim().toLowerCase(),
+    vaultId: vaultId.trim().toLowerCase(),
+    preferences: {
+      channel: preferences.channel,
+      cooldownMinutes: Number(preferences.cooldownMinutes),
+      severityThreshold: Number(preferences.severityThreshold),
+      quietHoursStart: Number(preferences.quietHoursStart),
+      quietHoursEnd: Number(preferences.quietHoursEnd),
+    },
+  });
+
+  if (operationIdentity) {
+    const existing = alertOperationStore.get(operationIdentity);
+    if (existing) {
+      if (Date.now() - existing.createdAt > ALERT_OPERATION_TTL_MS) {
+        alertOperationStore.delete(operationIdentity);
+      } else if (existing.fingerprint === currentFingerprint) {
+        return { preferences: existing.result as AlertPreferences, replayed: true };
+      } else {
+        const error = new Error(
+          "Operation identity has already been used with different parameters.",
+        );
+        (error as any).code = "OPERATION_IDENTITY_CONFLICT";
+        throw error;
+      }
+    }
+  }
+
+  alertPreferencesStore.set(key, preferences);
+
+  if (operationIdentity) {
+    alertOperationStore.set(operationIdentity, {
+      operationIdentity,
+      fingerprint: currentFingerprint,
+      result: preferences,
+      createdAt: Date.now(),
+    });
+  }
+
+  return { preferences, replayed: false };
+}
+
+export function clearAlertOperationStore(): void {
+  alertOperationStore.clear();
+}
+
+export function clearAlertPreferencesStore(): void {
+  alertPreferencesStore.clear();
+  alertLastTriggeredStore.clear();
 }
 
 // ── CRUD ────────────────────────────────────────────────────────────────
@@ -98,6 +203,25 @@ function toAlertKey(walletAddress: string, vaultId: string) {
  * Throws if the user already has MAX_ALERTS_PER_USER active alerts.
  */
 export async function createAlert(input: CreateAlertInput) {
+  const currentFingerprint = computeAlertFingerprint(input);
+
+  if (input.operationIdentity) {
+    const existing = alertOperationStore.get(input.operationIdentity);
+    if (existing) {
+      if (Date.now() - existing.createdAt > ALERT_OPERATION_TTL_MS) {
+        alertOperationStore.delete(input.operationIdentity);
+      } else if (existing.fingerprint === currentFingerprint) {
+        return { ...existing.result, __replayed: true };
+      } else {
+        const error = new Error(
+          "Operation identity has already been used with different parameters.",
+        );
+        (error as any).code = "OPERATION_IDENTITY_CONFLICT";
+        throw error;
+      }
+    }
+  }
+
   const activeCount = await prisma.userAlert.count({
     where: { walletAddress: input.walletAddress, status: "active" },
   });
@@ -131,6 +255,16 @@ export async function createAlert(input: CreateAlertInput) {
       reason: "Initial preference set on alert creation",
     });
   }
+
+  if (input.operationIdentity) {
+    alertOperationStore.set(input.operationIdentity, {
+      operationIdentity: input.operationIdentity,
+      fingerprint: currentFingerprint,
+      result: created,
+      createdAt: Date.now(),
+    });
+  }
+
   return created;
 }
 
