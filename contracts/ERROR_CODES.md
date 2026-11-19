@@ -71,6 +71,7 @@ Source: `contracts/stableswap/src/lib.rs`
 | 12   | `WrongNetwork`          | Live ledger or the caller's context is not the network the pool state is bound to, or `migrate` was asked to adopt another network's state | Read the pool on its bound network; retry with `get_pool_context()` |
 | 13   | `WrongContract`         | The caller's context names a different pool deployment | Use the context from the pool you are calling |
 | 14   | `WrongVersion`          | Stored state or the caller's context is not at the pool context version this code understands | Refresh with `get_pool_context()`; upgrade the contract if the stored version is newer |
+| 15   | `DuplicateOperation`    | `operation_id` was already consumed by a successful call of the same kind from the same sender | Treat the earlier submission as landed (check `is_operation_consumed`); use a fresh id for a new intent |
 
 `stableswap` uses checked arithmetic and documented floor rounding for every
 invariant, fee, deposit and withdrawal calculation. Boundary values (zero,
