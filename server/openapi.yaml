@@ -4382,13 +4382,151 @@ paths:
         '500':
           description: Failed to compute recommendation
 
+  /api/governance/forecast:
+    post:
+      summary: Compute impact forecast for a governance proposal
+      description: |
+        Returns estimated impact metrics for a proposed governance parameter change
+        (yield delta, fee revenue delta, exposure delta, risk score delta).
+
+        Deterministic, read-only endpoint (#1898):
+        - Uses checked arithmetic with strict boundary clamps and non-finite guards.
+        - Yield and exposure deltas are rounded half-up to 4 decimal places.
+        - Fee revenue delta is rounded half-up to 2 decimal places (cents).
+        - Risk score delta is rounded half-up to 2 decimal places.
+        - Preserves existing balances and state; rejects non-finite, out-of-range,
+          or negative inputs with structured diagnostic error responses.
+      tags:
+        - Governance
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - proposalType
+                - parameters
+                - baseline
+              properties:
+                proposalType:
+                  type: string
+                  enum: [fee_change, allocation_limit, strategy_param, reward_change]
+                  description: Type of governance proposal being modeled.
+                parameters:
+                  type: object
+                  description: Numeric parameters specific to the proposal type (all values must be finite numbers).
+                  additionalProperties:
+                    type: number
+                baseline:
+                  type: object
+                  required:
+                    - tvlUsd
+                    - yieldPct
+                    - feeRatePct
+                    - exposurePct
+                  properties:
+                    tvlUsd:
+                      type: number
+                      minimum: 0
+                      description: Baseline TVL in USD (must be non-negative and finite).
+                    yieldPct:
+                      type: number
+                      description: Baseline yield percentage (finite number).
+                    feeRatePct:
+                      type: number
+                      minimum: 0
+                      maximum: 100
+                      description: Baseline protocol fee rate (0 - 100%).
+                    exposurePct:
+                      type: number
+                      minimum: 0
+                      maximum: 100
+                      description: Baseline strategy exposure (0 - 100%).
+                    riskScore:
+                      type: number
+                      minimum: 0
+                      maximum: 100
+                      description: Optional baseline risk score (0 - 100).
+                    vaultCount:
+                      type: integer
+                      minimum: 0
+                      description: Optional active vault count.
+      responses:
+        '200':
+          description: Governance impact forecast computed successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  yieldPctDelta:
+                    type: number
+                    description: Projected change in yield (clamped to [-100, 1000], 4 decimal places).
+                  exposurePctDelta:
+                    type: number
+                    description: Projected change in exposure (clamped to [-100, 100], 4 decimal places).
+                  feeRevenueDeltaUsd:
+                    type: number
+                    description: Projected change in fee revenue in USD (2 decimal places).
+                  riskScoreDelta:
+                    type: number
+                    description: Projected change in risk score (clamped to [-100, 100], 2 decimal places).
+                  confidence:
+                    type: string
+                    enum: [low, medium, high]
+                  notes:
+                    type: array
+                    items:
+                      type: string
+        '400':
+          description: Validation failed (boundary violations, negative values, non-finite inputs). Preserves existing state.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string
+                    example: VALIDATION_FAILED
+                  message:
+                    type: string
+                  stage:
+                    type: string
+                    example: request-validation
+                  retryable:
+                    type: boolean
+                    example: true
+                  fields:
+                    type: array
+                    items:
+                      type: string
+                  diagnostics:
+                    type: array
+                    items:
+                      type: object
+        '429':
+          description: Rate limit exceeded (30 requests per 15 minutes)
+        '500':
+          description: Internal calculation error. State preserved.
+
   /api/governance/quorum-progress:
     post:
       summary: Compute multi-sig signer quorum progress
       description: |
         Deterministic quorum progress for a multi-sig operation: signed count,
         required threshold, remaining signatures, progress percentage, met flag,
-        and per-signer status. Read-only (#1310).
+        and per-signer status. Read-only (#1310, #1898).
+
+        Boundary & Rounding Invariants:
+        - Progress percentage is rounded to the nearest integer using standard half-up rounding.
+        - Critical boundary: `progressPct` is capped at 99% until quorum is strictly met
+          (e.g., 999/1000 signatures produces 99%, never premature 100%).
+        - `progressPct` reaches 100% if and only if `met` is true.
+        - Negative thresholds are rejected with 400 VALIDATION_FAILED.
+        - Thresholds exceeding signer count are clamped safely to total signers.
+        - A threshold of 0 is immediately satisfied (`met: true`, `progressPct: 100`).
+        - Preserves existing proposal and balance state on any error.
       tags:
         - Governance
       requestBody:
@@ -4414,7 +4552,8 @@ paths:
                   description: Public keys that have signed so far
                 threshold:
                   type: number
-                  description: Required signature threshold
+                  minimum: 0
+                  description: Required signature threshold (non-negative integer or number)
       responses:
         '200':
           description: Quorum progress
@@ -4431,6 +4570,8 @@ paths:
                     type: integer
                   progressPct:
                     type: integer
+                    minimum: 0
+                    maximum: 100
                   met:
                     type: boolean
                   perSigner:
@@ -4443,7 +4584,29 @@ paths:
                         signed:
                           type: boolean
         '400':
-          description: Invalid request body
+          description: Validation failed (negative threshold, malformed arrays). Preserves state.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string
+                    example: VALIDATION_FAILED
+                  message:
+                    type: string
+                  stage:
+                    type: string
+                  retryable:
+                    type: boolean
+                  fields:
+                    type: array
+                    items:
+                      type: string
+                  diagnostics:
+                    type: array
+                    items:
+                      type: object
 
   /api/preferences/audit/{walletAddress}:
     get:
