@@ -291,4 +291,68 @@ describe('StrategyComparison Component', () => {
       expect(screen.getByText('Blend')).toBeInTheDocument();
     });
   });
+  // #1922: boundary-value regressions
+  it('renders zero and near-limit values with documented rounding', async () => {
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => [
+        {
+          ...mockYields[0],
+          totalApy: 8.675,
+          liquidityUsd: 999_950,
+          managementFeeBps: 0,
+          performanceFeeBps: 10_000,
+          riskScore: 0,
+        },
+      ],
+    });
+
+    render(<StrategyComparison />);
+
+    await waitFor(() => {
+      expect(screen.getByText('Blend')).toBeInTheDocument();
+    });
+    expect(screen.getByText('8.68')).toBeInTheDocument();
+    expect(screen.getByText('$1.00M')).toBeInTheDocument();
+    expect(screen.getByText('100.00')).toBeInTheDocument();
+    expect(screen.getByText('0.00')).toBeInTheDocument();
+  });
+
+  it('skips entries past a limit instead of rendering NaN or Infinity', async () => {
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => [
+        { ...mockYields[0], performanceFeeBps: 10_001 },
+        { ...mockYields[1], riskScore: 101 },
+        { ...mockYields[2], totalApy: Number.POSITIVE_INFINITY },
+      ],
+    });
+
+    render(<StrategyComparison />);
+
+    await waitFor(() => {
+      expect(screen.getByText('No Strategy Data Available')).toBeInTheDocument();
+    });
+    expect(screen.queryByText(/NaN|Infinity/)).not.toBeInTheDocument();
+  });
+
+  it('treats a non-list payload as a failure and recovers on retry', async () => {
+    global.fetch = vi
+      .fn()
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ unexpected: true }) })
+      .mockResolvedValueOnce({ ok: true, json: async () => mockYields });
+
+    render(<StrategyComparison />);
+
+    await waitFor(() => {
+      expect(screen.getByText('Strategy Comparison Temporarily Unavailable')).toBeInTheDocument();
+    });
+
+    await userEvent.click(screen.getByRole('button', { name: /Try Again/i }));
+
+    await waitFor(() => {
+      expect(screen.getByText('Blend')).toBeInTheDocument();
+    });
+    expect(global.fetch).toHaveBeenCalledTimes(2);
+  });
 });
