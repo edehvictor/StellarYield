@@ -28,6 +28,11 @@ See [Zap event reference](../../docs/contracts/zap-events.md) for indexer field 
 - `SlippageExceeded`
 - `SwapFailed`
 
+Clients can call `get_error_diagnostic(error_code)` after a failed
+simulation. It returns a privacy-safe stage (`Validation`, `Router`, or
+`Vault`), a short remediation symbol, and whether retrying is appropriate. It
+never includes addresses, balances, quotes, or other route context.
+
 ## Storage Model
 
 - Instance keys: `Admin`, `DexRouter`, `Initialized`

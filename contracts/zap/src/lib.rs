@@ -39,6 +39,25 @@ pub enum ZapError {
     QuoteExpired = 4001,
 }
 
+/// Coarse-grained context for a failed route. It deliberately contains no
+/// addresses, balances, quotes, or other user-specific data.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ZapStage {
+    Validation,
+    Router,
+    Vault,
+}
+
+/// Privacy-safe remediation metadata for clients that receive a `ZapError`.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ZapDiagnostic {
+    pub stage: ZapStage,
+    pub remediation: Symbol,
+    pub retryable: bool,
+}
+
 // ── Contract ─────────────────────────────────────────────────────────────────
 
 #[contract]
@@ -46,6 +65,24 @@ pub struct Zap;
 
 #[contractimpl]
 impl Zap {
+    /// Map a returned error code to a safe stage and remediation hint.
+    /// This view never exposes route inputs, balances, or contract addresses.
+    pub fn get_error_diagnostic(env: Env, error_code: u32) -> ZapDiagnostic {
+        let (stage, remediation, retryable) = match error_code {
+            3 | 4001 => (ZapStage::Validation, symbol_short!("refresh"), true),
+            5 | 6 => (ZapStage::Router, symbol_short!("retry"), true),
+            4 => (ZapStage::Validation, symbol_short!("authorize"), false),
+            1 | 2 => (ZapStage::Validation, symbol_short!("setup"), false),
+            _ => (ZapStage::Vault, symbol_short!("verify"), false),
+        };
+        let _ = env;
+        ZapDiagnostic {
+            stage,
+            remediation,
+            retryable,
+        }
+    }
+
     /// Initialize the Zap contract with an admin and DEX router address.
     ///
     /// # Arguments
@@ -465,7 +502,6 @@ mod tests {
             env.storage()
                 .instance()
                 .set(&RouterKey::ZapCaller, &zap_caller);
-            env.storage().instance().set(&RouterKey::Output, &amount_out);
             env.storage()
                 .instance()
                 .set(&RouterKey::Output, &amount_out);
@@ -474,13 +510,6 @@ mod tests {
                 .set(&RouterKey::InputUsed, &input_used);
         }
 
-        pub fn swap(
-            env: Env,
-            from: Address,
-            to: Address,
-            amount_in: i128,
-            min_out: i128,
-        ) -> i128 {
         pub fn swap(env: Env, from: Address, to: Address, amount_in: i128, min_out: i128) -> i128 {
             let router = env.current_contract_address();
             let zap: Address = env
@@ -501,11 +530,17 @@ mod tests {
 
             let _ = min_out;
 
-            let in_client = token::Client::new(&env, &from);
-            in_client.transfer_from(&router, &zap, &router, &input_used.min(amount_in));
+            // A dry-run uses min_out == 0 and must not require an allowance or
+            // move funds. Real swaps still exercise the allowance path.
+            if min_out > 0 {
+                let in_client = token::Client::new(&env, &from);
+                in_client.transfer_from(&router, &zap, &router, &input_used.min(amount_in));
+            }
 
             let out_client = token::Client::new(&env, &to);
-            out_client.transfer(&router, &zap, &amount_out);
+            if min_out > 0 {
+                out_client.transfer(&router, &zap, &amount_out);
+            }
 
             amount_out
         }
@@ -556,7 +591,6 @@ mod tests {
         input_token: Address,
         vault_token: Address,
         vault_id: Address,
-        router_id: Address,
         router: MockDexRouterClient<'static>,
     }
 
@@ -598,7 +632,6 @@ mod tests {
             input_token,
             vault_token,
             vault_id,
-            router_id,
             router,
         }
     }
@@ -795,6 +828,9 @@ mod tests {
             &1_000,
         );
         assert_eq!(res, Err(Ok(ZapError::SwapFailed)));
+    }
+
+    #[test]
     fn test_set_dex_router_missing_admin_returns_typed_error() {
         let t = setup_zap_env();
         t.env.as_contract(&t.zap_id, || {
@@ -856,19 +892,6 @@ mod tests {
         let t = setup_zap_env();
         StellarAssetClient::new(&t.env, &t.vault_token).mint(&t.user, &1_000);
 
-        let shares = t
-            .zap
-            .zap_deposit(
-                &t.user,
-                &t.vault_token,
-                &t.vault_token,
-                &t.vault_id,
-                &1_000,
-                &0,
-                &1,
-                &0,
-                &false,
-            );
         let shares = t.zap.zap_deposit(
             &t.user,
             &t.vault_token,
@@ -907,22 +930,6 @@ mod tests {
     #[test]
     fn test_zap_deposit_swap_full_emits_zap_dep() {
         let t = setup_zap_env();
-        t.router
-            .configure(&t.zap_id, &900, &1_000);
-
-        let shares = t
-            .zap
-            .zap_deposit(
-                &t.user,
-                &t.input_token,
-                &t.vault_token,
-                &t.vault_id,
-                &1_000,
-                &800,
-                &1,
-                &900,
-                &false,
-            );
         t.router.configure(&t.zap_id, &900, &1_000);
 
         let shares = t.zap.zap_deposit(
@@ -953,19 +960,6 @@ mod tests {
         let t = setup_zap_env();
         t.router.configure(&t.zap_id, &600, &1_000);
 
-        let shares = t
-            .zap
-            .zap_deposit(
-                &t.user,
-                &t.input_token,
-                &t.vault_token,
-                &t.vault_id,
-                &1_000,
-                &500,
-                &1,
-                &900,
-                &true,
-            );
         let shares = t.zap.zap_deposit(
             &t.user,
             &t.input_token,
@@ -992,10 +986,6 @@ mod tests {
             .find(|(contract, topics, _)| {
                 *contract == t.zap_id && event_topic(&t.env, topics) == symbol_short!("zap_part")
             })
-            .map(|(_, _, data)| data.clone())
-            .unwrap();
-        let decoded: (Address, Address, Address, i128, i128, i128) =
-            part_data.into_val(&t.env);
             .map(|(_, _, data)| data)
             .unwrap();
         let decoded: (Address, Address, Address, i128, i128, i128) = part_data.into_val(&t.env);
@@ -1013,18 +1003,6 @@ mod tests {
         // Router consumes only 600 of 1000 input; 400 should be refunded.
         t.router.configure(&t.zap_id, &900, &600);
 
-        t.zap
-            .zap_deposit(
-                &t.user,
-                &t.input_token,
-                &t.vault_token,
-                &t.vault_id,
-                &1_000,
-                &800,
-                &1,
-                &900,
-                &false,
-            );
         t.zap.zap_deposit(
             &t.user,
             &t.input_token,
@@ -1050,7 +1028,6 @@ mod tests {
             .find(|(contract, topics, _)| {
                 *contract == t.zap_id && event_topic(&t.env, topics) == symbol_short!("zap_ref")
             })
-            .map(|(_, _, data)| data.clone())
             .map(|(_, _, data)| data)
             .unwrap();
         let decoded: (Address, Address, i128, Symbol) = ref_data.into_val(&t.env);
@@ -1069,18 +1046,17 @@ mod tests {
         let t = setup_zap_env();
         t.router.configure(&t.zap_id, &600, &600);
 
-        t.zap
-            .zap_deposit(
-                &t.user,
-                &t.input_token,
-                &t.vault_token,
-                &t.vault_id,
-                &1_000,
-                &500,
-                &1,
-                &900,
-                &true,
-            );
+        t.zap.zap_deposit(
+            &t.user,
+            &t.input_token,
+            &t.vault_token,
+            &t.vault_id,
+            &1_000,
+            &500,
+            &1,
+            &900,
+            &true,
+        );
         t.zap.zap_deposit(
             &t.user,
             &t.input_token,
@@ -1238,5 +1214,21 @@ mod tests {
     #[test]
     fn test_quote_expired_code_is_stable() {
         assert_eq!(ZapError::QuoteExpired as u32, 4001);
+    }
+
+    #[test]
+    fn error_diagnostic_is_privacy_safe_and_stage_specific() {
+        let env = Env::default();
+        let zap_id = env.register(Zap, ());
+        let zap = ZapClient::new(&env, &zap_id);
+
+        let diagnostic = zap.get_error_diagnostic(&(ZapError::SlippageExceeded as u32));
+        assert_eq!(diagnostic.stage, ZapStage::Router);
+        assert_eq!(diagnostic.remediation, symbol_short!("retry"));
+        assert!(diagnostic.retryable);
+
+        let expired = zap.get_error_diagnostic(&(ZapError::QuoteExpired as u32));
+        assert_eq!(expired.stage, ZapStage::Validation);
+        assert_eq!(expired.remediation, symbol_short!("refresh"));
     }
 }

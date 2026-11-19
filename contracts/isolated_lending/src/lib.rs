@@ -36,6 +36,7 @@ use soroban_sdk::{
 const BPS_DENOMINATOR: i128 = 10_000;
 /// Domain separator for the configuration fingerprint (versioned).
 const CONFIG_FINGERPRINT_DOMAIN: &[u8] = b"stellaryield_il_config_v1";
+const STATE_FINGERPRINT_DOMAIN: &[u8] = b"stellaryield_il_state_v1";
 /// Fixed-point scale of the borrow index (1.0 = `INDEX_SCALE`).
 const INDEX_SCALE: i128 = 1_000_000_000;
 /// Interest rates are parts per billion of the index, per ledger.
@@ -90,6 +91,28 @@ pub struct ConfigSnapshot {
     pub oracle_policy_configured: bool,
     pub oracle_min_confidence_bps: u32,
     pub oracle_max_age_ledgers: u32,
+}
+
+/// Dynamic market and subject state captured by a caller before a mutation.
+/// The corresponding fingerprint rejects stale previews before any write or
+/// token transfer, preventing a concurrent update from being overwritten.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StateSnapshot {
+    pub ledger: u32,
+    pub total_supplied: i128,
+    pub total_debt: i128,
+    pub pending_withdrawals: i128,
+    pub borrow_index: i128,
+    pub last_accrual_ledger: u32,
+    pub protocol_fees: i128,
+    pub bad_debt: i128,
+    pub subject: Address,
+    pub subject_supply: i128,
+    pub subject_pending_withdrawal: i128,
+    pub subject_collateral: i128,
+    pub subject_debt: i128,
+    pub subject_debt_index: i128,
 }
 
 /// Latest quote pushed by the configured oracle.
@@ -183,6 +206,8 @@ pub enum IsolatedLendingError {
     OracleQuoteStale = 13,
     OracleConfidenceTooLow = 14,
     StaleConfig = 15,
+    /// Dynamic market or subject state changed since the caller's preview.
+    StaleState = 16,
 }
 
 #[contract]
@@ -1104,6 +1129,120 @@ impl IsolatedLendingPair {
         Self::config_fingerprint(&env)
     }
 
+    /// Fingerprint the dynamic market state and one subject's position.
+    /// Capture this immediately before preparing a state-changing operation,
+    /// then pass it to one of the `*_with_state` entry points.
+    pub fn get_state_fingerprint(
+        env: Env,
+        subject: Address,
+    ) -> Result<BytesN<32>, IsolatedLendingError> {
+        Self::require_init(&env)?;
+        Self::state_fingerprint(&env, &subject)
+    }
+
+    pub fn supply_with_state(
+        env: Env,
+        user: Address,
+        amount: i128,
+        expected_state_fingerprint: BytesN<32>,
+    ) -> Result<(), IsolatedLendingError> {
+        Self::require_state(&env, &user, &expected_state_fingerprint)?;
+        Self::supply(env, user, amount)
+    }
+
+    pub fn withdraw_with_state(
+        env: Env,
+        user: Address,
+        amount: i128,
+        expected_state_fingerprint: BytesN<32>,
+    ) -> Result<(), IsolatedLendingError> {
+        Self::require_state(&env, &user, &expected_state_fingerprint)?;
+        Self::withdraw(env, user, amount)
+    }
+
+    pub fn post_collateral_with_state(
+        env: Env,
+        user: Address,
+        amount: i128,
+        expected_state_fingerprint: BytesN<32>,
+    ) -> Result<(), IsolatedLendingError> {
+        Self::require_state(&env, &user, &expected_state_fingerprint)?;
+        Self::post_collateral(env, user, amount)
+    }
+
+    pub fn queue_withdrawal_with_state(
+        env: Env,
+        user: Address,
+        amount: i128,
+        expected_state_fingerprint: BytesN<32>,
+    ) -> Result<(), IsolatedLendingError> {
+        Self::require_state(&env, &user, &expected_state_fingerprint)?;
+        Self::queue_withdrawal(env, user, amount)
+    }
+
+    pub fn repay_with_state(
+        env: Env,
+        user: Address,
+        amount: i128,
+        expected_state_fingerprint: BytesN<32>,
+    ) -> Result<(), IsolatedLendingError> {
+        Self::require_state(&env, &user, &expected_state_fingerprint)?;
+        Self::repay(env, user, amount)
+    }
+
+    pub fn repay_for_with_state(
+        env: Env,
+        payer: Address,
+        borrower: Address,
+        amount: i128,
+        expected_state_fingerprint: BytesN<32>,
+    ) -> Result<(), IsolatedLendingError> {
+        Self::require_state(&env, &borrower, &expected_state_fingerprint)?;
+        Self::repay_for(env, payer, borrower, amount)
+    }
+
+    pub fn borrow_with_state(
+        env: Env,
+        user: Address,
+        amount: i128,
+        expected_config_fingerprint: BytesN<32>,
+        expected_state_fingerprint: BytesN<32>,
+    ) -> Result<(), IsolatedLendingError> {
+        Self::require_state(&env, &user, &expected_state_fingerprint)?;
+        Self::borrow(env, user, amount, expected_config_fingerprint)
+    }
+
+    pub fn withdraw_collateral_with_state(
+        env: Env,
+        user: Address,
+        amount: i128,
+        expected_config_fingerprint: BytesN<32>,
+        expected_state_fingerprint: BytesN<32>,
+    ) -> Result<(), IsolatedLendingError> {
+        Self::require_state(&env, &user, &expected_state_fingerprint)?;
+        Self::withdraw_collateral(env, user, amount, expected_config_fingerprint)
+    }
+
+    pub fn liquidate_with_state(
+        env: Env,
+        liquidator: Address,
+        borrower: Address,
+        liquidation_id: u64,
+        repay_amount: i128,
+        expected_config_fingerprint: BytesN<32>,
+        expected_state_fingerprint: BytesN<32>,
+    ) -> Result<i128, IsolatedLendingError> {
+        Self::require_state(&env, &borrower, &expected_state_fingerprint)?;
+        Self::liquidate(
+            env,
+            liquidator,
+            borrower,
+            liquidation_id,
+            repay_amount,
+            expected_config_fingerprint,
+        )
+    }
+
     pub fn get_totals(env: Env) -> Result<(i128, i128), IsolatedLendingError> {
         Self::require_init(&env)?;
         Ok((
@@ -1176,6 +1315,71 @@ impl IsolatedLendingPair {
         let mut preimage = Bytes::from_slice(env, CONFIG_FINGERPRINT_DOMAIN);
         preimage.append(&Self::config_snapshot(env).to_xdr(env));
         Ok(env.crypto().sha256(&preimage).to_bytes())
+    }
+
+    fn state_snapshot(env: &Env, subject: &Address) -> StateSnapshot {
+        let read = |key: PairDataKey| env.storage().persistent().get(&key).unwrap_or(0);
+        StateSnapshot {
+            ledger: env.ledger().sequence(),
+            total_supplied: env
+                .storage()
+                .instance()
+                .get(&PairDataKey::TotalSupplied)
+                .unwrap_or(0),
+            total_debt: env
+                .storage()
+                .instance()
+                .get(&PairDataKey::TotalDebt)
+                .unwrap_or(0),
+            pending_withdrawals: env
+                .storage()
+                .instance()
+                .get(&PairDataKey::PendingWithdrawals)
+                .unwrap_or(0),
+            borrow_index: env
+                .storage()
+                .instance()
+                .get(&PairDataKey::BorrowIndex)
+                .unwrap_or(INDEX_SCALE),
+            last_accrual_ledger: env
+                .storage()
+                .instance()
+                .get(&PairDataKey::LastAccrualLedger)
+                .unwrap_or(env.ledger().sequence()),
+            protocol_fees: env
+                .storage()
+                .instance()
+                .get(&PairDataKey::ProtocolFees)
+                .unwrap_or(0),
+            bad_debt: env
+                .storage()
+                .instance()
+                .get(&PairDataKey::BadDebt)
+                .unwrap_or(0),
+            subject: subject.clone(),
+            subject_supply: read(PairDataKey::Supply(subject.clone())),
+            subject_pending_withdrawal: read(PairDataKey::PendingWithdrawal(subject.clone())),
+            subject_collateral: read(PairDataKey::Collateral(subject.clone())),
+            subject_debt: read(PairDataKey::Debt(subject.clone())),
+            subject_debt_index: read(PairDataKey::DebtIndex(subject.clone())),
+        }
+    }
+
+    fn state_fingerprint(env: &Env, subject: &Address) -> Result<BytesN<32>, IsolatedLendingError> {
+        let mut preimage = Bytes::from_slice(env, STATE_FINGERPRINT_DOMAIN);
+        preimage.append(&Self::state_snapshot(env, subject).to_xdr(env));
+        Ok(env.crypto().sha256(&preimage).to_bytes())
+    }
+
+    fn require_state(
+        env: &Env,
+        subject: &Address,
+        expected: &BytesN<32>,
+    ) -> Result<(), IsolatedLendingError> {
+        if Self::state_fingerprint(env, subject)? != *expected {
+            return Err(IsolatedLendingError::StaleState);
+        }
+        Ok(())
     }
 
     /// Reject an operation whose caller observed a different configuration.
@@ -2064,7 +2268,6 @@ mod test {
         env: Env,
         admin: Address,
         borrower: Address,
-        lender: Address,
         col_a: Address,
         debt_a: Address,
         col_b: Address,
@@ -2098,7 +2301,6 @@ mod test {
             env,
             admin,
             borrower,
-            lender,
             col_a,
             debt_a,
             col_b,
@@ -3175,6 +3377,27 @@ mod test {
         assert_eq!(
             pair.try_get_totals(),
             Err(Ok(IsolatedLendingError::NotInitialized))
+        );
+    }
+
+    #[test]
+    fn stale_state_is_rejected_before_a_guarded_mutation() {
+        let s = setup();
+        let state = s.pair.get_state_fingerprint(&s.borrower);
+        mint(&s.env, &s.collateral_token, &s.borrower, 10);
+        s.pair.post_collateral(&s.borrower, &10);
+        let position_before = s.pair.get_position(&s.borrower);
+        let balance_before = balance(&s.env, &s.collateral_token, &s.borrower);
+
+        assert_eq!(
+            s.pair
+                .try_post_collateral_with_state(&s.borrower, &5, &state),
+            Err(Ok(IsolatedLendingError::StaleState))
+        );
+        assert_eq!(s.pair.get_position(&s.borrower), position_before);
+        assert_eq!(
+            balance(&s.env, &s.collateral_token, &s.borrower),
+            balance_before
         );
     }
 }
