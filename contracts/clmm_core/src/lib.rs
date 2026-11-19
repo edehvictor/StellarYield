@@ -6,7 +6,8 @@
 //! custom price ranges, and NFT-style position tracking for capital efficiency.
 
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, symbol_short, token, Address, Env,
+    contract, contracterror, contractimpl, contracttype, symbol_short, token, xdr::ToXdr, Address,
+    BytesN, Env,
 };
 
 mod math;
@@ -30,6 +31,8 @@ pub enum DataKey {
     FeeGrowthGlobal1X128,
     Tick(i32),
     Position(u64),
+    PositionConfigFingerprint(u64),
+    ConfigFingerprint,
     NextPositionId,
 }
 
@@ -73,6 +76,8 @@ pub enum ClmmError {
     PriceLimitExceeded = 7,
     Unauthorized = 8,
     InvalidPosition = 9,
+    StaleConfiguration = 10,
+    ArithmeticError = 11,
 }
 
 // ── Contract ────────────────────────────────────────────────────────────
@@ -127,6 +132,10 @@ impl ClmmCore {
             .instance()
             .set(&DataKey::NextPositionId, &1u64);
         env.storage().instance().set(&DataKey::Initialized, &true);
+        let fingerprint = Self::configuration_fingerprint(&env);
+        env.storage()
+            .instance()
+            .set(&DataKey::ConfigFingerprint, &fingerprint);
 
         env.events().publish(
             (symbol_short!("init"),),
@@ -158,6 +167,7 @@ impl ClmmCore {
         amount1_max: u128,
     ) -> Result<(u64, u128, u128), ClmmError> {
         Self::require_init(&env)?;
+        Self::validate_configuration(&env, None)?;
         owner.require_auth();
 
         if amount == 0 {
@@ -181,16 +191,24 @@ impl ClmmCore {
             return Err(ClmmError::InvalidAmount);
         }
 
-        // Update ticks
+        if amount > i128::MAX as u128 || amount0 > i128::MAX as u128 || amount1 > i128::MAX as u128
+        {
+            return Err(ClmmError::ArithmeticError);
+        }
+
+        // Update ticks only after every validation that can fail has completed.
         tick::update_tick(&env, tick_lower, amount as i128, false)?;
         tick::update_tick(&env, tick_upper, -(amount as i128), false)?;
 
         // Update global liquidity if position is active
         if tick_lower <= current_tick && current_tick < tick_upper {
             let liquidity: u128 = env.storage().instance().get(&DataKey::Liquidity).unwrap();
+            let next_liquidity = liquidity
+                .checked_add(amount)
+                .ok_or(ClmmError::ArithmeticError)?;
             env.storage()
                 .instance()
-                .set(&DataKey::Liquidity, &(liquidity + amount));
+                .set(&DataKey::Liquidity, &next_liquidity);
         }
 
         // Transfer tokens from owner
@@ -247,6 +265,11 @@ impl ClmmCore {
         env.storage()
             .persistent()
             .set(&DataKey::Position(position_id), &position);
+        let fingerprint = Self::configuration_fingerprint(&env);
+        env.storage().persistent().set(
+            &DataKey::PositionConfigFingerprint(position_id),
+            &fingerprint,
+        );
         env.storage()
             .instance()
             .set(&DataKey::NextPositionId, &(position_id + 1));
@@ -276,10 +299,15 @@ impl ClmmCore {
             .get(&DataKey::Position(position_id))
             .ok_or(ClmmError::InvalidPosition)?;
 
+        Self::validate_configuration(&env, Some(position_id))?;
+
         position.owner.require_auth();
 
         if amount == 0 || amount > position.liquidity {
             return Err(ClmmError::InsufficientLiquidity);
+        }
+        if amount > i128::MAX as u128 {
+            return Err(ClmmError::ArithmeticError);
         }
 
         let current_tick: i32 = env.storage().instance().get(&DataKey::CurrentTick).unwrap();
@@ -304,15 +332,24 @@ impl ClmmCore {
         // Update global liquidity if position is active
         if position.tick_lower <= current_tick && current_tick < position.tick_upper {
             let liquidity: u128 = env.storage().instance().get(&DataKey::Liquidity).unwrap();
+            let next_liquidity = liquidity
+                .checked_sub(amount)
+                .ok_or(ClmmError::InsufficientLiquidity)?;
             env.storage()
                 .instance()
-                .set(&DataKey::Liquidity, &(liquidity - amount));
+                .set(&DataKey::Liquidity, &next_liquidity);
         }
 
         // Update position
         position.liquidity -= amount;
-        position.tokens_owed_0 += amount0;
-        position.tokens_owed_1 += amount1;
+        position.tokens_owed_0 = position
+            .tokens_owed_0
+            .checked_add(amount0)
+            .ok_or(ClmmError::ArithmeticError)?;
+        position.tokens_owed_1 = position
+            .tokens_owed_1
+            .checked_add(amount1)
+            .ok_or(ClmmError::ArithmeticError)?;
 
         env.storage()
             .persistent()
@@ -532,6 +569,8 @@ impl ClmmCore {
             .get(&DataKey::Position(position_id))
             .ok_or(ClmmError::InvalidPosition)?;
 
+        Self::validate_configuration(&env, Some(position_id))?;
+
         position.owner.require_auth();
 
         // Calculate fees earned
@@ -556,15 +595,28 @@ impl ClmmCore {
             fee_growth_global_1,
         );
 
-        let fees_0 = ((fee_growth_inside_0 - position.fee_growth_inside_0_last_x128)
-            * position.liquidity)
+        let fees_0 = fee_growth_inside_0
+            .checked_sub(position.fee_growth_inside_0_last_x128)
+            .and_then(|delta| delta.checked_mul(position.liquidity))
+            .ok_or(ClmmError::ArithmeticError)?
             / math::Q128;
-        let fees_1 = ((fee_growth_inside_1 - position.fee_growth_inside_1_last_x128)
-            * position.liquidity)
+        let fees_1 = fee_growth_inside_1
+            .checked_sub(position.fee_growth_inside_1_last_x128)
+            .and_then(|delta| delta.checked_mul(position.liquidity))
+            .ok_or(ClmmError::ArithmeticError)?
             / math::Q128;
 
-        let collect_0 = position.tokens_owed_0 + fees_0;
-        let collect_1 = position.tokens_owed_1 + fees_1;
+        let collect_0 = position
+            .tokens_owed_0
+            .checked_add(fees_0)
+            .ok_or(ClmmError::ArithmeticError)?;
+        let collect_1 = position
+            .tokens_owed_1
+            .checked_add(fees_1)
+            .ok_or(ClmmError::ArithmeticError)?;
+        if collect_0 > i128::MAX as u128 || collect_1 > i128::MAX as u128 {
+            return Err(ClmmError::ArithmeticError);
+        }
 
         // Transfer fees to owner
         let token0_addr: Address = env.storage().instance().get(&DataKey::Token0).unwrap();
@@ -640,6 +692,38 @@ impl ClmmCore {
     fn require_init(env: &Env) -> Result<(), ClmmError> {
         if !env.storage().instance().has(&DataKey::Initialized) {
             return Err(ClmmError::NotInitialized);
+        }
+        Ok(())
+    }
+
+    fn configuration_fingerprint(env: &Env) -> BytesN<32> {
+        let token0: Address = env.storage().instance().get(&DataKey::Token0).unwrap();
+        let token1: Address = env.storage().instance().get(&DataKey::Token1).unwrap();
+        let fee: u32 = env.storage().instance().get(&DataKey::Fee).unwrap();
+        let tick_spacing: i32 = env.storage().instance().get(&DataKey::TickSpacing).unwrap();
+        let preimage = (symbol_short!("clmm_cfg"), token0, token1, fee, tick_spacing).to_xdr(env);
+        env.crypto().sha256(&preimage).into()
+    }
+
+    fn validate_configuration(env: &Env, position_id: Option<u64>) -> Result<(), ClmmError> {
+        let current = Self::configuration_fingerprint(env);
+        let expected: BytesN<32> = env
+            .storage()
+            .instance()
+            .get(&DataKey::ConfigFingerprint)
+            .ok_or(ClmmError::StaleConfiguration)?;
+        if current != expected {
+            return Err(ClmmError::StaleConfiguration);
+        }
+        if let Some(id) = position_id {
+            let snapshot: BytesN<32> = env
+                .storage()
+                .persistent()
+                .get(&DataKey::PositionConfigFingerprint(id))
+                .ok_or(ClmmError::StaleConfiguration)?;
+            if snapshot != expected {
+                return Err(ClmmError::StaleConfiguration);
+            }
         }
         Ok(())
     }
@@ -722,12 +806,18 @@ mod tests {
         let (env, client, token0, token1) = setup_pool();
 
         let user = Address::generate(&env);
-        mint_tokens(&env, &token0, &user, 100_000);
-        mint_tokens(&env, &token1, &user, 100_000);
+        mint_tokens(&env, &token0, &user, 1_000_000_000_000_000_000);
+        mint_tokens(&env, &token1, &user, 1_000_000_000_000_000_000);
 
         // Mint position with tick range [-60, 60] (smaller range, aligned to tick spacing)
-        let (position_id, amount0, amount1) =
-            client.mint(&user, &-60, &60, &100_000, &100_000, &100_000);
+        let (position_id, _amount0, _amount1) = client.mint(
+            &user,
+            &-60,
+            &60,
+            &100_000,
+            &1_000_000_000_000_000_000,
+            &1_000_000_000_000_000_000,
+        );
 
         assert_eq!(position_id, 1);
 
@@ -735,5 +825,57 @@ mod tests {
         let position = client.get_position(&position_id);
         assert_eq!(position.owner, user);
         assert_eq!(position.liquidity, 100_000);
+    }
+
+    #[test]
+    fn stale_configuration_preserves_position_and_allows_retry() {
+        let (env, client, token0, token1) = setup_pool();
+        let owner = Address::generate(&env);
+        mint_tokens(&env, &token0, &owner, 1_000_000_000_000_000_000);
+        mint_tokens(&env, &token1, &owner, 1_000_000_000_000_000_000);
+        let (position_id, _, _) = client.mint(
+            &owner,
+            &-60,
+            &60,
+            &100_000,
+            &1_000_000_000_000_000_000,
+            &1_000_000_000_000_000_000,
+        );
+        let contract_id = client.address.clone();
+
+        env.as_contract(&contract_id, || {
+            let original = env
+                .storage()
+                .instance()
+                .get::<_, u32>(&DataKey::Fee)
+                .unwrap();
+            let position_before: Position = env
+                .storage()
+                .persistent()
+                .get(&DataKey::Position(position_id))
+                .unwrap();
+            env.storage().instance().set(&DataKey::Fee, &(original + 1));
+            assert_eq!(
+                ClmmCore::validate_configuration(&env, Some(position_id)),
+                Err(ClmmError::StaleConfiguration)
+            );
+            let position_after: Position = env
+                .storage()
+                .persistent()
+                .get(&DataKey::Position(position_id))
+                .unwrap();
+            assert_eq!(position_after.liquidity, position_before.liquidity);
+            assert_eq!(position_after.tokens_owed_0, position_before.tokens_owed_0);
+            assert_eq!(position_after.tokens_owed_1, position_before.tokens_owed_1);
+            env.storage().instance().set(&DataKey::Fee, &original);
+            assert_eq!(
+                ClmmCore::validate_configuration(&env, Some(position_id)),
+                Ok(())
+            );
+        });
+
+        let (amount0, amount1) = client.burn(&position_id, &100_000);
+        assert_eq!(client.get_position(&position_id).liquidity, 0);
+        assert!(amount0 > 0 || amount1 > 0);
     }
 }

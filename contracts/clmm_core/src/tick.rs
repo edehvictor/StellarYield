@@ -42,20 +42,33 @@ pub fn update_tick(
     let liquidity_gross_before = info.liquidity_gross;
 
     // Update gross liquidity (always positive)
-    let liquidity_gross_after = if liquidity_delta < 0 {
+    // Mint uses (+ at lower, - at upper); burn uses (- at lower, + at upper).
+    // The boundary and sign together distinguish additions from removals.
+    let is_addition = upper == (liquidity_delta < 0);
+    let gross_delta = liquidity_delta.unsigned_abs();
+    let liquidity_gross_after = if is_addition {
         info.liquidity_gross
-            .saturating_sub((-liquidity_delta) as u128)
+            .checked_add(gross_delta)
+            .ok_or(ClmmError::ArithmeticError)?
     } else {
-        info.liquidity_gross.saturating_add(liquidity_delta as u128)
+        info.liquidity_gross
+            .checked_sub(gross_delta)
+            .ok_or(ClmmError::InsufficientLiquidity)?
     };
 
     info.liquidity_gross = liquidity_gross_after;
 
     // Update net liquidity (directional)
     if upper {
-        info.liquidity_net = info.liquidity_net.saturating_sub(liquidity_delta);
+        info.liquidity_net = info
+            .liquidity_net
+            .checked_sub(liquidity_delta)
+            .ok_or(ClmmError::ArithmeticError)?;
     } else {
-        info.liquidity_net = info.liquidity_net.saturating_add(liquidity_delta);
+        info.liquidity_net = info
+            .liquidity_net
+            .checked_add(liquidity_delta)
+            .ok_or(ClmmError::ArithmeticError)?;
     }
 
     // Initialize tick if this is the first liquidity
