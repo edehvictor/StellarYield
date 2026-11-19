@@ -1,13 +1,50 @@
-# Isolated Lending — Configuration Fingerprints
+# Isolated Lending — Configuration Fingerprints and Network Context
 
 `contracts/isolated_lending` lets admins change market parameters at any time:
 collateral factor, collateral price, close factor, reserve requirement, interest
 rate, protocol fee, oracle address and oracle policy. A client that previews an
 operation under one configuration must not have it executed under another.
 
-The contract therefore exposes an **immutable configuration snapshot** and its
-**SHA-256 fingerprint**, and the entry points whose outcome depends on
-configuration require the caller to present that fingerprint.
+The contract exposes an **immutable configuration snapshot** and its **SHA-256
+fingerprint** (for configuration staleness), and an explicit **ledger context**
+(for network and version binding). Every state-modifying entry point requires
+both.
+
+## Ledger context binding
+
+`get_ledger_context() -> LedgerContext` returns the current network, deployment
+and version context:
+
+| Field | Meaning |
+|---|---|
+| `network_id` | SHA-256 of the network passphrase the pair state was initialised on |
+| `contract` | Address of this pair deployment |
+| `version` | Storage layout version (0 = legacy, 1 = current) |
+
+Callers capture this alongside `get_config_fingerprint()` before constructing a
+transaction and pass it as `expected_context` to every state-modifying call. The
+contract validates:
+
+1. `expected_context.network_id` equals the live network hash — rejects
+   `WrongNetwork` if the call arrives on a different network.
+2. `expected_context.contract` equals `env.current_contract_address()` — rejects
+   `WrongContract` if the caller's snapshot named a different deployment.
+3. `expected_context.version` equals the stored version — rejects `WrongVersion`
+   if the layout has been migrated between snapshot and execution.
+
+A legacy pair (version 0, initialised before this feature) has no stored binding
+and skips the network/version checks. Run `migrate(admin)` to stamp the live
+network and upgrade to version 1.
+
+### Entry points that require a context
+
+All state-modifying entry points now require `expected_context: LedgerContext`:
+`supply`, `withdraw`, `post_collateral`, `repay`, `repay_for`,
+`queue_withdrawal`, `borrow`, `withdraw_collateral`, and `liquidate`.
+
+Read-only entry points do not require one.
+
+## Configuration fingerprints
 
 ## Snapshot contents
 
@@ -125,6 +162,9 @@ invocations and decode the new `HealthFactor` shape.
 |---|---|---|
 | 4 | `InvalidConfig` | Invalid admin configuration value |
 | 15 | `StaleConfig` | Fingerprint does not match the current configuration; refresh and retry |
+| 16 | `WrongNetwork` | Context names a different network than the live ledger or stored binding |
+| 17 | `WrongContract` | Context names a different deployment address |
+| 18 | `WrongVersion` | Context storage version does not match the stored version |
 
 See `contracts/ERROR_CODES.md` for the full table.
 

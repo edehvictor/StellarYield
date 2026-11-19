@@ -27,6 +27,22 @@
 //! `MathOverflow`). A failing call returns before any token transfer or storage
 //! write, so balances, reserves, debt and configuration are unchanged and the
 //! same operation can be retried with corrected inputs.
+//!
+//! ## Network and ledger transition safety
+//!
+//! The pair's state is bound to an explicit `LedgerContext` (network passphrase
+//! hash + deployment address + storage version) on `initialize`. Every
+//! state-modifying entry point accepts an `expected_context` parameter and
+//! validates it against the live network, the stored binding, and the current
+//! storage version before interest accrues or tokens move. A mismatch fails
+//! with `WrongNetwork`, `WrongContract`, or `WrongVersion` and leaves all
+//! balances, positions, and totals unchanged, so the same call can be retried
+//! on the correct network once the client refreshes with `get_ledger_context`.
+//!
+//! Pairs initialized before context binding was introduced have no stored
+//! network binding; they continue operating unchanged and can be migrated by
+//! the admin via `migrate()`, which pins the live network and version without
+//! changing any financial state.
 
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, symbol_short, token, xdr::ToXdr, Address,
@@ -40,6 +56,9 @@ const CONFIG_FINGERPRINT_DOMAIN: &[u8] = b"stellaryield_il_config_v1";
 const INDEX_SCALE: i128 = 1_000_000_000;
 /// Interest rates are parts per billion of the index, per ledger.
 const RATE_SCALE: i128 = 1_000_000_000;
+/// Current storage layout version. Version 0 = pair existed before context
+/// binding; it keeps working and is bound on `migrate`.
+const CURRENT_STORAGE_VERSION: u32 = 1;
 
 #[contracttype]
 #[derive(Clone)]
@@ -65,6 +84,23 @@ pub struct PairConfig {
 pub struct OraclePolicyConfig {
     pub min_confidence_bps: u32,
     pub max_age_ledgers: u32,
+}
+
+/// Explicit network, deployment and version context of a lending pair.
+///
+/// Callers capture this via `get_ledger_context()` and pass it to every
+/// state-modifying entry point. An operation executes only when the live
+/// ledger network, the network the pair was initialised on, the deployment
+/// address, and the stored storage version all match the caller's snapshot.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LedgerContext {
+    /// SHA-256 of the network passphrase the pair state is bound to.
+    pub network_id: BytesN<32>,
+    /// Address of this pair deployment.
+    pub contract: Address,
+    /// Storage layout version of the pair state.
+    pub version: u32,
 }
 
 /// Immutable snapshot of the admin-controlled configuration that shapes
@@ -162,6 +198,10 @@ pub enum PairDataKey {
     Oracle,
     OraclePolicy,
     OracleQuote,
+    /// SHA-256 of the network passphrase this pair's state is bound to.
+    NetworkId,
+    /// Storage layout version of the stored state.
+    StorageVersion,
 }
 
 #[contracterror]
@@ -183,6 +223,14 @@ pub enum IsolatedLendingError {
     OracleQuoteStale = 13,
     OracleConfidenceTooLow = 14,
     StaleConfig = 15,
+    /// The live ledger or the caller's context belongs to a different network
+    /// than the pair's stored state, or the pair is already bound to another network.
+    WrongNetwork = 16,
+    /// The caller's context names a different pair deployment address.
+    WrongContract = 17,
+    /// The stored state or the caller's context is not at the storage version
+    /// this code understands.
+    WrongVersion = 18,
 }
 
 #[contract]
@@ -324,15 +372,24 @@ impl IsolatedLendingPair {
         env.storage()
             .instance()
             .set(&PairDataKey::TotalDebt, &0_i128);
+        // Bind this pair to the live network and current storage version.
+        let network_id = Self::live_network_id(&env);
+        env.storage()
+            .instance()
+            .set(&PairDataKey::NetworkId, &network_id);
+        env.storage()
+            .instance()
+            .set(&PairDataKey::StorageVersion, &CURRENT_STORAGE_VERSION);
         Ok(())
     }
 
-    pub fn supply(env: Env, user: Address, amount: i128) -> Result<(), IsolatedLendingError> {
+    pub fn supply(env: Env, user: Address, amount: i128, expected_context: LedgerContext) -> Result<(), IsolatedLendingError> {
         user.require_auth();
         if amount <= 0 {
             return Err(IsolatedLendingError::InvalidAmount);
         }
         Self::require_init(&env)?;
+        Self::require_context(&env, &expected_context)?;
         // Compute every checked value before moving tokens or writing storage:
         // returning `Err` does not roll back changes the call already made.
         let key = PairDataKey::Supply(user.clone());
@@ -366,12 +423,13 @@ impl IsolatedLendingPair {
         Ok(())
     }
 
-    pub fn withdraw(env: Env, user: Address, amount: i128) -> Result<(), IsolatedLendingError> {
+    pub fn withdraw(env: Env, user: Address, amount: i128, expected_context: LedgerContext) -> Result<(), IsolatedLendingError> {
         user.require_auth();
         if amount <= 0 {
             return Err(IsolatedLendingError::InvalidAmount);
         }
         Self::require_init(&env)?;
+        Self::require_context(&env, &expected_context)?;
 
         Self::accrue(&env)?;
 
@@ -419,12 +477,14 @@ impl IsolatedLendingPair {
         env: Env,
         user: Address,
         amount: i128,
+        expected_context: LedgerContext,
     ) -> Result<(), IsolatedLendingError> {
         user.require_auth();
         if amount <= 0 {
             return Err(IsolatedLendingError::InvalidAmount);
         }
         Self::require_init(&env)?;
+        Self::require_context(&env, &expected_context)?;
         // Checked before the transfer: an `Err` return would otherwise keep the
         // deposited tokens without crediting collateral.
         let key = PairDataKey::Collateral(user.clone());
@@ -450,10 +510,13 @@ impl IsolatedLendingPair {
     ///
     /// `expected_config_fingerprint` must equal `get_config_fingerprint`; a
     /// mismatch fails with `StaleConfig` before interest accrues or funds move.
+    /// `expected_context` must equal `get_ledger_context`; a mismatch fails
+    /// with `WrongNetwork`, `WrongContract`, or `WrongVersion` before accrual.
     pub fn borrow(
         env: Env,
         user: Address,
         amount: i128,
+        expected_context: LedgerContext,
         expected_config_fingerprint: BytesN<32>,
     ) -> Result<(), IsolatedLendingError> {
         user.require_auth();
@@ -461,6 +524,7 @@ impl IsolatedLendingPair {
             return Err(IsolatedLendingError::InvalidAmount);
         }
         Self::require_init(&env)?;
+        Self::require_context(&env, &expected_context)?;
         Self::require_config(&env, &expected_config_fingerprint)?;
         Self::check_oracle(&env)?;
         let index = Self::accrue(&env)?;
@@ -520,8 +584,10 @@ impl IsolatedLendingPair {
         Ok(())
     }
 
-    pub fn repay(env: Env, user: Address, amount: i128) -> Result<(), IsolatedLendingError> {
+    pub fn repay(env: Env, user: Address, amount: i128, expected_context: LedgerContext) -> Result<(), IsolatedLendingError> {
         user.require_auth();
+        Self::require_init(&env)?;
+        Self::require_context(&env, &expected_context)?;
         Self::repay_debt(&env, &user, &user, amount)
     }
 
@@ -533,8 +599,11 @@ impl IsolatedLendingPair {
         payer: Address,
         borrower: Address,
         amount: i128,
+        expected_context: LedgerContext,
     ) -> Result<(), IsolatedLendingError> {
         payer.require_auth();
+        Self::require_init(&env)?;
+        Self::require_context(&env, &expected_context)?;
         Self::repay_debt(&env, &payer, &borrower, amount)
     }
 
@@ -542,10 +611,13 @@ impl IsolatedLendingPair {
     ///
     /// `expected_config_fingerprint` must equal `get_config_fingerprint`; a
     /// mismatch fails with `StaleConfig` before interest accrues or funds move.
+    /// `expected_context` must equal `get_ledger_context`; a mismatch fails
+    /// with `WrongNetwork`, `WrongContract`, or `WrongVersion` before accrual.
     pub fn withdraw_collateral(
         env: Env,
         user: Address,
         amount: i128,
+        expected_context: LedgerContext,
         expected_config_fingerprint: BytesN<32>,
     ) -> Result<(), IsolatedLendingError> {
         user.require_auth();
@@ -553,6 +625,7 @@ impl IsolatedLendingPair {
             return Err(IsolatedLendingError::InvalidAmount);
         }
         Self::require_init(&env)?;
+        Self::require_context(&env, &expected_context)?;
         Self::require_config(&env, &expected_config_fingerprint)?;
 
         let collateral_key = PairDataKey::Collateral(user.clone());
@@ -601,12 +674,14 @@ impl IsolatedLendingPair {
         env: Env,
         user: Address,
         amount: i128,
+        expected_context: LedgerContext,
     ) -> Result<(), IsolatedLendingError> {
         user.require_auth();
         if amount <= 0 {
             return Err(IsolatedLendingError::InvalidAmount);
         }
         Self::require_init(&env)?;
+        Self::require_context(&env, &expected_context)?;
 
         let supply: i128 = env
             .storage()
@@ -718,6 +793,7 @@ impl IsolatedLendingPair {
         borrower: Address,
         liquidation_id: u64,
         repay_amount: i128,
+        expected_context: LedgerContext,
         expected_config_fingerprint: BytesN<32>,
     ) -> Result<i128, IsolatedLendingError> {
         liquidator.require_auth();
@@ -725,6 +801,7 @@ impl IsolatedLendingPair {
             return Err(IsolatedLendingError::InvalidAmount);
         }
         Self::require_init(&env)?;
+        Self::require_context(&env, &expected_context)?;
         Self::require_config(&env, &expected_config_fingerprint)?;
         let index = Self::accrue(&env)?;
 
@@ -1115,6 +1192,80 @@ impl IsolatedLendingPair {
         ))
     }
 
+    /// Current network, deployment and version context of this pair.
+    ///
+    /// Clients capture this before constructing a transaction and pass it as
+    /// `expected_context` to `supply`, `withdraw`, `post_collateral`, `borrow`,
+    /// `repay`, `repay_for`, `withdraw_collateral`, `queue_withdrawal` and
+    /// `liquidate`. An operation is rejected with `WrongNetwork`,
+    /// `WrongContract`, or `WrongVersion` if the context has changed.
+    ///
+    /// A legacy pair (initialized before context binding was added) has no
+    /// stored `NetworkId`; it returns a context with `version = 0`. It can
+    /// still execute all operations; the caller's snapshot simply has
+    /// `version = 0` and no network check is enforced. Run `migrate` to
+    /// stamp the live network and upgrade to `version = 1`.
+    pub fn get_ledger_context(env: Env) -> LedgerContext {
+        let network_id: Option<BytesN<32>> =
+            env.storage().instance().get(&PairDataKey::NetworkId);
+        let version: u32 = env
+            .storage()
+            .instance()
+            .get(&PairDataKey::StorageVersion)
+            .unwrap_or(0);
+        LedgerContext {
+            network_id: network_id
+                .unwrap_or_else(|| Self::live_network_id(&env)),
+            contract: env.current_contract_address(),
+            version,
+        }
+    }
+
+    /// Stamp the live network and storage version on a legacy pair.
+    ///
+    /// Idempotent: calling twice on the same network is a no-op. Calling on a
+    /// different network than the stored binding fails with `WrongNetwork`, so
+    /// state cannot be adopted by another network.
+    ///
+    /// Admin only. Does not change any financial state.
+    pub fn migrate(env: Env, admin: Address) -> Result<(), IsolatedLendingError> {
+        Self::require_admin(&env, &admin)?;
+        let live = Self::live_network_id(&env);
+        let stored: Option<BytesN<32>> =
+            env.storage().instance().get(&PairDataKey::NetworkId);
+        if let Some(ref s) = stored {
+            if *s != live {
+                return Err(IsolatedLendingError::WrongNetwork);
+            }
+            // Already migrated; version must be current.
+            let v: u32 = env
+                .storage()
+                .instance()
+                .get(&PairDataKey::StorageVersion)
+                .unwrap_or(0);
+            if v != CURRENT_STORAGE_VERSION {
+                env.storage()
+                    .instance()
+                    .set(&PairDataKey::StorageVersion, &CURRENT_STORAGE_VERSION);
+                env.events().publish(
+                    (symbol_short!("migrate"),),
+                    (admin, live, CURRENT_STORAGE_VERSION),
+                );
+            }
+            return Ok(());
+        }
+        // First migration: stamp network and version.
+        env.storage().instance().set(&PairDataKey::NetworkId, &live);
+        env.storage()
+            .instance()
+            .set(&PairDataKey::StorageVersion, &CURRENT_STORAGE_VERSION);
+        env.events().publish(
+            (symbol_short!("migrate"),),
+            (admin, live, CURRENT_STORAGE_VERSION),
+        );
+        Ok(())
+    }
+
     fn require_admin(env: &Env, admin: &Address) -> Result<(), IsolatedLendingError> {
         Self::require_init(env)?;
         admin.require_auth();
@@ -1483,6 +1634,58 @@ impl IsolatedLendingPair {
         }
         Ok(())
     }
+
+    /// SHA-256 of the live network passphrase.
+    fn live_network_id(env: &Env) -> BytesN<32> {
+        env.crypto()
+            .sha256(&env.ledger().network_passphrase())
+            .to_bytes()
+    }
+
+    /// Validate a caller's `expected_context` against the live network, the
+    /// stored binding, and the current storage version.
+    ///
+    /// A legacy pair with no stored `NetworkId` (version 0) passes silently:
+    /// it was initialized before context binding and keeps working unchanged.
+    fn require_context(
+        env: &Env,
+        expected: &LedgerContext,
+    ) -> Result<(), IsolatedLendingError> {
+        let live = Self::live_network_id(env);
+
+        // The caller's snapshot must name the live network.
+        if expected.network_id != live {
+            return Err(IsolatedLendingError::WrongNetwork);
+        }
+        // The caller's snapshot must name this contract.
+        if expected.contract != env.current_contract_address() {
+            return Err(IsolatedLendingError::WrongContract);
+        }
+
+        let stored_net: Option<BytesN<32>> =
+            env.storage().instance().get(&PairDataKey::NetworkId);
+        let stored_ver: u32 = env
+            .storage()
+            .instance()
+            .get(&PairDataKey::StorageVersion)
+            .unwrap_or(0);
+
+        // Legacy pair (no stored network): skip network/version enforcement.
+        if stored_net.is_none() {
+            return Ok(());
+        }
+
+        // The stored network must match the live network.
+        if stored_net.as_ref() != Some(&live) {
+            return Err(IsolatedLendingError::WrongNetwork);
+        }
+        // The caller's version must match what is stored.
+        if expected.version != stored_ver {
+            return Err(IsolatedLendingError::WrongVersion);
+        }
+
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -1506,6 +1709,11 @@ mod test {
         /// operation on this market, right now.
         fn fp(&self) -> BytesN<32> {
             self.pair.get_config_fingerprint()
+        }
+
+        /// Ledger context for this market's current deployment and network.
+        fn ctx(&self) -> LedgerContext {
+            self.pair.get_ledger_context()
         }
     }
 
@@ -1538,9 +1746,9 @@ mod test {
         let borrower = Address::generate(&env);
         mint(&env, &debt_token, &lender, 1_000);
         mint(&env, &collateral_token, &borrower, 100);
-        pair.supply(&lender, &1_000);
-        pair.post_collateral(&borrower, &100);
-        pair.borrow(&borrower, &80, &pair.get_config_fingerprint());
+        pair.supply(&lender, &1_000, &pair.get_ledger_context());
+        pair.post_collateral(&borrower, &100, &pair.get_ledger_context());
+        pair.borrow(&borrower, &80, &pair.get_ledger_context(), &pair.get_config_fingerprint());
 
         Setup {
             env,
@@ -1562,7 +1770,7 @@ mod test {
         mint(&s.env, &s.debt_token, &payer, 30);
         let borrower_balance = balance(&s.env, &s.debt_token, &s.borrower);
 
-        s.pair.repay_for(&payer, &s.borrower, &30);
+        s.pair.repay_for(&payer, &s.borrower, &30, &s.ctx());
 
         assert_eq!(s.pair.get_position(&s.borrower), (100, 50));
         assert_eq!(s.pair.get_totals(), (1_000, 50));
@@ -1580,7 +1788,7 @@ mod test {
         let payer = Address::generate(&s.env);
         mint(&s.env, &s.debt_token, &payer, 80);
 
-        s.pair.repay_for(&payer, &s.borrower, &80);
+        s.pair.repay_for(&payer, &s.borrower, &80, &s.ctx());
 
         assert_eq!(s.pair.get_position(&s.borrower), (100, 0));
         assert_eq!(s.pair.get_totals(), (1_000, 0));
@@ -1592,7 +1800,7 @@ mod test {
         let payer = Address::generate(&s.env);
         mint(&s.env, &s.debt_token, &payer, 100);
 
-        let res = s.pair.try_repay_for(&payer, &s.borrower, &81);
+        let res = s.pair.try_repay_for(&payer, &s.borrower, &81, &s.ctx());
         assert_eq!(res, Err(Ok(IsolatedLendingError::InvalidAmount)));
         assert_eq!(s.pair.get_position(&s.borrower), (100, 80));
     }
@@ -1605,12 +1813,12 @@ mod test {
         // 1_000 supplied, 80 borrowed -> 920 available.
         assert_eq!(s.pair.get_available_liquidity(), 920);
         mint(&s.env, &s.collateral_token, &s.borrower, 2_000);
-        s.pair.post_collateral(&s.borrower, &2_000);
+        s.pair.post_collateral(&s.borrower, &2_000, &s.ctx());
 
-        s.pair.borrow(&s.borrower, &920, &s.fp());
+        s.pair.borrow(&s.borrower, &920, &s.ctx(), &s.fp());
 
         assert_eq!(s.pair.get_available_liquidity(), 0);
-        let res = s.pair.try_borrow(&s.borrower, &1, &s.fp());
+        let res = s.pair.try_borrow(&s.borrower, &1, &s.ctx(), &s.fp());
         assert_eq!(res, Err(Ok(IsolatedLendingError::InsufficientLiquidity)));
     }
 
@@ -1618,23 +1826,23 @@ mod test {
     fn queued_withdrawals_reduce_borrowable_liquidity() {
         let s = setup();
         mint(&s.env, &s.collateral_token, &s.borrower, 2_000);
-        s.pair.post_collateral(&s.borrower, &2_000);
+        s.pair.post_collateral(&s.borrower, &2_000, &s.ctx());
 
-        s.pair.queue_withdrawal(&s.lender, &900);
+        s.pair.queue_withdrawal(&s.lender, &900, &s.ctx());
         assert_eq!(s.pair.get_available_liquidity(), 20);
 
-        let res = s.pair.try_borrow(&s.borrower, &21, &s.fp());
+        let res = s.pair.try_borrow(&s.borrower, &21, &s.ctx(), &s.fp());
         assert_eq!(res, Err(Ok(IsolatedLendingError::InsufficientLiquidity)));
-        s.pair.borrow(&s.borrower, &20, &s.fp());
+        s.pair.borrow(&s.borrower, &20, &s.ctx(), &s.fp());
     }
 
     #[test]
     fn withdrawing_clears_the_queued_amount() {
         let s = setup();
-        s.pair.queue_withdrawal(&s.lender, &500);
+        s.pair.queue_withdrawal(&s.lender, &500, &s.ctx());
         assert_eq!(s.pair.get_available_liquidity(), 420);
 
-        s.pair.withdraw(&s.lender, &500);
+        s.pair.withdraw(&s.lender, &500, &s.ctx());
 
         // 500 supplied, 80 borrowed, nothing queued.
         assert_eq!(s.pair.get_available_liquidity(), 420);
@@ -1643,7 +1851,7 @@ mod test {
     #[test]
     fn queued_withdrawal_cannot_exceed_supply() {
         let s = setup();
-        let res = s.pair.try_queue_withdrawal(&s.lender, &1_001);
+        let res = s.pair.try_queue_withdrawal(&s.lender, &1_001, &s.ctx());
         assert_eq!(res, Err(Ok(IsolatedLendingError::InsufficientLiquidity)));
     }
 
@@ -1669,7 +1877,7 @@ mod test {
 
         let res = s
             .pair
-            .try_liquidate(&liquidator, &s.borrower, &1, &80, &s.fp());
+            .try_liquidate(&liquidator, &s.borrower, &1, &80, &s.ctx(), &s.fp());
         assert_eq!(res, Err(Ok(IsolatedLendingError::PositionStillBacked)));
     }
 
@@ -1680,7 +1888,7 @@ mod test {
         let liquidator = Address::generate(&s.env);
         mint(&s.env, &s.debt_token, &liquidator, 80);
 
-        let seized = s.pair.liquidate(&liquidator, &s.borrower, &1, &80, &s.fp());
+        let seized = s.pair.liquidate(&liquidator, &s.borrower, &1, &80, &s.ctx(), &s.fp());
 
         assert_eq!(seized, 80);
         assert_eq!(s.pair.get_position(&s.borrower), (20, 0));
@@ -1697,11 +1905,11 @@ mod test {
         let liquidator = Address::generate(&s.env);
         mint(&s.env, &s.debt_token, &liquidator, 80);
 
-        s.pair.liquidate(&liquidator, &s.borrower, &7, &40, &s.fp());
+        s.pair.liquidate(&liquidator, &s.borrower, &7, &40, &s.ctx(), &s.fp());
         let after_first = s.pair.get_position(&s.borrower);
         let res = s
             .pair
-            .try_liquidate(&liquidator, &s.borrower, &7, &40, &s.fp());
+            .try_liquidate(&liquidator, &s.borrower, &7, &40, &s.ctx(), &s.fp());
 
         assert_eq!(res, Err(Ok(IsolatedLendingError::AlreadyLiquidated)));
         assert_eq!(s.pair.get_position(&s.borrower), after_first);
@@ -1717,13 +1925,13 @@ mod test {
         // No debt tokens yet, so the repayment transfer is rejected.
         assert!(s
             .pair
-            .try_liquidate(&liquidator, &s.borrower, &3, &40, &s.fp())
+            .try_liquidate(&liquidator, &s.borrower, &3, &40, &s.ctx(), &s.fp())
             .is_err());
         assert_eq!(s.pair.get_position(&s.borrower), (100, 80));
 
         mint(&s.env, &s.debt_token, &liquidator, 40);
         assert_eq!(
-            s.pair.liquidate(&liquidator, &s.borrower, &3, &40, &s.fp()),
+            s.pair.liquidate(&liquidator, &s.borrower, &3, &40, &s.ctx(), &s.fp()),
             40
         );
         assert_eq!(s.pair.get_position(&s.borrower), (60, 40));
@@ -1737,7 +1945,7 @@ mod test {
         let liquidator = Address::generate(&s.env);
         mint(&s.env, &s.debt_token, &liquidator, 80);
 
-        let seized = s.pair.liquidate(&liquidator, &s.borrower, &1, &80, &s.fp());
+        let seized = s.pair.liquidate(&liquidator, &s.borrower, &1, &80, &s.ctx(), &s.fp());
 
         assert_eq!(seized, 100);
         assert_eq!(s.pair.get_position(&s.borrower), (0, 0));
@@ -1771,7 +1979,7 @@ mod test {
         let liquidator = unhealthy_with_close_factor(&s);
 
         assert_eq!(
-            s.pair.liquidate(&liquidator, &s.borrower, &1, &20, &s.fp()),
+            s.pair.liquidate(&liquidator, &s.borrower, &1, &20, &s.ctx(), &s.fp()),
             20
         );
         assert_eq!(s.pair.get_position(&s.borrower), (80, 60));
@@ -1783,7 +1991,7 @@ mod test {
         let liquidator = unhealthy_with_close_factor(&s);
 
         assert_eq!(
-            s.pair.liquidate(&liquidator, &s.borrower, &1, &40, &s.fp()),
+            s.pair.liquidate(&liquidator, &s.borrower, &1, &40, &s.ctx(), &s.fp()),
             40
         );
         assert_eq!(s.pair.get_position(&s.borrower), (60, 40));
@@ -1796,7 +2004,7 @@ mod test {
 
         // Asked for 80 of 80, but only half the debt may be repaid at once.
         assert_eq!(
-            s.pair.liquidate(&liquidator, &s.borrower, &1, &80, &s.fp()),
+            s.pair.liquidate(&liquidator, &s.borrower, &1, &80, &s.ctx(), &s.fp()),
             40
         );
         assert_eq!(s.pair.get_position(&s.borrower), (60, 40));
@@ -1832,7 +2040,7 @@ mod test {
         assert_eq!(s.pair.get_position(&s.borrower), (100, 80));
         let payer = Address::generate(&s.env);
         mint(&s.env, &s.debt_token, &payer, 1);
-        s.pair.repay_for(&payer, &s.borrower, &1);
+        s.pair.repay_for(&payer, &s.borrower, &1, &s.ctx());
         assert_eq!(s.pair.get_position(&s.borrower), (100, 79));
         assert_eq!(s.pair.get_totals(), (1_000, 79));
     }
@@ -1868,8 +2076,8 @@ mod test {
         mint(&s.env, &s.debt_token, &payer, 20);
 
         set_ledger(&s.env, 1);
-        s.pair.repay_for(&payer, &s.borrower, &10);
-        s.pair.repay_for(&payer, &s.borrower, &10);
+        s.pair.repay_for(&payer, &s.borrower, &10, &s.ctx());
+        s.pair.repay_for(&payer, &s.borrower, &10, &s.ctx());
 
         // 80 + 10 interest - 20 repaid.
         assert_eq!(s.pair.get_position(&s.borrower), (100, 70));
@@ -1911,14 +2119,14 @@ mod test {
         mint(&s.env, &s.debt_token, &payer, 10);
 
         set_ledger(&s.env, 1);
-        s.pair.repay_for(&payer, &s.borrower, &10);
+        s.pair.repay_for(&payer, &s.borrower, &10, &s.ctx());
 
         // 920 + 10 repaid = 930 in the pair, 5 of it owed to the protocol.
         assert_eq!(
-            s.pair.try_withdraw(&s.lender, &926),
+            s.pair.try_withdraw(&s.lender, &926, &s.ctx()),
             Err(Ok(IsolatedLendingError::InsufficientLiquidity))
         );
-        s.pair.withdraw(&s.lender, &925);
+        s.pair.withdraw(&s.lender, &925, &s.ctx());
 
         let treasury = Address::generate(&s.env);
         assert_eq!(s.pair.claim_protocol_fees(&s.admin, &treasury), 5);
@@ -1935,11 +2143,11 @@ mod test {
         mint(&s.env, &s.debt_token, &payer, 90);
 
         set_ledger(&s.env, 1);
-        s.pair.repay_for(&payer, &s.borrower, &90);
+        s.pair.repay_for(&payer, &s.borrower, &90, &s.ctx());
         assert_eq!(s.pair.get_position(&s.borrower), (100, 0));
 
         // The lender redeems the whole deposit; the interest stays in the pair.
-        s.pair.withdraw(&s.lender, &1_000);
+        s.pair.withdraw(&s.lender, &1_000, &s.ctx());
         assert_eq!(balance(&s.env, &s.debt_token, &s.lender), 1_000);
 
         let treasury = Address::generate(&s.env);
@@ -1967,7 +2175,7 @@ mod test {
     /// policy of at least 80% confidence on quotes no older than 10 ledgers.
     fn with_oracle_policy(s: &Setup) -> Address {
         mint(&s.env, &s.collateral_token, &s.borrower, 100);
-        s.pair.post_collateral(&s.borrower, &100);
+        s.pair.post_collateral(&s.borrower, &100, &s.ctx());
         let oracle = Address::generate(&s.env);
         s.pair.set_oracle(&s.admin, &oracle);
         s.pair.set_oracle_policy(&s.admin, &8_000, &10);
@@ -1982,7 +2190,7 @@ mod test {
         s.pair.push_oracle_quote(&oracle, &10_000, &9_000);
         set_ledger(&s.env, 10);
 
-        s.pair.borrow(&s.borrower, &10, &s.fp());
+        s.pair.borrow(&s.borrower, &10, &s.ctx(), &s.fp());
         assert_eq!(s.pair.get_position(&s.borrower), (200, 90));
     }
 
@@ -1994,7 +2202,7 @@ mod test {
         s.pair.push_oracle_quote(&oracle, &10_000, &7_999);
 
         assert_eq!(
-            s.pair.try_borrow(&s.borrower, &10, &s.fp()),
+            s.pair.try_borrow(&s.borrower, &10, &s.ctx(), &s.fp()),
             Err(Ok(IsolatedLendingError::OracleConfidenceTooLow))
         );
     }
@@ -2008,7 +2216,7 @@ mod test {
         set_ledger(&s.env, 11);
 
         assert_eq!(
-            s.pair.try_borrow(&s.borrower, &10, &s.fp()),
+            s.pair.try_borrow(&s.borrower, &10, &s.ctx(), &s.fp()),
             Err(Ok(IsolatedLendingError::OracleQuoteStale))
         );
     }
@@ -2019,7 +2227,7 @@ mod test {
         with_oracle_policy(&s);
 
         assert_eq!(
-            s.pair.try_borrow(&s.borrower, &10, &s.fp()),
+            s.pair.try_borrow(&s.borrower, &10, &s.ctx(), &s.fp()),
             Err(Ok(IsolatedLendingError::OracleQuoteMissing))
         );
     }
@@ -2056,7 +2264,7 @@ mod test {
         mint(env, collateral_token, borrower, 100);
         pair.supply(lender, &1_000);
         pair.post_collateral(borrower, &100);
-        pair.borrow(borrower, &80, &pair.get_config_fingerprint());
+        pair.borrow(borrower, &80, &pair.get_ledger_context(), &pair.get_config_fingerprint());
         pair
     }
 
@@ -2138,6 +2346,7 @@ mod test {
                 &m.borrower,
                 &1,
                 &80,
+                &m.market_a.get_ledger_context(),
                 &m.market_a.get_config_fingerprint()
             ),
             80
@@ -2169,6 +2378,7 @@ mod test {
             &m.borrower,
             &1,
             &80,
+            &m.market_a.get_ledger_context(),
             &m.market_a.get_config_fingerprint(),
         );
 
@@ -2194,6 +2404,7 @@ mod test {
                 &m.borrower,
                 &1,
                 &80,
+                &m.market_a.get_ledger_context(),
                 &m.market_a.get_config_fingerprint()
             ),
             Err(Ok(IsolatedLendingError::PositionStillBacked))
@@ -2207,6 +2418,7 @@ mod test {
                 &m.borrower,
                 &1,
                 &80,
+                &m.market_b.get_ledger_context(),
                 &m.market_b.get_config_fingerprint()
             ),
             80
@@ -2230,6 +2442,7 @@ mod test {
                 &stranger,
                 &1,
                 &80,
+                &m.market_a.get_ledger_context(),
                 &m.market_a.get_config_fingerprint()
             )
             .is_err());
@@ -2251,6 +2464,7 @@ mod test {
             &m.borrower,
             &7,
             &40,
+            &m.market_a.get_ledger_context(),
             &m.market_a.get_config_fingerprint(),
         );
         assert_eq!(
@@ -2259,6 +2473,7 @@ mod test {
                 &m.borrower,
                 &7,
                 &40,
+                &m.market_a.get_ledger_context(),
                 &m.market_a.get_config_fingerprint()
             ),
             Err(Ok(IsolatedLendingError::AlreadyLiquidated))
@@ -2270,6 +2485,7 @@ mod test {
                 &m.borrower,
                 &7,
                 &40,
+                &m.market_b.get_ledger_context(),
                 &m.market_b.get_config_fingerprint()
             ),
             40
@@ -2290,6 +2506,7 @@ mod test {
             &m.borrower,
             &1,
             &80,
+            &m.market_a.get_ledger_context(),
             &m.market_a.get_config_fingerprint(),
         );
 
@@ -2320,6 +2537,7 @@ mod test {
             &borrower,
             &1,
             &80,
+            &market_a.get_ledger_context(),
             &market_a.get_config_fingerprint(),
         );
 
@@ -2371,6 +2589,7 @@ mod test {
             &borrower,
             &1,
             &80,
+            &market_a.get_ledger_context(),
             &market_a.get_config_fingerprint(),
         );
 
@@ -2399,7 +2618,7 @@ mod test {
         // 80 / 0.09 = 888 collateral would be seized; the pair holds 100.
         assert_eq!(
             s.pair
-                .try_liquidate(&liquidator, &s.borrower, &1, &80, &s.fp()),
+                .try_liquidate(&liquidator, &s.borrower, &1, &80, &s.ctx(), &s.fp()),
             Err(Ok(IsolatedLendingError::InsufficientCollateral))
         );
         // Rejected cleanly: no tokens moved and the liquidation id is still free.
@@ -2459,7 +2678,7 @@ mod test {
         );
         assert_eq!(
             s.pair
-                .try_liquidate(&liquidator, &s.borrower, &1, &80, &s.fp()),
+                .try_liquidate(&liquidator, &s.borrower, &1, &80, &s.ctx(), &s.fp()),
             Err(Ok(IsolatedLendingError::PositionStillBacked))
         );
 
@@ -2468,7 +2687,7 @@ mod test {
         let health = s.pair.get_health_factor(&s.borrower);
         assert_eq!((health.debt_value, health.collateral_value), (80, 90));
         assert_eq!(
-            s.pair.liquidate(&liquidator, &s.borrower, &1, &80, &s.fp()),
+            s.pair.liquidate(&liquidator, &s.borrower, &1, &80, &s.ctx(), &s.fp()),
             88
         );
     }
@@ -2487,7 +2706,7 @@ mod test {
     #[test]
     fn health_factor_with_empty_debt() {
         let s = setup();
-        s.pair.repay(&s.borrower, &80);
+        s.pair.repay(&s.borrower, &80, &s.ctx());
 
         let health = s.pair.get_health_factor(&s.borrower);
         assert_eq!((health.debt_value, health.collateral_value), (0, 100));
@@ -2541,7 +2760,7 @@ mod test {
         let payer = Address::generate(&s.env);
         mint(&s.env, &s.debt_token, &payer, 10);
         set_ledger(&s.env, 5);
-        s.pair.repay_for(&payer, &s.borrower, &10);
+        s.pair.repay_for(&payer, &s.borrower, &10, &s.ctx());
         s.pair.get_health_factor(&s.borrower);
         assert!(s.pair.get_available_liquidity() > 0);
 
@@ -2605,10 +2824,10 @@ mod test {
     fn borrow_with_current_fingerprint_succeeds() {
         let s = setup();
         mint(&s.env, &s.collateral_token, &s.borrower, 100);
-        s.pair.post_collateral(&s.borrower, &100);
+        s.pair.post_collateral(&s.borrower, &100, &s.ctx());
 
         // 200 of collateral at an 80% factor covers 160 of total debt.
-        s.pair.borrow(&s.borrower, &80, &s.fp());
+        s.pair.borrow(&s.borrower, &80, &s.ctx(), &s.fp());
 
         assert_eq!(s.pair.get_position(&s.borrower), (200, 160));
         // The setup already borrowed 80; this call added another 80.
@@ -2619,7 +2838,7 @@ mod test {
     fn borrow_with_stale_fingerprint_is_rejected_without_state_change() {
         let s = setup();
         mint(&s.env, &s.collateral_token, &s.borrower, 100);
-        s.pair.post_collateral(&s.borrower, &100);
+        s.pair.post_collateral(&s.borrower, &100, &s.ctx());
         let stale = s.fp();
 
         // The admin changes configuration after the client captured its snapshot.
@@ -2631,7 +2850,7 @@ mod test {
         let pair_balance = balance(&s.env, &s.debt_token, &s.pair.address);
 
         assert_eq!(
-            s.pair.try_borrow(&s.borrower, &50, &stale),
+            s.pair.try_borrow(&s.borrower, &50, &s.ctx(), &stale),
             Err(Ok(IsolatedLendingError::StaleConfig))
         );
 
@@ -2651,19 +2870,19 @@ mod test {
     fn borrow_retry_with_refreshed_fingerprint_succeeds() {
         let s = setup();
         mint(&s.env, &s.collateral_token, &s.borrower, 100);
-        s.pair.post_collateral(&s.borrower, &100);
+        s.pair.post_collateral(&s.borrower, &100, &s.ctx());
         let stale = s.fp();
         s.pair.set_reserve_bps(&s.admin, &100);
 
         assert_eq!(
-            s.pair.try_borrow(&s.borrower, &10, &stale),
+            s.pair.try_borrow(&s.borrower, &10, &s.ctx(), &stale),
             Err(Ok(IsolatedLendingError::StaleConfig))
         );
 
         // Refresh, then retry the same logical operation.
         let current = s.fp();
         assert_ne!(current, stale);
-        s.pair.borrow(&s.borrower, &10, &current);
+        s.pair.borrow(&s.borrower, &10, &s.ctx(), &current);
         assert_eq!(s.pair.get_position(&s.borrower), (200, 90));
     }
 
@@ -2671,18 +2890,18 @@ mod test {
     fn withdraw_collateral_with_stale_fingerprint_preserves_collateral() {
         let s = setup();
         mint(&s.env, &s.collateral_token, &s.borrower, 10);
-        s.pair.post_collateral(&s.borrower, &10);
+        s.pair.post_collateral(&s.borrower, &10, &s.ctx());
         let stale = s.fp();
         s.pair.set_reserve_bps(&s.admin, &100);
 
         assert_eq!(
-            s.pair.try_withdraw_collateral(&s.borrower, &10, &stale),
+            s.pair.try_withdraw_collateral(&s.borrower, &10, &s.ctx(), &stale),
             Err(Ok(IsolatedLendingError::StaleConfig))
         );
         assert_eq!(s.pair.get_position(&s.borrower), (110, 80));
         assert_eq!(balance(&s.env, &s.collateral_token, &s.borrower), 0);
 
-        s.pair.withdraw_collateral(&s.borrower, &10, &s.fp());
+        s.pair.withdraw_collateral(&s.borrower, &10, &s.ctx(), &s.fp());
         assert_eq!(s.pair.get_position(&s.borrower), (100, 80));
         assert_eq!(balance(&s.env, &s.collateral_token, &s.borrower), 10);
     }
@@ -2701,7 +2920,7 @@ mod test {
         let position = s.pair.get_position(&s.borrower);
         assert_eq!(
             s.pair
-                .try_liquidate(&liquidator, &s.borrower, &5, &40, &stale),
+                .try_liquidate(&liquidator, &s.borrower, &5, &40, &s.ctx(), &stale),
             Err(Ok(IsolatedLendingError::StaleConfig))
         );
         assert_eq!(s.pair.get_position(&s.borrower), position);
@@ -2711,7 +2930,7 @@ mod test {
         // Refresh and retry with the same liquidation id: the rejected attempt
         // consumed neither funds nor the id.
         assert_eq!(
-            s.pair.liquidate(&liquidator, &s.borrower, &5, &40, &s.fp()),
+            s.pair.liquidate(&liquidator, &s.borrower, &5, &40, &s.ctx(), &s.fp()),
             44
         );
         assert_eq!(s.pair.get_position(&s.borrower), (56, 40));
@@ -2749,7 +2968,7 @@ mod test {
         set_ledger(&s.env, 3);
         let before = read_accrual();
         assert_eq!(
-            s.pair.try_borrow(&s.borrower, &1, &stale),
+            s.pair.try_borrow(&s.borrower, &1, &s.ctx(), &stale),
             Err(Ok(IsolatedLendingError::StaleConfig))
         );
         assert_eq!(read_accrual(), before);
@@ -2828,7 +3047,7 @@ mod test {
 
         let user_balance = balance(&s.env, &s.collateral_token, &user);
         assert_eq!(
-            s.pair.try_post_collateral(&user, &1),
+            s.pair.try_post_collateral(&user, &1, &s.ctx()),
             Err(Ok(IsolatedLendingError::MathOverflow))
         );
         assert_eq!(balance(&s.env, &s.collateral_token, &user), user_balance);
@@ -2848,7 +3067,7 @@ mod test {
         assert_eq!(s.pair.get_totals().0, 0);
 
         assert_eq!(
-            s.pair.try_withdraw(&s.lender, &10),
+            s.pair.try_withdraw(&s.lender, &10, &s.ctx()),
             Err(Ok(IsolatedLendingError::MathOverflow))
         );
 
@@ -2873,7 +3092,7 @@ mod test {
 
         // 80 of debt against a 100 * 80% = 80 limit: one more unit is rejected.
         assert_eq!(
-            s.pair.try_borrow(&s.borrower, &1, &s.fp()),
+            s.pair.try_borrow(&s.borrower, &1, &s.ctx(), &s.fp()),
             Err(Ok(IsolatedLendingError::InsufficientCollateral))
         );
         assert_eq!(s.pair.get_position(&s.borrower), position);
@@ -2888,8 +3107,8 @@ mod test {
         );
 
         // Releasing debt restores headroom; the same logical operation can retry.
-        s.pair.repay(&s.borrower, &10);
-        s.pair.borrow(&s.borrower, &10, &s.fp());
+        s.pair.repay(&s.borrower, &10, &s.ctx());
+        s.pair.borrow(&s.borrower, &10, &s.ctx(), &s.fp());
         assert_eq!(s.pair.get_position(&s.borrower), (100, 80));
     }
 
@@ -2904,33 +3123,33 @@ mod test {
             Err(Ok(IsolatedLendingError::InvalidAmount))
         );
         assert_eq!(
-            s.pair.try_withdraw(&s.lender, &0),
+            s.pair.try_withdraw(&s.lender, &0, &s.ctx()),
             Err(Ok(IsolatedLendingError::InvalidAmount))
         );
         assert_eq!(
-            s.pair.try_post_collateral(&s.borrower, &0),
+            s.pair.try_post_collateral(&s.borrower, &0, &s.ctx()),
             Err(Ok(IsolatedLendingError::InvalidAmount))
         );
         assert_eq!(
-            s.pair.try_withdraw_collateral(&s.borrower, &0, &s.fp()),
+            s.pair.try_withdraw_collateral(&s.borrower, &0, &s.ctx(), &s.fp()),
             Err(Ok(IsolatedLendingError::InvalidAmount))
         );
         assert_eq!(
-            s.pair.try_borrow(&s.borrower, &0, &s.fp()),
+            s.pair.try_borrow(&s.borrower, &0, &s.ctx(), &s.fp()),
             Err(Ok(IsolatedLendingError::InvalidAmount))
         );
         assert_eq!(
-            s.pair.try_repay(&s.borrower, &0),
+            s.pair.try_repay(&s.borrower, &0, &s.ctx()),
             Err(Ok(IsolatedLendingError::InvalidAmount))
         );
         assert_eq!(
-            s.pair.try_queue_withdrawal(&s.lender, &0),
+            s.pair.try_queue_withdrawal(&s.lender, &0, &s.ctx()),
             Err(Ok(IsolatedLendingError::InvalidAmount))
         );
         let liquidator = Address::generate(&s.env);
         assert_eq!(
             s.pair
-                .try_liquidate(&liquidator, &s.borrower, &1, &0, &s.fp()),
+                .try_liquidate(&liquidator, &s.borrower, &1, &0, &s.ctx(), &s.fp()),
             Err(Ok(IsolatedLendingError::InvalidAmount))
         );
 
@@ -2944,20 +3163,20 @@ mod test {
         // A one-unit collateral position is rounded to a zero borrow limit at 80%.
         let user = Address::generate(&s.env);
         mint(&s.env, &s.collateral_token, &user, 1);
-        s.pair.post_collateral(&user, &1);
+        s.pair.post_collateral(&user, &1, &s.ctx());
         assert_eq!(
-            s.pair.try_borrow(&user, &1, &s.fp()),
+            s.pair.try_borrow(&user, &1, &s.ctx(), &s.fp()),
             Err(Ok(IsolatedLendingError::InsufficientCollateral))
         );
 
         // At a 100% factor the same single unit backs the smallest nonzero debt.
         s.pair.set_collateral_factor(&s.admin, &10_000);
-        s.pair.borrow(&user, &1, &s.fp());
+        s.pair.borrow(&user, &1, &s.ctx(), &s.fp());
         assert_eq!(s.pair.get_position(&user), (1, 1));
 
-        s.pair.repay(&user, &1);
+        s.pair.repay(&user, &1, &s.ctx());
         assert_eq!(s.pair.get_position(&user), (1, 0));
-        s.pair.withdraw_collateral(&user, &1, &s.fp());
+        s.pair.withdraw_collateral(&user, &1, &s.ctx(), &s.fp());
         assert_eq!(s.pair.get_position(&user), (0, 0));
     }
 
@@ -2967,12 +3186,12 @@ mod test {
         s.pair.set_collateral_factor(&s.admin, &9_999);
         let user = Address::generate(&s.env);
         mint(&s.env, &s.collateral_token, &user, 3);
-        s.pair.post_collateral(&user, &3);
+        s.pair.post_collateral(&user, &3, &s.ctx());
 
         // floor(3 * 9_999 / 10_000) = 2, so only two units can be borrowed.
-        s.pair.borrow(&user, &2, &s.fp());
+        s.pair.borrow(&user, &2, &s.ctx(), &s.fp());
         assert_eq!(
-            s.pair.try_borrow(&user, &1, &s.fp()),
+            s.pair.try_borrow(&user, &1, &s.ctx(), &s.fp()),
             Err(Ok(IsolatedLendingError::InsufficientCollateral))
         );
 
@@ -2981,7 +3200,7 @@ mod test {
         s.pair.set_collateral_price(&s.admin, &3_333);
         let tiny = Address::generate(&s.env);
         mint(&s.env, &s.collateral_token, &tiny, 1);
-        s.pair.post_collateral(&tiny, &1);
+        s.pair.post_collateral(&tiny, &1, &s.ctx());
         assert_eq!(s.pair.get_health_factor(&tiny).collateral_value, 0);
         assert_eq!(s.pair.get_health_factor(&s.borrower).collateral_value, 33);
     }
@@ -3030,7 +3249,7 @@ mod test {
         let debt_before = instance_i128(&s.env, &s.pair.address, PairDataKey::TotalDebt);
 
         assert_eq!(
-            s.pair.try_borrow(&s.borrower, &1, &s.fp()),
+            s.pair.try_borrow(&s.borrower, &1, &s.ctx(), &s.fp()),
             Err(Ok(IsolatedLendingError::MathOverflow))
         );
 
@@ -3074,7 +3293,7 @@ mod test {
 
         assert_eq!(
             s.pair
-                .try_liquidate(&liquidator, &s.borrower, &9, &(i128::MAX / 4), &s.fp()),
+                .try_liquidate(&liquidator, &s.borrower, &9, &(i128::MAX / 4), &s.ctx(), &s.fp()),
             Err(Ok(IsolatedLendingError::MathOverflow))
         );
 
@@ -3118,7 +3337,7 @@ mod test {
 
         assert_eq!(
             s.pair
-                .try_liquidate(&liquidator, &s.borrower, &2, &80, &s.fp()),
+                .try_liquidate(&liquidator, &s.borrower, &2, &80, &s.ctx(), &s.fp()),
             Err(Ok(IsolatedLendingError::MathOverflow))
         );
 
@@ -3176,5 +3395,138 @@ mod test {
             pair.try_get_totals(),
             Err(Ok(IsolatedLendingError::NotInitialized))
         );
+    }
+
+    // ── Network and ledger transition safety (#1758) ─────────────────
+
+    #[test]
+    fn get_ledger_context_returns_current_contract_and_version() {
+        let s = setup();
+        let ctx = s.pair.get_ledger_context();
+        assert_eq!(ctx.contract, s.pair.address);
+        assert_eq!(ctx.version, 1);
+    }
+
+    #[test]
+    fn wrong_contract_in_context_is_rejected_before_any_state_change() {
+        let s = setup();
+        let other = Address::generate(&s.env);
+        let mut bad_ctx = s.ctx();
+        bad_ctx.contract = other;
+
+        let position_before = s.pair.get_position(&s.borrower);
+        let result = s.pair.try_supply(&s.lender, &1, &bad_ctx);
+        assert_eq!(result, Err(Ok(IsolatedLendingError::WrongContract)));
+        assert_eq!(s.pair.get_position(&s.borrower), position_before);
+    }
+
+    #[test]
+    fn wrong_version_in_context_is_rejected_before_any_state_change() {
+        let s = setup();
+        let mut bad_ctx = s.ctx();
+        bad_ctx.version = 99;
+
+        let result = s.pair.try_supply(&s.lender, &1, &bad_ctx);
+        assert_eq!(result, Err(Ok(IsolatedLendingError::WrongVersion)));
+    }
+
+    #[test]
+    fn wrong_network_in_context_is_rejected_before_any_state_change() {
+        let s = setup();
+        // Build a context whose network_id is a zeroed hash (not the live network).
+        let mut bad_ctx = s.ctx();
+        // Flip the first byte to produce a network mismatch.
+        let mut raw = bad_ctx.network_id.to_array();
+        raw[0] ^= 0xff;
+        bad_ctx.network_id = BytesN::from_array(&s.env, &raw);
+
+        let result = s.pair.try_supply(&s.lender, &1, &bad_ctx);
+        assert_eq!(result, Err(Ok(IsolatedLendingError::WrongNetwork)));
+    }
+
+    #[test]
+    fn supply_with_correct_context_credits_the_lender() {
+        let s = setup();
+        mint(&s.env, &s.debt_token, &s.lender, 500);
+        let (old_total, _) = s.pair.get_totals();
+
+        s.pair.supply(&s.lender, &500, &s.ctx());
+
+        let (new_total, _) = s.pair.get_totals();
+        assert_eq!(new_total, old_total + 500);
+    }
+
+    #[test]
+    fn post_collateral_with_correct_context_credits_the_borrower() {
+        let s = setup();
+        mint(&s.env, &s.collateral_token, &s.borrower, 50);
+        let (col_before, _) = s.pair.get_position(&s.borrower);
+
+        s.pair.post_collateral(&s.borrower, &50, &s.ctx());
+
+        assert_eq!(s.pair.get_position(&s.borrower).0, col_before + 50);
+    }
+
+    #[test]
+    fn repay_with_correct_context_reduces_debt() {
+        let s = setup();
+        mint(&s.env, &s.debt_token, &s.borrower, 20);
+
+        s.pair.repay(&s.borrower, &20, &s.ctx());
+
+        assert_eq!(s.pair.get_position(&s.borrower).1, 60);
+    }
+
+    #[test]
+    fn queue_withdrawal_with_correct_context_reduces_liquidity() {
+        let s = setup();
+        let liq_before = s.pair.get_available_liquidity();
+
+        s.pair.queue_withdrawal(&s.lender, &100, &s.ctx());
+
+        assert_eq!(s.pair.get_available_liquidity(), liq_before - 100);
+    }
+
+    #[test]
+    fn migrate_pins_live_network_and_emits_event() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let admin = Address::generate(&env);
+        let col = env.register_stellar_asset_contract_v2(Address::generate(&env)).address();
+        let debt = env.register_stellar_asset_contract_v2(Address::generate(&env)).address();
+        let pair_id = env.register(IsolatedLendingPair, ());
+        let pair = IsolatedLendingPairClient::new(&env, &pair_id);
+        pair.initialize(&admin, &col, &debt, &8_000);
+
+        // Context is already stamped on initialize; migrate should be a no-op
+        // that returns Ok and emits an event only if the version changed.
+        pair.migrate(&admin);
+
+        let ctx = pair.get_ledger_context();
+        assert_eq!(ctx.version, 1);
+        assert_eq!(ctx.contract, pair_id);
+    }
+
+    #[test]
+    fn migrate_on_wrong_network_is_rejected() {
+        let s = setup();
+        // Directly write a fake NetworkId to simulate a cross-network restore.
+        s.env.as_contract(&s.pair.address, || {
+            let mut raw = [0u8; 32];
+            raw[0] = 0xde;
+            raw[1] = 0xad;
+            let fake: BytesN<32> = BytesN::from_array(&s.env, &raw);
+            s.env.storage().instance().set(&PairDataKey::NetworkId, &fake);
+        });
+
+        let result = s.pair.try_migrate(&s.admin);
+        assert_eq!(result, Err(Ok(IsolatedLendingError::WrongNetwork)));
+    }
+
+    #[test]
+    fn error_codes_are_stable() {
+        assert_eq!(IsolatedLendingError::WrongNetwork as u32, 16);
+        assert_eq!(IsolatedLendingError::WrongContract as u32, 17);
+        assert_eq!(IsolatedLendingError::WrongVersion as u32, 18);
     }
 }
