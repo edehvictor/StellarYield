@@ -116,6 +116,23 @@ This history is local to the browser and is not a chain-verified or tamper-proof
 
 ---
 
+## Failure Diagnostics and Safe Retry
+
+Every governance stage failure returns a privacy-safe diagnostic naming the stage that
+failed and the next action to take. The shared shape is defined in
+[`shared/types/governanceDiagnostic.ts`](../shared/types/governanceDiagnostic.ts) and
+documented in [governance-diagnostics.md](./governance/governance-diagnostics.md).
+
+- The API never echoes submitted values, wallet addresses, XDR, RPC URLs, or stack
+traces. It returns a stable `code`, `stage`, `retryable`, and `remediation` instead.
+- Failed requests leave existing proposals, signatures, and balances untouched. A
+validated failure also carries a `STATE_PRESERVED` diagnostic.
+- Validation failures are not retryable until the request is corrected. Stage
+failures are safe to retry. Confirmation failures use `RETRY_UNSAFE` because the
+transaction may already be on the network — check its hash or proposal status first.
+- The Transaction Builder keeps the selected action and entered field values after a
+failure, so a signer can retry without retyping.
+
 ## Using the Forecast Tool Before Proposing
 
 Before creating a proposal, signers can use the **Impact Forecast** panel (`client/src/pages/governance/GovernanceForecast.tsx`) to preview the expected effect on yield, exposure, and fee revenue. This is especially useful for `fee_change`, `allocation_limit`, and `strategy_param` actions. The forecast calls the backend at `/api/governance/forecast` and displays warnings when the projected impact exceeds safe thresholds.
@@ -133,5 +150,7 @@ Running a forecast is optional but strongly encouraged for parameter changes tha
 | `client/src/pages/governance/PendingTransactionCard.tsx` | Displays a proposal with sign/execute actions |
 | `client/src/pages/governance/useGovernanceStore.ts` | State management; auto-promotes pending → ready |
 | `client/src/pages/governance/GovernanceForecast.tsx` | Impact preview before proposing |
+| `client/src/pages/governance/governanceDiagnostics.ts` | Maps UI failures to privacy-safe stage diagnostics |
+| `client/src/pages/governance/GovernanceDiagnosticsList.tsx` | Renders stage, code, and remediation inline |
 | `client/src/pages/governance/types.ts` | TypeScript interfaces for proposals and config |
 | `client/src/pages/governance/governanceActions.ts` | Definitions of all supported admin actions |

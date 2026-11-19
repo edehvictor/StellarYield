@@ -4,6 +4,8 @@ import TransactionBuilder from "./TransactionBuilder";
 import { useWallet } from "../../context/useWallet";
 import type { PendingTransaction } from "./types";
 
+const rpcMockState = vi.hoisted(() => ({ failSimulation: false }));
+
 // Mock the wallet context
 vi.mock("../../context/useWallet", () => ({
   useWallet: vi.fn(),
@@ -45,6 +47,9 @@ vi.mock("@stellar/stellar-sdk", () => ({
         return { accountId: address };
       }
       async simulateTransaction() {
+        if (rpcMockState.failSimulation) {
+          throw new Error("simulation unavailable");
+        }
         return {
           results: [{ xdr: "mock_result" }],
         };
@@ -75,6 +80,7 @@ describe("TransactionBuilder Validation", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    rpcMockState.failSimulation = false;
     (useWallet as ReturnType<typeof vi.fn>).mockReturnValue({
       walletAddress: mockWalletAddress,
     });
@@ -686,6 +692,67 @@ describe("TransactionBuilder Validation", () => {
       });
 
       expect(actionSelect).toHaveValue("");
+    });
+  });
+
+  describe("Failure diagnostics and safe retry (#1901)", () => {
+    it("keeps the selected action and shows the failed stage and remediation", async () => {
+      rpcMockState.failSimulation = true;
+      render(
+        <TransactionBuilder
+          threshold={2}
+          contractId="CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4"
+          onTransactionCreated={mockOnTransactionCreated}
+        />,
+      );
+
+      const actionSelect = screen.getByRole("combobox", { name: /action/i });
+      fireEvent.change(actionSelect, { target: { value: "set_keeper_fee" } });
+      const feeInput = screen.getByPlaceholderText("50");
+      fireEvent.change(feeInput, { target: { value: "50" } });
+      fireEvent.click(screen.getByRole("button", { name: /build & propose/i }));
+
+      await waitFor(() =>
+        expect(screen.getByLabelText("Governance diagnostics")).toBeInTheDocument(),
+      );
+      expect(
+        screen.getByText(/Proposal transaction build · STAGE_UNAVAILABLE/),
+      ).toBeInTheDocument();
+      expect(screen.getByText(/State persistence · STATE_PRESERVED/)).toBeInTheDocument();
+      expect(screen.getAllByText(/^Next:/).length).toBeGreaterThanOrEqual(2);
+
+      // Existing input state is preserved so the signer can retry.
+      expect(actionSelect).toHaveValue("set_keeper_fee");
+      expect(feeInput).toHaveValue(50);
+      expect(mockOnTransactionCreated).not.toHaveBeenCalled();
+    });
+
+    it("retries from the same form state once the stage recovers", async () => {
+      rpcMockState.failSimulation = true;
+      render(
+        <TransactionBuilder
+          threshold={2}
+          contractId="CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4"
+          onTransactionCreated={mockOnTransactionCreated}
+        />,
+      );
+
+      const actionSelect = screen.getByRole("combobox", { name: /action/i });
+      fireEvent.change(actionSelect, { target: { value: "emergency_pause" } });
+      fireEvent.click(screen.getByRole("button", { name: /build & propose/i }));
+
+      await waitFor(() =>
+        expect(screen.getByLabelText("Governance diagnostics")).toBeInTheDocument(),
+      );
+
+      rpcMockState.failSimulation = false;
+      fireEvent.click(screen.getAllByRole("button", { name: /retry/i })[0]);
+
+      await waitFor(() =>
+        expect(mockOnTransactionCreated).toHaveBeenCalledWith(
+          expect.objectContaining({ method: "emergency_pause", status: "pending" }),
+        ),
+      );
     });
   });
 });
