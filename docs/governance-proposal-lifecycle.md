@@ -133,6 +133,39 @@ transaction may already be on the network — check its hash or proposal status 
 - The Transaction Builder keeps the selected action and entered field values after a
 failure, so a signer can retry without retyping.
 
+### Duplicate submissions
+
+Two server endpoints record state, and both resolve a retried request to the record
+the first request created instead of applying the effect twice.
+
+**Votes** (`POST /api/governance/vote-receipts`). A vote is identified by
+`(proposalId, voter)`. This holds with or without an `Idempotency-Key` header, and
+a retry that arrives under a different key still finds the same vote.
+
+| Situation | Response | Stored state |
+|---|---|---|
+| First submission | `201` and a `pending` receipt | one receipt created |
+| Retry with the same choice | `200`, the same receipt, `Idempotent-Replayed: true` | unchanged |
+| Different choice while the vote is `pending`, `delayed` or `recorded` | `409 VOTE_ALREADY_SUBMITTED`, with the existing `receiptId`, `choice` and `status` in `details` | unchanged |
+| Submission after the earlier receipt `failed` | `201` and a new receipt | the failed receipt stays, the new one owns the vote |
+
+**Execution attempts** (`POST /api/governance/execution-attempts`). Send an
+`operationId` (1 to 128 characters of `A-Z a-z 0-9 . _ : -`) and reuse it on every
+retry of the same operation. Without one, behavior is as before: the same
+`(proposalId, txHash)` updates its attempt, and anything else starts a new attempt.
+
+| Situation | Response | Stored state |
+|---|---|---|
+| First request with an `operationId` | `201` | attempt created |
+| Retry with the same `operationId` | `200`, the same `attemptId` | updated in place; a `txHash` learned later is attached |
+| Same `operationId`, different `txHash` | `409 OPERATION_ID_CONFLICT` | unchanged |
+| Stale retry for an attempt that already `succeeded`, `failed` or was `rolled_back` | `200`, `Idempotent-Replayed: true` | unchanged |
+| Malformed `operationId` | `400 INVALID_OPERATION_ID` | nothing stored |
+
+The `succeeded`, `failed` and `rolled-back` actions on an attempt now update that
+attempt in place. Before, an attempt that had no `txHash` yet was not found by hash,
+so these actions added a second record with the same attempt number.
+
 ## Using the Forecast Tool Before Proposing
 
 Before creating a proposal, signers can use the **Impact Forecast** panel (`client/src/pages/governance/GovernanceForecast.tsx`) to preview the expected effect on yield, exposure, and fee revenue. This is especially useful for `fee_change`, `allocation_limit`, and `strategy_param` actions. The forecast calls the backend at `/api/governance/forecast` and displays warnings when the projected impact exceeds safe thresholds.
