@@ -11,7 +11,10 @@
  * on every page load.
  */
 import { Router, Request, Response } from "express";
-import { failoverIncidentHistoryService } from "../services/failoverIncidentHistoryService";
+import {
+  failoverIncidentHistoryService,
+  FailoverIncidentValidationError,
+} from "../services/failoverIncidentHistoryService";
 
 const transparencyRouter = Router();
 
@@ -138,13 +141,21 @@ transparencyRouter.post(
       res.status(400).json({ error: "protocolId, protocolName, and reasons are required." });
       return;
     }
-    const incident = failoverIncidentHistoryService.recordIncident({
-      protocolId,
-      protocolName,
-      reasons,
-      startedAt,
-    });
-    res.status(201).json(incident);
+    try {
+      const incident = failoverIncidentHistoryService.recordIncident({
+        protocolId,
+        protocolName,
+        reasons,
+        startedAt,
+      });
+      res.status(201).json(incident);
+    } catch (error) {
+      if (error instanceof FailoverIncidentValidationError) {
+        res.status(400).json({ error: error.message });
+        return;
+      }
+      throw error;
+    }
   },
 );
 
@@ -157,10 +168,19 @@ transparencyRouter.post(
   "/failover-history/:protocolId/resolve",
   (req: Request, res: Response): void => {
     const { recoveredAt } = req.body as { recoveredAt?: string };
-    const incident = failoverIncidentHistoryService.resolveIncident(
-      req.params.protocolId,
-      recoveredAt,
-    );
+    let incident: ReturnType<typeof failoverIncidentHistoryService.resolveIncident>;
+    try {
+      incident = failoverIncidentHistoryService.resolveIncident(
+        req.params.protocolId,
+        recoveredAt,
+      );
+    } catch (error) {
+      if (error instanceof FailoverIncidentValidationError) {
+        res.status(400).json({ error: error.message });
+        return;
+      }
+      throw error;
+    }
     if (!incident) {
       res.status(404).json({ error: "No open incident found for this protocol." });
       return;
