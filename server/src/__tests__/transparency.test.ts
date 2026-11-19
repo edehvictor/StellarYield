@@ -1,6 +1,13 @@
 import request from "supertest";
 import { createApp } from "../app";
-import { aggregateTransparencyData } from "../routes/transparency";
+import {
+    aggregateTransparencyData,
+    computeDeflationaryRatio,
+    checkedAdd,
+    checkedSum,
+    roundToTwoDecimals,
+    TransparencyCalculationError,
+} from "../routes/transparency";
 import { failoverIncidentHistoryService } from "../services/failoverIncidentHistoryService";
 
 describe("GET /api/transparency/summary", () => {
@@ -46,6 +53,55 @@ describe("GET /api/transparency/summary", () => {
         const res = await request(createApp()).get("/api/transparency/summary");
         expect(res.body.deflationaryRatio).toBeGreaterThanOrEqual(0);
         expect(res.body.deflationaryRatio).toBeLessThanOrEqual(100);
+    });
+});
+
+describe("boundary-value calculations (#1914)", () => {
+    it("computeDeflationaryRatio returns 0 at zero emissions", () => {
+        expect(computeDeflationaryRatio(100, 0)).toBe(0);
+        expect(computeDeflationaryRatio(0, 0)).toBe(0);
+        expect(computeDeflationaryRatio(0, 300_000)).toBe(0);
+    });
+
+    it("computeDeflationaryRatio saturates at 100 and rounds half-up to 2dp", () => {
+        expect(computeDeflationaryRatio(300_000, 300_000)).toBe(100);
+        expect(computeDeflationaryRatio(600_000, 300_000)).toBe(100);
+        expect(computeDeflationaryRatio(1, 3)).toBe(33.33);
+        expect(computeDeflationaryRatio(100, 300_000)).toBe(0.03);
+        expect(computeDeflationaryRatio(Number.MAX_SAFE_INTEGER - 1, Number.MAX_SAFE_INTEGER - 1)).toBe(100);
+    });
+
+    it("computeDeflationaryRatio throws on negative or non-finite inputs", () => {
+        expect(() => computeDeflationaryRatio(-1, 100)).toThrow(TransparencyCalculationError);
+        expect(() => computeDeflationaryRatio(100, -1)).toThrow(TransparencyCalculationError);
+        expect(() => computeDeflationaryRatio(NaN, 100)).toThrow(TransparencyCalculationError);
+        expect(() => computeDeflationaryRatio(100, Infinity)).toThrow(TransparencyCalculationError);
+    });
+
+    it("roundToTwoDecimals and checkedAdd reject non-finite and overflow", () => {
+        expect(roundToTwoDecimals(1.005)).toBe(1); // binary 1.005 is 1.00499...
+        expect(roundToTwoDecimals(0)).toBe(0);
+        expect(() => roundToTwoDecimals(NaN)).toThrow(TransparencyCalculationError);
+        expect(() => roundToTwoDecimals(Infinity)).toThrow(TransparencyCalculationError);
+        expect(checkedAdd(0, 0)).toBe(0);
+        expect(checkedAdd(Number.MAX_SAFE_INTEGER - 2, 1)).toBe(Number.MAX_SAFE_INTEGER - 1);
+        expect(() => checkedAdd(Number.MAX_SAFE_INTEGER, 1)).toThrow(TransparencyCalculationError);
+        expect(() => checkedAdd(-1, 5)).toThrow(TransparencyCalculationError);
+        expect(() => checkedAdd(NaN, 5)).toThrow(TransparencyCalculationError);
+        expect(() => checkedSum([1, NaN, 3])).toThrow(TransparencyCalculationError);
+        expect(checkedSum([])).toBe(0);
+    });
+
+    it("aggregateTransparencyData keeps returning finite bounded values", async () => {
+        const data = await aggregateTransparencyData();
+        expect(Number.isFinite(data.totalRevenueLumens)).toBe(true);
+        expect(Number.isFinite(data.totalBurnedTokens)).toBe(true);
+        expect(data.deflationaryRatio).toBeGreaterThanOrEqual(0);
+        expect(data.deflationaryRatio).toBeLessThanOrEqual(100);
+        for (const h of data.history) {
+            expect(h.revenue).toBeGreaterThanOrEqual(0);
+            expect(h.burned).toBeGreaterThanOrEqual(0);
+        }
     });
 });
 

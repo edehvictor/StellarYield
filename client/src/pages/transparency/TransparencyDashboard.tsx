@@ -84,17 +84,24 @@ interface FailoverIncident {
 // ── Helpers ───────────────────────────────────────────────────────────────
 
 function formatUSD(value: number): string {
+    if (!Number.isFinite(value)) return "$0";
     return new Intl.NumberFormat("en-US", {
         style: "currency",
         currency: "USD",
         maximumFractionDigits: 0,
-    }).format(value);
+    }).format(Math.max(0, value));
 }
 
 function formatTokens(value: number): string {
+    if (!Number.isFinite(value)) return "0";
     return new Intl.NumberFormat("en-US", { maximumFractionDigits: 2 }).format(
-        value,
+        Math.max(0, value),
     );
+}
+
+function formatRatio(value: number): string {
+    if (!Number.isFinite(value)) return "0.00%";
+    return `${Math.min(100, Math.max(0, value)).toFixed(2)}%`;
 }
 
 // ── Sub-components ────────────────────────────────────────────────────────
@@ -329,7 +336,7 @@ export default function TransparencyDashboard() {
                 <StatCard
                     icon={<BarChart2 size={22} className="text-purple-400" />}
                     title="Deflationary Ratio"
-                    value={`${data.deflationaryRatio.toFixed(2)}%`}
+                    value={formatRatio(data.deflationaryRatio)}
                     subtitle="Burn rate vs. emission rate"
                     accent="purple"
                 />
