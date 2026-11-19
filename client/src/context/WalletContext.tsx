@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { isConnected } from "@stellar/freighter-api";
 import {
   clearStoredSession,
@@ -19,6 +19,24 @@ import {
   clearPendingTransactionDrafts,
 } from "../services/transactionDraft";
 
+/**
+ * Lifecycle state persisted alongside the session so that a partially
+ * completed connect/disconnect can be detected and safely retried or rolled
+ * back on the next mount. Kept in a dedicated key so it never collides with
+ * the session payload itself.
+ */
+const LIFECYCLE_STORAGE_KEY = "wallet.lifecycle.v1";
+
+type WalletLifecyclePhase = "idle" | "connecting" | "connected" | "disconnecting";
+
+interface WalletLifecycleState {
+  phase: WalletLifecyclePhase;
+  // The wallet address we were attempting to connect to, if any. Used to
+  // detect an interrupted connect so we can roll back to the previous session.
+  pendingWalletAddress: string | null;
+  updatedAt: number;
+}
+
 export function WalletProvider({ children }: { children: ReactNode }) {
   const [session, setSession] = useState<WalletSession | null>(null);
   const [isConnecting, setIsConnecting] = useState(false);
@@ -26,6 +44,96 @@ export function WalletProvider({ children }: { children: ReactNode }) {
     boolean | null
   >(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+
+  // Tracks the last successfully committed session so a failed connect can
+  // restore it without re-reading (possibly already-cleared) storage.
+  const lastCommittedSessionRef = useRef<WalletSession | null>(null);
+
+  const readLifecycleState = useCallback((): WalletLifecycleState | null => {
+    try {
+      const raw = localStorage.getItem(LIFECYCLE_STORAGE_KEY);
+      if (!raw) return null;
+      const parsed = JSON.parse(raw) as WalletLifecycleState;
+      if (
+        !parsed ||
+        typeof parsed.phase !== "string" ||
+        typeof parsed.updatedAt !== "number"
+      ) {
+        return null;
+      }
+      return parsed;
+    } catch {
+      return null;
+    }
+  }, []);
+
+  const writeLifecycleState = useCallback((
+    phase: WalletLifecyclePhase,
+    pendingWalletAddress: string | null,
+  ) => {
+    try {
+      const next: WalletLifecycleState = {
+        phase,
+        pendingWalletAddress,
+        updatedAt: Date.now(),
+      };
+      localStorage.setItem(LIFECYCLE_STORAGE_KEY, JSON.stringify(next));
+    } catch {
+      // Storage may be unavailable (private mode, quota); lifecycle tracking
+      // is best-effort and must never break wallet operations.
+    }
+  }, []);
+
+  const clearLifecycleState = useCallback(() => {
+    try {
+      localStorage.removeItem(LIFECYCLE_STORAGE_KEY);
+    } catch {
+      // ignore
+    }
+  }, []);
+
+  /**
+   * Reconciles any lifecycle state left behind by a previous, interrupted
+   * operation. Returns the session that should be active after recovery.
+   */
+  const reconcileInterruptedLifecycle = useCallback((
+    recovered: WalletSession | null,
+  ): WalletSession | null => {
+    const lifecycle = readLifecycleState();
+    if (!lifecycle) return recovered;
+
+    if (lifecycle.phase === "connecting") {
+      // A connect was interrupted. If recovery produced a session for the
+      // pending address, treat it as completed; otherwise roll back to the
+      // recovered (previous) session and surface a retry-friendly error.
+      if (
+        recovered &&
+        lifecycle.pendingWalletAddress &&
+        recovered.walletAddress === lifecycle.pendingWalletAddress
+      ) {
+        clearLifecycleState();
+        return recovered;
+      }
+      clearLifecycleState();
+      setErrorMessage(
+        "Previous wallet connection did not complete. Please try connecting again.",
+      );
+      return recovered;
+    }
+
+    if (lifecycle.phase === "disconnecting") {
+      // A disconnect was interrupted. Finish it deterministically so we never
+      // leave stale session data behind.
+      clearStoredSession();
+      clearSensitiveWalletState();
+      clearLifecycleState();
+      return null;
+    }
+
+    // Connected / idle: nothing to reconcile.
+    clearLifecycleState();
+    return recovered;
+  }, [clearLifecycleState, readLifecycleState, writeLifecycleState]);
 
   useEffect(() => {
     // On mount, attempt to recover any persisted session rather than loading
@@ -36,16 +144,24 @@ export function WalletProvider({ children }: { children: ReactNode }) {
 
     recoverSession().then((result) => {
       if (cancelled) return;
-      if (result.session) {
-        setSession(result.session);
+      const reconciled = reconcileInterruptedLifecycle(result.session ?? null);
+      if (reconciled) {
+        lastCommittedSessionRef.current = reconciled;
+        setSession(reconciled);
+      } else {
+        lastCommittedSessionRef.current = null;
+        setSession(null);
       }
     }).catch(() => {
       // Fallback: load without recovery so the user is not silently logged out
-      if (!cancelled) setSession(loadStoredSession());
+      if (cancelled) return;
+      const fallback = reconcileInterruptedLifecycle(loadStoredSession());
+      lastCommittedSessionRef.current = fallback;
+      setSession(fallback);
     });
 
     return () => { cancelled = true; };
-  }, []);
+  }, [reconcileInterruptedLifecycle]);
 
   useEffect(() => {
     async function checkConnection() {
@@ -71,9 +187,13 @@ export function WalletProvider({ children }: { children: ReactNode }) {
     void checkConnection();
   }, []);
 
-  async function connectWallet(options?: ConnectWalletOptions) {
+  const connectWallet = useCallback(async (options?: ConnectWalletOptions) => {
     setIsConnecting(true);
     setErrorMessage(null);
+
+    // Persist intent before attempting so an interrupted connect can be
+    // detected and rolled back on the next mount.
+    writeLifecycleState("connecting", options?.walletAddress ?? null);
 
     try {
       const nextSession = await connectWalletSession(options);
@@ -81,9 +201,15 @@ export function WalletProvider({ children }: { children: ReactNode }) {
       if (session?.walletAddress && session.walletAddress !== nextSession.walletAddress) {
         clearPendingTransactionDrafts();
       }
+      lastCommittedSessionRef.current = nextSession;
       setSession(nextSession);
+      writeLifecycleState("connected", null);
       return true;
     } catch (error) {
+      // Roll back the in-memory session before surfacing the safe diagnostic.
+      const previous = lastCommittedSessionRef.current;
+      setSession(previous);
+      clearLifecycleState();
       const diagnostic = getWalletLifecycleDiagnostic(error);
       console.error("[wallet] lifecycle diagnostic", {
         stage: diagnostic.stage,
@@ -94,11 +220,14 @@ export function WalletProvider({ children }: { children: ReactNode }) {
     } finally {
       setIsConnecting(false);
     }
-  }
+  }, [clearLifecycleState, session, writeLifecycleState]);
 
-  function disconnectWallet() {
+  const disconnectWallet = useCallback(() => {
+    // Record intent so an interrupted disconnect can be completed on reload.
+    writeLifecycleState("disconnecting", null);
     clearStoredSession();
     clearSensitiveWalletState();
+    lastCommittedSessionRef.current = null;
     setSession(null);
     setErrorMessage(null);
 
@@ -122,21 +251,28 @@ export function WalletProvider({ children }: { children: ReactNode }) {
                 }
               }
             }
+            // Disconnect fully completed; safe to clear the lifecycle marker.
+            clearLifecycleState();
           } catch {
             // Cache API might not be available in all environments
+            clearLifecycleState();
           }
         })();
+      } else {
+        // No Cache API: disconnect is complete synchronously.
+        clearLifecycleState();
       }
     } catch {
       // localStorage or other APIs might not be available
+      clearLifecycleState();
     }
-  }
+  }, [clearLifecycleState, writeLifecycleState]);
 
-  function clearError() {
+  const clearError = useCallback(() => {
     setErrorMessage(null);
-  }
+  }, []);
 
-  async function signTransaction(xdr: string, networkPassphrase: string): Promise<string> {
+  const signTransaction = useCallback(async (xdr: string, networkPassphrase: string): Promise<string> => {
     if (!session) {
       throw new WalletLifecycleError("transaction_signing");
     }
@@ -156,7 +292,7 @@ export function WalletProvider({ children }: { children: ReactNode }) {
       }
     }
     throw new WalletLifecycleError("transaction_signing");
-  }
+  }, [session]);
 
   const value = useMemo(
     () => ({
@@ -182,10 +318,7 @@ export function WalletProvider({ children }: { children: ReactNode }) {
       clearError,
       signTransaction,
     }),
-    // signTransaction is stable: it only captures `session` which is already
-    // in the deps array below.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [session, isConnecting, isFreighterInstalled, errorMessage],
+    [session, isConnecting, isFreighterInstalled, errorMessage, connectWallet, disconnectWallet, clearError, signTransaction],
   );
 
   return (
