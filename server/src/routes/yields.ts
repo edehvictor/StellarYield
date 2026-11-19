@@ -10,11 +10,38 @@ import { formatParityReport } from "../utils/yieldNormalization";
 import { calculateNetYield } from "../services/netYieldEngine";
 import { yieldReliabilityEngine } from "../services/yieldReliabilityService";
 import { getFeeHistory } from "../services/protocolFeeHistoryService";
+import {
+  DEFAULT_STRATEGY_COMPARISON_CONFIG,
+  computeStrategyComparisonConfigFingerprint,
+  verifyStrategyComparisonConfigFingerprint,
+} from "../../../shared/types/strategyComparisonConfigFingerprint";
 
 const yieldsRouter = Router();
 
 yieldsRouter.get("/", async (_req, res) => {
   try {
+    const expectedFp = (
+      (_req.query.expectedConfigFingerprint as string) ||
+      (_req.headers["if-match-config"] as string)
+    );
+    const fpResult = computeStrategyComparisonConfigFingerprint(DEFAULT_STRATEGY_COMPARISON_CONFIG);
+
+    if (expectedFp) {
+      const verification = verifyStrategyComparisonConfigFingerprint(
+        DEFAULT_STRATEGY_COMPARISON_CONFIG,
+        expectedFp,
+      );
+      if (!verification.valid) {
+        res.setHeader("X-Strategy-Config-Fingerprint", fpResult.fingerprint);
+        res.status(409).json({
+          error: verification.message,
+          code: verification.code,
+          isRecoverable: true,
+          currentFingerprint: fpResult.fingerprint,
+        });
+        return;
+      }
+    }
     const { data: yields, cacheStatus } = await getYieldDataWithCacheStatus();
     const parseBps = (value: unknown): number | undefined => {
       const parsed = Number(value);
@@ -78,6 +105,7 @@ yieldsRouter.get("/", async (_req, res) => {
         reliabilityStatus: score.status,
         warnings,
         feeHistory,
+        configFingerprint: fpResult.fingerprint,
       };
     }));
     res.setHeader(
@@ -85,6 +113,7 @@ yieldsRouter.get("/", async (_req, res) => {
       `public, max-age=${CURRENT_YIELDS_TTL_SECONDS}, stale-while-revalidate=30`,
     );
     res.setHeader("X-Cache-Status", cacheStatus);
+    res.setHeader("X-Strategy-Config-Fingerprint", fpResult.fingerprint);
     res.json(payload);
   } catch (error) {
     console.error("Failed to serve /api/yields.", error);

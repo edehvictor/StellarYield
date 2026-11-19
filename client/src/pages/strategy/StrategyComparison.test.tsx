@@ -291,4 +291,141 @@ describe('StrategyComparison Component', () => {
       expect(screen.getByText('Blend')).toBeInTheDocument();
     });
   });
+
+  // Issue #1918 Regression Tests: Harden strategy comparison against stale configuration snapshots
+  describe('Issue #1918 Regression: Configuration Fingerprint & State Preservation', () => {
+    it('displays configuration fingerprint badge when returned by API', async () => {
+      const mockFp = 'a1b2c3d4e5f60123456789abcdef0123456789abcdef0123456789abcdef0123';
+      global.fetch = vi.fn().mockResolvedValue({
+        ok: true,
+        headers: new Headers({ 'x-strategy-config-fingerprint': mockFp }),
+        json: async () => mockYields,
+      });
+
+      render(<StrategyComparison />);
+
+      await waitFor(() => {
+        expect(screen.getByTestId('config-fingerprint-badge')).toBeInTheDocument();
+      });
+      expect(screen.getByTestId('config-fingerprint-badge')).toHaveTextContent('scf-a1b2c3…0123');
+    });
+
+    it('preserves existing state and balances when a refresh fails boundary validation', async () => {
+      // First fetch: valid strategies
+      // Second fetch: malformed data
+      global.fetch = vi.fn()
+        .mockResolvedValueOnce({
+          ok: true,
+          headers: new Headers({ 'x-strategy-config-fingerprint': 'fp-1' }),
+          json: async () => mockYields,
+        })
+        .mockResolvedValueOnce({
+          ok: true,
+          headers: new Headers({ 'x-strategy-config-fingerprint': 'fp-1' }),
+          json: async () => [{ protocolName: '', apy: 'bad' }], // Malformed
+        });
+
+      render(<StrategyComparison />);
+
+      // First fetch displays strategies
+      await waitFor(() => {
+        expect(screen.getByText('Blend')).toBeInTheDocument();
+        expect(screen.getByText('Soroswap')).toBeInTheDocument();
+      });
+
+      // User triggers refresh
+      await userEvent.click(screen.getByRole('button', { name: /Refresh Analysis/i }));
+
+      // State is preserved! Blend and Soroswap are still in the document
+      await waitFor(() => {
+        expect(screen.getByTestId('validation-warning-banner')).toBeInTheDocument();
+      });
+      expect(screen.getByText('Blend')).toBeInTheDocument();
+      expect(screen.getByText('Soroswap')).toBeInTheDocument();
+      expect(screen.getByText(/Retaining existing valid strategy data/i)).toBeInTheDocument();
+    });
+
+    it('detects stale configuration snapshot and allows safe refresh retry', async () => {
+      // Initial fetch with fp-initial
+      // Second fetch with fp-changed (drifted configuration)
+      // Third fetch with fresh fp-changed confirming update
+      global.fetch = vi.fn()
+        .mockResolvedValueOnce({
+          ok: true,
+          headers: new Headers({ 'x-strategy-config-fingerprint': 'fp-initial' }),
+          json: async () => mockYields,
+        })
+        .mockResolvedValueOnce({
+          ok: true,
+          headers: new Headers({ 'x-strategy-config-fingerprint': 'fp-drifted-v2' }),
+          json: async () => mockYields,
+        })
+        .mockResolvedValueOnce({
+          ok: true,
+          headers: new Headers({ 'x-strategy-config-fingerprint': 'fp-drifted-v2' }),
+          json: async () => mockYields,
+        });
+
+      render(<StrategyComparison />);
+
+      await waitFor(() => {
+        expect(screen.getByText('Blend')).toBeInTheDocument();
+      });
+
+      // Refresh triggers drift detection
+      await userEvent.click(screen.getByRole('button', { name: /Refresh Analysis/i }));
+
+      // Warning banner displayed
+      await waitFor(() => {
+        expect(screen.getByTestId('stale-config-warning')).toBeInTheDocument();
+      });
+
+      // Attempting to select a strategy while stale is rejected
+      const selectButtons = screen.getAllByRole('button', { name: /Select Strategy/i });
+      await userEvent.click(selectButtons[0]);
+
+      expect(screen.getByTestId('action-notice')).toHaveTextContent(/configuration snapshot is stale/i);
+
+      // Safe retry: Click Refresh Configuration
+      await userEvent.click(screen.getByRole('button', { name: /Refresh Configuration/i }));
+
+      // Stale warning is cleared
+      await waitFor(() => {
+        expect(screen.queryByTestId('stale-config-warning')).not.toBeInTheDocument();
+      });
+
+      // Selection now succeeds with fresh configuration
+      const freshSelectButtons = screen.getAllByRole('button', { name: /Select Strategy/i });
+      await userEvent.click(freshSelectButtons[0]);
+      await waitFor(() => {
+        expect(screen.getByTestId('action-notice')).toHaveTextContent(/Selected Blend strategy/i);
+      });
+    });
+
+    it('preserves existing state and balances when refresh encounters network error', async () => {
+      global.fetch = vi.fn()
+        .mockResolvedValueOnce({
+          ok: true,
+          headers: new Headers({ 'x-strategy-config-fingerprint': 'fp-1' }),
+          json: async () => mockYields,
+        })
+        .mockRejectedValueOnce(new Error('Connection reset'));
+
+      render(<StrategyComparison />);
+
+      await waitFor(() => {
+        expect(screen.getByText('Blend')).toBeInTheDocument();
+      });
+
+      // Trigger refresh which fails
+      await userEvent.click(screen.getByRole('button', { name: /Refresh Analysis/i }));
+
+      // Does NOT show empty state or unmount table; preserves existing strategy cards
+      await waitFor(() => {
+        expect(screen.getByTestId('validation-warning-banner')).toBeInTheDocument();
+      });
+      expect(screen.getByText('Blend')).toBeInTheDocument();
+      expect(screen.getByText('Soroswap')).toBeInTheDocument();
+    });
+  });
 });
