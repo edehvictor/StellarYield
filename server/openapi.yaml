@@ -471,6 +471,39 @@ paths:
       description: Returns current yield information for all available vaults with APY, TVL, and risk ratings
       tags:
         - Yields
+      parameters:
+        - name: protocolFeeBps
+          in: query
+          required: false
+          description: Protocol fee assumption in basis points for the net-yield figures. Must be between 0 and 10000; the engine clamps values above 3000. Non-numeric values are ignored.
+          schema:
+            type: number
+            minimum: 0
+            maximum: 10000
+        - name: vaultFeeBps
+          in: query
+          required: false
+          description: Vault fee assumption in basis points for the net-yield figures. Must be between 0 and 10000; the engine clamps values above 3000. Non-numeric values are ignored.
+          schema:
+            type: number
+            minimum: 0
+            maximum: 10000
+        - name: rebalanceCostBps
+          in: query
+          required: false
+          description: Rebalance cost assumption in basis points for the net-yield figures. Must be between 0 and 10000; the engine clamps values above 3000. Non-numeric values are ignored.
+          schema:
+            type: number
+            minimum: 0
+            maximum: 10000
+        - name: slippageBps
+          in: query
+          required: false
+          description: Slippage assumption in basis points for the net-yield figures. Must be between 0 and 10000; the engine clamps values above 3000. Non-numeric values are ignored.
+          schema:
+            type: number
+            minimum: 0
+            maximum: 10000
       responses:
         '200':
           description: Successful response with yields data
@@ -480,8 +513,10 @@ paths:
                 type: array
                 items:
                   $ref: '#/components/schemas/YieldData'
+        '400':
+          description: An assumption is outside 0-10000 bps (`INVALID_ASSUMPTION`); `details.fields` names each one. No yield data is read.
         '500':
-          description: Failed to fetch yield data
+          description: Failed to fetch yield data (`YIELD_FETCH_FAILED`, `recoverable` true). Safe to retry.
 
   /api/yields/history:
     get:
