@@ -18,7 +18,13 @@
 
 import { PrismaClient } from "@prisma/client";
 import { sendEmail } from "./emailService";
-import { shouldSuppressAlert, type AlertPreferences } from "./alertsPreferenceRules";
+import {
+  shouldSuppressAlert,
+  roundToDecimals,
+  validateAlertPreferences,
+  type AlertPreferences,
+  type AlertPreferencesValidationResult,
+} from "./alertsPreferenceRules";
 import {
   recordPreferenceChange,
   getPreferenceAuditHistory,
@@ -102,6 +108,8 @@ function toAlertKey(walletAddress: string, vaultId: string) {
   return `${walletAddress.toLowerCase()}::${vaultId.toLowerCase()}`;
 }
 
+export { validateAlertPreferences, type AlertPreferencesValidationResult };
+
 export function computeAlertFingerprint(input: {
   walletAddress: string;
   vaultId: string;
@@ -143,16 +151,21 @@ export function setAlertPreferences(
   preferences: AlertPreferences,
   operationIdentity?: string,
 ): { preferences: AlertPreferences; replayed: boolean } {
+  const validation = validateAlertPreferences(preferences);
+  if (!validation.valid || !validation.sanitized) {
+    throw new Error(`Invalid alert preferences: ${validation.errors.join("; ")}`);
+  }
+  const sanitized = validation.sanitized;
   const key = toAlertKey(walletAddress, vaultId);
   const currentFingerprint = JSON.stringify({
     walletAddress: walletAddress.trim().toLowerCase(),
     vaultId: vaultId.trim().toLowerCase(),
     preferences: {
-      channel: preferences.channel,
-      cooldownMinutes: Number(preferences.cooldownMinutes),
-      severityThreshold: Number(preferences.severityThreshold),
-      quietHoursStart: Number(preferences.quietHoursStart),
-      quietHoursEnd: Number(preferences.quietHoursEnd),
+      channel: sanitized.channel,
+      cooldownMinutes: Number(sanitized.cooldownMinutes),
+      severityThreshold: Number(sanitized.severityThreshold),
+      quietHoursStart: Number(sanitized.quietHoursStart),
+      quietHoursEnd: Number(sanitized.quietHoursEnd),
     },
   });
 
@@ -173,18 +186,18 @@ export function setAlertPreferences(
     }
   }
 
-  alertPreferencesStore.set(key, preferences);
+  alertPreferencesStore.set(key, sanitized);
 
   if (operationIdentity) {
     alertOperationStore.set(operationIdentity, {
       operationIdentity,
       fingerprint: currentFingerprint,
-      result: preferences,
+      result: sanitized,
       createdAt: Date.now(),
     });
   }
 
-  return { preferences, replayed: false };
+  return { preferences: sanitized, replayed: false };
 }
 
 export function clearAlertOperationStore(): void {
@@ -203,7 +216,25 @@ export function clearAlertPreferencesStore(): void {
  * Throws if the user already has MAX_ALERTS_PER_USER active alerts.
  */
 export async function createAlert(input: CreateAlertInput) {
-  const currentFingerprint = computeAlertFingerprint(input);
+  if (!Number.isFinite(input.thresholdValue) || input.thresholdValue < 0 || input.thresholdValue > 1000) {
+    throw new Error("thresholdValue must be a number between 0 and 1000");
+  }
+  const roundedThreshold = roundToDecimals(input.thresholdValue, 4);
+
+  let sanitizedPrefs: AlertPreferences | undefined;
+  if (input.preferences) {
+    const validation = validateAlertPreferences(input.preferences);
+    if (!validation.valid || !validation.sanitized) {
+      throw new Error(`Invalid alert preferences: ${validation.errors.join("; ")}`);
+    }
+    sanitizedPrefs = validation.sanitized;
+  }
+
+  const currentFingerprint = computeAlertFingerprint({
+    ...input,
+    thresholdValue: roundedThreshold,
+    preferences: sanitizedPrefs,
+  });
 
   if (input.operationIdentity) {
     const existing = alertOperationStore.get(input.operationIdentity);
@@ -237,21 +268,21 @@ export async function createAlert(input: CreateAlertInput) {
       walletAddress: input.walletAddress,
       vaultId: input.vaultId,
       condition: input.condition,
-      thresholdValue: input.thresholdValue,
+      thresholdValue: roundedThreshold,
       email: input.email,
       status: "active",
     },
   });
-  if (input.preferences) {
+  if (sanitizedPrefs) {
     const key = toAlertKey(input.walletAddress, input.vaultId);
-    alertPreferencesStore.set(key, input.preferences);
+    alertPreferencesStore.set(key, sanitizedPrefs);
     recordPreferenceChange({
       walletAddress: input.walletAddress,
       vaultId: input.vaultId,
       actor: input.walletAddress,
       source: "api",
       before: null,
-      after: input.preferences,
+      after: sanitizedPrefs,
       reason: "Initial preference set on alert creation",
     });
   }
@@ -304,14 +335,19 @@ export async function evaluateAlerts(
   vaultId: string,
   currentApy: number,
 ): Promise<void> {
+  if (!Number.isFinite(currentApy)) {
+    return;
+  }
+  const roundedApy = roundToDecimals(currentApy, 4);
+
   const activeAlerts = await prisma.userAlert.findMany({
     where: { vaultId, status: "active" },
   });
 
   for (const alert of activeAlerts) {
     const triggered =
-      (alert.condition === "above" && currentApy > alert.thresholdValue) ||
-      (alert.condition === "below" && currentApy < alert.thresholdValue);
+      (alert.condition === "above" && roundedApy > alert.thresholdValue) ||
+      (alert.condition === "below" && roundedApy < alert.thresholdValue);
 
     if (!triggered) continue;
 
@@ -324,7 +360,7 @@ export async function evaluateAlerts(
         alertLastTriggeredStore.get(key),
         preferences,
       );
-      if (suppress || currentApy < preferences.severityThreshold) {
+      if (suppress || roundedApy < preferences.severityThreshold) {
         continue;
       }
       alertLastTriggeredStore.set(key, now.getTime());
@@ -340,7 +376,7 @@ export async function evaluateAlerts(
       vaultId: alert.vaultId,
       condition: alert.condition as AlertCondition,
       thresholdValue: alert.thresholdValue,
-      currentApy,
+      currentApy: roundedApy,
     });
   }
 }
@@ -479,6 +515,7 @@ export async function dispatchDriftAlert(
 /**
  * Update alert preferences for a wallet+vault pair, recording the audit trail.
  * Returns the new preferences and the audit entry.
+ * Validates boundaries and preserves existing state on failure.
  */
 export function updateAlertPreferences(
   walletAddress: string,
@@ -489,10 +526,15 @@ export function updateAlertPreferences(
   preferences: AlertPreferences;
   auditEntry: AlertPreferenceAuditEntry;
 } {
+  const validation = validateAlertPreferences(newPreferences);
+  if (!validation.valid || !validation.sanitized) {
+    throw new Error(`Invalid alert preferences: ${validation.errors.join("; ")}`);
+  }
+  const sanitized = validation.sanitized;
   const key = toAlertKey(walletAddress, vaultId);
   const before = alertPreferencesStore.get(key) ?? null;
 
-  alertPreferencesStore.set(key, newPreferences);
+  alertPreferencesStore.set(key, sanitized);
 
   const auditEntry = recordPreferenceChange({
     walletAddress,
@@ -500,22 +542,11 @@ export function updateAlertPreferences(
     actor: options?.actor ?? walletAddress,
     source: options?.source ?? "api",
     before,
-    after: newPreferences,
+    after: sanitized,
     reason: options?.reason ?? "Preferences updated",
   });
 
-  return { preferences: newPreferences, auditEntry };
-}
-
-/**
- * Retrieve the current alert preferences for a wallet+vault pair.
- */
-export function getAlertPreferences(
-  walletAddress: string,
-  vaultId: string,
-): AlertPreferences | undefined {
-  const key = toAlertKey(walletAddress, vaultId);
-  return alertPreferencesStore.get(key);
+  return { preferences: sanitized, auditEntry };
 }
 
 /**

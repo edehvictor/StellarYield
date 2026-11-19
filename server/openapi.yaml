@@ -2320,7 +2320,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/Alert'
         '400':
-          description: Invalid alert parameters
+          description: Invalid alert parameters (boundary violation, negative values)
         '409':
           description: Operation identity already used with different parameters
           content:
@@ -2443,6 +2443,157 @@ paths:
                   $ref: '#/components/schemas/Alert'
         '500':
           description: Failed to retrieve alerts
+
+  /api/alerts/{wallet}/preferences/history:
+    get:
+      summary: Get alert preference audit history
+      description: Returns the full audit trail of preference modifications for a wallet and vault (#1906).
+      tags:
+        - Alerts
+      parameters:
+        - name: wallet
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Stellar wallet address
+        - name: vaultId
+          in: query
+          required: true
+          schema:
+            type: string
+          description: Vault identifier
+      responses:
+        '200':
+          description: Audit history retrieved successfully
+        '400':
+          description: Missing vaultId parameter
+
+  /api/alerts/{wallet}/preferences/{vaultId}:
+    get:
+      summary: Get alert preferences
+      description: Retrieves configured alert preferences for a wallet and vault (#1906).
+      tags:
+        - Alerts
+      parameters:
+        - name: wallet
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Stellar wallet address
+        - name: vaultId
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Vault identifier
+      responses:
+        '200':
+          description: Preferences retrieved successfully
+        '404':
+          description: Preferences not found
+
+    put:
+      summary: Update alert preferences
+      description: |
+        Updates delivery and suppression preferences for a wallet and vault (#1906).
+
+        Boundary & Invariant Rules:
+        - Checked arithmetic: cooldownMinutes must be an integer between 0 and 1440.
+        - severityThreshold must be a finite number between 0 and 1000 (rounded half-up to 2 decimals).
+        - quietHoursStart and quietHoursEnd must be integers between 0 and 23.
+        - State preservation: On validation error, existing preferences and audit history remain untouched (HTTP 400).
+      tags:
+        - Alerts
+      parameters:
+        - name: wallet
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Stellar wallet address
+        - name: vaultId
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Vault identifier
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - channel
+                - cooldownMinutes
+                - severityThreshold
+                - quietHoursStart
+                - quietHoursEnd
+              properties:
+                channel:
+                  type: string
+                  enum: [email, in_app]
+                cooldownMinutes:
+                  type: integer
+                  minimum: 0
+                  maximum: 1440
+                severityThreshold:
+                  type: number
+                  minimum: 0
+                  maximum: 1000
+                quietHoursStart:
+                  type: integer
+                  minimum: 0
+                  maximum: 23
+                quietHoursEnd:
+                  type: integer
+                  minimum: 0
+                  maximum: 23
+                reason:
+                  type: string
+      responses:
+        '200':
+          description: Preferences updated and audit record created
+        '400':
+          description: Boundary validation failed. Existing state preserved.
+
+  /api/alerts/{wallet}/preferences/{vaultId}/revert:
+    post:
+      summary: Revert alert preferences
+      description: Reverts preferences to a previous audit entry snapshot (#1906). State preserved on error.
+      tags:
+        - Alerts
+      parameters:
+        - name: wallet
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Stellar wallet address
+        - name: vaultId
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Vault identifier
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                entryId:
+                  type: string
+                  description: Optional audit entry ID to revert to. If omitted, reverts to immediate predecessor.
+      responses:
+        '200':
+          description: Preferences successfully reverted
+        '404':
+          description: Audit entry or revert target not found. State preserved.
+        '500':
+          description: Revert failed. State preserved.
 
   /api/alerts/{id}:
     delete:

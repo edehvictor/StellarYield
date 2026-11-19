@@ -282,11 +282,12 @@ export default function AlertsModal({
       return;
     }
 
-    const threshold = parseFloat(form.thresholdValue);
-    if (!Number.isFinite(threshold) || threshold < 0 || threshold > 1000) {
+    const parsedThreshold = parseFloat(form.thresholdValue);
+    if (!Number.isFinite(parsedThreshold) || parsedThreshold < 0 || parsedThreshold > 1000) {
       setFormError("APY threshold must be between 0 and 1000");
       return;
     }
+    const threshold = Math.round((parsedThreshold + Number.EPSILON) * 10000) / 10000;
 
     if (!form.email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(form.email)) {
       setFormError("Enter a valid email address");
@@ -298,32 +299,39 @@ export default function AlertsModal({
       return;
     }
 
-    const preferences: AlertPreferencesWithChannelOverrides = {
-      channel: form.channel,
-      cooldownMinutes: Number(form.cooldownMinutes),
-      severityThreshold: Number(form.severityThreshold),
-      quietHoursStart: Number(form.quietHoursStart),
-      quietHoursEnd: Number(form.quietHoursEnd),
-      channelOverrides: channelOverrides.apy,
-    };
-
-    if (
-      !Number.isFinite(preferences.cooldownMinutes) ||
-      preferences.cooldownMinutes < 0 ||
-      preferences.cooldownMinutes > 1440
-    ) {
-      setFormError("Cooldown must be between 0 and 1440 minutes");
+    const cooldown = Number(form.cooldownMinutes);
+    if (!Number.isFinite(cooldown) || !Number.isInteger(cooldown) || cooldown < 0 || cooldown > 1440) {
+      setFormError("Cooldown must be an integer between 0 and 1440 minutes");
       return;
     }
 
-    if (
-      !Number.isFinite(preferences.severityThreshold) ||
-      preferences.severityThreshold < 0 ||
-      preferences.severityThreshold > 1000
-    ) {
+    const severity = Number(form.severityThreshold);
+    if (!Number.isFinite(severity) || severity < 0 || severity > 1000) {
       setFormError("Severity threshold must be between 0 and 1000");
       return;
     }
+    const severityThreshold = Math.round((severity + Number.EPSILON) * 100) / 100;
+
+    const quietStart = Number(form.quietHoursStart);
+    if (!Number.isFinite(quietStart) || !Number.isInteger(quietStart) || quietStart < 0 || quietStart > 23) {
+      setFormError("Quiet hours start must be an integer from 0 to 23");
+      return;
+    }
+
+    const quietEnd = Number(form.quietHoursEnd);
+    if (!Number.isFinite(quietEnd) || !Number.isInteger(quietEnd) || quietEnd < 0 || quietEnd > 23) {
+      setFormError("Quiet hours end must be an integer from 0 to 23");
+      return;
+    }
+
+    const preferences: AlertPreferencesWithChannelOverrides = {
+      channel: form.channel,
+      cooldownMinutes: cooldown,
+      severityThreshold,
+      quietHoursStart: quietStart,
+      quietHoursEnd: quietEnd,
+      channelOverrides: channelOverrides.apy,
+    };
 
     if (!alertOperationIdRef.current) {
       alertOperationIdRef.current = `op-alert-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
@@ -409,59 +417,35 @@ export default function AlertsModal({
 
   const toggleWatchedVault = (vaultId: string) => {
     digestOperationIdRef.current = null;
-    setDigestPreferences((current) => ({
-      ...current,
-      watchedVaultIds: current.watchedVaultIds.includes(vaultId)
-        ? current.watchedVaultIds.filter((value) => value !== vaultId)
-        : [...current.watchedVaultIds, vaultId],
-    }));
-  };
-
-  const handleSaveDigestPreferences = async () => {
-    if (digestSaving) return;
-    setDigestSaving(true);
-    setDigestError("");
-
-    if (!digestOperationIdRef.current) {
-      digestOperationIdRef.current = `op-digest-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
-    }
-    const operationIdentity = digestOperationIdRef.current;
-
-    try {
-      const saved = await saveDigestPreference(
-        walletAddress,
-        digestPreferences,
-        operationIdentity,
-      );
-      digestOperationIdRef.current = null;
-      setDigestPreferences(saved);
-    } catch (saveError) {
-      setDigestError(
-        saveError instanceof Error
-          ? saveError.message
-          : "Digest preferences could not be saved.",
-      );
-    } finally {
-      setDigestSaving(false);
-    }
     const newPrefs: WatchlistDigestPreference = {
       ...digestPreferences,
       watchedVaultIds: digestPreferences.watchedVaultIds.includes(vaultId)
         ? digestPreferences.watchedVaultIds.filter((value) => value !== vaultId)
         : [...digestPreferences.watchedVaultIds, vaultId],
     };
-    // Update optimistically - will be saved when user clicks Save
-    // No API call here, just local state update
     setDigestPreferences(newPrefs);
   };
 
   const handleSaveDigestPreferences = async () => {
+    if (digestSaving) return;
+
+    if (!digestOperationIdRef.current) {
+      digestOperationIdRef.current = `op-digest-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+    }
+    const operationIdentity = digestOperationIdRef.current;
+
     const preferencesWithOverrides = {
       ...digestPreferences,
       channelOverrides: channelOverrides.watchlist,
     };
     await optimisticDigestUpdate(preferencesWithOverrides, async () => {
-      return await saveDigestPreference(walletAddress, preferencesWithOverrides);
+      const saved = await saveDigestPreference(
+        walletAddress,
+        preferencesWithOverrides,
+        operationIdentity,
+      );
+      digestOperationIdRef.current = null;
+      return saved;
     });
   };
 
@@ -501,12 +485,6 @@ export default function AlertsModal({
             <select
               value={form.vaultId}
               onChange={(event) => updateFormField("vaultId", event.target.value)}
-              onChange={(event) =>
-                setForm((current) => ({
-                  ...current,
-                  vaultId: event.target.value,
-                }))
-              }
               aria-label="Select vault"
               className="col-span-2 bg-white/10 text-white rounded-xl px-3 py-2 text-sm border border-white/10 focus:border-indigo-400 outline-none"
             >
@@ -538,12 +516,6 @@ export default function AlertsModal({
                 placeholder="10.0"
                 value={form.thresholdValue}
                 onChange={(event) => updateFormField("thresholdValue", event.target.value)}
-                onChange={(event) =>
-                  setForm((current) => ({
-                    ...current,
-                    thresholdValue: event.target.value,
-                  }))
-                }
                 aria-label="APY threshold"
                 className="flex-1 bg-white/10 text-white rounded-xl px-3 py-2 text-sm border border-white/10 focus:border-indigo-400 outline-none"
               />
@@ -555,12 +527,6 @@ export default function AlertsModal({
               placeholder="you@example.com"
               value={form.email}
               onChange={(event) => updateFormField("email", event.target.value)}
-              onChange={(event) =>
-                setForm((current) => ({
-                  ...current,
-                  email: event.target.value,
-                }))
-              }
               aria-label="Notification email"
               className="col-span-2 bg-white/10 text-white rounded-xl px-3 py-2 text-sm border border-white/10 focus:border-indigo-400 outline-none placeholder:text-gray-500"
             />
@@ -581,12 +547,6 @@ export default function AlertsModal({
               max={1440}
               value={form.cooldownMinutes}
               onChange={(event) => updateFormField("cooldownMinutes", event.target.value)}
-              onChange={(event) =>
-                setForm((current) => ({
-                  ...current,
-                  cooldownMinutes: event.target.value,
-                }))
-              }
               aria-label="Cooldown minutes"
               placeholder="Cooldown (minutes)"
               className="bg-white/10 text-white rounded-xl px-3 py-2 text-sm border border-white/10 focus:border-indigo-400 outline-none"
@@ -597,12 +557,6 @@ export default function AlertsModal({
               max={1000}
               value={form.severityThreshold}
               onChange={(event) => updateFormField("severityThreshold", event.target.value)}
-              onChange={(event) =>
-                setForm((current) => ({
-                  ...current,
-                  severityThreshold: event.target.value,
-                }))
-              }
               aria-label="Severity threshold"
               placeholder="Severity threshold"
               className="bg-white/10 text-white rounded-xl px-3 py-2 text-sm border border-white/10 focus:border-indigo-400 outline-none"
@@ -613,12 +567,6 @@ export default function AlertsModal({
               max={23}
               value={form.quietHoursStart}
               onChange={(event) => updateFormField("quietHoursStart", event.target.value)}
-              onChange={(event) =>
-                setForm((current) => ({
-                  ...current,
-                  quietHoursStart: event.target.value,
-                }))
-              }
               aria-label="Quiet hours start"
               placeholder="Quiet start UTC"
               className="bg-white/10 text-white rounded-xl px-3 py-2 text-sm border border-white/10 focus:border-indigo-400 outline-none"
@@ -629,12 +577,6 @@ export default function AlertsModal({
               max={23}
               value={form.quietHoursEnd}
               onChange={(event) => updateFormField("quietHoursEnd", event.target.value)}
-              onChange={(event) =>
-                setForm((current) => ({
-                  ...current,
-                  quietHoursEnd: event.target.value,
-                }))
-              }
               aria-label="Quiet hours end"
               placeholder="Quiet end UTC"
               className="bg-white/10 text-white rounded-xl px-3 py-2 text-sm border border-white/10 focus:border-indigo-400 outline-none"

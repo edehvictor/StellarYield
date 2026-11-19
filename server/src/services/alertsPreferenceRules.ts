@@ -6,6 +6,63 @@ export interface AlertPreferences {
   quietHoursEnd: number;
 }
 
+export interface AlertPreferencesValidationResult {
+  valid: boolean;
+  errors: string[];
+  sanitized?: AlertPreferences;
+}
+
+/**
+ * Validates and sanitizes alert preferences against strict numeric boundaries
+ * and integer constraints. Preserves existing state on failure.
+ */
+export function validateAlertPreferences(raw: unknown): AlertPreferencesValidationResult {
+  const errors: string[] = [];
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    return { valid: false, errors: ["preferences must be an object"] };
+  }
+
+  const p = raw as Record<string, unknown>;
+
+  if (p.channel !== "email" && p.channel !== "in_app") {
+    errors.push("channel must be email or in_app");
+  }
+
+  const cooldown = Number(p.cooldownMinutes);
+  if (!Number.isFinite(cooldown) || !Number.isInteger(cooldown) || cooldown < 0 || cooldown > 1440) {
+    errors.push("cooldownMinutes must be an integer between 0 and 1440");
+  }
+
+  const severity = Number(p.severityThreshold);
+  if (!Number.isFinite(severity) || severity < 0 || severity > 1000) {
+    errors.push("severityThreshold must be a number between 0 and 1000");
+  }
+
+  const quietStart = Number(p.quietHoursStart);
+  if (!Number.isFinite(quietStart) || !Number.isInteger(quietStart) || quietStart < 0 || quietStart > 23) {
+    errors.push("quietHoursStart must be an integer from 0 to 23");
+  }
+
+  const quietEnd = Number(p.quietHoursEnd);
+  if (!Number.isFinite(quietEnd) || !Number.isInteger(quietEnd) || quietEnd < 0 || quietEnd > 23) {
+    errors.push("quietHoursEnd must be an integer from 0 to 23");
+  }
+
+  if (errors.length > 0) {
+    return { valid: false, errors };
+  }
+
+  const sanitized: AlertPreferences = {
+    channel: p.channel as "email" | "in_app",
+    cooldownMinutes: cooldown,
+    severityThreshold: roundToDecimals(severity, 2),
+    quietHoursStart: quietStart,
+    quietHoursEnd: quietEnd,
+  };
+
+  return { valid: true, errors: [], sanitized };
+}
+
 export type AlertThresholdReasonCode =
   | "BASELINE_DEFAULT"
   | "HIGH_VOLATILITY_EXPANSION"
@@ -76,6 +133,16 @@ export interface AlertThresholdRecommendation {
 }
 
 /**
+ * Documented rounding utility enforcing half-up rounding and normalizing -0 to 0.
+ */
+export function roundToDecimals(val: number, decimals: number): number {
+  if (!Number.isFinite(val)) return 0;
+  const factor = 10 ** decimals;
+  const res = Math.round((val + Number.EPSILON) * factor) / factor;
+  return Object.is(res, -0) ? 0 : res;
+}
+
+/**
  * Normalizes alert recommendation inputs to ensure determinism and jitter-free evaluation.
  */
 export function normalizeAlertThresholdInputs(
@@ -91,9 +158,10 @@ export function normalizeAlertThresholdInputs(
     if (typeof val !== "number" || !Number.isFinite(val) || Number.isNaN(val)) {
       return defaultVal;
     }
-    const clamped = Math.max(min, Math.min(max, val));
-    const factor = Math.pow(10, decimals);
-    return Math.round(clamped * factor) / factor;
+    const lower = Math.min(min, max);
+    const upper = Math.max(min, max);
+    const clamped = Math.max(lower, Math.min(upper, val));
+    return roundToDecimals(clamped, decimals);
   };
 
   return {
@@ -153,6 +221,11 @@ export function recommendAlertThreshold(
   configOverrides?: Partial<AlertThresholdConfig>,
 ): AlertThresholdRecommendation {
   const config = { ...DEFAULT_ALERT_THRESHOLD_CONFIG, ...configOverrides };
+  const minSev = Math.min(config.minSeverityThreshold, config.maxSeverityThreshold);
+  const maxSev = Math.max(config.minSeverityThreshold, config.maxSeverityThreshold);
+  const minCool = Math.min(config.minCooldownMinutes, config.maxCooldownMinutes);
+  const maxCool = Math.max(config.minCooldownMinutes, config.maxCooldownMinutes);
+
   const inputs = normalizeAlertThresholdInputs(rawInput);
 
   let severity = config.defaultSeverityThreshold;
@@ -162,26 +235,27 @@ export function recommendAlertThreshold(
 
   // Volatility adjustment
   if (inputs.historicalVolatility > config.volatilityHighThreshold) {
-    const volExp =
-      Math.round(((inputs.historicalVolatility - config.volatilityHighThreshold) / 50) * 5.0 * 100) /
-      100;
+    const volHighDenom = Math.max(1, 100 - config.volatilityHighThreshold);
+    const volExp = roundToDecimals(
+      ((inputs.historicalVolatility - config.volatilityHighThreshold) / volHighDenom) * 5.0,
+      2,
+    );
     severity += volExp;
     reasons.push(`High market volatility (+${volExp.toFixed(1)}% threshold)`);
     reasonCodes.push("HIGH_VOLATILITY_EXPANSION");
-  } else if (inputs.historicalVolatility < config.volatilityLowThreshold) {
-    const volTight =
-      Math.round(
-        ((config.volatilityLowThreshold - inputs.historicalVolatility) / config.volatilityLowThreshold) *
-          1.5 *
-          100,
-      ) / 100;
+  } else if (inputs.historicalVolatility < config.volatilityLowThreshold && config.volatilityLowThreshold > 0) {
+    const volLowDenom = config.volatilityLowThreshold;
+    const volTight = roundToDecimals(
+      ((config.volatilityLowThreshold - inputs.historicalVolatility) / volLowDenom) * 1.5,
+      2,
+    );
     severity -= volTight;
     reasons.push(`Low volatility environment (-${volTight.toFixed(1)}% threshold)`);
     reasonCodes.push("LOW_VOLATILITY_TIGHTENING");
   }
 
   // Burst trigger suppression
-  if (inputs.triggerFrequencyPerHour >= config.frequencyBurstThreshold) {
+  if (inputs.triggerFrequencyPerHour >= config.frequencyBurstThreshold && config.frequencyBurstThreshold > 0) {
     const burstMultiplier = Math.min(
       4,
       Math.floor(inputs.triggerFrequencyPerHour / config.frequencyBurstThreshold) + 1,
@@ -207,18 +281,18 @@ export function recommendAlertThreshold(
   }
 
   // Clamp severity
-  const unboundedSeverity = severity;
-  severity = Math.max(config.minSeverityThreshold, Math.min(config.maxSeverityThreshold, severity));
-  severity = Math.round(severity * 100) / 100;
+  const unboundedSeverity = roundToDecimals(severity, 2);
+  severity = Math.max(minSev, Math.min(maxSev, unboundedSeverity));
+  severity = roundToDecimals(severity, 2);
 
   // Clamp cooldown
-  cooldown = Math.max(config.minCooldownMinutes, Math.min(config.maxCooldownMinutes, cooldown));
+  cooldown = Math.max(minCool, Math.min(maxCool, cooldown));
   cooldown = Math.round(cooldown);
 
-  if (unboundedSeverity <= config.minSeverityThreshold && unboundedSeverity < config.minSeverityThreshold) {
+  if (unboundedSeverity < minSev) {
     reasonCodes.push("MIN_SEVERITY_FLOOR");
   }
-  if (unboundedSeverity >= config.maxSeverityThreshold && unboundedSeverity > config.maxSeverityThreshold) {
+  if (unboundedSeverity > maxSev) {
     reasonCodes.push("MAX_SEVERITY_CEILING");
   }
 
@@ -251,7 +325,15 @@ export function recommendAlertThreshold(
 }
 
 function inQuietHours(nowHourUtc: number, preferences: AlertPreferences): boolean {
-  const { quietHoursStart, quietHoursEnd } = preferences;
+  let { quietHoursStart, quietHoursEnd } = preferences;
+  if (!Number.isFinite(quietHoursStart) || !Number.isFinite(quietHoursEnd)) {
+    return false;
+  }
+  quietHoursStart = Math.floor(quietHoursStart) % 24;
+  quietHoursEnd = Math.floor(quietHoursEnd) % 24;
+  if (quietHoursStart < 0) quietHoursStart += 24;
+  if (quietHoursEnd < 0) quietHoursEnd += 24;
+
   if (quietHoursStart === quietHoursEnd) return false;
   if (quietHoursStart < quietHoursEnd) {
     return nowHourUtc >= quietHoursStart && nowHourUtc < quietHoursEnd;
@@ -265,7 +347,21 @@ export function shouldSuppressAlert(
   preferences: AlertPreferences,
 ): boolean {
   if (inQuietHours(now.getUTCHours(), preferences)) return true;
-  if (!previousTriggeredAtMs) return false;
-  const elapsedMs = now.getTime() - previousTriggeredAtMs;
+  if (
+    previousTriggeredAtMs === undefined ||
+    !Number.isFinite(previousTriggeredAtMs) ||
+    previousTriggeredAtMs <= 0
+  ) {
+    return false;
+  }
+  if (!Number.isFinite(preferences.cooldownMinutes) || preferences.cooldownMinutes <= 0) {
+    return false;
+  }
+  const nowMs = now.getTime();
+  // Safe handling of clock skew / future timestamps
+  if (nowMs < previousTriggeredAtMs) {
+    return false;
+  }
+  const elapsedMs = nowMs - previousTriggeredAtMs;
   return elapsedMs < preferences.cooldownMinutes * 60_000;
 }
