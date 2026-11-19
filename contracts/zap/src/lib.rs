@@ -290,6 +290,62 @@ impl Zap {
             let held = input_client.balance(&zap_addr);
             if held > 0 { held } else { amount_in }
         } else {
+            // Approve DEX router to spend our input tokens
+            input_client.approve(
+                &zap_addr,
+                &dex_router,
+                &amount_in,
+                &(env.ledger().sequence() + 100),
+            );
+
+            // Swap via DEX router
+            let swap_fn = Symbol::new(&env, "swap");
+            let swap_args: soroban_sdk::Vec<Val> = vec![
+                &env,
+                input_token.into_val(&env),
+                vault_token.clone().into_val(&env),
+                amount_in.into_val(&env),
+                min_amount_out.into_val(&env),
+            ];
+            let amount_out: i128 = env.invoke_contract(&dex_router, &swap_fn, swap_args);
+
+            if amount_out < min_amount_out {
+                return Err(ZapError::SlippageExceeded);
+            }
+
+            let quoted = if expected_amount_out > 0 {
+                expected_amount_out
+            } else {
+                min_amount_out
+            };
+
+            if amount_out < quoted {
+                if !allow_partial {
+                    return Err(ZapError::SlippageExceeded);
+                }
+
+                env.events().publish(
+                    (symbol_short!("zap_part"),),
+                    (
+                        user.clone(),
+                        input_token.clone(),
+                        vault_token.clone(),
+                        amount_in,
+                        quoted,
+                        amount_out,
+                    ),
+                );
+            }
+
+            Self::refund_unused_input(
+                &env,
+                &user,
+                &input_token,
+                &zap_addr,
+                symbol_short!("unused_in"),
+            );
+
+            amount_out
             // On retry: if we already hold vault_token, skip the swap.
             let vault_client = token::Client::new(&env, &vault_token);
             let already_converted = vault_client.balance(&zap_addr);
@@ -561,6 +617,16 @@ mod tests {
             env.storage().instance().set(&RouterKey::Output, &amount_out);
             env.storage()
                 .instance()
+                .set(&RouterKey::InputUsed, &input_used);
+        }
+
+        pub fn swap(
+            env: Env,
+            from: Address,
+            to: Address,
+            amount_in: i128,
+            min_out: i128,
+        ) -> i128 {
                 .set(&RouterKey::Output, &amount_out);
             env.storage()
                 .instance()
@@ -946,6 +1012,19 @@ mod tests {
         let t = setup_zap_env();
         StellarAssetClient::new(&t.env, &t.vault_token).mint(&t.user, &1_000);
 
+        let shares = t
+            .zap
+            .zap_deposit(
+                &t.user,
+                &t.vault_token,
+                &t.vault_token,
+                &t.vault_id,
+                &1_000,
+                &0,
+                &1,
+                &0,
+                &false,
+            );
         let shares = t.zap.zap_deposit(
             &t.user,
             &t.vault_token,
@@ -985,6 +1064,22 @@ mod tests {
     #[test]
     fn test_zap_deposit_swap_full_emits_zap_dep() {
         let t = setup_zap_env();
+        t.router
+            .configure(&t.zap_id, &900, &1_000);
+
+        let shares = t
+            .zap
+            .zap_deposit(
+                &t.user,
+                &t.input_token,
+                &t.vault_token,
+                &t.vault_id,
+                &1_000,
+                &800,
+                &1,
+                &900,
+                &false,
+            );
         t.router.configure(&t.zap_id, &900, &1_000);
 
         let shares = t.zap.zap_deposit(
@@ -1016,6 +1111,19 @@ mod tests {
         let t = setup_zap_env();
         t.router.configure(&t.zap_id, &600, &1_000);
 
+        let shares = t
+            .zap
+            .zap_deposit(
+                &t.user,
+                &t.input_token,
+                &t.vault_token,
+                &t.vault_id,
+                &1_000,
+                &500,
+                &1,
+                &900,
+                &true,
+            );
         let shares = t.zap.zap_deposit(
             &t.user,
             &t.input_token,
@@ -1043,6 +1151,10 @@ mod tests {
             .find(|(contract, topics, _)| {
                 *contract == t.zap_id && event_topic(&t.env, topics) == symbol_short!("zap_part")
             })
+            .map(|(_, _, data)| data.clone())
+            .unwrap();
+        let decoded: (Address, Address, Address, i128, i128, i128) =
+            part_data.into_val(&t.env);
             .map(|(_, _, data)| data)
             .unwrap();
         let decoded: (Address, Address, Address, i128, i128, i128) = part_data.into_val(&t.env);
@@ -1060,6 +1172,18 @@ mod tests {
         // Router consumes only 600 of 1000 input; 400 should be refunded.
         t.router.configure(&t.zap_id, &900, &600);
 
+        t.zap
+            .zap_deposit(
+                &t.user,
+                &t.input_token,
+                &t.vault_token,
+                &t.vault_id,
+                &1_000,
+                &800,
+                &1,
+                &900,
+                &false,
+            );
         t.zap.zap_deposit(
             &t.user,
             &t.input_token,
@@ -1086,6 +1210,7 @@ mod tests {
             .find(|(contract, topics, _)| {
                 *contract == t.zap_id && event_topic(&t.env, topics) == symbol_short!("zap_ref")
             })
+            .map(|(_, _, data)| data.clone())
             .map(|(_, _, data)| data)
             .unwrap();
         let decoded: (Address, Address, i128, Symbol) = ref_data.into_val(&t.env);
@@ -1104,6 +1229,18 @@ mod tests {
         let t = setup_zap_env();
         t.router.configure(&t.zap_id, &600, &600);
 
+        t.zap
+            .zap_deposit(
+                &t.user,
+                &t.input_token,
+                &t.vault_token,
+                &t.vault_id,
+                &1_000,
+                &500,
+                &1,
+                &900,
+                &true,
+            );
         t.zap.zap_deposit(
             &t.user,
             &t.input_token,
