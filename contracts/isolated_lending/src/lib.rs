@@ -383,7 +383,12 @@ impl IsolatedLendingPair {
         Ok(())
     }
 
-    pub fn supply(env: Env, user: Address, amount: i128, expected_context: LedgerContext) -> Result<(), IsolatedLendingError> {
+    pub fn supply(
+        env: Env,
+        user: Address,
+        amount: i128,
+        expected_context: LedgerContext,
+    ) -> Result<(), IsolatedLendingError> {
         user.require_auth();
         if amount <= 0 {
             return Err(IsolatedLendingError::InvalidAmount);
@@ -423,7 +428,12 @@ impl IsolatedLendingPair {
         Ok(())
     }
 
-    pub fn withdraw(env: Env, user: Address, amount: i128, expected_context: LedgerContext) -> Result<(), IsolatedLendingError> {
+    pub fn withdraw(
+        env: Env,
+        user: Address,
+        amount: i128,
+        expected_context: LedgerContext,
+    ) -> Result<(), IsolatedLendingError> {
         user.require_auth();
         if amount <= 0 {
             return Err(IsolatedLendingError::InvalidAmount);
@@ -584,7 +594,12 @@ impl IsolatedLendingPair {
         Ok(())
     }
 
-    pub fn repay(env: Env, user: Address, amount: i128, expected_context: LedgerContext) -> Result<(), IsolatedLendingError> {
+    pub fn repay(
+        env: Env,
+        user: Address,
+        amount: i128,
+        expected_context: LedgerContext,
+    ) -> Result<(), IsolatedLendingError> {
         user.require_auth();
         Self::require_init(&env)?;
         Self::require_context(&env, &expected_context)?;
