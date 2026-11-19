@@ -7,7 +7,13 @@ import { zapDeposit } from "../../services/soroban";
 import type { DecodedContractPanic } from "../../../../shared/types/contractPanic";
 import type { TxPhase } from "../../services/transactionPhase";
 import { TX_PHASE_PIPELINE } from "../../services/transactionPhase";
-import { fetchSwapQuote, isQuoteCancellation, verifySwapQuote, ZapQuoteError } from "./fetchSwapQuote";
+import {
+  describeZapQuoteVerifyFailure,
+  fetchSwapQuote,
+  isQuoteCancellation,
+  verifySwapQuote,
+  ZapQuoteError,
+} from "./fetchSwapQuote";
 import { minAmountAfterSlippage } from "./slippage";
 import {
   buildZapQuoteRequestKey,
@@ -43,6 +49,14 @@ import { useDepositImpact } from "./useDepositImpact";
 import type { QuoteSnapshot } from "./useDepositImpact";
 import { getVaultSlippage, setVaultSlippage, resetVaultSlippage } from "../../lib/preferences";
 import { apiFetch, apiUrl } from "../../lib/api";
+import {
+  clearDepositDraft,
+  reconcileDepositDraft,
+  saveDepositDraft,
+  type DepositDraftState,
+} from "./depositDraft";
+import { useProtectedWalletAction } from "../../hooks/useProtectedWalletAction";
+import SessionExpiredRecovery from "../../components/wallet/SessionExpiredRecovery";
 
 export interface ZapDepositPanelProps {
   walletAddress: string | null;

@@ -14,6 +14,12 @@ import {
   computeSignerQuorumProgress,
   type SignerQuorumInput,
 } from "../services/signerQuorumService";
+import {
+  computeGovernanceConfigFingerprint,
+  validateGovernanceConfigSnapshot,
+  verifyGovernanceConfigFingerprint,
+  type GovernanceConfigSnapshot,
+} from "../../../shared/types/governanceConfigSnapshot";
 import { sendError } from "../utils/errorResponse";
 
 const router = Router();
@@ -34,6 +40,100 @@ const VALID_PROPOSAL_TYPES: ProposalType[] = [
   "reward_change",
 ];
 
+type ConfigBinding =
+  | {
+      ok: true;
+      snapshot: GovernanceConfigSnapshot;
+      fingerprint: string;
+    }
+  | {
+      ok: false;
+      status: 400 | 409;
+      error: string;
+      message: string;
+      details?: unknown;
+      recoverable?: boolean;
+    };
+
+/**
+ * Validates a caller's configuration snapshot/fingerprint without mutating any
+ * governance state. A stale or malformed claim is rejected before the work
+ * (forecast, quorum computation, proposal preparation) runs.
+ */
+function bindGovernanceConfig(
+  snapshotInput: unknown,
+  expectedFingerprint: unknown,
+): ConfigBinding {
+  const validation = validateGovernanceConfigSnapshot(snapshotInput);
+  if (!validation.valid) {
+    return {
+      ok: false,
+      status: 400,
+      error: "INVALID_GOVERNANCE_CONFIG",
+      message: "The governance configuration snapshot is invalid.",
+      details: { issues: validation.issues },
+    };
+  }
+
+  const verification = verifyGovernanceConfigFingerprint(
+    validation.snapshot,
+    expectedFingerprint,
+  );
+  if (!verification.valid) {
+    return {
+      ok: false,
+      status: verification.status === "stale" ? 409 : 400,
+      error: verification.code,
+      message: verification.message,
+      details: {
+        expectedFingerprint: verification.expectedFingerprint,
+        providedFingerprint: verification.actualFingerprint,
+        driftReasons: verification.driftReasons,
+      },
+      recoverable: true,
+    };
+  }
+
+  return {
+    ok: true,
+    snapshot: validation.snapshot,
+    fingerprint: verification.expectedFingerprint,
+  };
+}
+
+function sendConfigBindingError(res: Response, binding: Extract<ConfigBinding, { ok: false }>): void {
+  sendError(
+    res,
+    binding.status,
+    binding.error,
+    binding.message,
+    binding.details,
+    undefined,
+    binding.recoverable,
+  );
+}
+
+/**
+ * POST /api/governance/config-snapshot
+ * Returns the canonical snapshot and immutable SHA-256 fingerprint for a
+ * governance configuration. Read-only; clients use it to refresh stale work.
+ */
+router.post("/config-snapshot", (req: Request, res: Response) => {
+  const validation = validateGovernanceConfigSnapshot(req.body);
+  if (!validation.valid) {
+    sendError(
+      res,
+      400,
+      "INVALID_GOVERNANCE_CONFIG",
+      "The governance configuration is invalid.",
+      { issues: validation.issues },
+    );
+    return;
+  }
+
+  res.json(computeGovernanceConfigFingerprint(validation.snapshot));
+});
+
 /**
  * POST /api/governance/forecast
  * Returns an estimated impact forecast for a governance proposal.
@@ -44,7 +144,16 @@ router.get("/forecast", (_req: Request, res: Response) => {
 });
 
 router.post("/forecast", forecastLimiter, (req: Request, res: Response) => {
-  const { proposalType, parameters, baseline } = req.body as Partial<GovernanceForecastInput>;
+  const {
+    proposalType,
+    parameters,
+    baseline,
+    configSnapshot,
+    expectedConfigFingerprint,
+  } = req.body as Partial<GovernanceForecastInput> & {
+    configSnapshot?: unknown;
+    expectedConfigFingerprint?: unknown;
+  };
 
   if (!proposalType || !VALID_PROPOSAL_TYPES.includes(proposalType)) {
     res.status(400).json({
@@ -71,7 +180,38 @@ router.post("/forecast", forecastLimiter, (req: Request, res: Response) => {
     return;
   }
 
+  const hasConfigClaim =
+    configSnapshot !== undefined || expectedConfigFingerprint !== undefined;
+  let binding: Extract<ConfigBinding, { ok: true }> | undefined;
+  if (hasConfigClaim) {
+    if (configSnapshot === undefined || expectedConfigFingerprint === undefined) {
+      sendError(
+        res,
+        400,
+        "INVALID_GOVERNANCE_CONFIG",
+        "configSnapshot and expectedConfigFingerprint must be supplied together.",
+      );
+      return;
+    }
+
+    const bound = bindGovernanceConfig(configSnapshot, expectedConfigFingerprint);
+    if (!bound.ok) {
+      sendConfigBindingError(res, bound);
+      return;
+    }
+    binding = bound;
+  }
+
   const result = forecastGovernanceProposal({ proposalType, parameters, baseline });
+  if (binding) {
+    res.json({
+      ...result,
+      configSnapshot: binding.snapshot,
+      configFingerprint: binding.fingerprint,
+    });
+    return;
+  }
+
   res.json(result);
 });
 
@@ -85,7 +225,10 @@ const MAX_ATTACHMENTS_PER_PROPOSAL = 20;
  * progressPct, met, perSigner) without touching the chain. Read-only (#1310).
  */
 router.post("/quorum-progress", (req: Request, res: Response) => {
-  const body = (req.body ?? {}) as Partial<SignerQuorumInput>;
+  const body = (req.body ?? {}) as Partial<SignerQuorumInput> & {
+    contractId?: unknown;
+    expectedConfigFingerprint?: unknown;
+  };
 
   if (!Array.isArray(body.signers)) {
     sendError(res, 400, "INVALID_REQUEST", "signers must be an array of public keys.");
@@ -100,12 +243,38 @@ router.post("/quorum-progress", (req: Request, res: Response) => {
     return;
   }
 
+  const signers = body.signers.filter((s): s is string => typeof s === "string");
+  const signatures = body.signatures.filter((s): s is string => typeof s === "string");
+  const configSnapshot: GovernanceConfigSnapshot = {
+    signers,
+    threshold: body.threshold,
+    contractId: typeof body.contractId === "string" ? body.contractId : "",
+  };
+
+  let binding: Extract<ConfigBinding, { ok: true }> | undefined;
+  if (body.expectedConfigFingerprint !== undefined) {
+    const bound = bindGovernanceConfig(
+      configSnapshot,
+      body.expectedConfigFingerprint,
+    );
+    if (!bound.ok) {
+      sendConfigBindingError(res, bound);
+      return;
+    }
+    binding = bound;
+  }
+
   const progress = computeSignerQuorumProgress({
-    signers: body.signers.filter((s): s is string => typeof s === "string"),
-    signatures: body.signatures.filter((s): s is string => typeof s === "string"),
+    signers,
+    signatures,
     threshold: body.threshold,
   });
-  res.json(progress);
+  res.json({
+    ...progress,
+    configFingerprint:
+      binding?.fingerprint ??
+      computeGovernanceConfigFingerprint(configSnapshot).fingerprint,
+  });
 });
 
 /**
