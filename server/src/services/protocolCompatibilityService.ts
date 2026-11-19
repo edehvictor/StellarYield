@@ -104,6 +104,7 @@ export interface CompatibilityIssue {
   fallbackReasonCode?: FallbackReasonCode;
   /** Human-readable sentence explaining the downgrade reason. */
   fallbackReason?: string;
+  registryConflict?: RegistryConflict;
 }
 
 /**
@@ -137,7 +138,6 @@ export function deriveFallbackReason(issue: string, component?: string): {
   }
 
   return { fallbackReasonCode: code, fallbackReason: FALLBACK_REASON_LABELS[code] };
-  registryConflict?: RegistryConflict;
 }
 
 export interface CompatibilityStatus {
