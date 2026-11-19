@@ -105,14 +105,20 @@ Source: `contracts/isolated_lending/src/lib.rs`
 | 13   | `OracleQuoteStale`       | Oracle quote older than the policy allows | Push a fresh quote                         |
 | 14   | `OracleConfidenceTooLow` | Oracle quote confidence below the policy | Wait for a higher-confidence quote          |
 | 15   | `StaleConfig`            | Configuration changed since the caller captured its fingerprint | Refresh with `get_config_fingerprint` and retry |
+| 16   | `WrongNetwork`           | Context names a different network than the live ledger or stored binding | Refresh with `get_ledger_context()` and retry on the correct network |
+| 17   | `WrongContract`          | Context names a different pair deployment address | Use the context from `get_ledger_context()` for this exact pair |
+| 18   | `WrongVersion`           | Context storage version does not match the stored version | Refresh with `get_ledger_context()` after migration |
 
 `isolated_lending` uses checked arithmetic and documented floor rounding for
 values, limits, interest, fees and liquidation payouts (the close-factor cap is
 the one upward rounding, capped at the debt). Every checked value is computed
 before tokens move or storage is written, so a call that fails with any code
 above leaves balances, positions, totals, pending withdrawals and configuration
-unchanged and can be retried with corrected inputs. See
-`docs/contracts/isolated-lending.md` for the rounding table and numeric limits.
+unchanged and can be retried with corrected inputs. All state-modifying entry
+points now require both a `LedgerContext` (network/version binding) and, where
+applicable, a configuration fingerprint. See
+`docs/contracts/isolated-lending.md` for the rounding table, numeric limits,
+and context binding.
 
 ---
 
@@ -269,6 +275,7 @@ Source: `contracts/zap/src/lib.rs`
 | 4    | `Unauthorized`       | Caller is not admin          | Use the admin address                    |
 | 5    | `SlippageExceeded`   | Swap output below minimum    | Increase slippage tolerance              |
 | 6    | `SwapFailed`         | Underlying swap call failed  | Check pool liquidity and token approvals |
+| 7    | `OpAlreadySettled`   | `op_id` was already successfully completed | Use a new `op_id` for a new operation; check `get_op_status` first |
 | 4001 | `QuoteExpired`       | Ledger closed after the quote deadline (`zap_deposit_with_deadline`) | Refresh the quote and resubmit |
 
 ---
