@@ -16,6 +16,12 @@ import type { GovernanceConfig } from "./types";
 import SignerQuorumProgress from "./SignerQuorumProgress";
 import { computeSignerQuorumProgress } from "./signerQuorum";
 import { getNetworkPassphrase } from "../../lib/networkEnv";
+import GovernanceDiagnosticsList from "./GovernanceDiagnosticsList";
+import {
+  buildExecutionDiagnostics,
+  buildWalletSigningDiagnostics,
+} from "./governanceDiagnostics";
+import type { GovernanceDiagnostic } from "../../../../shared/types/governanceDiagnostic";
 
 const NETWORK_PASSPHRASE = getNetworkPassphrase();
 
@@ -48,6 +54,7 @@ export default function PendingTransactionCard({
 
   const [signPhase, setSignPhase] = useState<TxPhase>("idle");
   const [signError, setSignError] = useState<string | null>(null);
+  const [signDiagnostics, setSignDiagnostics] = useState<GovernanceDiagnostic[]>([]);
 
   const persistedOperation = transaction.operation;
   const [execPhase, setExecPhase] = useState<TxPhase>(() =>
@@ -65,6 +72,11 @@ export default function PendingTransactionCard({
     persistedOperation?.failedAtPhase ??
       (persistedOperation?.txHash ? "polling" : "submitting"),
   );
+  const [execPhase, setExecPhase] = useState<TxPhase>("idle");
+  const [execError, setExecError] = useState<string | null>(null);
+  const [execDiagnostics, setExecDiagnostics] = useState<GovernanceDiagnostic[]>([]);
+  const [execHash, setExecHash] = useState<string | null>(null);
+  const lastExecPhaseRef = useRef<TxPhase>("idle");
 
   const hasSigned = transaction.signatures.some(
     (s) => s.publicKey === walletAddress,
@@ -80,6 +92,7 @@ export default function PendingTransactionCard({
     setSigning(true);
     setError(null);
     setSignError(null);
+    setSignDiagnostics([]);
     setSignPhase("waiting_for_wallet");
 
     try {
@@ -98,6 +111,7 @@ export default function PendingTransactionCard({
       const msg = err instanceof Error ? err.message : String(err);
       setError(msg);
       setSignError(msg);
+      setSignDiagnostics(buildWalletSigningDiagnostics());
       setSignPhase("failure");
     } finally {
       setSigning(false);
@@ -109,6 +123,8 @@ export default function PendingTransactionCard({
     setExecuting(true);
     setError(null);
     setExecError(null);
+    setExecDiagnostics([]);
+    setExecHash(null);
     lastExecPhaseRef.current = "idle";
 
     let operation: GovernanceExecutionState | null;
@@ -163,6 +179,11 @@ export default function PendingTransactionCard({
         setExecError(msg);
         setError(msg);
         onExecutionFailed(transaction.id, msg, failedAtPhase);
+        setExecDiagnostics(
+          buildExecutionDiagnostics(
+            lastExecPhaseRef.current === "submitting" ? "submitting" : "polling",
+          ),
+        );
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -172,6 +193,11 @@ export default function PendingTransactionCard({
       setExecError(msg);
       setError(msg);
       onExecutionFailed(transaction.id, msg, failedAtPhase);
+      setExecDiagnostics(
+        buildExecutionDiagnostics(
+          lastExecPhaseRef.current === "submitting" ? "submitting" : "polling",
+        ),
+      );
     } finally {
       setExecuting(false);
     }
@@ -179,6 +205,7 @@ export default function PendingTransactionCard({
 
   const retryExecute = () => {
     setExecError(null);
+    setExecDiagnostics([]);
     setError(null);
     void handleExecute();
   };
@@ -197,6 +224,7 @@ export default function PendingTransactionCard({
 
   const retrySign = () => {
     setSignError(null);
+    setSignDiagnostics([]);
     setError(null);
     void handleSign();
   };
@@ -274,6 +302,9 @@ export default function PendingTransactionCard({
                 errorMessage={signPhase === "failure" ? signError : null}
                 onRetry={signPhase === "failure" ? retrySign : undefined}
               />
+              {signPhase === "failure" && (
+                <GovernanceDiagnosticsList diagnostics={signDiagnostics} />
+              )}
               <button
                 type="button"
                 onClick={() => void handleSign()}
@@ -300,6 +331,9 @@ export default function PendingTransactionCard({
                 }
                 onRetry={execPhase === "failure" ? retryExecute : undefined}
               />
+              {execPhase === "failure" && (
+                <GovernanceDiagnosticsList diagnostics={execDiagnostics} />
+              )}
               <button
                 type="button"
                 onClick={() => void handleExecute()}

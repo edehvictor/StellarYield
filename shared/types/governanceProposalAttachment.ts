@@ -111,7 +111,11 @@ export function validateProposalAttachment(
 
   const kind = attachment.kind;
 
-  if (!attachment.filename || !FILENAME_RE.test(attachment.filename)) {
+  if (
+    typeof attachment.filename !== "string" ||
+    !attachment.filename ||
+    !FILENAME_RE.test(attachment.filename)
+  ) {
     errors.push({
       index,
       kind,
@@ -122,6 +126,7 @@ export function validateProposalAttachment(
   }
 
   if (
+    typeof attachment.contentType !== "string" ||
     !attachment.contentType ||
     !ACCEPTED_ATTACHMENT_CONTENT_TYPES[kind].includes(attachment.contentType)
   ) {
@@ -153,7 +158,11 @@ export function validateProposalAttachment(
     });
   }
 
-  if (!attachment.sha256 || !SHA256_HEX_RE.test(attachment.sha256)) {
+  if (
+    typeof attachment.sha256 !== "string" ||
+    !attachment.sha256 ||
+    !SHA256_HEX_RE.test(attachment.sha256)
+  ) {
     errors.push({
       index,
       kind,
@@ -162,7 +171,11 @@ export function validateProposalAttachment(
     });
   }
 
-  if (!attachment.manifestReference || !attachment.manifestReference.trim()) {
+  if (
+    typeof attachment.manifestReference !== "string" ||
+    !attachment.manifestReference ||
+    !attachment.manifestReference.trim()
+  ) {
     errors.push({
       index,
       kind,
@@ -171,7 +184,10 @@ export function validateProposalAttachment(
     });
   }
 
-  if (kind === "transaction_payload" && !attachment.xdr?.trim()) {
+  if (
+    kind === "transaction_payload" &&
+    (typeof attachment.xdr !== "string" || !attachment.xdr.trim())
+  ) {
     errors.push({
       index,
       kind,
