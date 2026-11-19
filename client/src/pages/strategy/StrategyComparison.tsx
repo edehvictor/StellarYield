@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useRef } from 'react';
 import {
   RefreshCw,
   AlertTriangle,
@@ -10,17 +10,18 @@ import {
   TrendingUp,
   Percent,
   Download,
+  ShieldCheck,
+  Check,
 } from 'lucide-react';
 import { apiUrl } from '../../lib/api';
 import { useBackendStatus } from '../../hooks/useBackendStatus';
 import { BackendUnavailable } from '../../components/BackendUnavailable';
-
-
 import {
   downloadStrategyComparisonExport,
   type StrategyComparisonExportFormat,
   type StrategyYield,
 } from './strategyComparisonExport';
+import { formatShortFingerprint } from '../../../../shared/types/strategyComparisonConfigFingerprint';
 
 const STRATEGY_THEMES: Record<string, { bg: string; text: string; shadow: string }> = {
   Blend: { bg: 'from-violet-500/20 to-indigo-600/20', text: 'text-indigo-400', shadow: 'shadow-indigo-500/20' },
@@ -44,35 +45,81 @@ export default function StrategyComparison() {
   const [data, setData] = useState<StrategyYield[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [configFingerprint, setConfigFingerprint] = useState<string | null>(null);
+  const [isStaleConfig, setIsStaleConfig] = useState(false);
+  const [validationWarning, setValidationWarning] = useState<string | null>(null);
+  const [selectedStrategyId, setSelectedStrategyId] = useState<string | null>(null);
+  const [actionNotice, setActionNotice] = useState<{ type: 'error' | 'success'; message: string } | null>(null);
+  
+  // Ref to track confirmed fingerprint across async calls
+  const confirmedFingerprintRef = useRef<string | null>(null);
   const backendStatus = useBackendStatus();
 
   const fetchStrategies = async () => {
     try {
       setError(null);
+      setValidationWarning(null);
+      setActionNotice(null);
       setLoading(true);
+
       const res = await fetch(apiUrl('/api/yields'));
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      
+      const headerFingerprint = res.headers?.get?.('x-strategy-config-fingerprint') || null;
       const yields = await res.json();
       
+      // Extract fingerprint from header or yield payload
+      const incomingFingerprint = headerFingerprint || (Array.isArray(yields) && yields[0]?.configFingerprint) || null;
+
+      // Check if active snapshot fingerprint has drifted
+      if (confirmedFingerprintRef.current && incomingFingerprint && confirmedFingerprintRef.current !== incomingFingerprint) {
+        setIsStaleConfig(true);
+      } else {
+        setIsStaleConfig(false);
+      }
+
+      if (incomingFingerprint) {
+        confirmedFingerprintRef.current = incomingFingerprint;
+        setConfigFingerprint(incomingFingerprint);
+      }
+
       // Validate untrusted fields at the boundary - return empty (safe failure)
       // without mutating state. Skip any entries with missing or malformed data.
-      const strategies = yields.filter((y: StrategyYield) => {
-        if (!y?.protocolName) return false;
-        if (!['Blend', 'Soroswap', 'DeFindex'].includes(y.protocolName)) return false;
-        if (typeof y.apy !== 'number' || !Number.isFinite(y.apy)) return false;
-        if (typeof y.tvl !== 'number' || !Number.isFinite(y.tvl)) return false;
-        if (typeof y.riskScore !== 'number') return false;
-        if (typeof y.liquidityUsd !== 'number' || !Number.isFinite(y.liquidityUsd)) return false;
-        if (typeof y.riskScore !== 'number') return false;
-        if (y.rebalancingBehavior && !['Static', 'Dynamic', 'Yield-Weighted'].includes(y.rebalancingBehavior)) return false;
-        return true;
-      });
+      const strategies = Array.isArray(yields)
+        ? yields.filter((y: StrategyYield) => {
+            if (!y?.protocolName) return false;
+            if (!['Blend', 'Soroswap', 'DeFindex'].includes(y.protocolName)) return false;
+            if (typeof y.apy !== 'number' || !Number.isFinite(y.apy)) return false;
+            if (typeof y.tvl !== 'number' || !Number.isFinite(y.tvl)) return false;
+            if (typeof y.riskScore !== 'number') return false;
+            if (typeof y.liquidityUsd !== 'number' || !Number.isFinite(y.liquidityUsd)) return false;
+            if (y.rebalancingBehavior && !['Static', 'Dynamic', 'Yield-Weighted'].includes(y.rebalancingBehavior)) return false;
+            return true;
+          })
+        : [];
       
-      // Set filtered data - if all entries were invalid, data will be empty
-      // This preserves state and doesn't mutate it with error status
-      setData(strategies);
+      // Preserve existing state and balances when validation fails (#1918)
+      if (strategies.length === 0 && Array.isArray(yields) && yields.length > 0) {
+        setData((prevData) => {
+          if (prevData.length > 0) {
+            setValidationWarning('Validation failed on updated strategy snapshot. Retaining existing valid strategy data and balances.');
+            return prevData;
+          }
+          return [];
+        });
+      } else {
+        setData(strategies);
+      }
     } catch (err: unknown) {
-      setError(getErrorMessage(err));
+      const msg = getErrorMessage(err);
+      setData((prevData) => {
+        if (prevData.length > 0) {
+          setValidationWarning(`Strategy refresh failed (${msg}). Retaining existing strategy data.`);
+          return prevData;
+        }
+        setError(msg);
+        return [];
+      });
     } finally {
       setLoading(false);
     }
@@ -82,11 +129,27 @@ export default function StrategyComparison() {
     downloadStrategyComparisonExport(data, format);
   };
 
+  const handleSelectStrategy = (strategy: StrategyYield) => {
+    if (isStaleConfig) {
+      setActionNotice({
+        type: 'error',
+        message: 'Cannot select strategy: configuration snapshot is stale. Please refresh configuration to continue.',
+      });
+      return;
+    }
+
+    setSelectedStrategyId(strategy.protocolName);
+    setActionNotice({
+      type: 'success',
+      message: `Selected ${strategy.protocolName} strategy with verified configuration snapshot.`,
+    });
+  };
+
   useEffect(() => {
     fetchStrategies();
   }, []);
 
-  // Show backend unavailable state if backend is down
+  // Show backend unavailable state if backend is down and no cached data exists
   if (backendStatus === "unavailable" && !data.length) {
     return (
       <div className="space-y-8 animate-in fade-in slide-in-from-bottom-4 duration-700">
@@ -102,7 +165,7 @@ export default function StrategyComparison() {
     );
   }
 
-  if (error) {
+  if (error && !data.length) {
     return (
       <div className="space-y-8 animate-in fade-in slide-in-from-bottom-4 duration-700">
         <header className="mb-6">
@@ -135,7 +198,8 @@ export default function StrategyComparison() {
 
   return (
     <div className="space-y-8 animate-in fade-in slide-in-from-bottom-4 duration-700">
-      <header className="flex flex-col md:flex-row md:items-end justify-between gap-4">
+      {/* Header */}
+      <header className="flex flex-col md:flex-row md:items-center justify-between gap-4 border-b border-white/10 pb-6">
         <div>
           <div className="flex items-center gap-3 mb-2">
             <div className="bg-emerald-500/20 p-2.5 rounded-xl border border-emerald-500/30 shadow-lg shadow-emerald-500/20">
@@ -145,9 +209,21 @@ export default function StrategyComparison() {
               Strategy Comparison Workspace
             </h2>
           </div>
-          <p className="text-gray-400 ml-[52px]">
-            Side-by-side analysis of risk, liquidity, and rebalancing approaches.
-          </p>
+          <div className="flex items-center gap-3 ml-[52px]">
+            <p className="text-gray-400">
+              Side-by-side analysis of risk, liquidity, and rebalancing approaches.
+            </p>
+            {configFingerprint && (
+              <span
+                data-testid="config-fingerprint-badge"
+                className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-mono bg-white/5 text-gray-300 border border-white/10"
+                title={`Snapshot Fingerprint: ${configFingerprint}`}
+              >
+                <ShieldCheck size={12} className="text-emerald-400" />
+                {formatShortFingerprint(configFingerprint)}
+              </span>
+            )}
+          </div>
         </div>
         <div className="flex flex-wrap gap-2">
           <button
@@ -189,6 +265,61 @@ export default function StrategyComparison() {
         </div>
       </header>
 
+      {/* Stale Configuration Warning Banner */}
+      {isStaleConfig && (
+        <div
+          data-testid="stale-config-warning"
+          className="p-4 rounded-2xl bg-amber-500/10 border border-amber-500/30 text-amber-200 flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-lg shadow-amber-500/5 animate-in fade-in"
+        >
+          <div className="flex items-center gap-3">
+            <AlertTriangle size={20} className="text-amber-400 shrink-0" />
+            <div>
+              <p className="font-semibold text-sm">Strategy Configuration Snapshot Stale</p>
+              <p className="text-xs text-amber-300/80">
+                Underlying strategy configuration has changed. Existing comparisons and balances are preserved. Refresh to update safely.
+              </p>
+            </div>
+          </div>
+          <button
+            onClick={fetchStrategies}
+            disabled={loading}
+            className="px-3 py-1.5 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 text-amber-200 text-xs font-semibold border border-amber-500/40 transition-colors shrink-0"
+          >
+            Refresh Configuration
+          </button>
+        </div>
+      )}
+
+      {/* Non-destructive Validation Warning Banner */}
+      {validationWarning && (
+        <div
+          data-testid="validation-warning-banner"
+          className="p-4 rounded-2xl bg-rose-500/10 border border-rose-500/30 text-rose-200 flex items-center gap-3 shadow-lg shadow-rose-500/5 animate-in fade-in"
+        >
+          <AlertTriangle size={18} className="text-rose-400 shrink-0" />
+          <p className="text-xs font-medium">{validationWarning}</p>
+        </div>
+      )}
+
+      {/* Action Notice (Selection Success / Failure) */}
+      {actionNotice && (
+        <div
+          data-testid="action-notice"
+          className={`p-4 rounded-2xl border text-xs font-medium flex items-center gap-3 animate-in fade-in ${
+            actionNotice.type === 'error'
+              ? 'bg-rose-500/10 border-rose-500/30 text-rose-200'
+              : 'bg-emerald-500/10 border-emerald-500/30 text-emerald-200'
+          }`}
+        >
+          {actionNotice.type === 'error' ? (
+            <AlertTriangle size={16} className="text-rose-400 shrink-0" />
+          ) : (
+            <Check size={16} className="text-emerald-400 shrink-0" />
+          )}
+          <p>{actionNotice.message}</p>
+        </div>
+      )}
+
       {loading ? (
         renderSkeleton()
       ) : data.length === 0 ? (
@@ -207,20 +338,30 @@ export default function StrategyComparison() {
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 relative">
           {data.map((strategy, i) => {
             const theme = STRATEGY_THEMES[strategy.protocolName] || { bg: 'bg-white/5', text: 'text-gray-400', shadow: '' };
+            const isSelected = selectedStrategyId === strategy.protocolName;
             return (
               <div
                 key={strategy.protocolName}
                 style={{ animationDelay: `${i * 100}ms` }}
-                className={`glass-card overflow-hidden border border-white/5 hover:border-white/20 transition-all duration-300 shadow-2xl ${theme.shadow}`}
+                className={`glass-card overflow-hidden border transition-all duration-300 shadow-2xl ${
+                  isSelected ? 'border-emerald-500/50 ring-2 ring-emerald-500/20' : 'border-white/5 hover:border-white/20'
+                } ${theme.shadow}`}
               >
                 {/* Header */}
-                <div className={`p-6 bg-gradient-to-br ${theme.bg} border-b border-white/10`}>
-                  <h3 className="text-3xl font-black text-white mb-2 tracking-tight">
-                    {strategy.protocolName}
-                  </h3>
-                  <div className="flex items-center gap-2 text-sm font-medium text-white/80 uppercase tracking-widest">
-                     <span className="flex items-center gap-1"><Activity size={14}/> Score: {strategy.riskScore}/100</span>
+                <div className={`p-6 bg-gradient-to-br ${theme.bg} border-b border-white/10 flex justify-between items-start`}>
+                  <div>
+                    <h3 className="text-3xl font-black text-white mb-2 tracking-tight">
+                      {strategy.protocolName}
+                    </h3>
+                    <div className="flex items-center gap-2 text-sm font-medium text-white/80 uppercase tracking-widest">
+                       <span className="flex items-center gap-1"><Activity size={14}/> Score: {strategy.riskScore}/100</span>
+                    </div>
                   </div>
+                  {isSelected && (
+                    <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-semibold bg-emerald-500/20 text-emerald-300 border border-emerald-500/40">
+                      <Check size={12} /> Active
+                    </span>
+                  )}
                 </div>
 
                 <div className="p-6 space-y-5 flex-1 flex flex-col">
@@ -302,8 +443,15 @@ export default function StrategyComparison() {
                   </div>
 
                   {/* Actions */}
-                  <button className="w-full btn-primary py-3 rounded-xl hover:scale-[1.02] transition-transform font-bold tracking-wide mt-2">
-                    Select Strategy
+                  <button
+                    onClick={() => handleSelectStrategy(strategy)}
+                    className={`w-full py-3 rounded-xl transition-all font-bold tracking-wide mt-2 ${
+                      isSelected
+                        ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40'
+                        : 'btn-primary hover:scale-[1.02]'
+                    }`}
+                  >
+                    {isSelected ? 'Strategy Selected ✓' : 'Select Strategy'}
                   </button>
                 </div>
               </div>
