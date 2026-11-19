@@ -109,6 +109,7 @@ Source: `contracts/isolated_lending/src/lib.rs`
 | 16   | `WrongNetwork`           | Context names a different network than the live ledger or stored binding | Refresh with `get_ledger_context()` and retry on the correct network |
 | 17   | `WrongContract`          | Context names a different pair deployment address | Use the context from `get_ledger_context()` for this exact pair |
 | 18   | `WrongVersion`           | Context storage version does not match the stored version | Refresh with `get_ledger_context()` after migration |
+| 19   | `InvalidOracleQuote`     | Oracle quote has an invalid price, confidence or future ledger | Publish a valid quote from the configured oracle |
 
 `isolated_lending` uses checked arithmetic and documented floor rounding for
 values, limits, interest, fees and liquidation payouts (the close-factor cap is
