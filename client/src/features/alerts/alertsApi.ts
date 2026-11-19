@@ -62,29 +62,77 @@ export async function deleteAlert(id: string, walletAddress: string): Promise<vo
   if (!res.ok && res.status !== 204) throw new Error("Failed to delete alert");
 }
 
-export async function fetchAlertPreferences(
+/** Alert preferences with the server's optimistic-concurrency version (#1903). */
+export interface VersionedAlertPreferences {
+  preferences: AlertPreferences;
+  /** 0 when the wallet+vault has no preferences yet. */
+  version: number;
+}
+
+/**
+ * Another write committed after `expectedVersion` was read. Carries the
+ * server's current record so the caller can show it or reapply its change.
+ */
+export class AlertPreferencesConflictError extends Error {
+  readonly code = "PREFERENCE_VERSION_CONFLICT";
+  constructor(
+    message: string,
+    readonly currentVersion: number,
+    readonly currentPreferences: AlertPreferences | null,
+  ) {
+    super(message);
+    this.name = "AlertPreferencesConflictError";
+  }
+}
+
+/** Reads the version from `X-Preferences-Version`, falling back to `ETag`. */
+function readVersion(res: Response): number {
+  const raw =
+    res.headers.get("X-Preferences-Version") ??
+    res.headers.get("ETag")?.replace(/^W\//, "").replace(/^"(.*)"$/, "$1");
+  const version = Number(raw);
+  return Number.isSafeInteger(version) && version >= 0 ? version : 0;
+}
+
+export async function fetchAlertPreferencesVersioned(
   walletAddress: string,
   vaultId: string,
-): Promise<AlertPreferences | null> {
+): Promise<VersionedAlertPreferences | null> {
   const res = await fetch(
     `${ALERTS_BASE}/preferences/${encodeURIComponent(walletAddress)}/${encodeURIComponent(vaultId)}`,
   );
   if (res.status === 404) return null;
   if (!res.ok) throw new Error("Failed to fetch alert preferences");
-  return res.json() as Promise<AlertPreferences>;
+  const preferences = (await res.json()) as AlertPreferences;
+  return { preferences, version: readVersion(res) };
 }
 
-export async function saveAlertPreferences(
+export async function fetchAlertPreferences(
+  walletAddress: string,
+  vaultId: string,
+): Promise<AlertPreferences | null> {
+  const versioned = await fetchAlertPreferencesVersioned(walletAddress, vaultId);
+  return versioned ? versioned.preferences : null;
+}
+
+/**
+ * Saves preferences. With `expectedVersion` the write only commits if nobody
+ * else saved since that version was read; otherwise it throws
+ * `AlertPreferencesConflictError` and the server keeps its record unchanged.
+ */
+export async function saveAlertPreferencesVersioned(
   walletAddress: string,
   vaultId: string,
   preferences: AlertPreferences,
-  operationIdentity?: string,
-): Promise<AlertPreferences> {
+  options: { operationIdentity?: string; expectedVersion?: number } = {},
+): Promise<VersionedAlertPreferences> {
+  const { operationIdentity, expectedVersion } = options;
   const headers: Record<string, string> = { "Content-Type": "application/json" };
   if (operationIdentity) {
     headers["X-Operation-Identity"] = operationIdentity;
     headers["Idempotency-Key"] = operationIdentity;
   }
+  if (expectedVersion !== undefined) headers["If-Match"] = `"${expectedVersion}"`;
   const res = await fetch(`${ALERTS_BASE}/preferences`, {
     method: "PUT",
     headers,
@@ -95,11 +143,72 @@ export async function saveAlertPreferences(
       operationIdentity,
     }),
   });
+  if (res.status === 409) {
+    const body = (await res.json().catch(() => ({}))) as {
+      error?: string;
+      code?: string;
+      currentVersion?: number;
+      preferences?: AlertPreferences | null;
+    };
+    if (body.code === "PREFERENCE_VERSION_CONFLICT") {
+      throw new AlertPreferencesConflictError(
+        body.error ?? "Alert preferences changed elsewhere. Reload and try again.",
+        typeof body.currentVersion === "number" ? body.currentVersion : readVersion(res),
+        body.preferences ?? null,
+      );
+    }
+    throw new Error(body.error ?? "Failed to save alert preferences");
+  }
   if (!res.ok) {
     const body = (await res.json().catch(() => ({}))) as { error?: string };
     throw new Error(body.error ?? "Failed to save alert preferences");
   }
-  return res.json() as Promise<AlertPreferences>;
+  const saved = (await res.json()) as AlertPreferences;
+  return { preferences: saved, version: readVersion(res) };
+}
+
+export async function saveAlertPreferences(
+  walletAddress: string,
+  vaultId: string,
+  preferences: AlertPreferences,
+  operationIdentity?: string,
+  expectedVersion?: number,
+): Promise<AlertPreferences> {
+  const saved = await saveAlertPreferencesVersioned(walletAddress, vaultId, preferences, {
+    operationIdentity,
+    expectedVersion,
+  });
+  return saved.preferences;
+}
+
+/**
+ * Read-modify-write under optimistic concurrency: reads the current record,
+ * applies `change`, saves with that version, and on a conflict re-applies
+ * `change` to the server's newer record, up to `maxAttempts` times. Each
+ * attempt uses a fresh operation identity, since its body differs. Other
+ * errors are thrown at once; the server record is untouched by any failure.
+ */
+export async function updateAlertPreferencesSafely(
+  walletAddress: string,
+  vaultId: string,
+  change: (current: AlertPreferences | null) => AlertPreferences,
+  maxAttempts = 3,
+): Promise<VersionedAlertPreferences> {
+  const current = await fetchAlertPreferencesVersioned(walletAddress, vaultId);
+  let base: AlertPreferences | null = current?.preferences ?? null;
+  let version = current?.version ?? 0;
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await saveAlertPreferencesVersioned(walletAddress, vaultId, change(base), {
+        expectedVersion: version,
+        operationIdentity: `op-prefs-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`,
+      });
+    } catch (error) {
+      if (!(error instanceof AlertPreferencesConflictError) || attempt >= maxAttempts) throw error;
+      base = error.currentPreferences;
+      version = error.currentVersion;
+    }
+  }
 }
 
 export async function fetchDigestPreference(
