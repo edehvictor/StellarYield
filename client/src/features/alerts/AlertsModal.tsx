@@ -129,6 +129,13 @@ export default function AlertsModal({
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [digestLoading, setDigestLoading] = useState(false);
   const overlayRef = useRef<HTMLDivElement>(null);
+  const alertOperationIdRef = useRef<string | null>(null);
+  const digestOperationIdRef = useRef<string | null>(null);
+
+  const updateFormField = <K extends keyof FormState>(field: K, value: FormState[K]) => {
+    alertOperationIdRef.current = null;
+    setForm((current) => ({ ...current, [field]: value }));
+  };
 
   // Digest preferences with optimistic updates and rollback on failure
   const {
@@ -326,6 +333,11 @@ export default function AlertsModal({
       channelOverrides: channelOverrides.apy,
     };
 
+    if (!alertOperationIdRef.current) {
+      alertOperationIdRef.current = `op-alert-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+    }
+    const operationIdentity = alertOperationIdRef.current;
+
     setSubmitting(true);
     try {
       const created = await createAlert({
@@ -335,7 +347,10 @@ export default function AlertsModal({
         thresholdValue: threshold,
         email: form.email,
         preferences,
+        operationIdentity,
       });
+
+      alertOperationIdRef.current = null;
 
       window.localStorage.setItem(
         PREFS_STORAGE_KEY,
@@ -348,7 +363,7 @@ export default function AlertsModal({
         }),
       );
 
-      setAlerts((prev) => [created, ...prev]);
+      setAlerts((prev) => (prev.some((a) => a.id === created.id) ? prev : [created, ...prev]));
       setForm(DEFAULT_FORM);
     } catch (err) {
       setFormError(
@@ -401,24 +416,36 @@ export default function AlertsModal({
   };
 
   const toggleWatchedVault = (vaultId: string) => {
+    digestOperationIdRef.current = null;
     const newPrefs: WatchlistDigestPreference = {
       ...digestPreferences,
       watchedVaultIds: digestPreferences.watchedVaultIds.includes(vaultId)
         ? digestPreferences.watchedVaultIds.filter((value) => value !== vaultId)
         : [...digestPreferences.watchedVaultIds, vaultId],
     };
-    // Update optimistically - will be saved when user clicks Save
-    // No API call here, just local state update
     setDigestPreferences(newPrefs);
   };
 
   const handleSaveDigestPreferences = async () => {
+    if (digestSaving) return;
+
+    if (!digestOperationIdRef.current) {
+      digestOperationIdRef.current = `op-digest-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+    }
+    const operationIdentity = digestOperationIdRef.current;
+
     const preferencesWithOverrides = {
       ...digestPreferences,
       channelOverrides: channelOverrides.watchlist,
     };
     await optimisticDigestUpdate(preferencesWithOverrides, async () => {
-      return await saveDigestPreference(walletAddress, preferencesWithOverrides);
+      const saved = await saveDigestPreference(
+        walletAddress,
+        preferencesWithOverrides,
+        operationIdentity,
+      );
+      digestOperationIdRef.current = null;
+      return saved;
     });
   };
 
@@ -457,12 +484,7 @@ export default function AlertsModal({
           <div className="grid grid-cols-2 gap-2">
             <select
               value={form.vaultId}
-              onChange={(event) =>
-                setForm((current) => ({
-                  ...current,
-                  vaultId: event.target.value,
-                }))
-              }
+              onChange={(event) => updateFormField("vaultId", event.target.value)}
               aria-label="Select vault"
               className="col-span-2 bg-white/10 text-white rounded-xl px-3 py-2 text-sm border border-white/10 focus:border-indigo-400 outline-none"
             >
@@ -476,12 +498,7 @@ export default function AlertsModal({
 
             <select
               value={form.condition}
-              onChange={(event) =>
-                setForm((current) => ({
-                  ...current,
-                  condition: event.target.value as AlertCondition,
-                }))
-              }
+              onChange={(event) => updateFormField("condition", event.target.value as AlertCondition)}
               aria-label="Alert condition"
               className="bg-white/10 text-white rounded-xl px-3 py-2 text-sm border border-white/10 focus:border-indigo-400 outline-none"
             >
@@ -498,12 +515,7 @@ export default function AlertsModal({
                 step={0.1}
                 placeholder="10.0"
                 value={form.thresholdValue}
-                onChange={(event) =>
-                  setForm((current) => ({
-                    ...current,
-                    thresholdValue: event.target.value,
-                  }))
-                }
+                onChange={(event) => updateFormField("thresholdValue", event.target.value)}
                 aria-label="APY threshold"
                 className="flex-1 bg-white/10 text-white rounded-xl px-3 py-2 text-sm border border-white/10 focus:border-indigo-400 outline-none"
               />
@@ -514,24 +526,14 @@ export default function AlertsModal({
               type="email"
               placeholder="you@example.com"
               value={form.email}
-              onChange={(event) =>
-                setForm((current) => ({
-                  ...current,
-                  email: event.target.value,
-                }))
-              }
+              onChange={(event) => updateFormField("email", event.target.value)}
               aria-label="Notification email"
               className="col-span-2 bg-white/10 text-white rounded-xl px-3 py-2 text-sm border border-white/10 focus:border-indigo-400 outline-none placeholder:text-gray-500"
             />
 
             <select
               value={form.channel}
-              onChange={(event) =>
-                setForm((current) => ({
-                  ...current,
-                  channel: event.target.value as "email" | "in_app",
-                }))
-              }
+              onChange={(event) => updateFormField("channel", event.target.value as "email" | "in_app")}
               aria-label="Notification channel"
               className="col-span-2 bg-white/10 text-white rounded-xl px-3 py-2 text-sm border border-white/10 focus:border-indigo-400 outline-none"
             >
@@ -544,12 +546,7 @@ export default function AlertsModal({
               min={0}
               max={1440}
               value={form.cooldownMinutes}
-              onChange={(event) =>
-                setForm((current) => ({
-                  ...current,
-                  cooldownMinutes: event.target.value,
-                }))
-              }
+              onChange={(event) => updateFormField("cooldownMinutes", event.target.value)}
               aria-label="Cooldown minutes"
               placeholder="Cooldown (minutes)"
               className="bg-white/10 text-white rounded-xl px-3 py-2 text-sm border border-white/10 focus:border-indigo-400 outline-none"
@@ -559,12 +556,7 @@ export default function AlertsModal({
               min={0}
               max={1000}
               value={form.severityThreshold}
-              onChange={(event) =>
-                setForm((current) => ({
-                  ...current,
-                  severityThreshold: event.target.value,
-                }))
-              }
+              onChange={(event) => updateFormField("severityThreshold", event.target.value)}
               aria-label="Severity threshold"
               placeholder="Severity threshold"
               className="bg-white/10 text-white rounded-xl px-3 py-2 text-sm border border-white/10 focus:border-indigo-400 outline-none"
@@ -574,12 +566,7 @@ export default function AlertsModal({
               min={0}
               max={23}
               value={form.quietHoursStart}
-              onChange={(event) =>
-                setForm((current) => ({
-                  ...current,
-                  quietHoursStart: event.target.value,
-                }))
-              }
+              onChange={(event) => updateFormField("quietHoursStart", event.target.value)}
               aria-label="Quiet hours start"
               placeholder="Quiet start UTC"
               className="bg-white/10 text-white rounded-xl px-3 py-2 text-sm border border-white/10 focus:border-indigo-400 outline-none"
@@ -589,12 +576,7 @@ export default function AlertsModal({
               min={0}
               max={23}
               value={form.quietHoursEnd}
-              onChange={(event) =>
-                setForm((current) => ({
-                  ...current,
-                  quietHoursEnd: event.target.value,
-                }))
-              }
+              onChange={(event) => updateFormField("quietHoursEnd", event.target.value)}
               aria-label="Quiet hours end"
               placeholder="Quiet end UTC"
               className="bg-white/10 text-white rounded-xl px-3 py-2 text-sm border border-white/10 focus:border-indigo-400 outline-none"

@@ -21,7 +21,9 @@ import { sendEmail } from "./emailService";
 import {
   shouldSuppressAlert,
   roundToDecimals,
+  validateAlertPreferences,
   type AlertPreferences,
+  type AlertPreferencesValidationResult,
 } from "./alertsPreferenceRules";
 import {
   recordPreferenceChange,
@@ -86,70 +88,125 @@ export interface CreateAlertInput {
   thresholdValue: number;
   email: string;
   preferences?: AlertPreferences;
+  operationIdentity?: string;
+}
+
+export const ALERT_OPERATION_TTL_MS = 24 * 60 * 60 * 1000;
+
+export interface AlertOperationRecord {
+  operationIdentity: string;
+  fingerprint: string;
+  result: any;
+  createdAt: number;
 }
 
 const alertPreferencesStore = new Map<string, AlertPreferences>();
 const alertLastTriggeredStore = new Map<string, number>();
+const alertOperationStore = new Map<string, AlertOperationRecord>();
 
 function toAlertKey(walletAddress: string, vaultId: string) {
   return `${walletAddress.toLowerCase()}::${vaultId.toLowerCase()}`;
 }
 
-export interface AlertPreferencesValidationResult {
-  valid: boolean;
-  errors: string[];
-  sanitized?: AlertPreferences;
+export { validateAlertPreferences, type AlertPreferencesValidationResult };
+
+export function computeAlertFingerprint(input: {
+  walletAddress: string;
+  vaultId: string;
+  condition: AlertCondition;
+  thresholdValue: number;
+  email: string;
+  preferences?: AlertPreferences;
+}): string {
+  return JSON.stringify({
+    walletAddress: input.walletAddress.trim().toLowerCase(),
+    vaultId: input.vaultId.trim().toLowerCase(),
+    condition: input.condition,
+    thresholdValue: Number(input.thresholdValue),
+    email: input.email.trim().toLowerCase(),
+    preferences: input.preferences
+      ? {
+          channel: input.preferences.channel,
+          cooldownMinutes: Number(input.preferences.cooldownMinutes),
+          severityThreshold: Number(input.preferences.severityThreshold),
+          quietHoursStart: Number(input.preferences.quietHoursStart),
+          quietHoursEnd: Number(input.preferences.quietHoursEnd),
+        }
+      : null,
+  });
 }
 
-/**
- * Validates and sanitizes alert preferences against strict numeric boundaries
- * and integer constraints. Preserves existing state on failure.
- */
-export function validateAlertPreferences(raw: unknown): AlertPreferencesValidationResult {
-  const errors: string[] = [];
-  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
-    return { valid: false, errors: ["preferences must be an object"] };
+// ── Alert Preferences & Operation Identity ──────────────────────────────
+
+export function getAlertPreferences(
+  walletAddress: string,
+  vaultId: string,
+): AlertPreferences | undefined {
+  return alertPreferencesStore.get(toAlertKey(walletAddress, vaultId));
+}
+
+export function setAlertPreferences(
+  walletAddress: string,
+  vaultId: string,
+  preferences: AlertPreferences,
+  operationIdentity?: string,
+): { preferences: AlertPreferences; replayed: boolean } {
+  const validation = validateAlertPreferences(preferences);
+  if (!validation.valid || !validation.sanitized) {
+    throw new Error(`Invalid alert preferences: ${validation.errors.join("; ")}`);
+  }
+  const sanitized = validation.sanitized;
+  const key = toAlertKey(walletAddress, vaultId);
+  const currentFingerprint = JSON.stringify({
+    walletAddress: walletAddress.trim().toLowerCase(),
+    vaultId: vaultId.trim().toLowerCase(),
+    preferences: {
+      channel: sanitized.channel,
+      cooldownMinutes: Number(sanitized.cooldownMinutes),
+      severityThreshold: Number(sanitized.severityThreshold),
+      quietHoursStart: Number(sanitized.quietHoursStart),
+      quietHoursEnd: Number(sanitized.quietHoursEnd),
+    },
+  });
+
+  if (operationIdentity) {
+    const existing = alertOperationStore.get(operationIdentity);
+    if (existing) {
+      if (Date.now() - existing.createdAt > ALERT_OPERATION_TTL_MS) {
+        alertOperationStore.delete(operationIdentity);
+      } else if (existing.fingerprint === currentFingerprint) {
+        return { preferences: existing.result as AlertPreferences, replayed: true };
+      } else {
+        const error = new Error(
+          "Operation identity has already been used with different parameters.",
+        );
+        (error as any).code = "OPERATION_IDENTITY_CONFLICT";
+        throw error;
+      }
+    }
   }
 
-  const p = raw as Record<string, unknown>;
+  alertPreferencesStore.set(key, sanitized);
 
-  if (p.channel !== "email" && p.channel !== "in_app") {
-    errors.push("channel must be email or in_app");
+  if (operationIdentity) {
+    alertOperationStore.set(operationIdentity, {
+      operationIdentity,
+      fingerprint: currentFingerprint,
+      result: sanitized,
+      createdAt: Date.now(),
+    });
   }
 
-  const cooldown = Number(p.cooldownMinutes);
-  if (!Number.isFinite(cooldown) || !Number.isInteger(cooldown) || cooldown < 0 || cooldown > 1440) {
-    errors.push("cooldownMinutes must be an integer between 0 and 1440");
-  }
+  return { preferences: sanitized, replayed: false };
+}
 
-  const severity = Number(p.severityThreshold);
-  if (!Number.isFinite(severity) || severity < 0 || severity > 1000) {
-    errors.push("severityThreshold must be a number between 0 and 1000");
-  }
+export function clearAlertOperationStore(): void {
+  alertOperationStore.clear();
+}
 
-  const quietStart = Number(p.quietHoursStart);
-  if (!Number.isFinite(quietStart) || !Number.isInteger(quietStart) || quietStart < 0 || quietStart > 23) {
-    errors.push("quietHoursStart must be an integer from 0 to 23");
-  }
-
-  const quietEnd = Number(p.quietHoursEnd);
-  if (!Number.isFinite(quietEnd) || !Number.isInteger(quietEnd) || quietEnd < 0 || quietEnd > 23) {
-    errors.push("quietHoursEnd must be an integer from 0 to 23");
-  }
-
-  if (errors.length > 0) {
-    return { valid: false, errors };
-  }
-
-  const sanitized: AlertPreferences = {
-    channel: p.channel as "email" | "in_app",
-    cooldownMinutes: cooldown,
-    severityThreshold: roundToDecimals(severity, 2),
-    quietHoursStart: quietStart,
-    quietHoursEnd: quietEnd,
-  };
-
-  return { valid: true, errors: [], sanitized };
+export function clearAlertPreferencesStore(): void {
+  alertPreferencesStore.clear();
+  alertLastTriggeredStore.clear();
 }
 
 // ── CRUD ────────────────────────────────────────────────────────────────
@@ -171,6 +228,29 @@ export async function createAlert(input: CreateAlertInput) {
       throw new Error(`Invalid alert preferences: ${validation.errors.join("; ")}`);
     }
     sanitizedPrefs = validation.sanitized;
+  }
+
+  const currentFingerprint = computeAlertFingerprint({
+    ...input,
+    thresholdValue: roundedThreshold,
+    preferences: sanitizedPrefs,
+  });
+
+  if (input.operationIdentity) {
+    const existing = alertOperationStore.get(input.operationIdentity);
+    if (existing) {
+      if (Date.now() - existing.createdAt > ALERT_OPERATION_TTL_MS) {
+        alertOperationStore.delete(input.operationIdentity);
+      } else if (existing.fingerprint === currentFingerprint) {
+        return { ...existing.result, __replayed: true };
+      } else {
+        const error = new Error(
+          "Operation identity has already been used with different parameters.",
+        );
+        (error as any).code = "OPERATION_IDENTITY_CONFLICT";
+        throw error;
+      }
+    }
   }
 
   const activeCount = await prisma.userAlert.count({
@@ -206,6 +286,16 @@ export async function createAlert(input: CreateAlertInput) {
       reason: "Initial preference set on alert creation",
     });
   }
+
+  if (input.operationIdentity) {
+    alertOperationStore.set(input.operationIdentity, {
+      operationIdentity: input.operationIdentity,
+      fingerprint: currentFingerprint,
+      result: created,
+      createdAt: Date.now(),
+    });
+  }
+
   return created;
 }
 
@@ -457,17 +547,6 @@ export function updateAlertPreferences(
   });
 
   return { preferences: sanitized, auditEntry };
-}
-
-/**
- * Retrieve the current alert preferences for a wallet+vault pair.
- */
-export function getAlertPreferences(
-  walletAddress: string,
-  vaultId: string,
-): AlertPreferences | undefined {
-  const key = toAlertKey(walletAddress, vaultId);
-  return alertPreferencesStore.get(key);
 }
 
 /**

@@ -11,10 +11,10 @@ import {
   createAlert,
   listAlerts,
   deleteAlert,
-  updateAlertPreferences,
   getAlertPreferences,
+  setAlertPreferences,
+  updateAlertPreferences,
   revertAlertPreferences,
-  validateAlertPreferences,
   MAX_ALERTS_PER_USER,
   type AlertCondition,
 } from "../services/alertsService";
@@ -23,6 +23,7 @@ import {
 } from "../services/alertPreferenceAuditService";
 import {
   roundToDecimals,
+  validateAlertPreferences,
   type AlertPreferences,
 } from "../services/alertsPreferenceRules";
 
@@ -32,12 +33,18 @@ const VALID_CONDITIONS: AlertCondition[] = ["above", "below"];
 
 /** POST /api/alerts */
 router.post("/", async (req: Request, res: Response) => {
+  const operationIdentity =
+    (req.headers["x-operation-identity"] as string | undefined) ??
+    (req.headers["idempotency-key"] as string | undefined) ??
+    (req.body?.operationIdentity as string | undefined);
+
   const { walletAddress, vaultId, condition, thresholdValue, email } = req.body as {
     walletAddress?: string;
     vaultId?: string;
     condition?: string;
     thresholdValue?: unknown;
     email?: string;
+    operationIdentity?: string;
     preferences?: {
       channel?: string;
       cooldownMinutes?: unknown;
@@ -82,12 +89,116 @@ router.post("/", async (req: Request, res: Response) => {
       thresholdValue: roundedThreshold,
       email,
       preferences,
+      operationIdentity,
     });
+
+    if ((alert as any).__replayed) {
+      res.setHeader("X-Idempotent-Replayed", "true");
+      const { __replayed, ...cleanAlert } = alert as any;
+      res.status(200).json(cleanAlert);
+      return;
+    }
+
     res.status(201).json(alert);
-  } catch (err) {
+  } catch (err: any) {
     const message = err instanceof Error ? err.message : "Failed to create alert";
+    if (err.code === "OPERATION_IDENTITY_CONFLICT" || message.includes("Operation identity has already been used")) {
+      res.status(409).json({ error: message, code: "OPERATION_IDENTITY_CONFLICT" });
+      return;
+    }
     const status = message.includes("Maximum") ? 429 : 500;
     res.status(status).json({ error: message });
+  }
+});
+
+/** GET /api/alerts/preferences/:wallet/:vaultId */
+router.get("/preferences/:wallet/:vaultId", (req: Request, res: Response) => {
+  const { wallet, vaultId } = req.params;
+  const preferences = getAlertPreferences(wallet, vaultId);
+  if (!preferences) {
+    res.status(404).json({ error: "Alert preferences not found" });
+    return;
+  }
+  res.json(preferences);
+});
+
+/** PUT /api/alerts/preferences */
+router.put("/preferences", (req: Request, res: Response) => {
+  const operationIdentity =
+    (req.headers["x-operation-identity"] as string | undefined) ??
+    (req.headers["idempotency-key"] as string | undefined) ??
+    (req.body?.operationIdentity as string | undefined);
+
+  const { walletAddress, vaultId, preferences } = req.body as {
+    walletAddress?: string;
+    vaultId?: string;
+    preferences?: {
+      channel?: string;
+      cooldownMinutes?: unknown;
+      severityThreshold?: unknown;
+      quietHoursStart?: unknown;
+      quietHoursEnd?: unknown;
+    };
+    operationIdentity?: string;
+  };
+
+  if (!walletAddress || !vaultId || !preferences) {
+    res.status(400).json({ error: "walletAddress, vaultId, and preferences are required" });
+    return;
+  }
+
+  const channel = preferences.channel;
+  const cooldownMinutes = Number(preferences.cooldownMinutes);
+  const severityThreshold = Number(preferences.severityThreshold);
+  const quietHoursStart = Number(preferences.quietHoursStart);
+  const quietHoursEnd = Number(preferences.quietHoursEnd);
+
+  if (!["email", "in_app"].includes(String(channel))) {
+    res.status(400).json({ error: "preferences.channel must be email or in_app" });
+    return;
+  }
+  if (!Number.isFinite(cooldownMinutes) || cooldownMinutes < 0 || cooldownMinutes > 1440) {
+    res.status(400).json({ error: "preferences.cooldownMinutes must be between 0 and 1440" });
+    return;
+  }
+  if (!Number.isFinite(severityThreshold) || severityThreshold < 0 || severityThreshold > 1000) {
+    res.status(400).json({ error: "preferences.severityThreshold must be between 0 and 1000" });
+    return;
+  }
+  if (!Number.isInteger(quietHoursStart) || quietHoursStart < 0 || quietHoursStart > 23) {
+    res.status(400).json({ error: "preferences.quietHoursStart must be an integer from 0 to 23" });
+    return;
+  }
+  if (!Number.isInteger(quietHoursEnd) || quietHoursEnd < 0 || quietHoursEnd > 23) {
+    res.status(400).json({ error: "preferences.quietHoursEnd must be an integer from 0 to 23" });
+    return;
+  }
+
+  try {
+    const result = setAlertPreferences(
+      walletAddress,
+      vaultId,
+      {
+        channel: channel as "email" | "in_app",
+        cooldownMinutes,
+        severityThreshold,
+        quietHoursStart,
+        quietHoursEnd,
+      },
+      operationIdentity,
+    );
+
+    if (result.replayed) {
+      res.setHeader("X-Idempotent-Replayed", "true");
+    }
+    res.json(result.preferences);
+  } catch (err: any) {
+    const message = err instanceof Error ? err.message : "Failed to update alert preferences";
+    if (err.code === "OPERATION_IDENTITY_CONFLICT" || message.includes("Operation identity has already been used")) {
+      res.status(409).json({ error: message, code: "OPERATION_IDENTITY_CONFLICT" });
+      return;
+    }
+    res.status(500).json({ error: message });
   }
 });
 

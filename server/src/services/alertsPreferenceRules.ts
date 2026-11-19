@@ -6,6 +6,63 @@ export interface AlertPreferences {
   quietHoursEnd: number;
 }
 
+export interface AlertPreferencesValidationResult {
+  valid: boolean;
+  errors: string[];
+  sanitized?: AlertPreferences;
+}
+
+/**
+ * Validates and sanitizes alert preferences against strict numeric boundaries
+ * and integer constraints. Preserves existing state on failure.
+ */
+export function validateAlertPreferences(raw: unknown): AlertPreferencesValidationResult {
+  const errors: string[] = [];
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    return { valid: false, errors: ["preferences must be an object"] };
+  }
+
+  const p = raw as Record<string, unknown>;
+
+  if (p.channel !== "email" && p.channel !== "in_app") {
+    errors.push("channel must be email or in_app");
+  }
+
+  const cooldown = Number(p.cooldownMinutes);
+  if (!Number.isFinite(cooldown) || !Number.isInteger(cooldown) || cooldown < 0 || cooldown > 1440) {
+    errors.push("cooldownMinutes must be an integer between 0 and 1440");
+  }
+
+  const severity = Number(p.severityThreshold);
+  if (!Number.isFinite(severity) || severity < 0 || severity > 1000) {
+    errors.push("severityThreshold must be a number between 0 and 1000");
+  }
+
+  const quietStart = Number(p.quietHoursStart);
+  if (!Number.isFinite(quietStart) || !Number.isInteger(quietStart) || quietStart < 0 || quietStart > 23) {
+    errors.push("quietHoursStart must be an integer from 0 to 23");
+  }
+
+  const quietEnd = Number(p.quietHoursEnd);
+  if (!Number.isFinite(quietEnd) || !Number.isInteger(quietEnd) || quietEnd < 0 || quietEnd > 23) {
+    errors.push("quietHoursEnd must be an integer from 0 to 23");
+  }
+
+  if (errors.length > 0) {
+    return { valid: false, errors };
+  }
+
+  const sanitized: AlertPreferences = {
+    channel: p.channel as "email" | "in_app",
+    cooldownMinutes: cooldown,
+    severityThreshold: roundToDecimals(severity, 2),
+    quietHoursStart: quietStart,
+    quietHoursEnd: quietEnd,
+  };
+
+  return { valid: true, errors: [], sanitized };
+}
+
 export type AlertThresholdReasonCode =
   | "BASELINE_DEFAULT"
   | "HIGH_VOLATILITY_EXPANSION"
