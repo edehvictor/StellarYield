@@ -64,10 +64,20 @@ export class PreparedTransaction<T = unknown> {
     return new PreparedTransaction<T>(xdrString, meta);
   }
 
-  public async sign(signer: SignerAdapter): Promise<SignedTransaction<T>> {
+  public async sign(
+    signer: SignerAdapter,
+    options?: {
+      operationId?: string;
+      validate?: () => boolean | string | void;
+      bypassIdempotency?: boolean;
+    }
+  ): Promise<SignedTransaction<T>> {
     const signedXdr = await signer.signTransaction(this.xdr, {
       networkPassphrase: this.meta.networkPassphrase,
       contractId: this.meta.contractId,
+      operationId: options?.operationId,
+      validate: options?.validate,
+      bypassIdempotency: options?.bypassIdempotency,
     });
     return new SignedTransaction<T>(signedXdr, this.meta, this.xdr);
   }
