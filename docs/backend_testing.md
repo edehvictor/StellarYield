@@ -347,7 +347,7 @@ The following table maps each route file in `server/src/routes/` to its primary 
 | :--- | :--- | :--- | :--- |
 | `activityTimeline.ts` | `GET /:walletAddress` - Build unified chronological timeline of user events (deposits, rebalances, rewards, etc.) | `accountActivityTimelineService.ts` | N/A |
 | `admin.ts` | `/vaults/*` (update params/metadata, pause/resume), `/fees/config`, `/risk/parameters`, `/audit-*` (logs, stats, export, verify), `/users/*`, `/recommendations/*` (freeze, resume) - Operator commands & admin actions | `freezeService.ts`, `ipfs/vaultMetadataService`, `strategyStateTransitionAuditService.ts` | `stellarAuth.test.ts`, `vaultMetadataService.test.ts`, `vaultMetadataValidation.test.ts` |
-| `alerts.ts` | `POST /`, `GET /:wallet`, `DELETE /:id` - Create, view, and delete automated user APY alert thresholds | `alertsService.ts`, `alertsPreferenceRules.ts` | `alerts.test.ts` |
+| `alerts.ts` | `POST /`, `GET /:wallet`, `DELETE /:id`, `PUT /preferences`, `GET /preferences/:wallet/:vaultId` - Create, view, delete automated user APY alert thresholds and manage alert preferences with operation identity deduplication | `alertsService.ts`, `alertsPreferenceRules.ts` | `alerts.test.ts` |
 | `analytics.ts` | `/attribution/*`, `/compatibility/*`, `/health/*`, `/sources/health`, `/reliability/*`, `/dashboard`, `/strategy-state-transitions/*`, `/recommendation-stability/*`, `/providers/uptime` - Yield analytics dashboard data | `portfolioAttributionService.ts`, `protocolCompatibilityService.ts`, `strategyHealthService.ts`, `yieldReliabilityService.ts`, `strategyStateTransitionAuditService.ts`, `yieldSourceRegistryService.ts`, `recommendationStabilityService.ts` | `analyticsRoutes.contract.test.ts`, `analyticsRoutes.simple.test.ts` |
 | `analyticsUtils.ts` | Helper utilities (request validation, report formatting, reliability scoring) for the analytics router | `portfolioAttributionService.ts`, `yieldReliabilityService.ts` | `analyticsRoutes.simple.test.ts` |
 | `auditMonitoring.ts` | `/alerts`, `/status`, `/report`, `/export`, `POST /start`, `/stop` - System-wide audit security log monitoring & integrity replays | `auditReplayService.ts` (monitored by `utils/auditMonitoring`) | `auditReplay.test.ts` |
@@ -379,3 +379,12 @@ The following table maps each route file in `server/src/routes/` to its primary 
 | `weeklyReports.ts` | `/` - Consolidates weekly yields reports | `weeklyYieldReportService.ts` | `weeklyYieldReport.test.ts` |
 | `yields.ts` | `GET /` - Fetches baseline protocol APYs with custom fee drag calculators | `yieldService.ts`, `netYieldEngine.ts` | `netYieldEngine.test.ts`, `yieldNormalization.test.ts`, `yieldRegime.test.ts` |
 | `zap.ts` | `GET /supported-assets`, `POST /quote` - Generates single-transaction multi-asset swap & vault entry routes | `zapQuote.ts`, `slippageRegistry.ts` | `zapQuote.test.ts`, `zapRoute.test.ts`, `zapSupportedAssetsRoute.test.ts`, `slippageRegistry.test.ts` |
+
+## 7. Alert Preferences & Operation Identity Deduplication
+
+Alert preferences and APY threshold creation are hardened against duplicate submissions and rapid user retries via an operation identity mechanism:
+
+- **Operation Identity (`operationIdentity`)**: Callers provide a unique token via `X-Operation-Identity` header, `Idempotency-Key` header, or body payload.
+- **Safe Retries**: When an identical operation identity and parameter fingerprint is re-submitted, the server replays the existing state with an `X-Idempotent-Replayed: true` header without creating duplicate alerts or re-applying effects.
+- **Conflict Prevention**: Reusing an active operation identity with conflicting parameters returns a `409 Conflict` (`OPERATION_IDENTITY_CONFLICT`).
+- **State & Balance Preservation**: If validation fails or downstream storage errors occur, the transaction aborts before mutation. Existing alerts, user preferences, and quotas are strictly preserved.

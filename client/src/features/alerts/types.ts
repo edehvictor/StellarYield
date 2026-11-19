@@ -19,6 +19,7 @@ export interface CreateAlertPayload {
   thresholdValue: number;
   email: string;
   preferences?: AlertPreferences;
+  operationIdentity?: string;
 }
 
 export interface AlertPreferences {
@@ -29,6 +30,13 @@ export interface AlertPreferences {
   quietHoursEnd: number;
 }
 
+export interface UpdateAlertPreferencesPayload {
+  walletAddress: string;
+  vaultId: string;
+  preferences: AlertPreferences;
+  operationIdentity?: string;
+}
+
 export interface WatchlistDigestPreference {
   enabled: boolean;
   scheduleMode: "daily" | "weekly" | "event_threshold";
@@ -37,4 +45,5 @@ export interface WatchlistDigestPreference {
   minApyDeltaPct: number;
   minRiskDelta: number;
   maxFreshnessHours: number;
+  operationIdentity?: string;
 }

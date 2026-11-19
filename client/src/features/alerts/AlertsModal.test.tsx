@@ -197,7 +197,63 @@ describe("AlertsModal", () => {
           eventThreshold: 4,
           watchedVaultIds: expect.arrayContaining(["Blend", "Soroswap"]),
         }),
+        expect.stringMatching(/^op-digest-/),
       ),
     );
+  });
+
+  it("attaches operation identity and reuses it on retry after submission failure", async () => {
+    mockCreate.mockRejectedValueOnce(new Error("Network timeout"));
+    mockCreate.mockResolvedValueOnce(SAMPLE_ALERT);
+
+    renderModal();
+    await waitFor(() => expect(mockFetch).toHaveBeenCalled());
+
+    fireEvent.change(screen.getByLabelText("Select vault"), { target: { value: "Blend" } });
+    fireEvent.change(screen.getByLabelText("APY threshold"), { target: { value: "10" } });
+    fireEvent.change(screen.getByLabelText("Notification email"), { target: { value: "user@example.com" } });
+
+    // First attempt fails
+    fireEvent.click(screen.getByText("Add Alert"));
+    expect(await screen.findByRole("alert")).toBeTruthy();
+    expect(screen.getByRole("alert").textContent).toContain("Network timeout");
+
+    // Form inputs and state remain preserved
+    expect(screen.getByLabelText("Notification email")).toHaveValue("user@example.com");
+
+    const firstCallOpId = mockCreate.mock.calls[0][0].operationIdentity;
+    expect(firstCallOpId).toBeTruthy();
+    expect(firstCallOpId).toMatch(/^op-alert-/);
+
+    // Second attempt (retry)
+    fireEvent.click(screen.getByText("Add Alert"));
+    await waitFor(() => expect(mockCreate).toHaveBeenCalledTimes(2));
+
+    const secondCallOpId = mockCreate.mock.calls[1][0].operationIdentity;
+    expect(secondCallOpId).toBe(firstCallOpId);
+  });
+
+  it("preserves digest preferences state and operation identity on failure", async () => {
+    mockSaveDigestPreference.mockRejectedValueOnce(new Error("Save failed"));
+    mockSaveDigestPreference.mockResolvedValueOnce(DEFAULT_DIGEST_PREFERENCE);
+
+    renderModal();
+    await waitFor(() => expect(mockFetchDigestPreference).toHaveBeenCalled());
+
+    fireEvent.click(screen.getByLabelText("Enable watchlist digest"));
+    fireEvent.click(screen.getByText("Save Digest Preferences"));
+
+    expect(await screen.findByText("Save failed")).toBeTruthy();
+    // Digest state checkbox remains preserved
+    expect(screen.getByLabelText("Enable watchlist digest")).toBeChecked();
+
+    const firstOpId = mockSaveDigestPreference.mock.calls[0][2];
+    expect(firstOpId).toMatch(/^op-digest-/);
+
+    // Retry
+    fireEvent.click(screen.getByText("Save Digest Preferences"));
+    await waitFor(() => expect(mockSaveDigestPreference).toHaveBeenCalledTimes(2));
+    const secondOpId = mockSaveDigestPreference.mock.calls[1][2];
+    expect(secondOpId).toBe(firstOpId);
   });
 });
