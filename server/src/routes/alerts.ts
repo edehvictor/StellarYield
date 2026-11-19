@@ -14,13 +14,17 @@ import {
   updateAlertPreferences,
   getAlertPreferences,
   revertAlertPreferences,
+  validateAlertPreferences,
   MAX_ALERTS_PER_USER,
   type AlertCondition,
 } from "../services/alertsService";
 import {
   getPreferenceAuditHistory,
 } from "../services/alertPreferenceAuditService";
-import type { AlertPreferences } from "../services/alertsPreferenceRules";
+import {
+  roundToDecimals,
+  type AlertPreferences,
+} from "../services/alertsPreferenceRules";
 
 const router = Router();
 
@@ -58,51 +62,24 @@ router.post("/", async (req: Request, res: Response) => {
     res.status(400).json({ error: "thresholdValue must be a number between 0 and 1000" });
     return;
   }
+  const roundedThreshold = roundToDecimals(threshold, 4);
 
   try {
-    let preferences;
+    let preferences: AlertPreferences | undefined;
     if (req.body.preferences) {
-      const channel = req.body.preferences.channel;
-      const cooldownMinutes = Number(req.body.preferences.cooldownMinutes);
-      const severityThreshold = Number(req.body.preferences.severityThreshold);
-      const quietHoursStart = Number(req.body.preferences.quietHoursStart);
-      const quietHoursEnd = Number(req.body.preferences.quietHoursEnd);
-
-      if (!["email", "in_app"].includes(channel)) {
-        res.status(400).json({ error: "preferences.channel must be email or in_app" });
+      const validation = validateAlertPreferences(req.body.preferences);
+      if (!validation.valid || !validation.sanitized) {
+        res.status(400).json({ error: validation.errors[0] });
         return;
       }
-      if (!Number.isFinite(cooldownMinutes) || cooldownMinutes < 0 || cooldownMinutes > 1440) {
-        res.status(400).json({ error: "preferences.cooldownMinutes must be between 0 and 1440" });
-        return;
-      }
-      if (!Number.isFinite(severityThreshold) || severityThreshold < 0 || severityThreshold > 1000) {
-        res.status(400).json({ error: "preferences.severityThreshold must be between 0 and 1000" });
-        return;
-      }
-      if (!Number.isInteger(quietHoursStart) || quietHoursStart < 0 || quietHoursStart > 23) {
-        res.status(400).json({ error: "preferences.quietHoursStart must be an integer from 0 to 23" });
-        return;
-      }
-      if (!Number.isInteger(quietHoursEnd) || quietHoursEnd < 0 || quietHoursEnd > 23) {
-        res.status(400).json({ error: "preferences.quietHoursEnd must be an integer from 0 to 23" });
-        return;
-      }
-
-      preferences = {
-        channel: channel as "email" | "in_app",
-        cooldownMinutes,
-        severityThreshold,
-        quietHoursStart,
-        quietHoursEnd,
-      };
+      preferences = validation.sanitized;
     }
 
     const alert = await createAlert({
       walletAddress,
       vaultId,
       condition: condition as AlertCondition,
-      thresholdValue: threshold,
+      thresholdValue: roundedThreshold,
       email,
       preferences,
     });
@@ -154,45 +131,29 @@ router.get("/:wallet/preferences/:vaultId", (req: Request, res: Response) => {
 /** PUT /api/alerts/:wallet/preferences/:vaultId */
 router.put("/:wallet/preferences/:vaultId", (req: Request, res: Response) => {
   const { wallet, vaultId } = req.params;
-  const { channel, cooldownMinutes, severityThreshold, quietHoursStart, quietHoursEnd } =
-    req.body as Record<string, unknown>;
 
-  if (!["email", "in_app"].includes(channel as string)) {
-    res.status(400).json({ error: "channel must be email or in_app" });
-    return;
-  }
-  if (!Number.isFinite(Number(cooldownMinutes)) || Number(cooldownMinutes) < 0 || Number(cooldownMinutes) > 1440) {
-    res.status(400).json({ error: "cooldownMinutes must be between 0 and 1440" });
-    return;
-  }
-  if (!Number.isFinite(Number(severityThreshold)) || Number(severityThreshold) < 0 || Number(severityThreshold) > 1000) {
-    res.status(400).json({ error: "severityThreshold must be between 0 and 1000" });
-    return;
-  }
-  if (!Number.isInteger(Number(quietHoursStart)) || Number(quietHoursStart) < 0 || Number(quietHoursStart) > 23) {
-    res.status(400).json({ error: "quietHoursStart must be an integer from 0 to 23" });
-    return;
-  }
-  if (!Number.isInteger(Number(quietHoursEnd)) || Number(quietHoursEnd) < 0 || Number(quietHoursEnd) > 23) {
-    res.status(400).json({ error: "quietHoursEnd must be an integer from 0 to 23" });
+  const validation = validateAlertPreferences(req.body);
+  if (!validation.valid || !validation.sanitized) {
+    res.status(400).json({ error: validation.errors[0] });
     return;
   }
 
-  const newPrefs: AlertPreferences = {
-    channel: channel as "email" | "in_app",
-    cooldownMinutes: Number(cooldownMinutes),
-    severityThreshold: Number(severityThreshold),
-    quietHoursStart: Number(quietHoursStart),
-    quietHoursEnd: Number(quietHoursEnd),
-  };
-
-  const { preferences, auditEntry } = updateAlertPreferences(wallet, vaultId, newPrefs, {
-    actor: wallet,
-    source: "api",
-    reason: req.body.reason as string | undefined,
-  });
-
-  res.json({ walletAddress: wallet, vaultId, preferences, auditEntry });
+  try {
+    const { preferences, auditEntry } = updateAlertPreferences(
+      wallet,
+      vaultId,
+      validation.sanitized,
+      {
+        actor: wallet,
+        source: "api",
+        reason: req.body.reason as string | undefined,
+      },
+    );
+    res.json({ walletAddress: wallet, vaultId, preferences, auditEntry });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "Failed to update preferences";
+    res.status(400).json({ error: message });
+  }
 });
 
 /** POST /api/alerts/:wallet/preferences/:vaultId/revert */
