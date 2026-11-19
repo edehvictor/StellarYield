@@ -4,6 +4,7 @@ import {
   mapRelayerStatus,
   mapRegistryHealth,
   mapSmokeTestStatus,
+  sanitizeSubsystemState,
   summarizeTransparencyHealth,
 } from "./transparencyServiceHealth";
 
@@ -50,6 +51,56 @@ describe("transparencyServiceHealth mappers", () => {
         { status: "fail" },
       ]),
     ).toBe("degraded");
+  });
+});
+
+describe("boundary-value status hardening (#1914)", () => {
+  it("mapRelayerStatus handles zero, minimum and maximum values", () => {
+    expect(mapRelayerStatus({ isOnline: true, failureCount: 0, successRate: 100 })).toBe("healthy");
+    expect(mapRelayerStatus({ isOnline: true, failureCount: 0, successRate: 50 })).toBe("healthy");
+    expect(mapRelayerStatus({ isOnline: true, failureCount: 1, successRate: 50 })).toBe("degraded");
+    expect(mapRelayerStatus({ isOnline: true, failureCount: 1, successRate: 49.99 })).toBe("failed");
+    expect(mapRelayerStatus({ isOnline: true, failureCount: Number.MAX_SAFE_INTEGER, successRate: 100 })).toBe("degraded");
+    expect(mapRelayerStatus({ isOnline: true, failureCount: Number.MAX_SAFE_INTEGER, successRate: 0 })).toBe("failed");
+  });
+
+  it("mapRelayerStatus never reports healthy for NaN, Infinity or out-of-range inputs", () => {
+    expect(mapRelayerStatus({ isOnline: true, failureCount: NaN, successRate: NaN })).not.toBe("healthy");
+    expect(mapRelayerStatus({ isOnline: true, failureCount: Infinity, successRate: 100 })).not.toBe("healthy");
+    expect(mapRelayerStatus({ isOnline: true, failureCount: 0, successRate: Infinity })).toBe("degraded");
+    expect(mapRelayerStatus({ isOnline: true, failureCount: -5, successRate: 100 })).toBe("degraded");
+    expect(mapRelayerStatus({ isOnline: true, failureCount: 0, successRate: 150 })).toBe("degraded");
+    expect(mapRelayerStatus({ isOnline: true, failureCount: 0, successRate: -10 })).toBe("degraded");
+    expect(mapRelayerStatus({ isOnline: true, failureCount: 5, successRate: NaN })).toBe("failed");
+  });
+
+  it("sanitizeSubsystemState coerces invalid values to unknown", () => {
+    expect(sanitizeSubsystemState("healthy")).toBe("healthy");
+    expect(sanitizeSubsystemState(undefined)).toBe("unknown");
+    expect(sanitizeSubsystemState(null)).toBe("unknown");
+    expect(sanitizeSubsystemState("HEALTHY")).toBe("unknown");
+    expect(sanitizeSubsystemState(0)).toBe("unknown");
+    expect(sanitizeSubsystemState("")).toBe("unknown");
+  });
+
+  it("summarizeTransparencyHealth never yields healthy from boundary-poisoned input", () => {
+    const boundary = summarizeTransparencyHealth({
+      indexer: "" as never,
+      relayer: "ok" as never,
+      registry: undefined,
+      smokeTest: "degraded",
+    });
+    expect(boundary.overall).not.toBe("healthy");
+    expect(boundary.subsystems.indexer).toBe("unknown");
+    expect(boundary.subsystems.relayer).toBe("unknown");
+  });
+
+  it("is idempotent and safe to retry with the same boundary input", () => {
+    const input = { indexer: "healthy", relayer: "healthy", registry: "healthy", smokeTest: "healthy" } as const;
+    const a = summarizeTransparencyHealth(input);
+    const b = summarizeTransparencyHealth(input);
+    expect(a).toEqual(b);
+    expect(a.overall).toBe("healthy");
   });
 });
 
