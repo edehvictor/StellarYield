@@ -10,11 +10,13 @@ import {
 import { getAdapter } from "../auth/walletAdapters";
 import type { ConnectWalletOptions, ExtensionWalletProviderId, WalletSession } from "../auth/types";
 import { WalletContext } from "./WalletContextObject";
+import { getActiveNetworkPassphrase } from "../config/network";
 
 import {
   clearSensitiveWalletState,
-  clearPendingTransactionDrafts,
 } from "../services/transactionDraft";
+
+const EXPECTED_NETWORK_PASSPHRASE = getActiveNetworkPassphrase();
 
 export function WalletProvider({ children }: { children: ReactNode }) {
   const [session, setSession] = useState<WalletSession | null>(null);
@@ -69,6 +71,14 @@ export function WalletProvider({ children }: { children: ReactNode }) {
     setErrorMessage(null);
 
     try {
+      // Bind the connect attempt to the network context this provider was
+      // initialized with. Reject early if the caller requested a different
+      // network so we never persist a session that points at the wrong ledger.
+      if (options?.networkPassphrase && options.networkPassphrase !== EXPECTED_NETWORK_PASSPHRASE) {
+        throw new Error(
+          `Network mismatch: expected ${EXPECTED_NETWORK_PASSPHRASE} but received ${options.networkPassphrase}.`,
+        );
+      }
       const nextSession = await connectWalletSession(options);
       // Account switch detection: if connecting a different account, clear prior pending draft payloads
       if (session?.walletAddress && session.walletAddress !== nextSession.walletAddress) {
@@ -78,6 +88,8 @@ export function WalletProvider({ children }: { children: ReactNode }) {
       return true;
     } catch (error) {
       console.error("Wallet connection failed", error);
+      // Preserve any previously connected session and its balances on failure;
+      // only surface the error so the caller can retry safely.
       setErrorMessage(
         error instanceof Error
           ? error.message
@@ -133,6 +145,11 @@ export function WalletProvider({ children }: { children: ReactNode }) {
     if (!session) {
       throw new Error("No wallet connected.");
     }
+    if (networkPassphrase !== EXPECTED_NETWORK_PASSPHRASE) {
+      throw new Error(
+        `Network mismatch: cannot sign for ${networkPassphrase}; wallet is bound to ${EXPECTED_NETWORK_PASSPHRASE}.`,
+      );
+    }
     const EXTENSION_PROVIDERS: ExtensionWalletProviderId[] = ["freighter", "xbull", "albedo"];
     if ((EXTENSION_PROVIDERS as string[]).includes(session.providerId)) {
       const adapter = getAdapter(session.providerId as ExtensionWalletProviderId);
@@ -151,7 +168,7 @@ export function WalletProvider({ children }: { children: ReactNode }) {
       walletAddressType: session?.walletAddressType ?? null,
       providerLabel: session?.providerLabel ?? null,
       providerId: session?.providerId ?? null,
-      network: session?.providerId ? "mainnet" : null,
+      network: session?.providerId ? EXPECTED_NETWORK_PASSPHRASE : null,
       sessionKeyAddress: session?.sessionKeyAddress ?? null,
       verificationStatus: session?.verificationStatus ?? null,
       connectedAt: session?.connectedAt ?? null,
