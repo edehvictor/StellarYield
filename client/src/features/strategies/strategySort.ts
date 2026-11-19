@@ -1,11 +1,12 @@
 /**
  * Strategy Comparison Sorting Utilities
  *
- * Strategies with null values in the sort field are always placed at the
- * bottom (stable, deterministic) so incomplete risk data never causes
+ * Strategies with null or non-finite (NaN, ±Infinity) values in the sort
+ * field are always placed at the bottom (stable, deterministic) so incomplete risk data never causes
  * unpredictable reordering of visible items.
  */
 
+import { comparableValue } from "./strategyComparisonMath";
 import type { StrategyComparison, StrategyComparisonSortKey } from "./types";
 
 /**
@@ -20,13 +21,13 @@ export function sortStrategies(
   const getValue = (s: StrategyComparison): number | null => {
     switch (sortKey) {
       case "apy":
-        return s.apy;
+        return comparableValue(s.apy);
       case "riskScore":
-        return s.risk?.riskScore ?? null;
+        return comparableValue(s.risk?.riskScore);
       case "volatilityPct":
-        return s.risk?.volatilityPct ?? null;
+        return comparableValue(s.risk?.volatilityPct);
       case "liquidityUsd":
-        return s.risk?.liquidityUsd ?? null;
+        return comparableValue(s.risk?.liquidityUsd);
     }
   };
 
@@ -43,7 +44,12 @@ export function sortStrategies(
     const primaryDiff = direction === "desc" ? bv - av : av - bv;
     if (primaryDiff !== 0) return primaryDiff;
 
-    // Tie-break: higher APY first
-    return b.apy - a.apy;
+    // Tie-break: higher APY first; a non-finite APY never wins a tie (#1922).
+    const aApy = comparableValue(a.apy);
+    const bApy = comparableValue(b.apy);
+    if (aApy === null && bApy === null) return 0;
+    if (aApy === null) return 1;
+    if (bApy === null) return -1;
+    return bApy - aApy;
   });
 }
