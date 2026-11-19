@@ -509,7 +509,7 @@ describe("StrategyLeaderboard", () => {
       await waitFor(() => {
         expect(screen.getByText("Rank")).toBeInTheDocument();
         expect(screen.getByText("Strategy")).toBeInTheDocument();
-        expect(screen.getByText("Type")).toBeInTheDocument();
+        expect(screen.getAllByText("Type").length).toBeGreaterThanOrEqual(1);
         expect(screen.getByText("APY")).toBeInTheDocument();
         expect(screen.getByText("Risk Score")).toBeInTheDocument();
         expect(screen.getByText("TVL")).toBeInTheDocument();

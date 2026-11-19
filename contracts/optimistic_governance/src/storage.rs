@@ -9,6 +9,9 @@ pub enum DataKey {
     Proposal(u64),
     ProposalCount,
     IsInitialized,
+    /// Ledger timestamp at which a proposal was created; voting weight is
+    /// measured as of this time.
+    ProposalSnapshot(u64),
 }
 
 #[contracttype]
@@ -29,4 +32,14 @@ pub struct Proposal {
     pub args: Vec<Val>,
     pub execution_time: u64,
     pub status: ProposalStatus,
+}
+
+/// Aggregate view of whether a proposal can be executed right now, and if
+/// not, every specific reason blocking it (rather than a single generic
+/// revert reason from `execute()`).
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExecutionReadiness {
+    pub is_ready: bool,
+    pub blocking_reasons: Vec<u32>,
 }

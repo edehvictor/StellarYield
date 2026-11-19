@@ -284,4 +284,80 @@ describe("verify-manifest.js", () => {
     expect(result.status).toBe(0);
     expect(result.stdout.toLowerCase()).toContain("skipping");
   });
+
+  // ── 6. Schema conformance (#1296) ──────────────────────────────────────
+
+  it("exits 1 when the manifest schemaVersion is unsupported", () => {
+    const registryPath = writeRegistry(tmpDir, {
+      testnet: { vault: ID_A, zap: "", token: "", governance: "", strategy: "", emissionController: "", liquidStaking: "", stableswap: "", vesting: "" },
+      mainnet: { vault: "", zap: "", token: "", governance: "", strategy: "", emissionController: "", liquidStaking: "", stableswap: "", vesting: "" },
+      local:   { vault: "", zap: "", token: "", governance: "", strategy: "", emissionController: "", liquidStaking: "", stableswap: "", vesting: "" },
+    });
+
+    const manifestPath = writeManifest(tmpDir, {
+      schemaVersion: "9.9",
+      ...validProvenance(),
+      network: "testnet",
+      commitSha: "abc123",
+      branch: "main",
+      contracts: { yield_vault: ID_A },
+    });
+
+    const result = runScript(
+      ["--manifest", manifestPath, "--registry", registryPath, "--network", "testnet"]
+    );
+
+    expect(result.status).toBe(1);
+    expect(result.stdout).toContain("does not conform to the deployment manifest schema");
+    expect(result.stdout).toContain("$.schemaVersion");
+  });
+
+  it("exits 1 when a contract value is not a valid Soroban ID", () => {
+    const registryPath = writeRegistry(tmpDir, {
+      testnet: { vault: ID_A, zap: ID_B, token: "", governance: "", strategy: "", emissionController: "", liquidStaking: "", stableswap: "", vesting: "" },
+      mainnet: { vault: "", zap: "", token: "", governance: "", strategy: "", emissionController: "", liquidStaking: "", stableswap: "", vesting: "" },
+      local:   { vault: "", zap: "", token: "", governance: "", strategy: "", emissionController: "", liquidStaking: "", stableswap: "", vesting: "" },
+    });
+
+    const manifestPath = writeManifest(tmpDir, {
+      schemaVersion: "1.0",
+      ...validProvenance(),
+      network: "testnet",
+      commitSha: "abc123",
+      branch: "main",
+      contracts: { yield_vault: "not-a-contract-id" },
+    });
+
+    const result = runScript(
+      ["--manifest", manifestPath, "--registry", registryPath, "--network", "testnet"]
+    );
+
+    expect(result.status).toBe(1);
+    expect(result.stdout).toContain("$.contracts.yield_vault");
+  });
+
+  it("skips schema validation when --schema none is passed", () => {
+    const registryPath = writeRegistry(tmpDir, {
+      testnet: { vault: ID_A, zap: "", token: "", governance: "", strategy: "", emissionController: "", liquidStaking: "", stableswap: "", vesting: "" },
+      mainnet: { vault: "", zap: "", token: "", governance: "", strategy: "", emissionController: "", liquidStaking: "", stableswap: "", vesting: "" },
+      local:   { vault: "", zap: "", token: "", governance: "", strategy: "", emissionController: "", liquidStaking: "", stableswap: "", vesting: "" },
+    });
+
+    // schemaVersion is intentionally unsupported; it should be ignored.
+    const manifestPath = writeManifest(tmpDir, {
+      schemaVersion: "9.9",
+      ...validProvenance(),
+      network: "testnet",
+      commitSha: "abc123",
+      branch: "main",
+      contracts: { yield_vault: ID_A },
+    });
+
+    const result = runScript(
+      ["--manifest", manifestPath, "--registry", registryPath, "--network", "testnet", "--schema", "none"]
+    );
+
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain("PASSED");
+  });
 });

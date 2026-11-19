@@ -2,9 +2,38 @@ import { calculateRiskScore } from "./riskScoring";
 import type { NormalizedYield, RawProtocolYield } from "../types/yields";
 import { calculateNetYield } from "../services/netYieldEngine";
 import { calculateCapitalEfficiency } from "../services/capitalEfficiencyService";
+import {
+  bpsToApyPercent,
+  normalizeApyPercent,
+  normalizeUsd,
+} from "./yieldNormalizationContract";
 
-const roundTo = (value: number, digits: number) =>
-  Math.round(value * 10 ** digits) / 10 ** digits;
+export {
+  APY_DECIMALS,
+  APY_ULP,
+  USD_DECIMALS,
+  USD_ULP,
+  YIELD_NORMALIZATION_CONTRACT,
+  blendApyPercent,
+  bpsToApyPercent,
+  decimalsOf,
+  isAtApyPrecision,
+  isAtUsdPrecision,
+  normalizeApyPercent,
+  normalizeUsd,
+  roundTo,
+} from "./yieldNormalizationContract";
+
+export {
+  checkYieldParity,
+  formatParityReport,
+} from "./yieldParity";
+export type {
+  ComparableYield,
+  YieldParityCode,
+  YieldParityIssue,
+  YieldParityReport,
+} from "./yieldParity";
 
 export function normalizeYield(rawYield: RawProtocolYield): NormalizedYield {
   const risk = calculateRiskScore({
@@ -13,8 +42,9 @@ export function normalizeYield(rawYield: RawProtocolYield): NormalizedYield {
     protocolAgeDays: rawYield.protocolAgeDays,
   });
 
-  const baseApy = roundTo(rawYield.apyBps / 100, 2);
-  let rewardApy = 0;
+  // Full-precision percent. Rounding happens once, where each value is emitted.
+  const baseApyPrecise = bpsToApyPercent(rawYield.apyBps);
+  let rewardApyPrecise = 0;
   const rewards: { symbol: string; apy: number; confidence?: "low" | "medium" | "high" }[] = [];
 
   if (rawYield.rewards && rawYield.tvlUsd > 0) {
@@ -25,25 +55,36 @@ export function normalizeYield(rawYield: RawProtocolYield): NormalizedYield {
         );
         continue;
       }
-      const apy = (reward.emissionPerYear * reward.tokenPrice) / rawYield.tvlUsd;
-      const roundedApy = roundTo(apy * 100, 2);
-      
-      // If confidence is low, we still include it but it's marked
-      rewardApy += roundedApy;
+      const apyPrecise =
+        ((reward.emissionPerYear * reward.tokenPrice) / rawYield.tvlUsd) * 100;
+
+      // Accumulate at full precision; rounding each stream first and summing
+      // the rounded values is what used to make apy + rewardApy disagree with
+      // totalApy by a cent of a percent.
+      rewardApyPrecise += apyPrecise;
+
       const rewardEntry: { symbol: string; apy: number; confidence?: "low" | "medium" | "high" } = {
         symbol: reward.tokenSymbol,
-        apy: roundedApy,
+        apy: normalizeApyPercent(apyPrecise),
       };
-      
+
       if (reward.confidence) {
         rewardEntry.confidence = reward.confidence;
       }
-      
+
       rewards.push(rewardEntry);
     }
   }
 
-  const netYield = calculateNetYield(baseApy + rewardApy);
+  const baseApy = normalizeApyPercent(baseApyPrecise);
+  const rewardApy = normalizeApyPercent(rewardApyPrecise);
+  const totalApy = normalizeApyPercent(baseApyPrecise + rewardApyPrecise);
+
+  // Contract rule: downstream values are derived from the *emitted* gross APY,
+  // never from a privately recomputed intermediate. `/api/yields` re-derives
+  // net yield from `totalApy`; deriving it here from anything else is exactly
+  // the mismatch the parity checks exist to catch.
+  const netYield = calculateNetYield(totalApy);
   const capitalEfficiency = calculateCapitalEfficiency({
     utilizationPct: Math.min(100, 45 + baseApy * 2.5),
     feeDragPct: netYield.feeDragApy,
@@ -57,11 +98,11 @@ export function normalizeYield(rawYield: RawProtocolYield): NormalizedYield {
     risk: risk.label,
     protocolName: rawYield.protocolName,
     apy: baseApy,
-    rewardApy: roundTo(rewardApy, 2),
-    totalApy: roundTo(baseApy + rewardApy, 2),
+    rewardApy,
+    totalApy,
     netApy: netYield.netApy,
     feeDragApy: netYield.feeDragApy,
-    tvl: roundTo(rawYield.tvlUsd, 2),
+    tvl: normalizeUsd(rawYield.tvlUsd),
     riskScore: risk.score,
     source: rawYield.source,
     fetchedAt: rawYield.fetchedAt,
@@ -75,10 +116,10 @@ export function normalizeYield(rawYield: RawProtocolYield): NormalizedYield {
     capitalEfficiency,
     rewards,
     attribution: rawYield.attribution || {
-      baseYield: roundTo(rawYield.apyBps / 100 * 0.7, 2),
-      incentives: roundTo(rawYield.apyBps / 100 * 0.2, 2),
-      compounding: roundTo(rawYield.apyBps / 100 * 0.05, 2),
-      tacticalRotation: roundTo(rawYield.apyBps / 100 * 0.05, 2),
+      baseYield: normalizeApyPercent(baseApyPrecise * 0.7),
+      incentives: normalizeApyPercent(baseApyPrecise * 0.2),
+      compounding: normalizeApyPercent(baseApyPrecise * 0.05),
+      tacticalRotation: normalizeApyPercent(baseApyPrecise * 0.05),
     },
   };
 }

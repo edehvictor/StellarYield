@@ -7,6 +7,7 @@ import React, { useState, useEffect } from 'react';
 import { X, Plus, Edit2, Trash2, Search, User, Copy, ExternalLink } from 'lucide-react';
 import { useContacts } from '../hooks/useContacts';
 import { Contact, ContactData } from '../types';
+import { explorerAccountUrl } from '../../../lib/networkEnv';
 
 interface ContactsModalProps {
   isOpen: boolean;
@@ -131,11 +132,7 @@ export function ContactsModal({ isOpen, onClose, onSelectContact }: ContactsModa
    * Handle view on blockchain explorer
    */
   const handleViewOnExplorer = (address: string) => {
-    const passphrase = import.meta.env.VITE_NETWORK_PASSPHRASE ?? "";
-    const isMainnet = passphrase.includes("mainnet") || passphrase.includes("Public Global");
-    const networkPath = isMainnet ? "public" : "testnet";
-    const explorerUrl = `https://stellar.expert/explorer/${networkPath}/account/${address}`;
-    window.open(explorerUrl, '_blank');
+    window.open(explorerAccountUrl(address), '_blank');
   };
 
   if (!isOpen) return null;

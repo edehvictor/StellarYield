@@ -8,6 +8,7 @@
 
 import { Router } from "express";
 import { sendError } from "../utils/errorResponse";
+import { idempotency } from "../middleware/idempotency";
 
 const offrampRouter = Router();
 
@@ -21,8 +22,12 @@ if (!OFFRAMP_API_KEY) {
   );
 }
 
-/** POST /api/offramp/withdrawals — proxy withdrawal creation */
-offrampRouter.post("/withdrawals", async (req, res) => {
+/**
+ * POST /api/offramp/withdrawals — proxy withdrawal creation.
+ * Send an `Idempotency-Key` header so a retried request cannot create a
+ * second withdrawal (see middleware/idempotency.ts).
+ */
+offrampRouter.post("/withdrawals", idempotency({ scope: "offramp.withdrawals" }), async (req, res) => {
   if (!OFFRAMP_API_KEY) {
     return sendError(res, 503, "OFFRAMP_UNAVAILABLE", "Offramp service not configured.");
   }

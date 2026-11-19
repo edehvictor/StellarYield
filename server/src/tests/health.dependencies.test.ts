@@ -10,7 +10,8 @@ import healthRouter from "../routes/health";
 
 // ── Mocks ────────────────────────────────────────────────────────────────────
 
-const mockPing = jest.fn();
+// eslint-disable-next-line no-var
+var mockPing = jest.fn();
 jest.mock("ioredis", () => ({
   Redis: jest.fn().mockImplementation(() => ({
     ping: mockPing,
@@ -20,17 +21,21 @@ jest.mock("ioredis", () => ({
   })),
 }));
 
-const mockQueryRaw = jest.fn();
-const mockIndexerFindFirst = jest.fn();
+// eslint-disable-next-line no-var
+var mockQueryRaw = jest.fn();
+// eslint-disable-next-line no-var
+var mockIndexerFindFirst = jest.fn();
 jest.mock("@prisma/client", () => ({
   PrismaClient: jest.fn().mockImplementation(() => ({
-    $queryRaw: mockQueryRaw,
-    indexerState: { findFirst: mockIndexerFindFirst },
+    $queryRaw: (...args: unknown[]) => mockQueryRaw(...args),
+    indexerState: { findFirst: (...args: unknown[]) => mockIndexerFindFirst(...args) },
   })),
 }));
 
-const mockHorizonCall = jest.fn();
-const mockRpcGetNetwork = jest.fn();
+// eslint-disable-next-line no-var
+var mockHorizonCall = jest.fn();
+// eslint-disable-next-line no-var
+var mockRpcGetNetwork = jest.fn();
 jest.mock("@stellar/stellar-sdk", () => {
   const actual = jest.requireActual("@stellar/stellar-sdk");
   return {

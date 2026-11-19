@@ -3,9 +3,22 @@
  *
  * Allows users to create, view, and delete custom APY threshold alerts.
  * Alerts trigger an email when a vault's APY crosses the configured threshold.
+ *
+ * Optimistic UI updates with automatic rollback:
+ * - Alert deletion: optimistically removed, rolled back on API error with retry option
+ * - Digest preferences: optimistically updated, rolled back on save failure with retry option
  */
 import { useCallback, useEffect, useRef, useState } from "react";
-import { X, Bell, Trash2, Plus, AlertTriangle, CheckCircle2, Loader2 } from "lucide-react";
+import {
+  X,
+  Bell,
+  Trash2,
+  Plus,
+  AlertTriangle,
+  CheckCircle2,
+  Loader2,
+  RotateCcw,
+} from "lucide-react";
 import type {
   UserAlert,
   AlertCondition,
@@ -19,6 +32,23 @@ import {
   fetchDigestPreference,
   saveDigestPreference,
 } from "./alertsApi";
+import { useOptimisticUpdate } from "../../hooks/useOptimisticUpdate";
+
+type ChannelOverride = "inherit" | "on" | "off";
+
+type AlertClass = "apy" | "watchlist";
+
+interface ChannelOverrides {
+  email: ChannelOverride;
+  digest: ChannelOverride;
+  in_app: ChannelOverride;
+}
+
+type AlertClassChannelOverrides = Record<AlertClass, ChannelOverrides>;
+
+type AlertPreferencesWithChannelOverrides = AlertPreferences & {
+  channelOverrides: ChannelOverrides;
+};
 
 const MAX_ALERTS = 20;
 
@@ -63,6 +93,24 @@ const DEFAULT_DIGEST_PREFERENCES: WatchlistDigestPreference = {
   maxFreshnessHours: 12,
 };
 
+const DEFAULT_CHANNEL_OVERRIDES: AlertClassChannelOverrides = {
+  apy: {
+    email: "inherit",
+    digest: "inherit",
+    in_app: "inherit",
+  },
+  watchlist: {
+    email: "inherit",
+    digest: "inherit",
+    in_app: "inherit",
+  },
+};
+
+const CHANNEL_OVERRIDES_STORAGE_KEY = "stellar-yield.channel-overrides";
+
+const getChannelOverridesStorageKey = (walletAddress: string) =>
+  `${CHANNEL_OVERRIDES_STORAGE_KEY}.${walletAddress}`;
+
 const PREFS_STORAGE_KEY = "stellar-yield.alert-preferences";
 
 export default function AlertsModal({
@@ -74,16 +122,31 @@ export default function AlertsModal({
   const [alerts, setAlerts] = useState<UserAlert[]>([]);
   const [loading, setLoading] = useState(false);
   const [form, setForm] = useState<FormState>(DEFAULT_FORM);
+  const [channelOverrides, setChannelOverrides] =
+    useState<AlertClassChannelOverrides>(DEFAULT_CHANNEL_OVERRIDES);
   const [formError, setFormError] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [deletingId, setDeletingId] = useState<string | null>(null);
-  const [digestPreferences, setDigestPreferences] = useState<WatchlistDigestPreference>(
-    DEFAULT_DIGEST_PREFERENCES,
-  );
   const [digestLoading, setDigestLoading] = useState(false);
-  const [digestSaving, setDigestSaving] = useState(false);
-  const [digestError, setDigestError] = useState("");
   const overlayRef = useRef<HTMLDivElement>(null);
+
+  // Digest preferences with optimistic updates and rollback on failure
+  const {
+    current: digestPreferences,
+    setCurrent: setDigestPreferences,
+    error: digestError,
+    isPending: digestSaving,
+    canRetry: canRetryDigestSave,
+    optimisticUpdate: optimisticDigestUpdate,
+    retry: retryDigestSave,
+    clearError: clearDigestError,
+  } = useOptimisticUpdate<WatchlistDigestPreference>({
+    initialValue: DEFAULT_DIGEST_PREFERENCES,
+  });
+
+  // Alert deletion with optimistic updates and rollback on failure
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+  const [failedDeleteId, setFailedDeleteId] = useState<string | null>(null);
 
   const loadAlerts = useCallback(async () => {
     if (!walletAddress) return;
@@ -113,7 +176,6 @@ export default function AlertsModal({
       }
 
       setDigestLoading(true);
-      setDigestError("");
       try {
         const preferences = await fetchDigestPreference(walletAddress);
         if (!cancelled) {
@@ -121,8 +183,7 @@ export default function AlertsModal({
         }
       } catch {
         if (!cancelled) {
-          setDigestPreferences(DEFAULT_DIGEST_PREFERENCES);
-          setDigestError("Digest preferences could not be loaded.");
+          clearDigestError();
         }
       } finally {
         if (!cancelled) {
@@ -136,7 +197,7 @@ export default function AlertsModal({
     return () => {
       cancelled = true;
     };
-  }, [isOpen, walletAddress]);
+  }, [isOpen, walletAddress, clearDigestError, setDigestPreferences]);
 
   useEffect(() => {
     const stored = window.localStorage.getItem(PREFS_STORAGE_KEY);
@@ -148,6 +209,51 @@ export default function AlertsModal({
       // ignore malformed local storage data
     }
   }, []);
+
+  useEffect(() => {
+    const stored = window.localStorage.getItem(
+      getChannelOverridesStorageKey(walletAddress),
+    );
+    if (!stored) {
+      setChannelOverrides({
+        apy: { ...DEFAULT_CHANNEL_OVERRIDES.apy },
+        watchlist: { ...DEFAULT_CHANNEL_OVERRIDES.watchlist },
+      });
+      return;
+    }
+    try {
+      const overrides = JSON.parse(stored) as Partial<AlertClassChannelOverrides> &
+        Partial<ChannelOverrides>;
+      const apy = { ...DEFAULT_CHANNEL_OVERRIDES.apy };
+      const watchlist = { ...DEFAULT_CHANNEL_OVERRIDES.watchlist };
+      if (overrides.apy || overrides.watchlist) {
+        if (overrides.apy && typeof overrides.apy === "object") {
+          Object.assign(apy, overrides.apy);
+        }
+        if (overrides.watchlist && typeof overrides.watchlist === "object") {
+          Object.assign(watchlist, overrides.watchlist);
+        }
+      } else {
+        const legacy = overrides as Partial<ChannelOverrides>;
+        Object.assign(apy, legacy);
+        Object.assign(watchlist, legacy);
+      }
+      setChannelOverrides({ apy, watchlist });
+    } catch {
+      setChannelOverrides({
+        apy: { ...DEFAULT_CHANNEL_OVERRIDES.apy },
+        watchlist: { ...DEFAULT_CHANNEL_OVERRIDES.watchlist },
+      });
+    }
+  }, [walletAddress]);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    window.localStorage.setItem(
+      getChannelOverridesStorageKey(walletAddress),
+      JSON.stringify(channelOverrides),
+    );
+  }, [isOpen, channelOverrides]);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -185,12 +291,13 @@ export default function AlertsModal({
       return;
     }
 
-    const preferences: AlertPreferences = {
+    const preferences: AlertPreferencesWithChannelOverrides = {
       channel: form.channel,
       cooldownMinutes: Number(form.cooldownMinutes),
       severityThreshold: Number(form.severityThreshold),
       quietHoursStart: Number(form.quietHoursStart),
       quietHoursEnd: Number(form.quietHoursEnd),
+      channelOverrides: channelOverrides.apy,
     };
 
     if (
@@ -236,7 +343,9 @@ export default function AlertsModal({
       setAlerts((prev) => [created, ...prev]);
       setForm(DEFAULT_FORM);
     } catch (err) {
-      setFormError(err instanceof Error ? err.message : "Failed to create alert");
+      setFormError(
+        err instanceof Error ? err.message : "Failed to create alert",
+      );
     } finally {
       setSubmitting(false);
     }
@@ -244,40 +353,65 @@ export default function AlertsModal({
 
   const handleDelete = async (id: string) => {
     setDeletingId(id);
+    setDeleteError(null);
+    setFailedDeleteId(null);
+
+    // Find the alert we're deleting for rollback
+    const alertToDelete = alerts.find((alert) => alert.id === id);
+    if (!alertToDelete) {
+      setDeletingId(null);
+      return;
+    }
+
     try {
-      await deleteAlert(id, walletAddress);
+      // Optimistically remove from UI
       setAlerts((prev) => prev.filter((alert) => alert.id !== id));
-    } catch {
-      // Ignore deletion failures and keep current list.
+
+      // Make API call to delete
+      await deleteAlert(id, walletAddress);
+    } catch (err) {
+      // Rollback: restore the deleted alert
+      setAlerts((prev) =>
+        [...prev, alertToDelete].sort(
+          (a, b) =>
+            new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime(),
+        ),
+      );
+
+      const errorMessage =
+        err instanceof Error ? err.message : "Failed to delete alert";
+      setDeleteError(errorMessage);
+      setFailedDeleteId(id);
     } finally {
       setDeletingId(null);
     }
   };
 
+  const retryDeleteAlert = async () => {
+    if (!failedDeleteId) return;
+    await handleDelete(failedDeleteId);
+  };
+
   const toggleWatchedVault = (vaultId: string) => {
-    setDigestPreferences((current) => ({
-      ...current,
-      watchedVaultIds: current.watchedVaultIds.includes(vaultId)
-        ? current.watchedVaultIds.filter((value) => value !== vaultId)
-        : [...current.watchedVaultIds, vaultId],
-    }));
+    const newPrefs: WatchlistDigestPreference = {
+      ...digestPreferences,
+      watchedVaultIds: digestPreferences.watchedVaultIds.includes(vaultId)
+        ? digestPreferences.watchedVaultIds.filter((value) => value !== vaultId)
+        : [...digestPreferences.watchedVaultIds, vaultId],
+    };
+    // Update optimistically - will be saved when user clicks Save
+    // No API call here, just local state update
+    setDigestPreferences(newPrefs);
   };
 
   const handleSaveDigestPreferences = async () => {
-    setDigestSaving(true);
-    setDigestError("");
-    try {
-      const saved = await saveDigestPreference(walletAddress, digestPreferences);
-      setDigestPreferences(saved);
-    } catch (saveError) {
-      setDigestError(
-        saveError instanceof Error
-          ? saveError.message
-          : "Digest preferences could not be saved.",
-      );
-    } finally {
-      setDigestSaving(false);
-    }
+    const preferencesWithOverrides = {
+      ...digestPreferences,
+      channelOverrides: channelOverrides.watchlist,
+    };
+    await optimisticDigestUpdate(preferencesWithOverrides, async () => {
+      return await saveDigestPreference(walletAddress, preferencesWithOverrides);
+    });
   };
 
   if (!isOpen) return null;
@@ -308,11 +442,19 @@ export default function AlertsModal({
           </button>
         </div>
 
-        <form onSubmit={(event) => void handleSubmit(event)} className="mb-5 space-y-3">
+        <form
+          onSubmit={(event) => void handleSubmit(event)}
+          className="mb-5 space-y-3"
+        >
           <div className="grid grid-cols-2 gap-2">
             <select
               value={form.vaultId}
-              onChange={(event) => setForm((current) => ({ ...current, vaultId: event.target.value }))}
+              onChange={(event) =>
+                setForm((current) => ({
+                  ...current,
+                  vaultId: event.target.value,
+                }))
+              }
               aria-label="Select vault"
               className="col-span-2 bg-white/10 text-white rounded-xl px-3 py-2 text-sm border border-white/10 focus:border-indigo-400 outline-none"
             >
@@ -349,7 +491,10 @@ export default function AlertsModal({
                 placeholder="10.0"
                 value={form.thresholdValue}
                 onChange={(event) =>
-                  setForm((current) => ({ ...current, thresholdValue: event.target.value }))
+                  setForm((current) => ({
+                    ...current,
+                    thresholdValue: event.target.value,
+                  }))
                 }
                 aria-label="APY threshold"
                 className="flex-1 bg-white/10 text-white rounded-xl px-3 py-2 text-sm border border-white/10 focus:border-indigo-400 outline-none"
@@ -361,7 +506,12 @@ export default function AlertsModal({
               type="email"
               placeholder="you@example.com"
               value={form.email}
-              onChange={(event) => setForm((current) => ({ ...current, email: event.target.value }))}
+              onChange={(event) =>
+                setForm((current) => ({
+                  ...current,
+                  email: event.target.value,
+                }))
+              }
               aria-label="Notification email"
               className="col-span-2 bg-white/10 text-white rounded-xl px-3 py-2 text-sm border border-white/10 focus:border-indigo-400 outline-none placeholder:text-gray-500"
             />
@@ -387,7 +537,10 @@ export default function AlertsModal({
               max={1440}
               value={form.cooldownMinutes}
               onChange={(event) =>
-                setForm((current) => ({ ...current, cooldownMinutes: event.target.value }))
+                setForm((current) => ({
+                  ...current,
+                  cooldownMinutes: event.target.value,
+                }))
               }
               aria-label="Cooldown minutes"
               placeholder="Cooldown (minutes)"
@@ -399,7 +552,10 @@ export default function AlertsModal({
               max={1000}
               value={form.severityThreshold}
               onChange={(event) =>
-                setForm((current) => ({ ...current, severityThreshold: event.target.value }))
+                setForm((current) => ({
+                  ...current,
+                  severityThreshold: event.target.value,
+                }))
               }
               aria-label="Severity threshold"
               placeholder="Severity threshold"
@@ -411,7 +567,10 @@ export default function AlertsModal({
               max={23}
               value={form.quietHoursStart}
               onChange={(event) =>
-                setForm((current) => ({ ...current, quietHoursStart: event.target.value }))
+                setForm((current) => ({
+                  ...current,
+                  quietHoursStart: event.target.value,
+                }))
               }
               aria-label="Quiet hours start"
               placeholder="Quiet start UTC"
@@ -423,7 +582,10 @@ export default function AlertsModal({
               max={23}
               value={form.quietHoursEnd}
               onChange={(event) =>
-                setForm((current) => ({ ...current, quietHoursEnd: event.target.value }))
+                setForm((current) => ({
+                  ...current,
+                  quietHoursEnd: event.target.value,
+                }))
               }
               aria-label="Quiet hours end"
               placeholder="Quiet end UTC"
@@ -432,7 +594,10 @@ export default function AlertsModal({
           </div>
 
           {formError && (
-            <p role="alert" className="text-red-400 text-xs flex items-center gap-1">
+            <p
+              role="alert"
+              className="text-red-400 text-xs flex items-center gap-1"
+            >
               <AlertTriangle size={12} /> {formError}
             </p>
           )}
@@ -442,7 +607,11 @@ export default function AlertsModal({
             disabled={submitting || activeAlerts.length >= MAX_ALERTS}
             className="w-full flex items-center justify-center gap-2 py-2 rounded-xl bg-indigo-500 hover:bg-indigo-400 disabled:opacity-50 disabled:cursor-not-allowed text-white text-sm font-semibold transition-colors"
           >
-            {submitting ? <Loader2 size={14} className="animate-spin" /> : <Plus size={14} />}
+            {submitting ? (
+              <Loader2 size={14} className="animate-spin" />
+            ) : (
+              <Plus size={14} />
+            )}
             Add Alert
           </button>
 
@@ -453,9 +622,66 @@ export default function AlertsModal({
 
         <section className="mb-5 rounded-2xl border border-white/10 bg-white/5 p-4 space-y-3">
           <div>
-            <h3 className="text-sm font-semibold text-white">Vault Watchlist Digest</h3>
+            <h3 className="text-sm font-semibold text-white">
+              Channel Overrides
+            </h3>
             <p className="text-xs text-gray-400">
-              Receive APY, risk, freshness, and triggered alert summaries for watched vaults.
+              Configure per-channel delivery for each alert class. "Inherit"
+              follows your global defaults.
+            </p>
+          </div>
+          <div className="space-y-4">
+            {(
+              [
+                { key: "apy", label: "APY Alerts" },
+                { key: "watchlist", label: "Watchlist Digest" },
+              ] as const
+            ).map((alertClass) => (
+              <div key={alertClass.key} className="space-y-2">
+                <p className="text-xs uppercase tracking-widest text-gray-500">
+                  {alertClass.label}
+                </p>
+                {(["email", "digest", "in_app"] as const).map((channel) => (
+                  <label
+                    key={channel}
+                    className="flex items-center justify-between gap-3 rounded-xl bg-black/20 px-3 py-2 text-sm text-white"
+                  >
+                    <span className="capitalize">
+                      {channel === "in_app" ? "In-app" : channel}
+                    </span>
+                    <select
+                      value={channelOverrides[alertClass.key][channel]}
+                      onChange={(event) =>
+                        setChannelOverrides((current) => ({
+                          ...current,
+                          [alertClass.key]: {
+                            ...current[alertClass.key],
+                            [channel]: event.target.value as ChannelOverride,
+                          },
+                        }))
+                      }
+                      aria-label={`${alertClass.label} ${channel} notification override`}
+                      className="bg-white/10 text-white rounded-xl px-3 py-2 text-sm border border-white/10 focus:border-indigo-400 outline-none"
+                    >
+                      <option value="inherit">Use default</option>
+                      <option value="on">Always send</option>
+                      <option value="off">Never send</option>
+                    </select>
+                  </label>
+                ))}
+              </div>
+            ))}
+          </div>
+        </section>
+
+        <section className="mb-5 rounded-2xl border border-white/10 bg-white/5 p-4 space-y-3">
+          <div>
+            <h3 className="text-sm font-semibold text-white">
+              Vault Watchlist Digest
+            </h3>
+            <p className="text-xs text-gray-400">
+              Receive APY, risk, freshness, and triggered alert summaries for
+              watched vaults.
             </p>
           </div>
 
@@ -487,7 +713,8 @@ export default function AlertsModal({
                   onChange={(event) =>
                     setDigestPreferences((current) => ({
                       ...current,
-                      scheduleMode: event.target.value as WatchlistDigestPreference["scheduleMode"],
+                      scheduleMode: event.target
+                        .value as WatchlistDigestPreference["scheduleMode"],
                     }))
                   }
                   aria-label="Digest schedule mode"
@@ -560,7 +787,9 @@ export default function AlertsModal({
               </div>
 
               <div className="space-y-2">
-                <p className="text-xs uppercase tracking-widest text-gray-500">Watched vaults</p>
+                <p className="text-xs uppercase tracking-widest text-gray-500">
+                  Watched vaults
+                </p>
                 <div className="grid grid-cols-2 gap-2">
                   {vaultOptions.map((vaultId) => (
                     <label
@@ -570,7 +799,9 @@ export default function AlertsModal({
                       <input
                         type="checkbox"
                         aria-label={`Watch vault ${vaultId}`}
-                        checked={digestPreferences.watchedVaultIds.includes(vaultId)}
+                        checked={digestPreferences.watchedVaultIds.includes(
+                          vaultId,
+                        )}
                         onChange={() => toggleWatchedVault(vaultId)}
                       />
                       <span>{vaultId}</span>
@@ -580,9 +811,28 @@ export default function AlertsModal({
               </div>
 
               {digestError && (
-                <p role="alert" className="text-red-400 text-xs flex items-center gap-1">
-                  <AlertTriangle size={12} /> {digestError}
-                </p>
+                <div
+                  role="alert"
+                  className="flex items-start gap-2 p-3 rounded-lg bg-red-500/10 border border-red-500/30"
+                >
+                  <AlertTriangle
+                    size={14}
+                    className="text-red-400 mt-0.5 shrink-0"
+                  />
+                  <div className="flex-1 min-w-0">
+                    <p className="text-red-400 text-xs">{digestError}</p>
+                    {canRetryDigestSave && (
+                      <button
+                        type="button"
+                        onClick={() => void retryDigestSave()}
+                        className="mt-2 text-xs text-red-300 hover:text-red-200 flex items-center gap-1 transition-colors"
+                      >
+                        <RotateCcw size={12} />
+                        Retry
+                      </button>
+                    )}
+                  </div>
+                </div>
               )}
 
               <button
@@ -591,7 +841,11 @@ export default function AlertsModal({
                 disabled={digestSaving}
                 className="w-full flex items-center justify-center gap-2 py-2 rounded-xl bg-slate-700 hover:bg-slate-600 disabled:opacity-50 text-white text-sm font-semibold transition-colors"
               >
-                {digestSaving ? <Loader2 size={14} className="animate-spin" /> : <Bell size={14} />}
+                {digestSaving ? (
+                  <Loader2 size={14} className="animate-spin" />
+                ) : (
+                  <Bell size={14} />
+                )}
                 Save Digest Preferences
               </button>
             </>
@@ -599,13 +853,39 @@ export default function AlertsModal({
         </section>
 
         <div className="overflow-y-auto flex-1 space-y-2 pr-1">
+          {deleteError && (
+            <div
+              role="alert"
+              className="flex items-start gap-2 p-3 rounded-lg bg-red-500/10 border border-red-500/30 mb-2"
+            >
+              <AlertTriangle
+                size={14}
+                className="text-red-400 mt-0.5 shrink-0"
+              />
+              <div className="flex-1 min-w-0">
+                <p className="text-red-400 text-xs">{deleteError}</p>
+                {failedDeleteId && (
+                  <button
+                    type="button"
+                    onClick={() => void retryDeleteAlert()}
+                    className="mt-2 text-xs text-red-300 hover:text-red-200 flex items-center gap-1 transition-colors"
+                  >
+                    <RotateCcw size={12} />
+                    Retry delete
+                  </button>
+                )}
+              </div>
+            </div>
+          )}
           {loading && (
             <div className="flex justify-center py-6">
               <Loader2 size={20} className="animate-spin text-gray-400" />
             </div>
           )}
           {!loading && alerts.length === 0 && (
-            <p className="text-center text-gray-500 text-sm py-6">No alerts yet</p>
+            <p className="text-center text-gray-500 text-sm py-6">
+              No alerts yet
+            </p>
           )}
           {alerts.map((alert) => (
             <div
@@ -617,14 +897,20 @@ export default function AlertsModal({
               }`}
             >
               <div className="flex-1 min-w-0">
-                <p className="text-sm text-white font-medium truncate">{alert.vaultId}</p>
+                <p className="text-sm text-white font-medium truncate">
+                  {alert.vaultId}
+                </p>
                 <p className="text-xs text-gray-400">
                   APY {alert.condition} {alert.thresholdValue}%
                 </p>
               </div>
               <div className="flex items-center gap-2 shrink-0">
                 {alert.status === "triggered" && (
-                  <CheckCircle2 size={14} className="text-green-400" aria-label="Triggered" />
+                  <CheckCircle2
+                    size={14}
+                    className="text-green-400"
+                    aria-label="Triggered"
+                  />
                 )}
                 <span
                   className={`text-xs px-2 py-0.5 rounded-full ${

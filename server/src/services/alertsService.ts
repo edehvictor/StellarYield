@@ -19,6 +19,14 @@
 import { PrismaClient } from "@prisma/client";
 import { sendEmail } from "./emailService";
 import { shouldSuppressAlert, type AlertPreferences } from "./alertsPreferenceRules";
+import {
+  recordPreferenceChange,
+  getPreferenceAuditHistory,
+  getAuditEntryById,
+  findRevertTarget,
+  type AlertPreferenceAuditEntry,
+  type AuditSource,
+} from "./alertPreferenceAuditService";
 
 const prisma = new PrismaClient();
 
@@ -111,10 +119,17 @@ export async function createAlert(input: CreateAlertInput) {
     },
   });
   if (input.preferences) {
-    alertPreferencesStore.set(
-      toAlertKey(input.walletAddress, input.vaultId),
-      input.preferences,
-    );
+    const key = toAlertKey(input.walletAddress, input.vaultId);
+    alertPreferencesStore.set(key, input.preferences);
+    recordPreferenceChange({
+      walletAddress: input.walletAddress,
+      vaultId: input.vaultId,
+      actor: input.walletAddress,
+      source: "api",
+      before: null,
+      after: input.preferences,
+      reason: "Initial preference set on alert creation",
+    });
   }
   return created;
 }
@@ -271,6 +286,12 @@ async function dispatchAlertEmail(
   });
 }
 
+/** Reset the in-memory preference store. Intended for testing only. */
+export function resetAlertPreferencesStore(): void {
+  alertPreferencesStore.clear();
+  alertLastTriggeredStore.clear();
+}
+
 export async function dispatchDriftAlert(
   vaultId: string,
   targetWeight: number,
@@ -317,4 +338,93 @@ export async function dispatchDriftAlert(
       console.error("[alertsService] Failed to send drift alert email", err);
     }
   }
+}
+
+// ── Preference Management with Audit Trail ──────────────────────────────
+
+/**
+ * Update alert preferences for a wallet+vault pair, recording the audit trail.
+ * Returns the new preferences and the audit entry.
+ */
+export function updateAlertPreferences(
+  walletAddress: string,
+  vaultId: string,
+  newPreferences: AlertPreferences,
+  options?: { actor?: string; source?: AuditSource; reason?: string },
+): {
+  preferences: AlertPreferences;
+  auditEntry: AlertPreferenceAuditEntry;
+} {
+  const key = toAlertKey(walletAddress, vaultId);
+  const before = alertPreferencesStore.get(key) ?? null;
+
+  alertPreferencesStore.set(key, newPreferences);
+
+  const auditEntry = recordPreferenceChange({
+    walletAddress,
+    vaultId,
+    actor: options?.actor ?? walletAddress,
+    source: options?.source ?? "api",
+    before,
+    after: newPreferences,
+    reason: options?.reason ?? "Preferences updated",
+  });
+
+  return { preferences: newPreferences, auditEntry };
+}
+
+/**
+ * Retrieve the current alert preferences for a wallet+vault pair.
+ */
+export function getAlertPreferences(
+  walletAddress: string,
+  vaultId: string,
+): AlertPreferences | undefined {
+  const key = toAlertKey(walletAddress, vaultId);
+  return alertPreferencesStore.get(key);
+}
+
+/**
+ * Revert alert preferences to a previous audit entry's snapshot.
+ * Records the revert in the audit trail with source "revert".
+ */
+export function revertAlertPreferences(
+  walletAddress: string,
+  vaultId: string,
+  targetEntryId?: string,
+): {
+  preferences: AlertPreferences;
+  auditEntry: AlertPreferenceAuditEntry;
+} {
+  const key = toAlertKey(walletAddress, vaultId);
+  const currentPrefs = alertPreferencesStore.get(key);
+
+  let revertTo: AlertPreferenceAuditEntry | undefined;
+
+  if (targetEntryId) {
+    revertTo = getAuditEntryById(walletAddress, vaultId, targetEntryId);
+    if (!revertTo) {
+      throw new Error(`Audit entry ${targetEntryId} not found`);
+    }
+  } else {
+    revertTo = findRevertTarget(walletAddress, vaultId);
+    if (!revertTo) {
+      throw new Error("No previous preference snapshot to revert to");
+    }
+  }
+
+  const revertedPrefs = { ...revertTo.after };
+  alertPreferencesStore.set(key, revertedPrefs);
+
+  const auditEntry = recordPreferenceChange({
+    walletAddress,
+    vaultId,
+    actor: walletAddress,
+    source: "revert",
+    before: currentPrefs ?? null,
+    after: revertedPrefs,
+    reason: `Reverted to audit entry ${revertTo.id}`,
+  });
+
+  return { preferences: revertedPrefs, auditEntry };
 }

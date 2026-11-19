@@ -31,6 +31,57 @@ describe("useDepositImpact", () => {
     expect(result.current.shouldBlock).toBe(false);
   });
 
+  it("blocks when deposit exceeds 25% of route liquidity depth (#1312)", () => {
+    const { result } = renderHook(() =>
+      useDepositImpact({
+        ...base,
+        amountUsd: 30_000,
+        routeLiquidityDepthUsd: 100_000,
+      }),
+    );
+    expect(result.current.shouldBlock).toBe(true);
+    expect(result.current.blockReason).toContain("route liquidity depth");
+    expect(result.current.severity).toBe("critical");
+    expect(
+      result.current.reasons.some((r) => r.includes("route liquidity depth")),
+    ).toBe(true);
+  });
+
+  it("warns when deposit exceeds 15% but not 25% of depth (#1312)", () => {
+    const { result } = renderHook(() =>
+      useDepositImpact({
+        ...base,
+        amountUsd: 20_000,
+        routeLiquidityDepthUsd: 100_000,
+      }),
+    );
+    expect(result.current.shouldBlock).toBe(false);
+    expect(result.current.severity).toBe("warning");
+    expect(
+      result.current.reasons.some((r) => r.includes("safety cap")),
+    ).toBe(true);
+  });
+
+  it("skips depth check when depth is unknown (#1312)", () => {
+    const { result } = renderHook(() =>
+      useDepositImpact({ ...base, amountUsd: 1_000_000 }),
+    );
+    expect(result.current.shouldBlock).toBe(false);
+    expect(
+      result.current.reasons.some((r) => r.includes("route liquidity depth")),
+    ).toBe(false);
+  });
+
+  it("skips depth check when amountUsd is zero (#1312)", () => {
+    const { result } = renderHook(() =>
+      useDepositImpact({ ...base, amountUsd: 0, routeLiquidityDepthUsd: 100 }),
+    );
+    expect(result.current.shouldBlock).toBe(false);
+    expect(
+      result.current.reasons.some((r) => r.includes("route liquidity depth")),
+    ).toBe(false);
+  });
+
   it("adds slippage reason for elevated slippage (3–7%)", () => {
     const { result } = renderHook(() =>
       useDepositImpact({ ...base, slippageTolerance: 5 }),

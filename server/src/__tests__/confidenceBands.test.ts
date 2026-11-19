@@ -3,6 +3,7 @@ import {
   computeAllocationBands,
   getBandColor,
   formatAllocationBand,
+  computeHistoryCoverageDecay,
 } from "../services/confidenceService";
 
 describe("calculateBandWidth", () => {
@@ -277,5 +278,90 @@ describe("formatAllocationBand", () => {
     const formatted = formatAllocationBand(band);
 
     expect(formatted).toBe("33.3% (30.1% - 36.5%)");
+  });
+});
+
+// ── History coverage decay (#1073) ───────────────────────────────────────────
+
+describe("computeHistoryCoverageDecay", () => {
+  const NOW = new Date("2026-06-30T00:00:00.000Z");
+
+  /** Build `count` consecutive daily ISO dates ending `endOffsetDays` before NOW. */
+  function denseDates(count: number, endOffsetDays = 0): string[] {
+    return Array.from({ length: count }, (_, i) => {
+      const d = new Date(NOW);
+      d.setUTCDate(d.getUTCDate() - endOffsetDays - (count - 1 - i));
+      return d.toISOString().split("T")[0];
+    });
+  }
+
+  it("returns full decay factor (no penalty) for dense, up-to-date daily history", () => {
+    const result = computeHistoryCoverageDecay(denseDates(30), NOW);
+    expect(result.decayFactor).toBeCloseTo(1, 2);
+    expect(result.historyCoverage).toBeCloseTo(1, 2);
+    expect(result.maxGapDays).toBeCloseTo(1, 1);
+    expect(result.reasons).toHaveLength(0);
+  });
+
+  it("returns zero decay and no_history reason for empty history", () => {
+    const result = computeHistoryCoverageDecay([], NOW);
+    expect(result.decayFactor).toBe(0);
+    expect(result.historyCoverage).toBe(0);
+    expect(result.reasons).toContain("no_history");
+  });
+
+  it("degrades confidence as coverage becomes sparse", () => {
+    // Only 1 in 3 days present across a 30-day window.
+    const dates = denseDates(30).filter((_, i) => i % 3 === 0);
+    const dense = computeHistoryCoverageDecay(denseDates(30), NOW);
+    const sparse = computeHistoryCoverageDecay(dates, NOW);
+
+    expect(sparse.historyCoverage).toBeLessThan(dense.historyCoverage);
+    expect(sparse.decayFactor).toBeLessThan(dense.decayFactor);
+    expect(sparse.reasons).toContain("sparse_history");
+  });
+
+  it("degrades confidence for a long missing interval (gap) even with otherwise dense data", () => {
+    const before = denseDates(10, 25); // 10 dense days, 25 days ago
+    const after = denseDates(10, 0); // 10 dense days, up to now
+    const gapped = [...before, ...after];
+
+    const dense = computeHistoryCoverageDecay(denseDates(20), NOW);
+    const gappedResult = computeHistoryCoverageDecay(gapped, NOW);
+
+    expect(gappedResult.maxGapDays).toBeGreaterThan(10);
+    expect(gappedResult.decayFactor).toBeLessThan(dense.decayFactor);
+    expect(gappedResult.reasons).toContain("gapped_history");
+  });
+
+  it("degrades confidence when the most recent point is stale relative to now", () => {
+    const fresh = computeHistoryCoverageDecay(denseDates(14, 0), NOW);
+    const stale = computeHistoryCoverageDecay(denseDates(14, 20), NOW);
+
+    expect(stale.stalenessDays).toBeGreaterThan(fresh.stalenessDays);
+    expect(stale.decayFactor).toBeLessThan(fresh.decayFactor);
+    expect(stale.reasons).toContain("stale_history");
+  });
+
+  it("decay factor is always within [0, 1]", () => {
+    const cases = [
+      denseDates(30),
+      denseDates(30).filter((_, i) => i % 5 === 0),
+      denseDates(3, 60),
+      [],
+    ];
+    for (const dates of cases) {
+      const result = computeHistoryCoverageDecay(dates, NOW);
+      expect(result.decayFactor).toBeGreaterThanOrEqual(0);
+      expect(result.decayFactor).toBeLessThanOrEqual(1);
+    }
+  });
+
+  it("ignores duplicate dates when computing coverage", () => {
+    const dates = denseDates(10, 0);
+    const withDuplicates = [...dates, ...dates];
+    const withoutDuplicates = computeHistoryCoverageDecay(dates, NOW);
+    const withDupesResult = computeHistoryCoverageDecay(withDuplicates, NOW);
+    expect(withDupesResult.decayFactor).toBeCloseTo(withoutDuplicates.decayFactor, 3);
   });
 });

@@ -9,6 +9,11 @@
 import * as StellarSdk from '@stellar/stellar-sdk';
 import { recordReplayError } from './indexerStatus';
 import { recordGapEvent, validateNetworkContinuity } from './continuitychecks';
+import {
+  EventCursorError,
+  computeEventPageCheckpoint,
+  extractRpcCursor,
+} from './eventCursorCheckpoint';
 
 const RPC_URL = process.env.RPC_URL || 'https://soroban-testnet.stellar.org';
 const NETWORK_PASSPHRASE = process.env.NETWORK_PASSPHRASE || StellarSdk.Networks.TESTNET;
@@ -220,17 +225,30 @@ async function ingestContractEvents(
         });
       }
 
-      // Check if there are more pages
-      hasMorePages = eventsResponse.events.length === MAX_EVENTS_PER_PAGE;
-      
-      if (eventsResponse.events.length > 0) {
-        const lastEvent = eventsResponse.events[eventsResponse.events.length - 1];
-        startLedger = lastEvent.ledger;
-        pageCursor = eventsResponse.latestLedger.toString(); // Use latest ledger as cursor
-      } else {
-        startLedger = endLedger;
-        hasMorePages = false;
+      // Check if there are more pages; advance using the RPC pagination
+      // cursor so a crash mid-pagination resumes at exactly this next page
+      // instead of re-scanning the ledger range (#1289).
+      const rpcCursor = extractRpcCursor(eventsResponse);
+      const outcome = computeEventPageCheckpoint({
+        lastLedger: startLedger,
+        endLedger,
+        events: eventsResponse.events,
+        rpcCursor,
+        limit: MAX_EVENTS_PER_PAGE,
+      });
+
+      if (!outcome.ok) {
+        throw new EventCursorError(
+          outcome.error.code,
+          outcome.error.message,
+          outcome.error.meta,
+        );
       }
+
+      const checkpoint = outcome.checkpoint;
+      startLedger = checkpoint.lastLedger;
+      hasMorePages = checkpoint.hasMorePages;
+      pageCursor = checkpoint.cursorPosition;
 
       // Update cursor after each page
       await updateCursorCheckpoint(

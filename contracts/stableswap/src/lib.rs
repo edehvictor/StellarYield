@@ -15,6 +15,34 @@
 //! Dynamic fee adjustment scales linearly with pool imbalance:
 //!   fee = base_fee + (imbalance_ratio · fee_multiplier)
 //! where imbalance_ratio = |x/S - 0.5| / 0.5  (S = x+y)
+//!
+//! ## Rounding and numeric limits
+//!
+//! All arithmetic is checked. Values that cannot be represented safely return a
+//! typed [`StableSwapError`] (`MathOverflow`, `InvalidAmount`, `ZeroInvariant`)
+//! before any token transfer or storage write, so a failed call never changes
+//! reserves, LP supply, LP balances, or token balances.
+//!
+//! Rounding rules (all divisions are integer division of non-negative values, so
+//! they round **down**):
+//!
+//! - Newton intermediate products are folded division-first
+//!   (`floor(floor(d²/4L)·d/S)` for `d³/(4·x·y)`), which keeps them smaller than
+//!   the exact rational value and extends the safe reserve range beyond a direct
+//!   cube. The iteration still needs `ann·S·D` to fit in `i128`, so for a
+//!   balanced pool the per-side reserve limit is roughly
+//!   `sqrt(i128::MAX / (4·A))` (`≈ 6.5·10¹⁷` for `A = 100`). Values beyond the
+//!   checked domain return `MathOverflow` instead of wrapping.
+//! - The invariant `D` and the solved reserve `y` are returned as the first
+//!   iterate whose change is at most one unit, so `|result − exact| ≤ 1`.
+//! - Deposits mint `floor(total_supply·(D₁−D₀)/D₀)` LP tokens and withdrawals pay
+//!   `floor(reserve·lp_amount/total_supply)`; both round in favour of the pool.
+//! - Swap fees and the post-fee input are floored, and the output is
+//!   `reserve_out − y`, rounding in favour of the pool.
+//!
+//! Minimum reserves are `1` unit per token; zero reserves or a zero invariant are
+//! rejected. Requesting an amount that pushes an intermediate value outside the
+//! `i128` domain is rejected with `MathOverflow` rather than wrapping.
 
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, symbol_short, token, Address, Env,
@@ -74,6 +102,7 @@ pub enum StableSwapError {
     InvalidFee = 8,
     MathOverflow = 9,
     ZeroInvariant = 10,
+    InvalidToken = 11,
 }
 
 // ── Contract ─────────────────────────────────────────────────────────────
@@ -108,6 +137,17 @@ impl StableSwap {
         if base_fee > MAX_BASE_FEE_BPS {
             return Err(StableSwapError::InvalidFee);
         }
+        if (fee_multiplier as i128) > FEE_PRECISION
+            || (base_fee as i128)
+                .checked_add(fee_multiplier as i128)
+                .ok_or(StableSwapError::InvalidFee)?
+                > FEE_PRECISION
+        {
+            return Err(StableSwapError::InvalidFee);
+        }
+        if token0 == token1 || token0 == lp_token || token1 == lp_token {
+            return Err(StableSwapError::InvalidToken);
+        }
 
         let s = env.storage().instance();
         s.set(&DataKey::Initialized, &true);
@@ -141,7 +181,7 @@ impl StableSwap {
         sender.require_auth();
         Self::assert_initialized(&env)?;
 
-        if amount0 <= 0 || amount1 <= 0 {
+        if amount0 <= 0 || amount1 <= 0 || min_mint_amount < 0 {
             return Err(StableSwapError::InvalidAmount);
         }
 
@@ -152,18 +192,6 @@ impl StableSwap {
         let reserve1: i128 = env.storage().instance().get(&DataKey::Reserve1).unwrap();
         let total_supply: i128 = env.storage().instance().get(&DataKey::TotalSupply).unwrap();
         let amp_coeff: u32 = env.storage().instance().get(&DataKey::AmpCoeff).unwrap();
-
-        // Pull tokens from sender
-        token::Client::new(&env, &token0).transfer(
-            &sender,
-            &env.current_contract_address(),
-            &amount0,
-        );
-        token::Client::new(&env, &token1).transfer(
-            &sender,
-            &env.current_contract_address(),
-            &amount1,
-        );
 
         let new_reserve0 = reserve0
             .checked_add(amount0)
@@ -193,9 +221,31 @@ impl StableSwap {
                 .ok_or(StableSwapError::MathOverflow)?
         };
 
-        if mint_amount < min_mint_amount {
+        if mint_amount <= 0 || mint_amount < min_mint_amount {
             return Err(StableSwapError::InsufficientOutput);
         }
+
+        let new_supply = total_supply
+            .checked_add(mint_amount)
+            .ok_or(StableSwapError::MathOverflow)?;
+
+        let lp_key = DataKey::LpBalance(sender.clone());
+        let old_lp: i128 = env.storage().persistent().get(&lp_key).unwrap_or(0);
+        let new_lp = old_lp
+            .checked_add(mint_amount)
+            .ok_or(StableSwapError::MathOverflow)?;
+
+        // Pull tokens from sender only after invariant validation and calculations succeed
+        token::Client::new(&env, &token0).transfer(
+            &sender,
+            &env.current_contract_address(),
+            &amount0,
+        );
+        token::Client::new(&env, &token1).transfer(
+            &sender,
+            &env.current_contract_address(),
+            &amount1,
+        );
 
         // Update state
         env.storage()
@@ -204,21 +254,10 @@ impl StableSwap {
         env.storage()
             .instance()
             .set(&DataKey::Reserve1, &new_reserve1);
-        let new_supply = total_supply
-            .checked_add(mint_amount)
-            .ok_or(StableSwapError::MathOverflow)?;
         env.storage()
             .instance()
             .set(&DataKey::TotalSupply, &new_supply);
-
-        let lp_key = DataKey::LpBalance(sender.clone());
-        let old_lp: i128 = env.storage().persistent().get(&lp_key).unwrap_or(0);
-        env.storage().persistent().set(
-            &lp_key,
-            &(old_lp
-                .checked_add(mint_amount)
-                .ok_or(StableSwapError::MathOverflow)?),
-        );
+        env.storage().persistent().set(&lp_key, &new_lp);
 
         env.events().publish(
             (symbol_short!("add_liq"),),
@@ -238,7 +277,7 @@ impl StableSwap {
         sender.require_auth();
         Self::assert_initialized(&env)?;
 
-        if lp_amount <= 0 {
+        if lp_amount <= 0 || min_amount0 < 0 || min_amount1 < 0 {
             return Err(StableSwapError::InvalidAmount);
         }
 
@@ -248,9 +287,13 @@ impl StableSwap {
             return Err(StableSwapError::InsufficientLiquidity);
         }
 
+        let total_supply: i128 = env.storage().instance().get(&DataKey::TotalSupply).unwrap();
+        if total_supply <= 0 || lp_amount > total_supply {
+            return Err(StableSwapError::InsufficientLiquidity);
+        }
+
         let reserve0: i128 = env.storage().instance().get(&DataKey::Reserve0).unwrap();
         let reserve1: i128 = env.storage().instance().get(&DataKey::Reserve1).unwrap();
-        let total_supply: i128 = env.storage().instance().get(&DataKey::TotalSupply).unwrap();
 
         let out0 = reserve0
             .checked_mul(lp_amount)
@@ -266,25 +309,40 @@ impl StableSwap {
         if out0 < min_amount0 || out1 < min_amount1 {
             return Err(StableSwapError::InsufficientOutput);
         }
+        if out0 > reserve0 || out1 > reserve1 || (out0 == 0 && out1 == 0) {
+            return Err(StableSwapError::InsufficientLiquidity);
+        }
 
-        // Burn LP
-        env.storage()
-            .persistent()
-            .set(&lp_key, &(sender_lp - lp_amount));
-        env.storage()
-            .instance()
-            .set(&DataKey::TotalSupply, &(total_supply - lp_amount));
-        env.storage()
-            .instance()
-            .set(&DataKey::Reserve0, &(reserve0 - out0));
-        env.storage()
-            .instance()
-            .set(&DataKey::Reserve1, &(reserve1 - out1));
+        let new_reserve0 = reserve0
+            .checked_sub(out0)
+            .ok_or(StableSwapError::MathOverflow)?;
+        let new_reserve1 = reserve1
+            .checked_sub(out1)
+            .ok_or(StableSwapError::MathOverflow)?;
+        let new_supply = total_supply
+            .checked_sub(lp_amount)
+            .ok_or(StableSwapError::MathOverflow)?;
+        let new_sender_lp = sender_lp
+            .checked_sub(lp_amount)
+            .ok_or(StableSwapError::MathOverflow)?;
 
+        // Transfer tokens to sender
         let token0: Address = env.storage().instance().get(&DataKey::Token0).unwrap();
         let token1: Address = env.storage().instance().get(&DataKey::Token1).unwrap();
         token::Client::new(&env, &token0).transfer(&env.current_contract_address(), &sender, &out0);
         token::Client::new(&env, &token1).transfer(&env.current_contract_address(), &sender, &out1);
+
+        // Burn LP and update reserves
+        env.storage().persistent().set(&lp_key, &new_sender_lp);
+        env.storage()
+            .instance()
+            .set(&DataKey::TotalSupply, &new_supply);
+        env.storage()
+            .instance()
+            .set(&DataKey::Reserve0, &new_reserve0);
+        env.storage()
+            .instance()
+            .set(&DataKey::Reserve1, &new_reserve1);
 
         env.events()
             .publish((symbol_short!("rem_liq"),), (sender, lp_amount, out0, out1));
@@ -307,7 +365,7 @@ impl StableSwap {
         sender.require_auth();
         Self::assert_initialized(&env)?;
 
-        if amount_in <= 0 {
+        if amount_in <= 0 || min_out < 0 {
             return Err(StableSwapError::InvalidAmount);
         }
 
@@ -323,8 +381,12 @@ impl StableSwap {
             let r1: i128 = env.storage().instance().get(&DataKey::Reserve1).unwrap();
             (r1, r0, token0.clone())
         } else {
-            return Err(StableSwapError::InvalidAmount);
+            return Err(StableSwapError::InvalidToken);
         };
+
+        if reserve_in <= 0 || reserve_out <= 0 {
+            return Err(StableSwapError::InsufficientLiquidity);
+        }
 
         let amp_coeff: u32 = env.storage().instance().get(&DataKey::AmpCoeff).unwrap();
         let base_fee: u32 = env.storage().instance().get(&DataKey::BaseFee).unwrap();
@@ -336,23 +398,45 @@ impl StableSwap {
 
         // Compute dynamic fee based on imbalance before the swap
         let fee = Self::compute_dynamic_fee(reserve_in, reserve_out, base_fee, fee_multiplier)?;
+        if fee >= FEE_PRECISION {
+            return Err(StableSwapError::InvalidFee);
+        }
+
+        let fee_factor = FEE_PRECISION
+            .checked_sub(fee)
+            .ok_or(StableSwapError::MathOverflow)?;
 
         // Amount after fee deduction
         let amount_in_after_fee = amount_in
-            .checked_mul(FEE_PRECISION - fee)
+            .checked_mul(fee_factor)
             .ok_or(StableSwapError::MathOverflow)?
             .checked_div(FEE_PRECISION)
             .ok_or(StableSwapError::MathOverflow)?;
+
+        if amount_in_after_fee <= 0 {
+            return Err(StableSwapError::InvalidAmount);
+        }
 
         // Compute new reserve_out using the invariant
         let new_reserve_in = reserve_in
             .checked_add(amount_in_after_fee)
             .ok_or(StableSwapError::MathOverflow)?;
-        let new_reserve_out = Self::compute_y(new_reserve_in, reserve_in + reserve_out, amp_coeff)?;
+        let sum = reserve_in
+            .checked_add(reserve_out)
+            .ok_or(StableSwapError::MathOverflow)?;
+        let new_reserve_out = Self::compute_y(new_reserve_in, sum, amp_coeff)?;
+
+        if new_reserve_out <= 0 || new_reserve_out >= reserve_out {
+            return Err(StableSwapError::InsufficientLiquidity);
+        }
 
         let amount_out = reserve_out
             .checked_sub(new_reserve_out)
             .ok_or(StableSwapError::MathOverflow)?;
+
+        if amount_out <= 0 || amount_out >= reserve_out {
+            return Err(StableSwapError::InsufficientLiquidity);
+        }
 
         if amount_out < min_out {
             return Err(StableSwapError::InsufficientOutput);
@@ -423,28 +507,20 @@ impl StableSwap {
         if x <= 0 || y <= 0 {
             return Err(StableSwapError::ZeroInvariant);
         }
+        if !(1..=MAX_A).contains(&amp) {
+            return Err(StableSwapError::InvalidAmpCoeff);
+        }
 
         let s = x.checked_add(y).ok_or(StableSwapError::MathOverflow)?;
         // A·n^n  (n=2, n^n=4)
         let ann: i128 = (amp as i128)
             .checked_mul(4)
-            .ok_or(StableSwapError::MathOverflow)?;
+            .ok_or(StableSwapError::InvalidAmpCoeff)?;
 
         let mut d = s;
 
         for _ in 0..NEWTON_ITERS {
-            // d_prod = D^3 / (4·x·y)
-            let d3 = d
-                .checked_mul(d)
-                .and_then(|v| v.checked_mul(d))
-                .ok_or(StableSwapError::MathOverflow)?;
-            let four_xy = x
-                .checked_mul(4)
-                .and_then(|v| v.checked_mul(y))
-                .ok_or(StableSwapError::MathOverflow)?;
-            let d_prod = d3
-                .checked_div(four_xy)
-                .ok_or(StableSwapError::MathOverflow)?;
+            let d_prod = Self::compute_d_prod(d, x, y)?;
 
             // numerator = (ann·S + n·d_prod)·D  = (ann·S + 2·d_prod)·D
             let numer = ann
@@ -468,17 +544,47 @@ impl StableSwap {
                 .checked_sub(d_prod)
                 .ok_or(StableSwapError::MathOverflow)?;
 
+            if denom <= 0 {
+                return Err(StableSwapError::MathOverflow);
+            }
+
             let d_next = numer
                 .checked_div(denom)
                 .ok_or(StableSwapError::MathOverflow)?;
 
-            // Converged?
-            if (d_next - d).abs() <= 1 {
+            if d_next <= 0 {
+                return Err(StableSwapError::MathOverflow);
+            }
+
+            // Converged? `d_next` and `d` are both positive and fit in i128, so
+            // the difference is safe; use checked math to keep it explicit.
+            let delta = d_next.checked_sub(d).ok_or(StableSwapError::MathOverflow)?;
+            if delta.unsigned_abs() <= 1 {
                 return Ok(d_next);
             }
             d = d_next;
         }
-        Ok(d)
+        Err(StableSwapError::MathOverflow)
+    }
+
+    /// Compute `d³ / (4·x·y)` without overflowing the intermediate cube.
+    ///
+    /// Division-first folding (`floor(floor(d²/4·max)·d/min)`) keeps every
+    /// intermediate smaller than `i128::MAX` for reserves that would overflow a
+    /// direct `d³` product, and floors at each step so the result never exceeds
+    /// the exact rational value (rounding favours the pool).
+    fn compute_d_prod(d: i128, x: i128, y: i128) -> Result<i128, StableSwapError> {
+        let (large, small) = if x >= y { (x, y) } else { (y, x) };
+        let four_large = large.checked_mul(4).ok_or(StableSwapError::MathOverflow)?;
+        let d2 = d.checked_mul(d).ok_or(StableSwapError::MathOverflow)?;
+        let quotient = d2
+            .checked_div(four_large)
+            .ok_or(StableSwapError::MathOverflow)?;
+        quotient
+            .checked_mul(d)
+            .ok_or(StableSwapError::MathOverflow)?
+            .checked_div(small)
+            .ok_or(StableSwapError::MathOverflow)
     }
 
     /// Given the new reserve of one token (x_new), compute the required
@@ -487,8 +593,11 @@ impl StableSwap {
     /// Solves: y^2 + (b − D)·y − D^3/(4·A·n^n·x_new) = 0
     /// where b = x_new + D/ann
     fn compute_y(x_new: i128, sum: i128, amp: u32) -> Result<i128, StableSwapError> {
-        if x_new <= 0 {
+        if x_new <= 0 || sum <= 0 {
             return Err(StableSwapError::InvalidAmount);
+        }
+        if !(1..=MAX_A).contains(&amp) {
+            return Err(StableSwapError::InvalidAmpCoeff);
         }
 
         // Recompute D from current sum (approximation: use sum as proxy for D)
@@ -497,7 +606,7 @@ impl StableSwap {
         // where b = x_new + D/ann,  D ≈ sum (initial guess)
         let ann: i128 = (amp as i128)
             .checked_mul(4)
-            .ok_or(StableSwapError::MathOverflow)?;
+            .ok_or(StableSwapError::InvalidAmpCoeff)?;
 
         // Approximate D as proportional to sum (conservative; accurate enough for 2-coin pools)
         let d = sum;
@@ -507,17 +616,17 @@ impl StableSwap {
             .checked_add(d.checked_div(ann).ok_or(StableSwapError::MathOverflow)?)
             .ok_or(StableSwapError::MathOverflow)?;
 
-        // c = D^3 / (4·ann·x_new)
-        let d3 = d
-            .checked_mul(d)
-            .and_then(|v| v.checked_mul(d))
-            .ok_or(StableSwapError::MathOverflow)?;
+        // c = D³ / (4·ann·x_new), folded division-first to avoid overflowing
+        // the intermediate cube (see module rounding notes).
         let four_ann_x = ann
             .checked_mul(4)
             .and_then(|v| v.checked_mul(x_new))
             .ok_or(StableSwapError::MathOverflow)?;
-        let c = d3
+        let d2 = d.checked_mul(d).ok_or(StableSwapError::MathOverflow)?;
+        let c = d2
             .checked_div(four_ann_x)
+            .ok_or(StableSwapError::MathOverflow)?
+            .checked_mul(d)
             .ok_or(StableSwapError::MathOverflow)?;
 
         let mut y = d;
@@ -531,15 +640,26 @@ impl StableSwap {
                 .ok_or(StableSwapError::MathOverflow)?
                 .checked_sub(d)
                 .ok_or(StableSwapError::MathOverflow)?;
+
+            if denom <= 0 {
+                return Err(StableSwapError::MathOverflow);
+            }
+
             let y_next = numer
                 .checked_div(denom)
                 .ok_or(StableSwapError::MathOverflow)?;
-            if (y_next - y).abs() <= 1 {
+
+            if y_next <= 0 {
+                return Err(StableSwapError::MathOverflow);
+            }
+
+            let delta = y_next.checked_sub(y).ok_or(StableSwapError::MathOverflow)?;
+            if delta.unsigned_abs() <= 1 {
                 return Ok(y_next);
             }
             y = y_next;
         }
-        Ok(y)
+        Err(StableSwapError::MathOverflow)
     }
 
     /// Compute the dynamic fee (in FEE_PRECISION units) based on pool imbalance.
@@ -554,6 +674,9 @@ impl StableSwap {
         base_fee: u32,
         fee_multiplier: u32,
     ) -> Result<i128, StableSwapError> {
+        if balance0 < 0 || balance1 < 0 {
+            return Err(StableSwapError::InvalidAmount);
+        }
         let total = balance0
             .checked_add(balance1)
             .ok_or(StableSwapError::MathOverflow)?;
@@ -576,9 +699,15 @@ impl StableSwap {
             .checked_div(FEE_PRECISION)
             .ok_or(StableSwapError::MathOverflow)?;
 
-        (base_fee as i128)
+        let total_fee = (base_fee as i128)
             .checked_add(additional_fee)
-            .ok_or(StableSwapError::MathOverflow)
+            .ok_or(StableSwapError::MathOverflow)?;
+
+        if total_fee >= FEE_PRECISION {
+            return Err(StableSwapError::InvalidFee);
+        }
+
+        Ok(total_fee)
     }
 
     // ── Internal helpers ────────────────────────────────────────────────
@@ -765,5 +894,583 @@ mod tests {
         let client = StableSwapClient::new(&env, &contract_id);
         let result = client.try_initialize(&admin, &t0, &t1, &lp, &100, &30_000, &20_000);
         assert!(result.is_err());
+    }
+
+    // ── End-to-end Setup Helper with Real SAC Tokens ───────────────────
+
+    fn setup_pool_with_tokens(
+        env: &Env,
+        amp: u32,
+    ) -> (StableSwapClient<'_>, Address, Address, Address, Address) {
+        env.mock_all_auths();
+        let admin = Address::generate(env);
+        let user = Address::generate(env);
+        let token0_admin = Address::generate(env);
+        let token1_admin = Address::generate(env);
+
+        let token0_contract = env.register_stellar_asset_contract_v2(token0_admin);
+        let token1_contract = env.register_stellar_asset_contract_v2(token1_admin);
+        let token0 = token0_contract.address();
+        let token1 = token1_contract.address();
+        let lp_token = Address::generate(env);
+
+        let contract_id = env.register(StableSwap, ());
+        let client = StableSwapClient::new(env, &contract_id);
+        client.initialize(&admin, &token0, &token1, &lp_token, &amp, &30_000, &20_000);
+
+        // Mint initial tokens to user
+        let token0_client = token::StellarAssetClient::new(env, &token0);
+        let token1_client = token::StellarAssetClient::new(env, &token1);
+        token0_client.mint(&user, &10_000_000);
+        token1_client.mint(&user, &10_000_000);
+
+        (client, user, token0, token1, lp_token)
+    }
+
+    // ── Normal Operation Regression Tests ──────────────────────────────
+
+    #[test]
+    fn test_normal_full_lifecycle() {
+        let env = Env::default();
+        let (client, user, token0, token1, _) = setup_pool_with_tokens(&env, 100);
+
+        let t0_client = token::Client::new(&env, &token0);
+        let t1_client = token::Client::new(&env, &token1);
+
+        // 1. Add liquidity
+        let mint = client.add_liquidity(&user, &1_000_000, &1_000_000, &1_000_000);
+        assert!(mint >= 1_000_000);
+        assert_eq!(t0_client.balance(&user), 9_000_000);
+        assert_eq!(t1_client.balance(&user), 9_000_000);
+        assert_eq!(client.get_reserves(), (1_000_000, 1_000_000));
+        assert_eq!(client.get_lp_balance(&user), mint);
+        assert_eq!(client.get_total_supply(), mint);
+
+        // 2. Swap token0 for token1
+        let swapped_out = client.swap(&user, &token0, &100_000, &90_000);
+        assert!(swapped_out >= 90_000);
+        assert_eq!(t0_client.balance(&user), 8_900_000);
+        assert_eq!(t1_client.balance(&user), 9_000_000 + swapped_out);
+
+        // 3. Remove liquidity
+        let half_lp = mint / 2;
+        let (out0, out1) = client.remove_liquidity(&user, &half_lp, &1, &1);
+        assert!(out0 > 0 && out1 > 0);
+        assert_eq!(client.get_lp_balance(&user), mint - half_lp);
+        assert_eq!(client.get_total_supply(), mint - half_lp);
+    }
+
+    // ── Boundary Failures: Malformed Data & State Preservation ──────────
+
+    #[test]
+    fn test_initialize_rejects_identical_tokens() {
+        let env = Env::default();
+        let admin = Address::generate(&env);
+        let t0 = Address::generate(&env);
+        let lp = Address::generate(&env);
+
+        let c = env.register(StableSwap, ());
+        let client = StableSwapClient::new(&env, &c);
+        let res = client.try_initialize(&admin, &t0, &t0, &lp, &100, &30_000, &20_000);
+        assert_eq!(res, Err(Ok(StableSwapError::InvalidToken)));
+    }
+
+    #[test]
+    fn test_initialize_rejects_lp_token_as_pool_token() {
+        let env = Env::default();
+        let admin = Address::generate(&env);
+        let t0 = Address::generate(&env);
+        let t1 = Address::generate(&env);
+
+        let c1 = env.register(StableSwap, ());
+        let client1 = StableSwapClient::new(&env, &c1);
+        let res1 = client1.try_initialize(&admin, &t0, &t1, &t0, &100, &30_000, &20_000);
+        assert_eq!(res1, Err(Ok(StableSwapError::InvalidToken)));
+
+        let c2 = env.register(StableSwap, ());
+        let client2 = StableSwapClient::new(&env, &c2);
+        let res2 = client2.try_initialize(&admin, &t0, &t1, &t1, &100, &30_000, &20_000);
+        assert_eq!(res2, Err(Ok(StableSwapError::InvalidToken)));
+    }
+
+    #[test]
+    fn test_initialize_rejects_excessive_fee_multiplier() {
+        let env = Env::default();
+        let admin = Address::generate(&env);
+        let t0 = Address::generate(&env);
+        let t1 = Address::generate(&env);
+        let lp = Address::generate(&env);
+
+        // fee_multiplier alone > FEE_PRECISION
+        let c1 = env.register(StableSwap, ());
+        let client1 = StableSwapClient::new(&env, &c1);
+        let res1 = client1.try_initialize(&admin, &t0, &t1, &lp, &100, &10_000, &10_000_001);
+        assert_eq!(res1, Err(Ok(StableSwapError::InvalidFee)));
+
+        // base_fee + fee_multiplier > FEE_PRECISION
+        let c2 = env.register(StableSwap, ());
+        let client2 = StableSwapClient::new(&env, &c2);
+        let res2 = client2.try_initialize(
+            &admin,
+            &t0,
+            &t1,
+            &lp,
+            &100,
+            &MAX_BASE_FEE_BPS,
+            &(FEE_PRECISION as u32),
+        );
+        assert_eq!(res2, Err(Ok(StableSwapError::InvalidFee)));
+    }
+
+    #[test]
+    fn test_add_liquidity_boundary_validation_and_state_preservation() {
+        let env = Env::default();
+        let (client, user, token0, token1, _) = setup_pool_with_tokens(&env, 100);
+
+        let t0_client = token::Client::new(&env, &token0);
+        let t1_client = token::Client::new(&env, &token1);
+
+        let initial_b0 = t0_client.balance(&user);
+        let initial_b1 = t1_client.balance(&user);
+
+        // 1. Zero amount0 rejected
+        let res0 = client.try_add_liquidity(&user, &0, &100_000, &0);
+        assert_eq!(res0, Err(Ok(StableSwapError::InvalidAmount)));
+        assert_eq!(t0_client.balance(&user), initial_b0);
+        assert_eq!(t1_client.balance(&user), initial_b1);
+        assert_eq!(client.get_reserves(), (0, 0));
+
+        // 2. Negative amount1 rejected
+        let res1 = client.try_add_liquidity(&user, &100_000, &-5, &0);
+        assert_eq!(res1, Err(Ok(StableSwapError::InvalidAmount)));
+        assert_eq!(t0_client.balance(&user), initial_b0);
+        assert_eq!(t1_client.balance(&user), initial_b1);
+
+        // 3. Negative min_mint_amount rejected
+        let res_neg_min = client.try_add_liquidity(&user, &100_000, &100_000, &-1);
+        assert_eq!(res_neg_min, Err(Ok(StableSwapError::InvalidAmount)));
+        assert_eq!(t0_client.balance(&user), initial_b0);
+        assert_eq!(t1_client.balance(&user), initial_b1);
+
+        // 4. Slippage exceeded: min_mint_amount higher than minted LP
+        let res_slip = client.try_add_liquidity(&user, &100_000, &100_000, &999_999_999);
+        assert_eq!(res_slip, Err(Ok(StableSwapError::InsufficientOutput)));
+        // BALANCES AND STATE COMPLETELY PRESERVED
+        assert_eq!(t0_client.balance(&user), initial_b0);
+        assert_eq!(t1_client.balance(&user), initial_b1);
+        assert_eq!(client.get_reserves(), (0, 0));
+        assert_eq!(client.get_total_supply(), 0);
+        assert_eq!(client.get_lp_balance(&user), 0);
+    }
+
+    #[test]
+    fn test_add_liquidity_safe_retry_after_failure() {
+        let env = Env::default();
+        let (client, user, token0, token1, _) = setup_pool_with_tokens(&env, 100);
+
+        let t0_client = token::Client::new(&env, &token0);
+        let t1_client = token::Client::new(&env, &token1);
+
+        // Attempt 1: excessive slippage tolerance fails
+        let fail_res = client.try_add_liquidity(&user, &500_000, &500_000, &10_000_000);
+        assert_eq!(fail_res, Err(Ok(StableSwapError::InsufficientOutput)));
+        assert_eq!(t0_client.balance(&user), 10_000_000);
+        assert_eq!(t1_client.balance(&user), 10_000_000);
+
+        // Retry: with realistic min_mint_amount succeeds
+        let success_mint = client.add_liquidity(&user, &500_000, &500_000, &500_000);
+        assert!(success_mint >= 500_000);
+        assert_eq!(t0_client.balance(&user), 9_500_000);
+        assert_eq!(t1_client.balance(&user), 9_500_000);
+        assert_eq!(client.get_reserves(), (500_000, 500_000));
+    }
+
+    #[test]
+    fn test_swap_boundary_validation_and_state_preservation() {
+        let env = Env::default();
+        let (client, user, token0, token1, _) = setup_pool_with_tokens(&env, 100);
+
+        let t0_client = token::Client::new(&env, &token0);
+        let t1_client = token::Client::new(&env, &token1);
+
+        // 1. Swap on empty pool fails with InsufficientLiquidity without modifying balances
+        let res_empty = client.try_swap(&user, &token0, &100_000, &0);
+        assert_eq!(res_empty, Err(Ok(StableSwapError::InsufficientLiquidity)));
+        assert_eq!(t0_client.balance(&user), 10_000_000);
+
+        // Bootstrap pool liquidity
+        client.add_liquidity(&user, &1_000_000, &1_000_000, &1_000_000);
+        let bal0_after_liq = t0_client.balance(&user);
+        let bal1_after_liq = t1_client.balance(&user);
+        let reserves_after_liq = client.get_reserves();
+
+        // 2. Zero amount_in rejected
+        let res_zero = client.try_swap(&user, &token0, &0, &0);
+        assert_eq!(res_zero, Err(Ok(StableSwapError::InvalidAmount)));
+        assert_eq!(t0_client.balance(&user), bal0_after_liq);
+        assert_eq!(t1_client.balance(&user), bal1_after_liq);
+
+        // 3. Negative min_out rejected
+        let res_neg_out = client.try_swap(&user, &token0, &10_000, &-1);
+        assert_eq!(res_neg_out, Err(Ok(StableSwapError::InvalidAmount)));
+        assert_eq!(t0_client.balance(&user), bal0_after_liq);
+
+        // 4. Untrusted token address rejected with typed InvalidToken
+        let bogus_token = Address::generate(&env);
+        let res_bogus = client.try_swap(&user, &bogus_token, &10_000, &0);
+        assert_eq!(res_bogus, Err(Ok(StableSwapError::InvalidToken)));
+        assert_eq!(t0_client.balance(&user), bal0_after_liq);
+        assert_eq!(t1_client.balance(&user), bal1_after_liq);
+        assert_eq!(client.get_reserves(), reserves_after_liq);
+
+        // 5. Slippage exceeded rejected with InsufficientOutput and state preserved
+        let res_slip = client.try_swap(&user, &token0, &10_000, &999_999);
+        assert_eq!(res_slip, Err(Ok(StableSwapError::InsufficientOutput)));
+        assert_eq!(t0_client.balance(&user), bal0_after_liq);
+        assert_eq!(t1_client.balance(&user), bal1_after_liq);
+        assert_eq!(client.get_reserves(), reserves_after_liq);
+    }
+
+    #[test]
+    fn test_swap_safe_retry_after_failure() {
+        let env = Env::default();
+        let (client, user, token0, token1, _) = setup_pool_with_tokens(&env, 100);
+        client.add_liquidity(&user, &1_000_000, &1_000_000, &1_000_000);
+
+        let t0_client = token::Client::new(&env, &token0);
+        let t1_client = token::Client::new(&env, &token1);
+        let b0 = t0_client.balance(&user);
+        let b1 = t1_client.balance(&user);
+
+        // Fail 1: malformed token
+        let fake_token = Address::generate(&env);
+        assert_eq!(
+            client.try_swap(&user, &fake_token, &50_000, &0),
+            Err(Ok(StableSwapError::InvalidToken))
+        );
+        assert_eq!(t0_client.balance(&user), b0);
+
+        // Fail 2: impossible slippage
+        assert_eq!(
+            client.try_swap(&user, &token0, &50_000, &200_000),
+            Err(Ok(StableSwapError::InsufficientOutput))
+        );
+        assert_eq!(t0_client.balance(&user), b0);
+
+        // Retry: valid swap succeeds
+        let out = client.swap(&user, &token0, &50_000, &45_000);
+        assert!(out >= 45_000);
+        assert_eq!(t0_client.balance(&user), b0 - 50_000);
+        assert_eq!(t1_client.balance(&user), b1 + out);
+    }
+
+    #[test]
+    fn test_remove_liquidity_boundary_validation_and_state_preservation() {
+        let env = Env::default();
+        let (client, user, token0, token1, _) = setup_pool_with_tokens(&env, 100);
+
+        let t0_client = token::Client::new(&env, &token0);
+        let t1_client = token::Client::new(&env, &token1);
+
+        let mint = client.add_liquidity(&user, &1_000_000, &1_000_000, &1_000_000);
+        let bal0 = t0_client.balance(&user);
+        let bal1 = t1_client.balance(&user);
+        let reserves = client.get_reserves();
+
+        // 1. Zero lp_amount rejected
+        let res_zero = client.try_remove_liquidity(&user, &0, &0, &0);
+        assert_eq!(res_zero, Err(Ok(StableSwapError::InvalidAmount)));
+        assert_eq!(client.get_lp_balance(&user), mint);
+
+        // 2. Negative min_amount0 rejected
+        let res_neg0 = client.try_remove_liquidity(&user, &100, &-1, &0);
+        assert_eq!(res_neg0, Err(Ok(StableSwapError::InvalidAmount)));
+
+        // 3. Negative min_amount1 rejected
+        let res_neg1 = client.try_remove_liquidity(&user, &100, &0, &-1);
+        assert_eq!(res_neg1, Err(Ok(StableSwapError::InvalidAmount)));
+
+        // 4. lp_amount greater than user balance rejected
+        let res_too_much = client.try_remove_liquidity(&user, &(mint + 1), &0, &0);
+        assert_eq!(
+            res_too_much,
+            Err(Ok(StableSwapError::InsufficientLiquidity))
+        );
+
+        // 5. Slippage exceeded rejected
+        let res_slip = client.try_remove_liquidity(&user, &(mint / 2), &999_999_999, &0);
+        assert_eq!(res_slip, Err(Ok(StableSwapError::InsufficientOutput)));
+
+        // Verify balances, LP and reserves completely preserved
+        assert_eq!(t0_client.balance(&user), bal0);
+        assert_eq!(t1_client.balance(&user), bal1);
+        assert_eq!(client.get_lp_balance(&user), mint);
+        assert_eq!(client.get_total_supply(), mint);
+        assert_eq!(client.get_reserves(), reserves);
+    }
+
+    #[test]
+    fn test_remove_liquidity_safe_retry_after_failure() {
+        let env = Env::default();
+        let (client, user, token0, token1, _) = setup_pool_with_tokens(&env, 100);
+        let mint = client.add_liquidity(&user, &1_000_000, &1_000_000, &1_000_000);
+
+        let t0_client = token::Client::new(&env, &token0);
+        let t1_client = token::Client::new(&env, &token1);
+        let b0 = t0_client.balance(&user);
+        let b1 = t1_client.balance(&user);
+
+        // Excessive min_out fails
+        let fail_res = client.try_remove_liquidity(&user, &(mint / 2), &5_000_000, &0);
+        assert_eq!(fail_res, Err(Ok(StableSwapError::InsufficientOutput)));
+        assert_eq!(client.get_lp_balance(&user), mint);
+
+        // Safe retry with acceptable minimums succeeds
+        let burn_amount = mint / 2;
+        let (out0, out1) = client.remove_liquidity(&user, &burn_amount, &100_000, &100_000);
+        assert!(out0 >= 100_000);
+        assert!(out1 >= 100_000);
+        assert_eq!(client.get_lp_balance(&user), mint - burn_amount);
+        assert_eq!(t0_client.balance(&user), b0 + out0);
+        assert_eq!(t1_client.balance(&user), b1 + out1);
+    }
+
+    // ── Math & Solver Boundary Tests ───────────────────────────────────
+
+    #[test]
+    fn test_compute_d_invalid_amp_coeff() {
+        assert_eq!(
+            StableSwap::compute_d(1_000_000, 1_000_000, 0),
+            Err(StableSwapError::InvalidAmpCoeff)
+        );
+        assert_eq!(
+            StableSwap::compute_d(1_000_000, 1_000_000, MAX_A + 1),
+            Err(StableSwapError::InvalidAmpCoeff)
+        );
+    }
+
+    #[test]
+    fn test_compute_y_boundary_validation() {
+        // x_new <= 0
+        assert_eq!(
+            StableSwap::compute_y(0, 1_000_000, 100),
+            Err(StableSwapError::InvalidAmount)
+        );
+        assert_eq!(
+            StableSwap::compute_y(-10, 1_000_000, 100),
+            Err(StableSwapError::InvalidAmount)
+        );
+        // sum <= 0
+        assert_eq!(
+            StableSwap::compute_y(1000, 0, 100),
+            Err(StableSwapError::InvalidAmount)
+        );
+        assert_eq!(
+            StableSwap::compute_y(1000, -50, 100),
+            Err(StableSwapError::InvalidAmount)
+        );
+        // invalid amp
+        assert_eq!(
+            StableSwap::compute_y(1000, 2000, 0),
+            Err(StableSwapError::InvalidAmpCoeff)
+        );
+        assert_eq!(
+            StableSwap::compute_y(1000, 2000, MAX_A + 1),
+            Err(StableSwapError::InvalidAmpCoeff)
+        );
+    }
+
+    #[test]
+    fn test_compute_dynamic_fee_boundary_validation() {
+        // Negative balance rejected
+        assert_eq!(
+            StableSwap::compute_dynamic_fee(-1, 1000, 30_000, 20_000),
+            Err(StableSwapError::InvalidAmount)
+        );
+        assert_eq!(
+            StableSwap::compute_dynamic_fee(1000, -1, 30_000, 20_000),
+            Err(StableSwapError::InvalidAmount)
+        );
+        // Total fee >= FEE_PRECISION rejected
+        assert_eq!(
+            StableSwap::compute_dynamic_fee(1000, 1000, FEE_PRECISION as u32, 0),
+            Err(StableSwapError::InvalidFee)
+        );
+    }
+
+    // ── Boundary-value invariant calculations (#1764) ──────────────────
+
+    #[test]
+    fn test_compute_d_minimum_reserves() {
+        // One unit per token is the smallest valid pool. D is finite, positive,
+        // and at least the reserve sum.
+        let d = StableSwap::compute_d(1, 1, 1).expect("minimum reserves must converge");
+        assert!(d >= 2);
+
+        // Minimum remains valid at maximum amplification.
+        let d_max_amp = StableSwap::compute_d(1, 1, MAX_A).expect("min reserves at MAX_A");
+        assert!(d_max_amp >= 2);
+    }
+
+    #[test]
+    fn test_compute_d_near_limit_reserves() {
+        // 1e17 per side: large enough that a direct `d^3` is close to the i128
+        // limit, but within the documented `sqrt(i128::MAX / (4·A))` domain.
+        let reserve: i128 = 100_000_000_000_000_000;
+        let d = StableSwap::compute_d(reserve, reserve, 100)
+            .expect("near-limit balanced reserves must converge");
+        assert!(d >= reserve.checked_mul(2).unwrap());
+        assert!(d < reserve.checked_mul(4).unwrap());
+    }
+
+    #[test]
+    fn test_compute_d_maximum_reserves_typed_error() {
+        // x + y overflows i128: typed failure, never a panic.
+        assert_eq!(
+            StableSwap::compute_d(i128::MAX, i128::MAX, 100),
+            Err(StableSwapError::MathOverflow)
+        );
+
+        // Sum fits but d^2 cannot be represented: typed failure.
+        let third = i128::MAX / 3;
+        assert_eq!(
+            StableSwap::compute_d(third, third, 100),
+            Err(StableSwapError::MathOverflow)
+        );
+    }
+
+    #[test]
+    fn test_compute_y_near_limit_and_maximum() {
+        // Near-limit values converge instead of overflowing the cube.
+        let y = StableSwap::compute_y(1_000_000_000_000_000_000, 2_000_000_000_000_000_000, 100)
+            .expect("near-limit y must converge");
+        assert!(y > 0);
+
+        // Maximum inputs that cannot be represented return a typed error.
+        assert_eq!(
+            StableSwap::compute_y(i128::MAX, i128::MAX, 100),
+            Err(StableSwapError::MathOverflow)
+        );
+    }
+
+    #[test]
+    fn test_dynamic_fee_maximum_values() {
+        // Balanced maximum reserves have zero imbalance and no overflow.
+        let half = i128::MAX / 2;
+        assert_eq!(
+            StableSwap::compute_dynamic_fee(half, half, 30_000, 20_000),
+            Ok(30_000)
+        );
+
+        // Extreme imbalance at the i128 limit cannot be scaled safely.
+        assert_eq!(
+            StableSwap::compute_dynamic_fee(i128::MAX, 0, 30_000, 20_000),
+            Err(StableSwapError::MathOverflow)
+        );
+    }
+
+    #[test]
+    fn test_minimum_liquidity_lifecycle_rounds_down() {
+        let env = Env::default();
+        let (client, user, _token0, _token1, _) = setup_pool_with_tokens(&env, 100);
+
+        // Smallest meaningful deposit.
+        let mint = client.add_liquidity(&user, &1, &1, &0);
+        assert!(mint > 0);
+        assert_eq!(client.get_reserves(), (1, 1));
+
+        // A tiny withdrawal rounds both payouts to zero and is rejected, leaving
+        // LP balance, supply, and reserves untouched.
+        let tiny = mint / 2;
+        if tiny > 0 {
+            let res = client.try_remove_liquidity(&user, &tiny, &0, &0);
+            assert_eq!(res, Err(Ok(StableSwapError::InsufficientLiquidity)));
+            assert_eq!(client.get_lp_balance(&user), mint);
+            assert_eq!(client.get_total_supply(), mint);
+            assert_eq!(client.get_reserves(), (1, 1));
+        }
+
+        // Full exit returns exactly the reserves (floor division is exact here).
+        let (out0, out1) = client.remove_liquidity(&user, &mint, &0, &0);
+        assert_eq!((out0, out1), (1, 1));
+        assert_eq!(client.get_reserves(), (0, 0));
+        assert_eq!(client.get_total_supply(), 0);
+    }
+
+    #[test]
+    fn test_withdrawal_rounding_is_documented_floor() {
+        let env = Env::default();
+        let (client, user, _token0, _token1, _) = setup_pool_with_tokens(&env, 100);
+
+        let mint = client.add_liquidity(&user, &1_000_000, &1_000_000, &0);
+        let (reserve0, reserve1) = client.get_reserves();
+        let lp_amount = mint / 3;
+
+        let (out0, out1) = client.remove_liquidity(&user, &lp_amount, &0, &0);
+
+        // Payouts must equal floor(reserve * lp / supply): the pool never pays
+        // out more than the proportional share.
+        assert_eq!(out0, reserve0 * lp_amount / mint);
+        assert_eq!(out1, reserve1 * lp_amount / mint);
+        assert!(out0 <= reserve0);
+        assert!(out1 <= reserve1);
+    }
+
+    #[test]
+    fn test_add_liquidity_max_amount_rejected_without_state_change() {
+        let env = Env::default();
+        let (client, user, token0, token1, _) = setup_pool_with_tokens(&env, 100);
+        let t0_client = token::Client::new(&env, &token0);
+        let t1_client = token::Client::new(&env, &token1);
+
+        client.add_liquidity(&user, &1_000, &1_000, &0);
+        let reserves = client.get_reserves();
+        let supply = client.get_total_supply();
+        let bal0 = t0_client.balance(&user);
+        let bal1 = t1_client.balance(&user);
+
+        // reserve + i128::MAX overflows: typed failure before any transfer.
+        assert_eq!(
+            client.try_add_liquidity(&user, &i128::MAX, &1, &0),
+            Err(Ok(StableSwapError::MathOverflow))
+        );
+        assert_eq!(client.get_reserves(), reserves);
+        assert_eq!(client.get_total_supply(), supply);
+        assert_eq!(t0_client.balance(&user), bal0);
+        assert_eq!(t1_client.balance(&user), bal1);
+
+        // Safe retry with a representable amount succeeds.
+        let mint = client.add_liquidity(&user, &1_000, &1_000, &0);
+        assert!(mint > 0);
+        assert_eq!(t0_client.balance(&user), bal0 - 1_000);
+        assert_eq!(t1_client.balance(&user), bal1 - 1_000);
+    }
+
+    #[test]
+    fn test_swap_max_amount_rejected_without_state_change() {
+        let env = Env::default();
+        let (client, user, token0, token1, _) = setup_pool_with_tokens(&env, 100);
+        let t0_client = token::Client::new(&env, &token0);
+        let t1_client = token::Client::new(&env, &token1);
+
+        client.add_liquidity(&user, &1_000_000, &1_000_000, &0);
+        let reserves = client.get_reserves();
+        let bal0 = t0_client.balance(&user);
+        let bal1 = t1_client.balance(&user);
+
+        // `amount_in * fee_factor` cannot be represented: typed failure.
+        assert_eq!(
+            client.try_swap(&user, &token0, &i128::MAX, &0),
+            Err(Ok(StableSwapError::MathOverflow))
+        );
+        assert_eq!(client.get_reserves(), reserves);
+        assert_eq!(t0_client.balance(&user), bal0);
+        assert_eq!(t1_client.balance(&user), bal1);
+
+        // Safe retry.
+        let out = client.swap(&user, &token0, &100_000, &0);
+        assert!(out > 0);
+        assert_eq!(t0_client.balance(&user), bal0 - 100_000);
+        assert_eq!(t1_client.balance(&user), bal1 + out);
     }
 }

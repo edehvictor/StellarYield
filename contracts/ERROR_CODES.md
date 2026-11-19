@@ -40,6 +40,14 @@ Source: `contracts/yield_vault/src/lib.rs`
 | 11   | `StorageKeyNotFound`    | Required storage key is missing             | Ensure contract is properly initialized and configured |
 | 2001 | `InvalidDonationBps`    | Donation basis points outside 0–10 000      | Pass a value between 0 and 10 000                      |
 | 2002 | `CharityNotWhitelisted` | Charity address not on protocol whitelist   | Use `set_charity_whitelist` to add the address         |
+| 2003 | `OperationExpired`      | Admin operation expired before execution    | Create a new operation and execute it in time          |
+| 2004 | `OperationReplayed`     | Admin operation was already executed        | No action needed                                       |
+| 2005 | `UnauthorizedContract`  | Cross-contract call from a disallowed caller | Use the contracts registered for this network          |
+| 2006 | `InvalidRecipient`      | Fee recipient is invalid                    | Pass a valid, non-self recipient address               |
+| 2007 | `DonationBelowMinimum`  | Donation is zero or below the dust minimum  | Increase the yield amount or donation split            |
+| 2008 | `InsufficientLiquidityDepth` | Deposit exceeds the route liquidity depth limit | Reduce deposit size or raise the limit via `set_liquidity_depth_limit` |
+| 2009 | `AlreadyMigrated`       | Storage is already at the requested version | No action needed; migration is idempotent              |
+| 2010 | `StorageVersionMismatch` | Target version is below current on-chain version | Use `CURRENT_STORAGE_VERSION` or a higher version     |
 
 ---
 
@@ -57,8 +65,17 @@ Source: `contracts/stableswap/src/lib.rs`
 | 6    | `Unauthorized`          | Caller is not admin                          | Use the admin address                       |
 | 7    | `InvalidAmpCoeff`       | Amplification coefficient out of range       | Use a valid amp value (typically 1–10 000)  |
 | 8    | `InvalidFee`            | Fee basis points out of range                | Use a fee value within protocol limits      |
-| 9    | `MathOverflow`          | Arithmetic overflow in invariant calculation | Reduce input amounts                        |
+| 9    | `MathOverflow`          | A checked intermediate cannot be represented in `i128` | Reduce the amount; see the per-side reserve limit in `docs/contracts/stableswap-invariant.md` |
 | 10   | `ZeroInvariant`         | Pool invariant is zero                       | Pool is empty; add liquidity first          |
+| 11   | `InvalidToken`          | Token address is duplicate, LP token, or unrecognized in swap | Use distinct, registered pool tokens |
+
+`stableswap` uses checked arithmetic and documented floor rounding for every
+invariant, fee, deposit and withdrawal calculation. Boundary values (zero,
+minimum one-unit reserves, maximum `i128` inputs) either produce a defined
+result or a typed error above; a rejected call never changes reserves, LP supply,
+LP balances or token balances. See
+`docs/contracts/stableswap-invariant.md` for the rounding table and numeric
+limits.
 
 ---
 
@@ -75,9 +92,84 @@ Source: `contracts/isolated_lending/src/lib.rs`
 | 5    | `NotInitialized`         | Contract not initialized             | Call `initialize()`                            |
 | 6    | `InvalidAmount`          | Amount is zero or negative           | Pass a positive amount                         |
 | 7    | `InsufficientLiquidity`  | Not enough liquidity to borrow       | Reduce borrow amount or add liquidity          |
-| 8    | `InsufficientCollateral` | Collateral below required ratio      | Add more collateral                            |
+| 8    | `InsufficientCollateral` | Collateral below required ratio, or a liquidation would pay out collateral the market does not hold | Add more collateral; check the position is backed by this market's funds |
 | 9    | `PositionStillBacked`    | Position cannot be liquidated yet    | Wait until health factor drops below threshold |
-| 10   | `MathOverflow`           | Arithmetic overflow                  | Reduce input amounts                           |
+| 10   | `MathOverflow`           | A checked intermediate cannot be represented in `i128` | Reduce input amounts; see `docs/contracts/isolated-lending.md` |
+| 11   | `AlreadyLiquidated`      | Liquidation id already used for this borrower | Use a new liquidation id               |
+| 12   | `OracleQuoteMissing`     | Oracle policy set but no quote pushed | Have the configured oracle push a quote       |
+| 13   | `OracleQuoteStale`       | Oracle quote older than the policy allows | Push a fresh quote                         |
+| 14   | `OracleConfidenceTooLow` | Oracle quote confidence below the policy | Wait for a higher-confidence quote          |
+| 15   | `StaleConfig`            | Configuration changed since the caller captured its fingerprint | Refresh with `get_config_fingerprint` and retry |
+
+`isolated_lending` uses checked arithmetic and documented floor rounding for
+values, limits, interest, fees and liquidation payouts (the close-factor cap is
+the one upward rounding, capped at the debt). Every checked value is computed
+before tokens move or storage is written, so a call that fails with any code
+above leaves balances, positions, totals, pending withdrawals and configuration
+unchanged and can be retried with corrected inputs. See
+`docs/contracts/isolated-lending.md` for the rounding table and numeric limits.
+
+---
+
+## clmm_core — `ClmmError`
+
+Source: `contracts/clmm_core/src/lib.rs`
+
+| Code | Name                    | Meaning                                                        | Remediation                                              |
+| ---- | ----------------------- | -------------------------------------------------------------- | -------------------------------------------------------- |
+| 1    | `NotInitialized`        | Pool has not been initialized                                  | Call `initialize()`                                      |
+| 2    | `AlreadyInitialized`    | `initialize()` called twice                                    | No action needed                                         |
+| 3    | `InvalidTick`           | Tick is not aligned to the pool's tick spacing or is out of range | Use a tick divisible by `TickSpacing` within ±887272 |
+| 4    | `InvalidTickRange`      | `tick_lower` is not below `tick_upper`                         | Order the range correctly                                |
+| 5    | `InsufficientLiquidity` | Burn or swap amount exceeds the available liquidity            | Burn no more than the position holds                     |
+| 6    | `InvalidAmount`         | Amount is zero or the required deposit exceeds a cap           | Pass a positive amount and sufficient caps               |
+| 7    | `PriceLimitExceeded`    | Swap price limit is on the wrong side of the current price     | Set the limit beyond the current price in the swap direction |
+| 8    | `Unauthorized`          | Caller is not the position owner                               | Use the position owner address                           |
+| 9    | `InvalidPosition`       | No position exists with this id                                | Check the position id                                    |
+| 10   | `DuplicateOperation`    | An operation identity was already consumed by a successful call | Reuse the identity only for a genuine retry of the same call; use a new one for a new operation |
+| 11   | `ConcurrentModification` | Position sequence does not match; position state was modified concurrently | Query current sequence via `get_position()` / `get_position_sequence()` and retry |
+
+See `docs/contracts/clmm-operations.md` for identity scoping, optimistic concurrency, and retry rules.
+
+---
+
+## dutch_auction — `AuctionError`
+
+Source: `contracts/dutch_auction/src/lib.rs`
+
+| Code | Name                    | Meaning                                                                 | Remediation                                                       |
+| ---- | ----------------------- | ----------------------------------------------------------------------- | ----------------------------------------------------------------- |
+| 1    | `NotInitialized`        | Contract not initialized                                                | Call `initialize()`                                               |
+| 2    | `AlreadyInitialized`    | `initialize()` called twice                                             | No action needed                                                  |
+| 3    | `ZeroAmount`            | Amount or price is zero or negative                                     | Pass positive amounts                                             |
+| 4    | `Unauthorized`          | Caller is not the admin                                                 | Use the admin address                                             |
+| 5    | `AuctionNotFound`       | No auction with this id                                                 | Check the auction id                                              |
+| 6    | `AuctionNotActive`      | Auction is completed or cancelled                                       | Pick an active auction                                            |
+| 7    | `AuctionExpired`        | Auction is past its duration                                            | Call `settle_auction`                                             |
+| 8    | `VaultSufficient`       | Position is not undercollateralized                                     | Nothing to liquidate                                              |
+| 9    | `InsufficientCollateral`| No collateral left to buy                                               | Pick another auction                                              |
+| 10   | `InvalidParams`         | Payment would exceed `max_debt_payment`                                 | Raise `max_debt_payment` or retry later                           |
+| 11   | `AuctionStillActive`    | Auction has not expired yet                                             | Wait for the duration to elapse                                   |
+| 12   | `NothingToLiquidate`    | No remaining collateral to return                                       | No action needed                                                  |
+| 13   | `InvalidConfig`         | Auction parameters are impossible as a set: zero duration, empty inventory, non-positive floor price, floor above start price, or an unrepresentable end time. Also returned by `initialize` / `update_params` for zero duration, `floor_discount_bps` above 9 999, or `penalty_bps` above 10 000 | Fix the parameters (#1477) |
+| 14   | `MathOverflow`          | An amount or price does not fit an `i128`                               | Reduce the quantity or price inputs (#1476)                       |
+
+### Fill events (#1475)
+
+Every successful `buy_collateral` publishes, in addition to the legacy `("buy",)` event, a `("fill", auction_id)` event whose data is the `FillEvent` struct:
+
+| Field                  | Meaning                                                                                      |
+| ---------------------- | -------------------------------------------------------------------------------------------- |
+| `auction_id`           | Auction filled (also the second topic, for filtering)                                        |
+| `buyer`                | Address that bought                                                                          |
+| `quantity`             | Collateral received                                                                          |
+| `auction_price`        | Decayed list price at the time of the fill (scaled 1e7)                                      |
+| `effective_price`      | What the buyer actually paid per unit, penalty included: `paid * 1e7 / quantity`, rounded down |
+| `paid`                 | Total debt tokens paid (`debt_applied + penalty`)                                            |
+| `debt_applied`         | Part of `paid` that repaid the vault owner's debt (capped at the debt still owed)            |
+| `penalty`              | Part of `paid` sent to the protocol fee recipient                                            |
+| `remaining_collateral` | Collateral still for sale afterwards (0 once the auction is done)                            |
+| `completed`            | True when this fill completed the auction                                                    |
 
 ---
 
@@ -166,12 +258,13 @@ Source: `contracts/zap/src/lib.rs`
 
 | Code | Name                 | Meaning                      | Remediation                              |
 | ---- | -------------------- | ---------------------------- | ---------------------------------------- |
-| 1    | `NotInitialized`     | Contract not initialized     | Call `initialize()`                      |
+| 1    | `NotInitialized`     | Contract not initialized, or its admin/router config is missing | Call `initialize()`                      |
 | 2    | `AlreadyInitialized` | Contract already initialized | No action needed                         |
 | 3    | `ZeroAmount`         | Input amount is zero         | Pass a positive amount                   |
 | 4    | `Unauthorized`       | Caller is not admin          | Use the admin address                    |
 | 5    | `SlippageExceeded`   | Swap output below minimum    | Increase slippage tolerance              |
 | 6    | `SwapFailed`         | Underlying swap call failed  | Check pool liquidity and token approvals |
+| 4001 | `QuoteExpired`       | Ledger closed after the quote deadline (`zap_deposit_with_deadline`) | Refresh the quote and resubmit |
 
 ---
 
@@ -202,3 +295,20 @@ In addition to typed errors, contracts may call `panic_with_error!` or `panic!` 
 - Integer overflow in unchecked arithmetic (rare; most paths use checked math).
 
 When you see an untyped panic, check the function's precondition guards at the top of the call.
+
+### Decoding for user-facing errors
+
+Clients never parse the RPC error string. Both the server (`server/src/services/sorobanReader.ts`) and the client (`client/src/services/soroban.ts`) read the structured `ScError` from the simulation's diagnostic events with `shared/types/contractPanic.ts`:
+
+| `ScError`                                   | Decoded code              |
+| ------------------------------------------- | ------------------------- |
+| `Contract(code)` catalogued for the contract | `CONTRACT_ERROR`          |
+| `Contract(code)` not catalogued              | `UNKNOWN_CONTRACT_ERROR`  |
+| `WasmVm` (untyped `panic!` / `unwrap()` trap) | `CONTRACT_TRAPPED`        |
+| `Budget`                                     | `RESOURCE_LIMIT_EXCEEDED` |
+| `Auth`                                       | `AUTHORIZATION_FAILED`    |
+| `Storage, MissingValue`                      | `LEDGER_ENTRY_MISSING`    |
+| any other host error                         | `HOST_ERROR`              |
+| no structured error in the events            | `UNDECODABLE`             |
+
+Contract codes are looked up per contract (`vault`, `zap`), so keep the catalog in `shared/types/contractPanic.ts` in sync when adding a variant to `VaultError` or `ZapError`; `server/src/__tests__/contractPanicDecoding.test.ts` fails on drift. Prefer returning a typed error over `unwrap()` so failures decode to a specific message instead of `CONTRACT_TRAPPED`.

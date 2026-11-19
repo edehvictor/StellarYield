@@ -111,6 +111,84 @@ export async function getJobRecord(
   }
 }
 
+// ── Compound idempotency (#1533) ──────────────────────────────────────────────
+
+/**
+ * Length of one compound schedule window. Matches the CompoundScheduler cron
+ * pattern (every 4 hours) so each window maps to exactly one compound action
+ * per vault.
+ */
+export const COMPOUND_PERIOD_MS = 4 * 60 * 60 * 1000;
+
+/**
+ * #1533: Build the stable vault + period key for a compound window.
+ * Deterministic for every instant inside the same 4h window, so a worker that
+ * restarts (or a job that is retried) inside the window computes the same key
+ * and can detect an already-broadcast compound.
+ */
+export function compoundPeriodKey(
+  vaultContractId: string,
+  atMs: number = Date.now(),
+): string {
+  const windowStart = Math.floor(atMs / COMPOUND_PERIOD_MS) * COMPOUND_PERIOD_MS;
+  return `compound:${vaultContractId}:${windowStart}`;
+}
+
+/** Record of a broadcast compound keyed by vault + period (#1533). */
+export interface CompoundBroadcastRecord {
+  vaultContractId: string;
+  periodKey: string;
+  txHash: string;
+  jobId?: string;
+  recordedAt: string;
+}
+
+const COMPOUND_BROADCAST_PREFIX = 'keeper:compound:broadcast:';
+/** TTL covers ≥6 schedule windows so late retries still hit the record. */
+const COMPOUND_BROADCAST_TTL_SECONDS = 24 * 60 * 60;
+
+/**
+ * #1533: Look up the broadcast record for a vault + period window.
+ * Returns null when no broadcast was recorded for the window (or Redis is
+ * unavailable — treated as "no record" so behaviour degrades to at-least-once
+ * rather than blocking compounding).
+ */
+export async function getCompoundBroadcastRecord(
+  periodKey: string,
+): Promise<CompoundBroadcastRecord | null> {
+  try {
+    const redis = getRedis();
+    const raw = await redis.get(`${COMPOUND_BROADCAST_PREFIX}${periodKey}`);
+    if (!raw) return null;
+    return JSON.parse(raw) as CompoundBroadcastRecord;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * #1533: Persist the broadcast record for a vault + period window.
+ * Written immediately after a successful broadcast, before any other
+ * bookkeeping, so a crash right after submission is still recoverable.
+ */
+export async function recordCompoundBroadcast(
+  record: CompoundBroadcastRecord,
+): Promise<void> {
+  try {
+    const redis = getRedis();
+    await redis.setex(
+      `${COMPOUND_BROADCAST_PREFIX}${record.periodKey}`,
+      COMPOUND_BROADCAST_TTL_SECONDS,
+      JSON.stringify(record),
+    );
+  } catch (err) {
+    logger.warn(
+      { err, periodKey: record.periodKey },
+      'Failed to persist compound broadcast record',
+    );
+  }
+}
+
 /**
  * #907: Classify a job failure and return the terminal reason if non-retryable.
  */
@@ -179,6 +257,126 @@ export async function quarantineJob(
       { err, jobId: job.id, queueName: sourceQueue.name },
       'Failed to quarantine job',
     );
+  }
+}
+
+// ── Dead-letter queue (#1537) ──────────────────────────────────────────────
+
+const DEAD_LETTER_PREFIX = 'keeper:dead-letter:';
+
+export interface DeadLetterEntry {
+  id: string;
+  queueName: string;
+  jobData: Record<string, unknown>;
+  failureReason: string;
+  failedAttempts: number;
+  firstFailedAt: string;
+  lastFailedAt: string;
+  error?: string;
+  metadata?: Record<string, unknown>;
+}
+
+/**
+ * Move a permanently failed job to the dead-letter queue with full failure
+ * context for operator inspection and manual replay (#1537).
+ */
+export async function moveToDeadLetter(
+  queueName: string,
+  jobId: string,
+  jobData: Record<string, unknown>,
+  failureReason: string,
+  failedAttempts: number,
+  error?: string,
+): Promise<void> {
+  try {
+    const redis = getRedis();
+    const entry: DeadLetterEntry = {
+      id: jobId,
+      queueName,
+      jobData,
+      failureReason,
+      failedAttempts,
+      firstFailedAt: new Date().toISOString(),
+      lastFailedAt: new Date().toISOString(),
+      error,
+    };
+    const key = `${DEAD_LETTER_PREFIX}${queueName}:${jobId}`;
+    await redis.setex(key, 30 * 24 * 60 * 60, JSON.stringify(entry)); // 30-day TTL
+    // Also add to a sorted set for listing
+    await redis.zadd(`${DEAD_LETTER_PREFIX}index`, Date.now(), key);
+    logger.warn({ queueName, jobId, failureReason }, 'Job moved to dead-letter queue');
+  } catch (err) {
+    logger.error({ err, queueName, jobId }, 'Failed to move job to dead-letter queue');
+  }
+}
+
+/**
+ * List dead-letter entries, optionally filtered by queue name (#1537).
+ */
+export async function listDeadLetter(
+  queueName?: string,
+  limit = 50,
+): Promise<DeadLetterEntry[]> {
+  try {
+    const redis = getRedis();
+    const pattern = queueName
+      ? `${DEAD_LETTER_PREFIX}${queueName}:*`
+      : `${DEAD_LETTER_PREFIX}*`;
+    const keys = await redis.keys(pattern);
+    const entries: DeadLetterEntry[] = [];
+    for (const key of keys.slice(0, limit)) {
+      const raw = await redis.get(key);
+      if (raw) entries.push(JSON.parse(raw) as DeadLetterEntry);
+    }
+    return entries;
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Inspect a single dead-letter entry (#1537).
+ */
+export async function inspectDeadLetter(
+  queueName: string,
+  jobId: string,
+): Promise<DeadLetterEntry | null> {
+  try {
+    const redis = getRedis();
+    const raw = await redis.get(`${DEAD_LETTER_PREFIX}${queueName}:${jobId}`);
+    return raw ? (JSON.parse(raw) as DeadLetterEntry) : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Manually replay a dead-letter entry back into its original queue (#1537).
+ * Removes the entry from the dead-letter store after successful re-enqueue.
+ */
+export async function replayDeadLetter(
+  queueName: string,
+  jobId: string,
+): Promise<boolean> {
+  try {
+    const entry = await inspectDeadLetter(queueName, jobId);
+    if (!entry) return false;
+
+    const queue = new Queue(queueName, { connection: getRedis() });
+    await queue.add(`replay:${jobId}`, entry.jobData, {
+      attempts: config.keeper.jobMaxAttempts,
+      backoff: { type: 'exponential', delay: 5_000 },
+    });
+
+    const redis = getRedis();
+    await redis.del(`${DEAD_LETTER_PREFIX}${queueName}:${jobId}`);
+    await redis.zrem(`${DEAD_LETTER_PREFIX}index`, `${DEAD_LETTER_PREFIX}${queueName}:${jobId}`);
+
+    logger.info({ queueName, jobId }, 'Dead-letter job replayed');
+    return true;
+  } catch (err) {
+    logger.error({ err, queueName, jobId }, 'Failed to replay dead-letter job');
+    return false;
   }
 }
 
@@ -251,6 +449,9 @@ export async function enqueueLiquidationJob(
 
 /**
  * #906: Enqueue a compound job with sequence and fence metadata.
+ * #1533: Uses the stable vault + period key as the BullMQ job ID so that
+ * duplicate enqueues within the same 4h window are collapsed by the queue
+ * itself, even across producer restarts.
  */
 export async function enqueueCompoundJob(
   vaultContractId: string,
@@ -259,6 +460,7 @@ export async function enqueueCompoundJob(
 ): Promise<string> {
   const queue = createCompoundQueue();
   const fencingToken = nextFencingToken(QUEUE_NAMES.COMPOUND, vaultContractId);
+  const periodKey = compoundPeriodKey(vaultContractId);
 
   const job = await queue.add(
     `compound:${vaultContractId}`,
@@ -267,8 +469,9 @@ export async function enqueueCompoundJob(
       minHarvestAmount,
       fencingToken,
       requiredSequence,
+      periodKey,
     } as CompoundJobData,
-    { jobId: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}` },
+    { jobId: periodKey },
   );
 
   await persistJobRecord({
@@ -284,7 +487,7 @@ export async function enqueueCompoundJob(
   });
 
   logger.info(
-    { jobId: job.id, vaultContractId, fencingToken, requiredSequence },
+    { jobId: job.id, vaultContractId, periodKey, fencingToken, requiredSequence },
     'Compound job enqueued',
   );
 

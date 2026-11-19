@@ -5,13 +5,17 @@ import { useGovernanceStore } from "./useGovernanceStore";
 import TransactionBuilder from "./TransactionBuilder";
 import PendingTransactionCard from "./PendingTransactionCard";
 import GovernanceForecast from "./GovernanceForecast";
+import ProposalAttachments from "./ProposalAttachments";
 import type { GovernanceConfig, PendingTransaction } from "./types";
+import { RouterUpgradePanel } from "../../features/router_upgrade";
+import { serializeSignerRotationAuditCsv } from "./signerRotationAudit";
 
 export default function GovernanceDashboard() {
   const { walletAddress, isConnected } = useWallet();
   const {
     transactions,
     config,
+    signerRotationAudit,
     addTransaction,
     addSignature,
     markExecuted,
@@ -20,6 +24,9 @@ export default function GovernanceDashboard() {
 
   const [showConfig, setShowConfig] = useState(false);
   const [configDraft, setConfigDraft] = useState<GovernanceConfig>(config);
+  const [configurationError, setConfigurationError] = useState("");
+  const [exportError, setExportError] = useState("");
+  const [exportMessage, setExportMessage] = useState("");
 
   const isSigner =
     walletAddress !== null && config.signers.includes(walletAddress);
@@ -29,8 +36,35 @@ export default function GovernanceDashboard() {
   const executedTxns = transactions.filter((t) => t.status === "executed");
 
   function handleSaveConfig() {
-    updateConfig(configDraft);
-    setShowConfig(false);
+    setConfigurationError("");
+    try {
+      updateConfig(configDraft, walletAddress ?? "Unknown wallet");
+      setShowConfig(false);
+    } catch (error) {
+      setConfigurationError(
+        error instanceof Error
+          ? error.message
+          : "Unable to save governance configuration and signer audit.",
+      );
+    }
+  }
+
+  function handleExportSignerAudit() {
+    setExportError("");
+    setExportMessage("");
+    try {
+      const csv = serializeSignerRotationAuditCsv(signerRotationAudit);
+      const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = "governance-signer-rotation-audit.csv";
+      link.click();
+      URL.revokeObjectURL(url);
+      setExportMessage("Signer rotation audit CSV downloaded.");
+    } catch {
+      setExportError("Unable to export the signer rotation audit. Please try again.");
+    }
   }
 
   function handleTransactionCreated(tx: PendingTransaction) {
@@ -151,8 +185,75 @@ export default function GovernanceDashboard() {
           >
             Save Configuration
           </button>
+          {configurationError && (
+            <p role="alert" className="text-sm text-red-400">
+              {configurationError}
+            </p>
+          )}
         </div>
       )}
+
+      <section
+        className="glass-card p-6 space-y-4"
+        aria-labelledby="signer-audit-heading"
+      >
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <h3 id="signer-audit-heading" className="text-lg font-bold">
+              Signer Rotation Audit
+            </h3>
+            <p className="text-sm text-gray-400">
+              {signerRotationAudit.length} configuration change
+              {signerRotationAudit.length === 1 ? "" : "s"} recorded in this
+              browser
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={handleExportSignerAudit}
+            className="btn-secondary px-4 py-2 text-sm"
+          >
+            Export CSV
+          </button>
+        </div>
+        {exportError && (
+          <p role="alert" className="text-sm text-red-400">
+            {exportError}
+          </p>
+        )}
+        {exportMessage && (
+          <p role="status" className="text-sm text-green-400">
+            {exportMessage}
+          </p>
+        )}
+        {signerRotationAudit.length === 0 ? (
+          <p className="text-sm text-gray-500">
+            No signer rotations recorded yet. The CSV export will contain its
+            column headers only.
+          </p>
+        ) : (
+          <ol className="space-y-3">
+            {[...signerRotationAudit].reverse().map((record, index) => (
+              <li
+                key={`${record.timestamp}-${signerRotationAudit.length - index}`}
+                className="border-t border-gray-700 pt-3 text-sm"
+              >
+                <p className="font-medium">
+                  {new Date(record.timestamp).toLocaleString()} · {record.actor}
+                </p>
+                <p className="text-gray-400">
+                  Added: {record.addedSigners.join(", ") || "None"} · Removed:{" "}
+                  {record.removedSigners.join(", ") || "None"} · Threshold:{" "}
+                  {record.previousThreshold} → {record.nextThreshold}
+                </p>
+                <p className="text-xs text-gray-500 font-mono">
+                  Contract: {record.contractId || "Not configured"}
+                </p>
+              </li>
+            ))}
+          </ol>
+        )}
+      </section>
 
       {/* Transaction Builder */}
       {isSigner && (
@@ -162,6 +263,15 @@ export default function GovernanceDashboard() {
           onTransactionCreated={handleTransactionCreated}
         />
       )}
+
+      {/* Router Upgrade Verification & Invocation Dry-Run */}
+      {isSigner && (
+        <div className="mt-6">
+          <RouterUpgradePanel />
+        </div>
+      )}
+      {/* Proposal Attachments */}
+      {isSigner && <ProposalAttachments />}
 
       {!isSigner && walletAddress && (
         <div className="glass-card p-5 text-center text-gray-400">
@@ -185,6 +295,7 @@ export default function GovernanceDashboard() {
               transaction={tx}
               onSign={addSignature}
               onExecute={markExecuted}
+              config={config}
             />
           ))}
         </div>
@@ -200,6 +311,7 @@ export default function GovernanceDashboard() {
               transaction={tx}
               onSign={addSignature}
               onExecute={markExecuted}
+              config={config}
             />
           ))}
         </div>
@@ -217,6 +329,7 @@ export default function GovernanceDashboard() {
               transaction={tx}
               onSign={addSignature}
               onExecute={markExecuted}
+              config={config}
             />
           ))}
         </div>

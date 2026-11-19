@@ -12,6 +12,12 @@ The governance configuration stores a list of **signer addresses** and a **thres
 
 Configuration is managed in the **Configure Signers** panel on the Governance dashboard (`client/src/pages/governance/GovernanceDashboard.tsx`). The default contract ID is read from the `VITE_CONTRACT_ID` environment variable.
 
+### Signer Rotation Audit Export
+
+When the signer list or threshold is changed and saved, the Governance dashboard records the timestamp, connected wallet, contract ID, threshold before and after, and added/removed signer addresses in this browser's local storage. Use **Export CSV** in the Signer Rotation Audit panel to download the history; an empty history exports the CSV headers.
+
+This history is local to the browser and is not a chain-verified or tamper-proof audit trail. It does not include configuration changes made in another browser or directly on-chain. Keep an exported copy when a durable record is required.
+
 ---
 
 ## Lifecycle Stages

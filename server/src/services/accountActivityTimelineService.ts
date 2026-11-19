@@ -2,6 +2,14 @@ import {
   getRecommendationTimeline,
   type RecommendationTimelineEntry,
 } from "./recommendationTimelineService";
+import {
+  decodeTimelineCursor,
+  encodeTimelineCursor,
+  isBeforeTimelineCursor,
+  PAGINATION_DEFAULT_LIMIT,
+  PAGINATION_MAX_LIMIT,
+  type PaginatedResponse,
+} from "../types/pagination";
 
 export type AccountActivityEventType =
   | "deposit"
@@ -10,6 +18,15 @@ export type AccountActivityEventType =
   | "recommendation"
   | "alert"
   | "rebalance";
+
+export type TransactionStatus = "completed" | "pending" | "failed";
+
+export interface AccountActivityFilters {
+  types?: AccountActivityEventType[];
+  protocol?: string;
+  asset?: string;
+  status?: TransactionStatus;
+}
 
 export interface AccountActivityEvent {
   id: string;
@@ -21,6 +38,8 @@ export interface AccountActivityEvent {
   source: "portfolio" | "rewards" | "advisor" | "monitoring" | "automation";
   amountUsd?: number;
   assetSymbol?: string;
+  protocol?: string;
+  status?: TransactionStatus;
   severity?: "info" | "warning" | "critical";
   relatedVaultId?: string;
   metadata?: Record<string, string | number | boolean | null>;
@@ -144,6 +163,8 @@ function mapRecommendationEvent(
     description: entry.rationale,
     timestamp: entry.timestamp,
     source: "advisor",
+    protocol: entry.targetVault,
+    status: "completed",
     severity: entry.reasonCodes.some((code) => code.severity === "critical")
       ? "critical"
       : entry.reasonCodes.some((code) => code.severity === "warning")
@@ -173,6 +194,8 @@ function buildSeededEvents(walletAddress: string): AccountActivityEvent[] {
     source: "portfolio",
     amountUsd: seed.amountUsd,
     assetSymbol: seed.assetSymbol,
+    protocol: seed.protocol,
+    status: "completed" as TransactionStatus,
     severity: "info",
     relatedVaultId: seed.protocol,
   }));
@@ -187,6 +210,8 @@ function buildSeededEvents(walletAddress: string): AccountActivityEvent[] {
     source: "rewards",
     amountUsd: seed.amountUsd,
     assetSymbol: seed.assetSymbol,
+    protocol: seed.protocol,
+    status: "completed" as TransactionStatus,
     severity: "info",
     relatedVaultId: seed.protocol,
   }));
@@ -225,7 +250,7 @@ function buildSeededEvents(walletAddress: string): AccountActivityEvent[] {
 
 export function buildUnifiedAccountTimeline(
   walletAddress: string,
-  filters?: AccountActivityEventType[],
+  filters?: AccountActivityFilters,
 ): AccountActivityEvent[] {
   const seededEvents = buildSeededEvents(walletAddress);
   const recommendationEvents = getRecommendationTimeline(walletAddress).map((entry) =>
@@ -237,11 +262,68 @@ export function buildUnifiedAccountTimeline(
       new Date(right.timestamp).getTime() - new Date(left.timestamp).getTime(),
   );
 
-  if (!filters || filters.length === 0) {
+  if (!filters) {
     return allEvents;
   }
 
-  const allowed = new Set(filters);
-  return allEvents.filter((event) => allowed.has(event.type));
+  return allEvents.filter((event) => {
+    if (filters.types && filters.types.length > 0) {
+      if (!filters.types.includes(event.type)) return false;
+    }
+    if (filters.protocol && event.protocol !== filters.protocol) return false;
+    if (filters.asset && event.assetSymbol !== filters.asset) return false;
+    if (filters.status && event.status !== filters.status) return false;
+    return true;
+  });
+}
+
+export interface AccountActivityPaginationOptions {
+  cursor?: string;
+  limit?: number;
+}
+
+/**
+ * Cursor-paginated account activity timeline (#1305).
+ *
+ * Follows the shared `PaginatedResponse` contract (`cursor`/`limit` query
+ * params, `{data, pagination: {nextCursor, hasMore, limit}}` response).
+ * Sort is newest-first with an `(timestamp, id)` compound cursor so pages
+ * are stable under timestamp collisions and mid-pagination inserts.
+ * A missing or malformed cursor starts from the first page.
+ */
+export function getAccountActivityPaginated(
+  walletAddress: string,
+  filters?: AccountActivityFilters,
+  options: AccountActivityPaginationOptions = {},
+): PaginatedResponse<AccountActivityEvent> {
+  const rawLimit = options.limit ?? PAGINATION_DEFAULT_LIMIT;
+  const limit = Number.isFinite(rawLimit)
+    ? Math.min(Math.max(1, Math.floor(rawLimit)), PAGINATION_MAX_LIMIT)
+    : PAGINATION_DEFAULT_LIMIT;
+
+  const all = buildUnifiedAccountTimeline(walletAddress, filters);
+  const cursor = decodeTimelineCursor(options.cursor ?? null);
+
+  const eligible = cursor
+    ? all.filter((event) =>
+        isBeforeTimelineCursor(
+          { ts: new Date(event.timestamp).getTime(), id: event.id },
+          cursor,
+        ),
+      )
+    : all;
+
+  const hasMore = eligible.length > limit;
+  const data = hasMore ? eligible.slice(0, limit) : eligible;
+  const last = data[data.length - 1];
+  const nextCursor =
+    hasMore && last
+      ? encodeTimelineCursor({
+          ts: new Date(last.timestamp).getTime(),
+          id: last.id,
+        })
+      : null;
+
+  return { data, pagination: { nextCursor, hasMore, limit } };
 }
 

@@ -1,8 +1,13 @@
 import { useState, useCallback } from "react";
 import type { PendingTransaction, GovernanceConfig } from "./types";
+import {
+  createSignerRotationAuditRecord,
+  type SignerRotationAuditRecord,
+} from "./signerRotationAudit";
 
 const STORAGE_KEY = "stellar_yield_governance_txns";
 const CONFIG_KEY = "stellar_yield_governance_config";
+const SIGNER_ROTATION_AUDIT_KEY = "stellar_yield_signer_rotation_audit";
 
 function loadFromStorage<T>(key: string, fallback: T): T {
   try {
@@ -31,6 +36,9 @@ export function useGovernanceStore() {
   const [config, setConfig] = useState<GovernanceConfig>(() =>
     loadFromStorage(CONFIG_KEY, DEFAULT_CONFIG),
   );
+  const [signerRotationAudit, setSignerRotationAudit] = useState<
+    SignerRotationAuditRecord[]
+  >(() => loadFromStorage(SIGNER_ROTATION_AUDIT_KEY, []));
 
   const addTransaction = useCallback(
     (tx: PendingTransaction) => {
@@ -76,14 +84,50 @@ export function useGovernanceStore() {
     [transactions],
   );
 
-  const updateConfig = useCallback((newConfig: GovernanceConfig) => {
-    setConfig(newConfig);
-    saveToStorage(CONFIG_KEY, newConfig);
-  }, []);
+  const updateConfig = useCallback(
+    (newConfig: GovernanceConfig, actor: string) => {
+      const record = createSignerRotationAuditRecord(
+        config,
+        newConfig,
+        actor,
+        new Date().toISOString(),
+      );
+      const updatedAudit = record
+        ? [...signerRotationAudit, record]
+        : signerRotationAudit;
+      let configPersisted = false;
+
+      try {
+        saveToStorage(CONFIG_KEY, newConfig);
+        configPersisted = true;
+        if (record) {
+          saveToStorage(SIGNER_ROTATION_AUDIT_KEY, updatedAudit);
+        }
+      } catch {
+        if (configPersisted) {
+          try {
+            saveToStorage(CONFIG_KEY, config);
+          } catch {
+            throw new Error(
+              "Unable to save the signer audit or restore the previous governance configuration. Reload and verify the saved configuration.",
+            );
+          }
+        }
+        throw new Error(
+          "Unable to save governance configuration and signer audit. Check browser storage availability and try again.",
+        );
+      }
+
+      setConfig(newConfig);
+      if (record) setSignerRotationAudit(updatedAudit);
+    },
+    [config, signerRotationAudit],
+  );
 
   return {
     transactions,
     config,
+    signerRotationAudit,
     addTransaction,
     addSignature,
     markExecuted,

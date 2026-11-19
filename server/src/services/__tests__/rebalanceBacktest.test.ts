@@ -29,6 +29,27 @@ describe("validateRebalanceBacktestParams", () => {
     );
   });
 
+  it("rejects zero-length date window when startDate equals endDate", () => {
+    const params = { ...BASE_PARAMS, startDate: "2024-01-01", endDate: "2024-01-01" };
+    const errors = validateRebalanceBacktestParams(params);
+    expect(errors).toContain("startDate and endDate cannot be identical (zero-length window).");
+    expect(errors).toContain("startDate must be before endDate.");
+  });
+
+  it("rejects non-positive or non-integer rebalanceIntervalDays", () => {
+    for (const invalidInterval of [0, -10, 2.5, NaN]) {
+      const params = { ...BASE_PARAMS, rebalanceIntervalDays: invalidInterval };
+      const errors = validateRebalanceBacktestParams(params);
+      expect(errors).toContain("rebalanceIntervalDays must be a positive integer.");
+    }
+  });
+
+  it("rejects rebalanceIntervalDays exceeding max allowed days", () => {
+    const params = { ...BASE_PARAMS, rebalanceIntervalDays: 2000 };
+    const errors = validateRebalanceBacktestParams(params);
+    expect(errors.some((e) => e.includes("exceeds maximum allowed"))).toBe(true);
+  });
+
   it("rejects when weights do not sum to 100", () => {
     const params = {
       ...BASE_PARAMS,

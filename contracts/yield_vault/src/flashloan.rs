@@ -68,6 +68,16 @@ impl YieldVault {
     ) -> Result<i128, VaultError> {
         YieldVault::require_init(env)?;
 
+        // Nested flash loans would observe and mutate inconsistent balances.
+        let active: bool = env
+            .storage()
+            .instance()
+            .get(&DataKey::FlashLoanActive)
+            .unwrap_or(false);
+        if active {
+            return Err(VaultError::Unauthorized);
+        }
+
         if amount <= 0 {
             return Err(VaultError::ZeroAmount);
         }
@@ -86,7 +96,10 @@ impl YieldVault {
         // Step 2: Calculate premium fee
         let fee = (amount * FLASH_LOAN_FEE_BPS) / BPS_DENOMINATOR;
 
-        // Step 3: Optimistically transfer funds to receiver
+        // Step 3: Set the guard before any external call and transfer funds
+        env.storage()
+            .instance()
+            .set(&DataKey::FlashLoanActive, &true);
         token_client.transfer(&vault_addr, receiver, &amount);
 
         // Step 4: Execute receiver's callback
@@ -105,7 +118,10 @@ impl YieldVault {
             return Err(VaultError::InsufficientShares); // Repayment failed
         }
 
-        // Step 6: Update vault accounting (fee increases total assets)
+        // Step 6: Repayment and fee are verified, so the guard can be cleared
+        env.storage().instance().remove(&DataKey::FlashLoanActive);
+
+        // Step 7: Update vault accounting (fee increases total assets)
         let total_assets: i128 = YieldVault::get_storage_required(env, &DataKey::TotalAssets)?;
         env.storage()
             .instance()
