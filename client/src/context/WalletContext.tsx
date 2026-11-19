@@ -13,6 +13,7 @@ import {
 import { getAdapter } from "../auth/walletAdapters";
 import type { ConnectWalletOptions, WalletSession } from "../auth/types";
 import { WalletContext } from "./WalletContextObject";
+import { getNetworkPassphrase } from "../lib/networkEnv";
 
 import {
   clearSensitiveWalletState,
@@ -76,6 +77,12 @@ export function WalletProvider({ children }: { children: ReactNode }) {
     setErrorMessage(null);
 
     try {
+      if (
+        options?.networkPassphrase &&
+        options.networkPassphrase !== getNetworkPassphrase()
+      ) {
+        throw new WalletLifecycleError("provider_availability");
+      }
       const nextSession = await connectWalletSession(options);
       // Account switch detection: if connecting a different account, clear prior pending draft payloads
       if (session?.walletAddress && session.walletAddress !== nextSession.walletAddress) {
@@ -138,6 +145,13 @@ export function WalletProvider({ children }: { children: ReactNode }) {
 
   async function signTransaction(xdr: string, networkPassphrase: string): Promise<string> {
     if (!session) {
+      throw new WalletLifecycleError("transaction_signing");
+    }
+    const activeNetwork = getNetworkPassphrase();
+    if (
+      networkPassphrase !== activeNetwork ||
+      (session.networkPassphrase && session.networkPassphrase !== activeNetwork)
+    ) {
       throw new WalletLifecycleError("transaction_signing");
     }
     if (

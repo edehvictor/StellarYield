@@ -109,7 +109,7 @@ Integrates with Stellar blockchain:
 
 - **Transaction Creation**: Build payment, set options, and custom transactions
 - **TSS Signing**: Sign transactions with threshold signatures
-- **Submission**: Submit signed transactions to Horizon after a network guard: the group signature must verify for the configured passphrase, an optional caller-supplied `network_passphrase` must match, and the Horizon root must report the same network. Otherwise the request fails with `NETWORK_MISMATCH` (HTTP 409)
+- **Submission**: Submit signed transactions to Horizon after a network guard: the group signature must verify for the configured passphrase, an optional caller-supplied `network_passphrase` must match, and the Horizon root must report the same network. Otherwise the request fails with `NETWORK_MISMATCH` (HTTP 409). Reads and writes are bound to an explicit network/ledger/version context; mismatches are rejected and existing state and balances are preserved when validation or execution fails
 - **Verification**: Verify transaction signatures
 
 ### 5. HTTP API (`/api/`)
@@ -124,6 +124,8 @@ RESTful API for treasury operations:
 | `/api/v1/treasury/sign` | POST | Sign transaction with TSS |
 | `/api/v1/treasury/submit` | POST | Submit signed transaction |
 | `/api/v1/public-key` | GET | Get aggregated public key |
+
+All state-changing and read endpoints accept an explicit `network` / `ledger` / `version` context. Requests whose context does not match the node's configured network or current ledger are rejected (no state is mutated and balances are left unchanged). Failed validation or execution is atomic: prior state and balances are preserved, and callers may safely retry with a corrected context.
 
 #### Participant authentication
 
@@ -348,7 +350,10 @@ go tool cover -html=coverage.out
 go test ./tss -v
 go test ./coordinator -v
 go test ./storage -v
+go test ./api -run 'Network|Ledger|Context' -v
 ```
+
+Focused regression tests cover normal operation, failure (context mismatch / validation error), and safe retry behavior. State and balances are asserted to be unchanged after a failed request.
 
 ## 📊 Monitoring
 
@@ -391,6 +396,7 @@ All key operations are logged:
 - **Authenticate ceremony participants**
 - **Rate limit API endpoints**
 - **Monitor for unusual signing patterns**
+- **Pin clients to an explicit network/ledger/version context and reject mismatches**
 
 ### 3. Operational Security
 
@@ -398,6 +404,7 @@ All key operations are logged:
 - **Use separate infrastructure providers**
 - **Implement monitoring and alerting**
 - **Document incident response procedures**
+- **Ensure failed validation or execution never mutates state or balances; retries must be safe**
 
 ### 4. Threshold Selection
 

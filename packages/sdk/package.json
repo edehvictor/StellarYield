@@ -17,11 +17,11 @@
     "README.md"
   ],
   "scripts": {
-    "build": "npx tsup",
-    "build:bindings": "npx tsx scripts/build-bindings.ts",
+    "build": "node init && npx tsup",
+    "build:bindings": "node init && npx tsx scripts/build-bindings.ts",
     "verify-drift": "npx tsx scripts/verify-drift.ts",
     "test": "npx vitest run",
-    "dev": "npx tsup --watch",
+    "dev": "node init && npx tsup --watch",
     "typecheck": "npx tsc --noEmit"
   },
   "dependencies": {

@@ -19,7 +19,7 @@ const PASSPHRASE = "Test SDF Network ; September 2015";
 const VAULT = "Blend";
 const context: AlertPreferenceContext = {
   networkPassphrase: PASSPHRASE,
-  vaultId: VAULT,
+  vaultId: VAULT.toLowerCase(),
   schemaVersion: ALERT_PREFERENCE_SCHEMA_VERSION,
 };
 
