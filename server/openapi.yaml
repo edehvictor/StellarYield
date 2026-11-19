@@ -2070,6 +2070,23 @@ paths:
         '403':
           description: FORBIDDEN — admin access required
     post:
+      summary: Create APY alert
+      description: Creates a new APY alert for a wallet and vault with operation identity deduplication
+      tags:
+        - Alerts
+      parameters:
+        - name: X-Operation-Identity
+          in: header
+          required: false
+          schema:
+            type: string
+          description: Unique operation identity token for safe retries and duplicate prevention
+        - name: Idempotency-Key
+          in: header
+          required: false
+          schema:
+            type: string
+          description: Idempotency key header alternative
       summary: Submit a treasury withdrawal (cooldown enforced)
       description: >
         Creates a pending treasury withdrawal for a vault (admin only, #1343).
@@ -2238,6 +2255,11 @@ paths:
                   type: string
                   format: email
                   description: Email address for notifications
+                operationIdentity:
+                  type: string
+                  description: Unique operation identity token for safe retries
+                preferences:
+                  $ref: '#/components/schemas/AlertPreferences'
               required:
                 - walletAddress
                 - vaultId
@@ -2245,6 +2267,17 @@ paths:
                 - thresholdValue
                 - email
       responses:
+        '200':
+          description: Alert returned from previous identical submission (safe idempotent replay)
+          headers:
+            X-Idempotent-Replayed:
+              schema:
+                type: string
+              description: Set to 'true' if the response was replayed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Alert'
         '201':
           description: Alert created successfully
           content:
@@ -2253,10 +2286,103 @@ paths:
                 $ref: '#/components/schemas/Alert'
         '400':
           description: Invalid alert parameters
+        '409':
+          description: Operation identity already used with different parameters
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string
+                  code:
+                    type: string
+                    example: OPERATION_IDENTITY_CONFLICT
         '429':
           description: Maximum alerts per user exceeded
         '500':
           description: Failed to create alert
+
+  /api/alerts/preferences:
+    put:
+      summary: Update alert preferences
+      description: Updates alert preferences for a wallet and vault with operation identity deduplication
+      tags:
+        - Alerts
+      parameters:
+        - name: X-Operation-Identity
+          in: header
+          required: false
+          schema:
+            type: string
+        - name: Idempotency-Key
+          in: header
+          required: false
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - walletAddress
+                - vaultId
+                - preferences
+              properties:
+                walletAddress:
+                  type: string
+                vaultId:
+                  type: string
+                operationIdentity:
+                  type: string
+                preferences:
+                  $ref: '#/components/schemas/AlertPreferences'
+      responses:
+        '200':
+          description: Alert preferences updated or replayed
+          headers:
+            X-Idempotent-Replayed:
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AlertPreferences'
+        '400':
+          description: Invalid preference parameters
+        '409':
+          description: Operation identity conflict
+        '500':
+          description: Failed to update alert preferences
+
+  /api/alerts/preferences/{wallet}/{vaultId}:
+    get:
+      summary: Get alert preferences
+      description: Returns alert preferences for a specific wallet and vault
+      tags:
+        - Alerts
+      parameters:
+        - name: wallet
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: vaultId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Alert preferences retrieved successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AlertPreferences'
+        '404':
+          description: Alert preferences not found
 
   /api/alerts/{wallet}:
     get:
@@ -5965,6 +6091,36 @@ Incident:
           type: string
           format: date-time
 
+     AlertPreferences:
+      type: object
+      properties:
+        channel:
+          type: string
+          enum: [email, in_app]
+        cooldownMinutes:
+          type: number
+          minimum: 0
+          maximum: 1440
+        severityThreshold:
+          type: number
+          minimum: 0
+          maximum: 1000
+        quietHoursStart:
+          type: integer
+          minimum: 0
+          maximum: 23
+        quietHoursEnd:
+          type: integer
+          minimum: 0
+          maximum: 23
+      required:
+        - channel
+        - cooldownMinutes
+        - severityThreshold
+        - quietHoursStart
+        - quietHoursEnd
+
+     FragmentationMetrics:
     FragmentationMetrics:
       type: object
       properties:

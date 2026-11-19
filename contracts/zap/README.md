@@ -7,6 +7,7 @@
 ## Public API
 
 - `initialize(admin, dex_router)`
+- `zap_deposit(user, input_token, vault_token, vault, amount_in, min_amount_out, min_shares_out, expected_amount_out, allow_partial)`
 - `zap_deposit(user, input_token, vault_token, vault, amount_in, min_amount_out, min_shares_out, expected_amount_out, allow_partial, op_id)`
 - `zap_deposit_with_deadline(user, input_token, vault_token, vault, amount_in, min_amount_out, min_shares_out, expected_amount_out, allow_partial, op_id, deadline)`
 - `get_op_status(user, op_id) -> Option<ZapStatus>`
