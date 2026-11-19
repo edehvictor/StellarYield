@@ -231,6 +231,8 @@ pub enum IsolatedLendingError {
     /// The stored state or the caller's context is not at the storage version
     /// this code understands.
     WrongVersion = 18,
+    /// The configured oracle supplied a quote with malformed boundary fields.
+    InvalidOracleQuote = 19,
 }
 
 #[contract]
@@ -1629,12 +1631,19 @@ impl IsolatedLendingPair {
         let Some(policy) = policy else {
             return Ok(());
         };
+        if policy.min_confidence_bps > 10_000 {
+            return Err(IsolatedLendingError::InvalidConfig);
+        }
         let quote: OracleQuoteData = env
             .storage()
             .instance()
             .get(&PairDataKey::OracleQuote)
             .ok_or(IsolatedLendingError::OracleQuoteMissing)?;
-        if env.ledger().sequence().saturating_sub(quote.ledger) > policy.max_age_ledgers {
+        let current_ledger = env.ledger().sequence();
+        if quote.price_bps == 0 || quote.confidence_bps > 10_000 || quote.ledger > current_ledger {
+            return Err(IsolatedLendingError::InvalidOracleQuote);
+        }
+        if current_ledger - quote.ledger > policy.max_age_ledgers {
             return Err(IsolatedLendingError::OracleQuoteStale);
         }
         if quote.confidence_bps < policy.min_confidence_bps {
@@ -2233,6 +2242,55 @@ mod test {
         assert_eq!(
             s.pair.try_borrow(&s.borrower, &10, &s.ctx(), &s.fp()),
             Err(Ok(IsolatedLendingError::OracleQuoteStale))
+        );
+    }
+
+    #[test]
+    fn malformed_future_oracle_quote_fails_without_mutation_and_can_be_retried() {
+        let s = setup();
+        let oracle = with_oracle_policy(&s);
+        s.pair.push_oracle_quote(&oracle, &10_000, &9_000);
+        let borrower_balance = balance(&s.env, &s.debt_token, &s.borrower);
+        let pair_balance = balance(&s.env, &s.debt_token, &s.pair.address);
+        let totals = s.pair.get_totals();
+        let old_ledger = s.env.ledger().sequence();
+
+        s.env.as_contract(&s.pair.address, || {
+            s.env.storage().instance().set(
+                &PairDataKey::OracleQuote,
+                &OracleQuoteData {
+                    price_bps: 10_000,
+                    confidence_bps: 9_000,
+                    ledger: old_ledger + 1,
+                },
+            );
+        });
+        set_ledger(&s.env, old_ledger + 2);
+
+        assert_eq!(
+            s.pair.try_borrow(&s.borrower, &10, &s.ctx(), &s.fp()),
+            Err(Ok(IsolatedLendingError::InvalidOracleQuote))
+        );
+        assert_eq!(s.pair.get_totals(), totals);
+        assert_eq!(balance(&s.env, &s.debt_token, &s.borrower), borrower_balance);
+        assert_eq!(balance(&s.env, &s.debt_token, &s.pair.address), pair_balance);
+
+        s.pair.push_oracle_quote(&oracle, &10_000, &9_000);
+        s.pair.borrow(&s.borrower, &10, &s.ctx(), &s.fp());
+        assert_eq!(s.pair.get_position(&s.borrower), (200, 90));
+    }
+
+    #[test]
+    fn malformed_oracle_price_is_rejected_when_quote_is_pushed() {
+        let s = setup();
+        let oracle = with_oracle_policy(&s);
+        assert_eq!(
+            s.pair.try_push_oracle_quote(&oracle, &0, &9_000),
+            Err(Ok(IsolatedLendingError::InvalidConfig))
+        );
+        assert_eq!(
+            s.pair.try_push_oracle_quote(&oracle, &10_000, &10_001),
+            Err(Ok(IsolatedLendingError::InvalidConfig))
         );
     }
 
