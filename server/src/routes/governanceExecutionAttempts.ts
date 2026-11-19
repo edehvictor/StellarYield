@@ -14,8 +14,9 @@
 
 import { Router, Request, Response } from "express";
 import { sendError } from "../utils/errorResponse";
+import { IDEMPOTENT_REPLAYED_HEADER } from "../middleware/idempotency";
 import {
-  recordExecutionAttempt,
+  recordExecutionAttemptOnce,
   getExecutionAttempt,
   listExecutionAttemptsForProposal,
   markExecutionSucceeded,
@@ -56,11 +57,20 @@ function isExecutionAttemptStatus(value: unknown): value is ExecutionAttemptStat
  * POST /api/governance/execution-attempts
  * Record or update a governance execution attempt.
  *
- * Body: { proposalId, txHash?, status?, phase?, attemptNumber?, error?, failedAtPhase? }
+ * Body: { proposalId, operationId?, txHash?, status?, phase?, attemptNumber?, error?, failedAtPhase? }
  *
  * Reporting the same (proposalId, txHash) twice updates the existing attempt
  * rather than duplicating it, so client retries are safe.
+ *
+ * `operationId` is the identity of one logical operation, chosen by the client
+ * and reused on every retry. A retry that carries it resolves to the attempt it
+ * created (200) instead of creating another (201). Reusing it with a different
+ * txHash is 409 OPERATION_ID_CONFLICT, and a stale retry never moves a finished
+ * attempt to another status: the stored attempt is returned unchanged and the
+ * response carries `Idempotent-Replayed: true`.
  */
+const OPERATION_ID_PATTERN = /^[A-Za-z0-9._:-]{1,128}$/;
+
 router.post("/", (req: Request, res: Response) => {
   const body = (req.body ?? {}) as Partial<RecordExecutionAttemptInput>;
 
@@ -86,8 +96,22 @@ router.post("/", (req: Request, res: Response) => {
     return;
   }
 
+  if (
+    body.operationId !== undefined &&
+    (typeof body.operationId !== "string" || !OPERATION_ID_PATTERN.test(body.operationId))
+  ) {
+    sendError(
+      res,
+      400,
+      "INVALID_OPERATION_ID",
+      "operationId must be 1-128 characters of A-Z, a-z, 0-9, '.', '_', ':' or '-'.",
+    );
+    return;
+  }
+
   const input: RecordExecutionAttemptInput = {
     proposalId: body.proposalId,
+    operationId: body.operationId,
     txHash: body.txHash,
     status: body.status,
     phase: body.phase,
@@ -96,8 +120,23 @@ router.post("/", (req: Request, res: Response) => {
     failedAtPhase: body.failedAtPhase,
   };
 
-  const attempt = recordExecutionAttempt(input);
-  res.status(201).json(attempt);
+  const { outcome, attempt } = recordExecutionAttemptOnce(input);
+  if (outcome === "conflict") {
+    sendError(
+      res,
+      409,
+      "OPERATION_ID_CONFLICT",
+      "This operationId already belongs to an attempt with a different txHash. The stored attempt was not changed.",
+      { attemptId: attempt.attemptId },
+    );
+    return;
+  }
+  if (outcome === "replayed") {
+    res.set(IDEMPOTENT_REPLAYED_HEADER, "true");
+    res.status(200).json(attempt);
+    return;
+  }
+  res.status(outcome === "created" || !input.operationId ? 201 : 200).json(attempt);
 });
 
 /**
