@@ -16,6 +16,12 @@
  *
  * Data is cached for 60 seconds to avoid expensive on-chain queries
  * on every page load.
+ *
+ * Failure behaviour (#1917): a snapshot is validated before it replaces the
+ * cache. If aggregation or validation fails, the previous known-good snapshot
+ * is served unchanged with `status: "degraded"` and a privacy-safe diagnostic
+ * naming the failed stage. Responses never echo raw error text, RPC URLs,
+ * wallets, or stack traces.
  */
 import { Router, type Request, type Response } from "express";
 import {
@@ -33,6 +39,11 @@ import {
   type TransparencyContextExpectation,
   type TransparencyNetwork,
 } from "../../../shared/types/transparencyContext";
+import {
+    buildTransparencyDiagnostic,
+    redactDiagnosticText,
+    type TransparencyDiagnostic,
+} from "../../../shared/types/transparencyDiagnostic";
 
 const transparencyRouter = Router();
 
@@ -58,7 +69,17 @@ interface TransparencyData extends TransparencySummary {
 
 export type ExternalTransparencySource = () => Promise<unknown> | unknown;
 
+/** Snapshot health as seen by the aggregation stage. */
+type TransparencyStatus = "healthy" | "degraded";
+
+interface TransparencyPayload extends TransparencySummary {
+    status: TransparencyStatus;
+    diagnostics: TransparencyDiagnostic[];
+}
+
 let cache: TransparencyData | null = null;
+/** Most recent snapshot that passed validation; never overwritten by a failure. */
+let lastKnownGood: TransparencyData | null = null;
 let externalDataSource: ExternalTransparencySource | null = null;
 const CACHE_TTL_MS = 60_000; // 60 seconds
 
@@ -287,7 +308,81 @@ export function setTransparencyDataSource(source: ExternalTransparencySource | n
  */
 export function resetTransparencyCache(): void {
     cache = null;
+    lastKnownGood = null;
     externalDataSource = null;
+    aggregatorOverride = null;
+}
+
+/** @internal Test seam so failure handling can be exercised without I/O. */
+let aggregatorOverride: (() => Promise<TransparencyData>) | null = null;
+
+function isFiniteNonNegative(value: unknown): value is number {
+    return typeof value === "number" && Number.isFinite(value) && value >= 0;
+}
+
+/**
+ * Validate the shape of an aggregated snapshot before it is cached or served.
+ *
+ * Insufficient or malformed diagnostic context must never replace a previously
+ * valid snapshot, so every field and the derived totals are checked here.
+ */
+export function validateTransparencyData(value: unknown): value is TransparencyData {
+    if (typeof value !== "object" || value === null) return false;
+    const candidate = value as Partial<TransparencyData>;
+
+    if (
+        !isFiniteNonNegative(candidate.totalRevenueLumens) ||
+        !isFiniteNonNegative(candidate.totalBurnedTokens) ||
+        !isFiniteNonNegative(candidate.deflationaryRatio) ||
+        !isFiniteNonNegative(candidate.cachedAt)
+    ) {
+        return false;
+    }
+
+    const context = candidate.context;
+    if (
+        typeof context !== "object" ||
+        context === null ||
+        typeof context.network !== "string" ||
+        !isValidLedgerSequence(context.ledger) ||
+        typeof context.version !== "string"
+    ) {
+        return false;
+    }
+
+    if (!Array.isArray(candidate.history) || candidate.history.length === 0) {
+        return false;
+    }
+
+    for (const point of candidate.history) {
+        if (
+            typeof point !== "object" ||
+            point === null ||
+            typeof (point as TransparencyHistoryPoint).date !== "string" ||
+            (point as TransparencyHistoryPoint).date.length === 0 ||
+            !isFiniteNonNegative((point as TransparencyHistoryPoint).revenue) ||
+            !isFiniteNonNegative((point as TransparencyHistoryPoint).burned)
+        ) {
+            return false;
+        }
+    }
+
+    const revenueSum = candidate.history.reduce((sum, point) => sum + point.revenue, 0);
+    const burnedSum = candidate.history.reduce((sum, point) => sum + point.burned, 0);
+
+    return (
+        Math.abs(revenueSum - candidate.totalRevenueLumens) <= 0.01 &&
+        Math.abs(burnedSum - candidate.totalBurnedTokens) <= 0.01
+    );
+}
+
+function toPayload(
+    data: TransparencyData,
+    status: TransparencyStatus,
+    diagnostics: TransparencyDiagnostic[],
+): TransparencyPayload {
+    const { cachedAt: _omit, ...metrics } = cloneSummaryData(data);
+    return { ...metrics, status, diagnostics };
 }
 
 // ── Network, ledger and version context (#1916) ─────────────────────────
@@ -469,11 +564,48 @@ async function aggregateTransparencyData(options?: { forceRefresh?: boolean }): 
     if (cache && cache.context.network !== network) {
         cache = null;
     }
+    if (lastKnownGood && lastKnownGood.context.network !== network) {
+        lastKnownGood = null;
+    }
 
-    if (!options?.forceRefresh && cache && Date.now() - cache.cachedAt < CACHE_TTL_MS) {
+    if (
+        !options?.forceRefresh &&
+        cache &&
+        Date.now() - cache.cachedAt < CACHE_TTL_MS &&
+        validateTransparencyData(cache)
+    ) {
         return cache;
     }
 
+    const next = aggregatorOverride ? await aggregatorOverride() : await buildTransparencySnapshot(network);
+
+    if (!validateTransparencyData(next)) {
+        throw new TransparencyValidationError(
+            "transparency snapshot failed validation",
+            "MALFORMED_EXTERNAL_DATA",
+        );
+    }
+
+    // A source that answers from an older ledger (for example an RPC node
+    // that is behind) never replaces a newer snapshot (#1916).
+    if (cache && next.context.ledger < cache.context.ledger) {
+        return cache;
+    }
+
+    // Only replace the cache after every boundary validation and checked
+    // computation has succeeded; a failure leaves the previous snapshot
+    // intact for safe retry.
+    cache = next;
+    lastKnownGood = next;
+    return next;
+}
+
+/**
+ * Build a fresh snapshot from the configured source. Kept separate from the
+ * cache/validation logic so a failed build can never partially write to
+ * module state.
+ */
+async function buildTransparencySnapshot(network: TransparencyNetwork): Promise<TransparencyData> {
     const rawSourceData = externalDataSource
         ? await externalDataSource()
         : buildDefaultSeededInput();
@@ -481,23 +613,12 @@ async function aggregateTransparencyData(options?: { forceRefresh?: boolean }): 
     const summary = buildTransparencySummary(rawSourceData);
     const context = resolveSnapshotContext(rawSourceData, network);
 
-    // A source that answers from an older ledger (for example an RPC node
-    // that is behind) never replaces a newer snapshot (#1916).
-    if (cache && context.ledger < cache.context.ledger) {
-        return cache;
-    }
-
-    // Only replace the cache after every boundary validation and checked
-    // computation has succeeded; a failure leaves the previous snapshot
-    // intact for safe retry.
-    cache = {
+    return {
         ...summary,
         history: summary.history.map((point) => ({ ...point })),
         cachedAt: Date.now(),
         context,
     };
-
-    return cache;
 }
 
 // ── Routes ────────────────────────────────────────────────────────────────
@@ -520,15 +641,18 @@ const handleSummary = async (req: Request, res: Response): Promise<void> => {
         throw err;
     }
 
-    const respond = (data: TransparencyData): void => {
+    const respond = (
+        data: TransparencyData,
+        status: TransparencyStatus,
+        diagnostics: TransparencyDiagnostic[],
+    ): void => {
         const check = checkTransparencyContext(data.context, expectation);
         setContextHeaders(res, data.context);
         if (!check.ok) {
             sendContextError(res, check.error, data.context);
             return;
         }
-        const { cachedAt: _omit, ...payload } = cloneSummaryData(data);
-        res.json(payload);
+        res.status(200).json(toPayload(data, status, diagnostics));
     };
 
     try {
@@ -538,28 +662,52 @@ const handleSummary = async (req: Request, res: Response): Promise<void> => {
         if (expectation.minLedger !== undefined && data.context.ledger < expectation.minLedger) {
             data = await aggregateTransparencyData({ forceRefresh: true });
         }
-        respond(data);
+        respond(data, "healthy", []);
     } catch (err) {
-        console.error("Failed to aggregate transparency data", err);
-        // Fall back to the last good snapshot for the same network if one
-        // exists; do not expose a poisoned partial result. Callers can
-        // safely retry.
+        // Log only redacted detail. Raw errors can carry RPC URLs, wallets, and
+        // stack traces, so they must not reach the response or unredacted logs.
+        const detail = redactDiagnosticText(
+            err instanceof Error ? err.message : "unknown aggregation failure",
+        );
+        console.error(`[transparency] aggregation stage failed: ${detail}`);
+
+        // Fall back to the last known-good snapshot for the same network if
+        // one exists, rather than an empty or partial result (#1916, #1917).
+        // Callers can safely retry.
         let network: TransparencyNetwork | null = null;
         try {
             network = resolveTransparencyNetwork();
         } catch {
             network = null;
         }
-        if (cache && network && cache.context.network === network) {
-            respond(cache);
+        if (lastKnownGood && network && lastKnownGood.context.network === network) {
+            respond(lastKnownGood, "degraded", [
+                buildTransparencyDiagnostic("AGGREGATION_FAILED", {
+                    stage: "aggregation",
+                }),
+                buildTransparencyDiagnostic("STALE_LAST_KNOWN", {
+                    stage: "cache",
+                    affectedStages: ["aggregation", "cache"],
+                }),
+            ]);
             return;
         }
         if (err instanceof TransparencyContextError) {
             sendContextError(res, err);
             return;
         }
+
         const code = err instanceof TransparencyCalculationError ? err.code : "MALFORMED_EXTERNAL_DATA";
-        res.status(500).json({ error: "Unable to fetch transparency data.", code });
+        res.status(500).json({
+            error: "Unable to fetch transparency data.",
+            code,
+            status: "unavailable",
+            diagnostics: [
+                buildTransparencyDiagnostic("NO_DATA_AVAILABLE", {
+                    stage: "aggregation",
+                }),
+            ],
+        });
     }
 };
 
@@ -706,6 +854,25 @@ transparencyRouter.post(
     res.json(incident);
   },
 );
+
+/** @internal Test hook: replace the aggregator used by the route. */
+export function __setTransparencyAggregatorForTesting(
+    aggregator: (() => Promise<TransparencyData>) | null,
+): void {
+    aggregatorOverride = aggregator;
+}
+
+/** @internal Test hook: force the next read to bypass the fresh cache. */
+export function __expireTransparencyCacheForTesting(): void {
+    if (cache) {
+        cache = { ...cache, cachedAt: 0 };
+    }
+}
+
+/** @internal Test hook: restore the module to its initial state. */
+export function __resetTransparencyStateForTesting(): void {
+    resetTransparencyCache();
+}
 
 export { aggregateTransparencyData };
 export default transparencyRouter;

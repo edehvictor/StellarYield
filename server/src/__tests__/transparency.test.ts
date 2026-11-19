@@ -13,8 +13,13 @@ import {
     TransparencyCalculationError,
     TransparencyValidationError,
     validateExternalHistory,
+    validateTransparencyData,
+    __expireTransparencyCacheForTesting,
+    __resetTransparencyStateForTesting,
+    __setTransparencyAggregatorForTesting,
 } from "../routes/transparency";
 import { failoverIncidentHistoryService } from "../services/failoverIncidentHistoryService";
+import { TRANSPARENCY_SCHEMA_VERSION } from "../../../shared/types/transparencyContext";
 
 describe("GET /api/transparency/summary", () => {
     it("returns 200 with all required fields", async () => {
@@ -342,5 +347,159 @@ describe("malformed external data hardening (#1913)", () => {
         expect(history.status).toBe(200);
         expect(history.body.incidents).toHaveLength(1);
         expect(history.body.incidents[0].resolved).toBe(false);
+    });
+});
+
+// ── #1917: insufficient diagnostic context ────────────────────────────────
+
+type Snapshot = Awaited<ReturnType<typeof aggregateTransparencyData>>;
+
+function makeSnapshot(overrides: Partial<Snapshot> = {}): Snapshot {
+    const history = [{ date: "2026-11-18", revenue: 1_000, burned: 100 }];
+    return {
+        totalRevenueLumens: 1_000,
+        totalBurnedTokens: 100,
+        deflationaryRatio: 1,
+        history,
+        cachedAt: Date.now(),
+        context: { network: "testnet", ledger: 1, version: TRANSPARENCY_SCHEMA_VERSION },
+        ...overrides,
+    };
+}
+
+const secretBearingError = () =>
+    Promise.reject(
+        new Error(
+            "fetch to https://horizon.internal.example.com failed for GDXCN5BQ4RJXFTDMCTP3H7J6P5PT7PNZ4VP5G7F5VZ6B7K4Q7ZQ7ZQ7Z at /srv/app/server/src/routes/transparency.ts:1:1",
+        ),
+    );
+
+describe("GET /api/transparency/summary – diagnostic hardening (#1917)", () => {
+    beforeEach(() => {
+        __resetTransparencyStateForTesting();
+    });
+
+    afterEach(() => {
+        __resetTransparencyStateForTesting();
+    });
+
+    it("normal operation reports healthy status with no diagnostics", async () => {
+        const res = await request(createApp()).get("/api/transparency/summary");
+
+        expect(res.status).toBe(200);
+        expect(res.body.status).toBe("healthy");
+        expect(res.body.diagnostics).toEqual([]);
+        expect(res.body.history).toHaveLength(30);
+        expect(res.body.cachedAt).toBeUndefined();
+    });
+
+    it("returns a privacy-safe diagnostic when aggregation fails with no prior snapshot", async () => {
+        __setTransparencyAggregatorForTesting(secretBearingError);
+
+        const res = await request(createApp()).get("/api/transparency/summary");
+
+        expect(res.status).toBe(500);
+        expect(res.body.code).toBe("MALFORMED_EXTERNAL_DATA");
+        expect(res.body.status).toBe("unavailable");
+        expect(res.body.diagnostics).toHaveLength(1);
+
+        const [diagnostic] = res.body.diagnostics;
+        expect(diagnostic.code).toBe("NO_DATA_AVAILABLE");
+        expect(diagnostic.stage).toBe("aggregation");
+        expect(diagnostic.retryable).toBe(true);
+        expect(diagnostic.privacySafe).toBe(true);
+        expect(typeof diagnostic.remediation).toBe("string");
+
+        const serialized = JSON.stringify(res.body);
+        expect(serialized).not.toContain("horizon.internal.example.com");
+        expect(serialized).not.toContain("GDXCN5BQ4RJXFTDMCTP3H7J6P5PT7PNZ4VP5G7F5VZ6B7K4Q7ZQ7ZQ7Z");
+        expect(serialized).not.toContain("/srv/app");
+        expect(serialized).not.toMatch(/at aggregate/);
+    });
+
+    it("preserves the last known-good snapshot and balances when a later aggregation fails", async () => {
+        __setTransparencyAggregatorForTesting(async () => makeSnapshot());
+        const warm = await request(createApp()).get("/api/transparency/summary");
+        expect(warm.status).toBe(200);
+        expect(warm.body.status).toBe("healthy");
+
+        // Simulate the aggregation window expiring, then a failing retry.
+        __expireTransparencyCacheForTesting();
+        __setTransparencyAggregatorForTesting(secretBearingError);
+
+        const degraded = await request(createApp()).get("/api/transparency/summary");
+
+        expect(degraded.status).toBe(200);
+        expect(degraded.body.status).toBe("degraded");
+        expect(degraded.body.totalRevenueLumens).toBe(warm.body.totalRevenueLumens);
+        expect(degraded.body.totalBurnedTokens).toBe(warm.body.totalBurnedTokens);
+        expect(degraded.body.deflationaryRatio).toBe(warm.body.deflationaryRatio);
+        expect(degraded.body.history).toEqual(warm.body.history);
+
+        expect(degraded.body.diagnostics.map((d: { code: string }) => d.code)).toEqual([
+            "AGGREGATION_FAILED",
+            "STALE_LAST_KNOWN",
+        ]);
+        expect(degraded.body.diagnostics[0].stage).toBe("aggregation");
+        expect(degraded.body.diagnostics[1].stage).toBe("cache");
+        for (const diagnostic of degraded.body.diagnostics) {
+            expect(diagnostic.privacySafe).toBe(true);
+            expect(diagnostic.remediation.length).toBeGreaterThan(0);
+        }
+    });
+
+    it("treats an invalid snapshot as a failure instead of overwriting good state", async () => {
+        __setTransparencyAggregatorForTesting(async () => makeSnapshot());
+        const warm = await request(createApp()).get("/api/transparency/summary");
+        expect(warm.status).toBe(200);
+
+        __expireTransparencyCacheForTesting();
+        __setTransparencyAggregatorForTesting(async () =>
+            makeSnapshot({ totalRevenueLumens: Number.NaN, history: [] }),
+        );
+
+        const res = await request(createApp()).get("/api/transparency/summary");
+
+        expect(res.status).toBe(200);
+        expect(res.body.status).toBe("degraded");
+        expect(res.body.totalRevenueLumens).toBe(warm.body.totalRevenueLumens);
+        expect(res.body.diagnostics[0].code).toBe("AGGREGATION_FAILED");
+        expect(res.body.history).toEqual(warm.body.history);
+    });
+
+    it("rejects snapshots whose totals do not match their history", () => {
+        expect(validateTransparencyData(makeSnapshot())).toBe(true);
+        expect(validateTransparencyData(makeSnapshot({ totalRevenueLumens: 999 }))).toBe(false);
+        expect(validateTransparencyData(makeSnapshot({ history: [] }))).toBe(false);
+        expect(validateTransparencyData(null)).toBe(false);
+    });
+
+    it("retries safely once aggregation recovers, without losing or double-applying state", async () => {
+        __setTransparencyAggregatorForTesting(async () => makeSnapshot());
+        await request(createApp()).get("/api/transparency/summary");
+
+        __expireTransparencyCacheForTesting();
+        __setTransparencyAggregatorForTesting(secretBearingError);
+        const failed = await request(createApp()).get("/api/transparency/summary");
+        expect(failed.body.status).toBe("degraded");
+
+        // Retry after recovery: the stage rebuilds a fresh snapshot.
+        __setTransparencyAggregatorForTesting(async () =>
+            makeSnapshot({
+                history: [{ date: "2026-11-19", revenue: 1_500, burned: 150 }],
+                totalRevenueLumens: 1_500,
+                totalBurnedTokens: 150,
+                deflationaryRatio: 2,
+            }),
+        );
+
+        const retried = await request(createApp()).get("/api/transparency/summary");
+
+        expect(retried.status).toBe(200);
+        expect(retried.body.status).toBe("healthy");
+        expect(retried.body.diagnostics).toEqual([]);
+        expect(retried.body.totalRevenueLumens).toBe(1_500);
+        expect(retried.body.totalBurnedTokens).toBe(150);
+        expect(retried.body.deflationaryRatio).toBe(2);
     });
 });
