@@ -9,9 +9,12 @@
 - `initialize(admin, oracle)`
 - `mint(minter, option_type, underlying_asset, quote_asset, strike_price, opening_time, expiration_time, collateral_amount)`
 - `exercise(exerciser, option_id)` exercises all remaining collateral
+- `exercise_with_sequence(exerciser, option_id, expected_sequence)` checks an optimistic-concurrency sequence
 - `exercise_partial(exerciser, option_id, amount)` exercises part of the collateral
-- `cancel(minter, option_id)` cancels an unexpired option and returns its unexercised collateral
-- `expire(option_id)`
+- `exercise_partial_with_sequence(exerciser, option_id, amount, expected_sequence)` checks a sequence
+- `cancel(minter, option_id)` cancels an unexpired option; `cancel_with_sequence` checks a sequence
+- `expire(option_id)` expires an option; `expire_with_sequence` checks a sequence
+- `get_settlement_sequence(option_id)` returns the sequence for the next settlement call
 - `deposit(owner, asset, amount)` / `withdraw(owner, asset, amount)`
 - `get_free_collateral(owner, asset)` / `get_reserved_collateral(owner, asset)`
 - `get_premium(spot, strike, time_to_expiry_years, iv)`
@@ -59,6 +62,12 @@ amount), by `cancel` (the unexercised amount while the option is active), and by
 `expire` (whatever was not exercised). `withdraw` can only take
 free collateral, so it fails with `InsufficientFreeCollateral` rather than
 undercollateralize an open position.
+
+Settlement uses optimistic concurrency. Callers read the sequence, include it
+in `exercise`, `exercise_partial`, `cancel`, or `expire`, and retry with the
+new sequence after `ConcurrentModification`. A per-option temporary lock also
+rejects re-entrant token callbacks. Failed validation and failed token
+transfers leave option state and balances unchanged by transaction rollback.
 
 Positions minted before reserve tracking existed have no recorded reserve;
 releasing their collateral saturates at zero. Their collateral was never in the
