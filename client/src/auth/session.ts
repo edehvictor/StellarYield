@@ -11,6 +11,7 @@ import type {
 } from "./types";
 import { getAdapter } from "./walletAdapters";
 import { getApiBaseUrl } from "../lib/api";
+import { getNetworkPassphrase } from "../lib/networkEnv";
 
 const STORAGE_KEY = "stellar-yield.wallet-session";
 const BROADCAST_CHANNEL_NAME = "stellar-yield-wallet-session";
@@ -159,6 +160,7 @@ interface ChallengeResponse {
   walletAddressType: "account" | "contract";
   acceptedSignerTypes: string[];
   authConfigFingerprint?: string;
+  networkPassphrase?: string;
 }
 
 interface VerifyResponse {
@@ -166,6 +168,7 @@ interface VerifyResponse {
   walletAddressType: "account" | "contract";
   acceptedSignerTypes: string[];
   authConfigFingerprint?: string;
+  networkPassphrase?: string;
 }
 
 interface VerifyAttemptResult {
@@ -228,6 +231,13 @@ export interface SessionRecoveryResult {
   session: WalletSession | null;
 }
 
+function assertNetworkContext(expected: string, actual: string | undefined): void {
+  if (!actual || actual !== expected) {
+    throw new WalletLifecycleError("backend_verification");
+  }
+}
+
+
 /**
  * Attempt to recover a stored wallet session after a page reload.
  *
@@ -254,6 +264,11 @@ export async function recoverSession(): Promise<SessionRecoveryResult> {
   if (isSessionExpired(session)) {
     clearStoredSession();
     return { status: "expired", session: null };
+  }
+
+  const activeNetwork = getNetworkPassphrase();
+  if (session.networkPassphrase && session.networkPassphrase !== activeNetwork) {
+    return { status: "degraded", session: { ...session, providerAvailable: false } };
   }
 
   const EXTENSION_PROVIDERS: ExtensionWalletProviderId[] = ["freighter", "xbull", "albedo"];
@@ -418,6 +433,7 @@ async function requestSmartWalletChallenge(
       sessionKeyAddress: session.sessionKeyAddress,
       providerId: session.providerId,
       loginHint: session.loginHint,
+      networkPassphrase: getNetworkPassphrase(),
     }),
   });
 
@@ -432,6 +448,7 @@ async function requestSmartWalletChallenge(
   ) {
     throw new Error("Unable to create auth challenge.");
   }
+  assertNetworkContext(getNetworkPassphrase(), challengePayload.networkPassphrase);
 
   return challengePayload as ChallengeResponse;
 }
@@ -464,7 +481,8 @@ async function verifySmartWalletSession(
             sessionKeyAddress: session.sessionKeyAddress,
             challenge: challengePayload.challenge,
             signature,
-          }),
+            networkPassphrase: getNetworkPassphrase(),
+                }),
         },
       );
 
@@ -490,6 +508,7 @@ async function verifySmartWalletSession(
       if (!verificationResponse.ok) {
         throw new Error("Unable to verify smart wallet session.");
       }
+      assertNetworkContext(getNetworkPassphrase(), verificationPayload.networkPassphrase);
 
       if (typeof verificationPayload.verified !== "boolean") {
         throw new Error("Unable to verify smart wallet session.");
@@ -569,6 +588,7 @@ export async function connectWalletSession(
       permissions: [...DEFAULT_PERMISSIONS, "trade"],
       origin,
       providerAvailable: true,
+      networkPassphrase: getNetworkPassphrase(),
     };
     saveSession(session);
     return session;
@@ -600,6 +620,7 @@ export async function connectWalletSession(
     permissions: [...DEFAULT_PERMISSIONS],
     origin,
     providerAvailable: true,
+    networkPassphrase: getNetworkPassphrase(),
   };
 
   const verification = await verifySmartWalletSession(session);
