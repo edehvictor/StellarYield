@@ -181,10 +181,27 @@ export default function TransparencyDashboard() {
     }, []);
 
     useEffect(() => {
-        fetch(`${getApiBase()}/api/transparency/failover-history`)
-            .then((res) => (res.ok ? res.json() : Promise.resolve({ incidents: [] })))
-            .then((data: { incidents: FailoverIncident[] }) => setFailoverIncidents(data.incidents))
-            .catch(() => setFailoverIncidents([]));
+        let cancelled = false;
+        async function loadFailoverHistory() {
+            // Retry transient failures without replacing a previously loaded
+            // snapshot with an empty result. The API is read-only and safe to retry.
+            for (let attempt = 0; attempt < 3; attempt += 1) {
+                try {
+                    const response = await fetch(`${getApiBase()}/api/transparency/failover-history`);
+                    if (!response.ok) throw new Error(`Server returned ${response.status}`);
+                    const payload = (await response.json()) as { incidents?: unknown };
+                    if (!Array.isArray(payload.incidents)) throw new Error("Malformed failover history response");
+                    if (!cancelled) setFailoverIncidents(payload.incidents as FailoverIncident[]);
+                    return;
+                } catch {
+                    if (attempt < 2) {
+                        await new Promise((resolve) => window.setTimeout(resolve, 250 * (attempt + 1)));
+                    }
+                }
+            }
+        }
+        void loadFailoverHistory();
+        return () => { cancelled = true; };
     }, []);
 
     useEffect(() => {
