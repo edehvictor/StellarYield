@@ -10,6 +10,11 @@ import { formatParityReport } from "../utils/yieldNormalization";
 import { calculateNetYield } from "../services/netYieldEngine";
 import { yieldReliabilityEngine } from "../services/yieldReliabilityService";
 import { getFeeHistory } from "../services/protocolFeeHistoryService";
+import {
+  OpportunityRankingService,
+  type RankingWeights,
+} from "../services/opportunityRankingService";
+import { getAssetConfigVersion } from "../services/zapQuote";
 
 const yieldsRouter = Router();
 
@@ -85,6 +90,13 @@ yieldsRouter.get("/", async (_req, res) => {
       `public, max-age=${CURRENT_YIELDS_TTL_SECONDS}, stale-while-revalidate=30`,
     );
     res.setHeader("X-Cache-Status", cacheStatus);
+    // Immutable configuration fingerprint (#stale-config): clients use this
+    // to detect when the asset configuration snapshot has changed between
+    // the quote that was shown and the one that would be executed. When the
+    // fingerprint received with a quote no longer matches the one on the
+    // current response the client must refresh before submitting.
+    const configVersion = getAssetConfigVersion();
+    res.setHeader("X-Config-Version", configVersion);
     res.json(payload);
   } catch (error) {
     console.error("Failed to serve /api/yields.", error);
