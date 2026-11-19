@@ -3,6 +3,14 @@
  *
  * Normalizes indexer, relayer, registry, and smoke-test signals into a single
  * deterministic overall status for the transparency dashboard.
+ *
+ * Boundary-value handling (#1914): every numeric input is sanitized before
+ * use. Non-finite, negative, or out-of-range values are treated as unknown
+ * rather than healthy, successRate is clamped to [0, 100] and rounded only
+ * after clamping, and failureCount is bounded to a finite non-negative
+ * integer. Unknown/missing subsystem states are normalized to "unknown"
+ * instead of being left as unchecked values, so a boundary payload can never
+ * silently flip the overall status to healthy.
  */
 
 export type SubsystemState = "healthy" | "degraded" | "failed" | "unknown";
@@ -39,6 +47,15 @@ const SUBSYSTEM_LABELS: Record<keyof TransparencyHealthInput, string> = {
   smokeTest: "Smoke test",
 };
 
+function isValidState(state: unknown): state is SubsystemState {
+  return state === "healthy" || state === "degraded" || state === "failed" || state === "unknown";
+}
+
+/** Coerce an unchecked subsystem value to a valid state or "unknown". */
+export function sanitizeSubsystemState(state: unknown): SubsystemState {
+  return isValidState(state) ? state : "unknown";
+}
+
 function worstState(states: SubsystemState[]): SubsystemState {
   return states.reduce(
     (worst, state) => (SEVERITY_RANK[state] > SEVERITY_RANK[worst] ? state : worst),
@@ -73,8 +90,19 @@ export function mapRelayerStatus(input: {
   successRate: number;
 }): SubsystemState {
   if (!input.isOnline) return "failed";
-  if (input.failureCount > 0 && input.successRate < 50) return "failed";
-  if (input.failureCount > 0) return "degraded";
+  // Boundary values: NaN/Infinity/out-of-range numbers never count as healthy.
+  // Clamp successRate to [0, 100] and bound failureCount to a finite
+  // non-negative integer before comparing against the 50% threshold.
+  const failureCount = Number.isFinite(input.failureCount)
+    ? Math.max(0, Math.floor(input.failureCount))
+    : 0;
+  const successRate = Number.isFinite(input.successRate)
+    ? Math.min(100, Math.max(0, input.successRate))
+    : 0;
+  const hasInvalid = failureCount !== input.failureCount || successRate !== input.successRate;
+  if (failureCount <= 0 && !hasInvalid) return "healthy";
+  if (failureCount > 0 && successRate < 50) return "failed";
+  if (failureCount > 0 || hasInvalid) return "degraded";
   return "healthy";
 }
 
@@ -108,10 +136,10 @@ export function summarizeTransparencyHealth(
   input: Partial<TransparencyHealthInput>,
 ): TransparencyHealthSummary {
   const subsystems: TransparencyHealthInput = {
-    indexer: input.indexer ?? "unknown",
-    relayer: input.relayer ?? "unknown",
-    registry: input.registry ?? "unknown",
-    smokeTest: input.smokeTest ?? "unknown",
+    indexer: sanitizeSubsystemState(input.indexer),
+    relayer: sanitizeSubsystemState(input.relayer),
+    registry: sanitizeSubsystemState(input.registry),
+    smokeTest: sanitizeSubsystemState(input.smokeTest),
   };
 
   const states = Object.values(subsystems);
