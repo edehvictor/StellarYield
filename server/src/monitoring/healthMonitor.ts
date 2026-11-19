@@ -1,5 +1,6 @@
 import axios from "axios";
 import type { HealthStatus } from "../routes/health";
+import { AlertSeverity, normalizeSeverity } from "../utils/alertSeverity";
 
 const DISCORD_WEBHOOK_URL = process.env.DISCORD_WEBHOOK_URL;
 const HEALTH_ENDPOINT =
@@ -29,26 +30,53 @@ export async function startHealthMonitor() {
       if (status.sorobanRpc === "warning")
         issues.push("⚠️ Soroban RPC is degraded");
 
+      // Check Soroban RPC Failover Pool status
+      try {
+        const rpcEndpoint = HEALTH_ENDPOINT.replace(/\/api\/health$/, "/api/rpc/status");
+        const rpcResp = await axios.get(rpcEndpoint, { timeout: 5_000 });
+        if (rpcResp.data) {
+          if (rpcResp.data.status === "all_down") {
+            issues.push("❌ All Soroban RPC pool endpoints are DOWN");
+          } else if (rpcResp.data.status === "failover_active") {
+            issues.push(
+              `⚠️ Soroban RPC running on failover node: ${rpcResp.data.activeEndpoint} (priority ${rpcResp.data.activePriority})`,
+            );
+          }
+        }
+      } catch {
+        // Non-fatal if /api/rpc is temporarily unavailable
+      }
+
       if (issues.length > 0) {
         const severity = issues.some((i) => i.startsWith("❌"))
-          ? "HIGH"
-          : "MEDIUM";
+          ? AlertSeverity.HIGH
+          : AlertSeverity.MEDIUM;
         await sendAlert(issues.join("\n"), severity);
       }
     } catch {
-      await sendAlert("🚨 BACKEND API IS UNREACHABLE!", "CRITICAL");
+      await sendAlert("🚨 BACKEND API IS UNREACHABLE!", AlertSeverity.CRITICAL);
     }
   }, CHECK_INTERVAL);
 }
 
-async function sendAlert(message: string, severity: string) {
+export async function sendAlert(message: string, rawSeverity: string) {
+  // Normalize so every alert this service emits uses one of the four
+  // canonical AlertSeverity levels, regardless of what the caller passed.
+  const severity = normalizeSeverity(rawSeverity);
+
   if (!DISCORD_WEBHOOK_URL) {
     console.warn("Alert triggered but no webhook URL configured:", message);
     return;
   }
 
   const color =
-    severity === "CRITICAL" ? 0xff0000 : severity === "HIGH" ? 0xff6600 : 0xffaa00;
+    severity === AlertSeverity.CRITICAL
+      ? 0xff0000
+      : severity === AlertSeverity.HIGH
+        ? 0xff6600
+        : severity === AlertSeverity.MEDIUM
+          ? 0xffaa00
+          : 0xffdd55;
 
   const payload = {
     embeds: [

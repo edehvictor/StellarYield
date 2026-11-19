@@ -91,12 +91,97 @@ export function loadStoredSession(): WalletSession | null {
 
   try {
     const session = JSON.parse(stored) as WalletSession;
+    // Reject non-object values (e.g. the literal string "null" or a number)
+    if (!session || typeof session !== "object") {
+      window.localStorage.removeItem(STORAGE_KEY);
+      return null;
+    }
     return session;
   } catch (error) {
     console.error("Failed to restore wallet session", error);
     window.localStorage.removeItem(STORAGE_KEY);
     return null;
   }
+}
+
+export type SessionRecoveryStatus =
+  | "recovered"        // Session is valid and provider is available
+  | "degraded"         // Session loaded but provider unavailable or re-verification failed
+  | "expired"          // Session exceeded TTL — cleared
+  | "no_session";      // Nothing in storage
+
+export interface SessionRecoveryResult {
+  status: SessionRecoveryStatus;
+  session: WalletSession | null;
+}
+
+/**
+ * Attempt to recover a stored wallet session after a page reload.
+ *
+ * Recovery flow:
+ *  1. Load the persisted session. Return `no_session` if nothing is stored.
+ *  2. Reject expired sessions (TTL exceeded) — clears storage.
+ *  3. For extension wallets, probe the provider's `isAvailable()` and update
+ *     the `providerAvailable` flag on the session.
+ *  4. For smart-wallet sessions that have a `sessionKeyAddress`, re-verify
+ *     against the backend.  A network failure falls back to `degraded` rather
+ *     than clearing the session so the user can still read data.
+ *  5. Persist the updated session and broadcast `session-update` to other tabs.
+ *
+ * Never throws — all errors are captured as `degraded` status so the caller
+ * can choose whether to prompt the user to reconnect.
+ */
+export async function recoverSession(): Promise<SessionRecoveryResult> {
+  const session = loadStoredSession();
+
+  if (!session) {
+    return { status: "no_session", session: null };
+  }
+
+  if (isSessionExpired(session)) {
+    clearStoredSession();
+    return { status: "expired", session: null };
+  }
+
+  const EXTENSION_PROVIDERS: ExtensionWalletProviderId[] = ["freighter", "xbull", "albedo"];
+  const isExtensionProvider = (EXTENSION_PROVIDERS as WalletProviderId[]).includes(
+    session.providerId,
+  );
+
+  const recovered = { ...session };
+
+  if (isExtensionProvider) {
+    const adapter = getAdapter(session.providerId as ExtensionWalletProviderId);
+    let available = false;
+    try {
+      available = adapter ? await adapter.isAvailable() : false;
+    } catch {
+      available = false;
+    }
+
+    recovered.providerAvailable = available;
+
+    if (!available) {
+      saveSession(recovered);
+      return { status: "degraded", session: recovered };
+    }
+  } else {
+    // Smart wallet — re-verify against backend if credentials are present
+    const newStatus = await verifySmartWalletSession(session);
+    recovered.verificationStatus = newStatus;
+    if (newStatus === "verified") {
+      recovered.lastVerifiedAt = new Date().toISOString();
+      recovered.providerAvailable = true;
+    } else {
+      recovered.providerAvailable = false;
+      saveSession(recovered);
+      return { status: "degraded", session: recovered };
+    }
+  }
+
+  recovered.lastActivityAt = new Date().toISOString();
+  saveSession(recovered);
+  return { status: "recovered", session: recovered };
 }
 
 export function isSessionExpired(session: WalletSession): boolean {

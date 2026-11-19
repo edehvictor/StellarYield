@@ -50,6 +50,17 @@ export interface MerkleTreeResult {
 }
 
 /**
+ * Binds a leaf to the campaign and asset it is distributed under, matching the
+ * on-chain `compute_leaf`. The campaign ID is the distributor's epoch (u32).
+ */
+export interface LeafContext {
+  /** Distribution epoch the root is published under. */
+  campaignId: number;
+  /** Reward token contract address. */
+  asset: string;
+}
+
+/**
  * Compute the SHA-256 hash of a buffer.
  */
 function sha256(data: Buffer): Buffer {
@@ -58,17 +69,27 @@ function sha256(data: Buffer): Buffer {
 
 /**
  * Compute a leaf hash matching the on-chain formula:
- * SHA256(index || address_bytes || amount).
+ * SHA256([campaign_id || asset_bytes ||] index || address_bytes || amount).
  *
  * @param index   - The leaf index (uint32, big-endian).
  * @param address - The Stellar wallet address string.
  * @param amount  - The reward amount as a bigint-compatible string (int128, big-endian).
+ * @param context - Campaign ID and asset the leaf is bound to. The deployed
+ *                  contract always binds leaves, so pass it for on-chain roots.
  */
 export function computeLeaf(
   index: number,
   address: string,
   amount: string,
+  context?: LeafContext,
 ): Buffer {
+  const prefix: Buffer[] = [];
+  if (context) {
+    const campaignBuf = Buffer.alloc(4);
+    campaignBuf.writeUInt32BE(context.campaignId, 0);
+    prefix.push(campaignBuf, Buffer.from(context.asset, "utf-8"));
+  }
+
   // Index as 4-byte big-endian
   const indexBuf = Buffer.alloc(4);
   indexBuf.writeUInt32BE(index, 0);
@@ -85,7 +106,7 @@ export function computeLeaf(
     val >>= BigInt(8);
   }
 
-  return sha256(Buffer.concat([indexBuf, addressBuf, amountBuf]));
+  return sha256(Buffer.concat([...prefix, indexBuf, addressBuf, amountBuf]));
 }
 
 /**
@@ -106,16 +127,20 @@ export function hashPair(a: Buffer, b: Buffer): Buffer {
  * per-user proofs for on-chain verification.
  *
  * @param entries - The list of reward allocations.
+ * @param context - Campaign ID and asset to bind each leaf to.
  * @returns The Merkle root and per-user claim data with proofs.
  */
-export function generateMerkleTree(entries: RewardEntry[]): MerkleTreeResult {
+export function generateMerkleTree(
+  entries: RewardEntry[],
+  context?: LeafContext,
+): MerkleTreeResult {
   if (entries.length === 0) {
     return { root: "0".repeat(64), claims: {} };
   }
 
   // Compute leaves
   const leaves: Buffer[] = entries.map((entry) =>
-    computeLeaf(entry.index, entry.address, entry.amount),
+    computeLeaf(entry.index, entry.address, entry.amount, context),
   );
 
   // Build tree layers (bottom-up)
@@ -174,6 +199,7 @@ export function generateMerkleTree(entries: RewardEntry[]): MerkleTreeResult {
  * @param address - The claimant address.
  * @param amount  - The claim amount.
  * @param proof   - The Merkle proof (array of hex strings).
+ * @param context - Campaign ID and asset the leaf is bound to.
  * @returns Whether the proof is valid.
  */
 export function verifyProof(
@@ -182,8 +208,9 @@ export function verifyProof(
   address: string,
   amount: string,
   proof: string[],
+  context?: LeafContext,
 ): boolean {
-  let computed = computeLeaf(index, address, amount);
+  let computed = computeLeaf(index, address, amount, context);
 
   for (const proofHex of proof) {
     const proofElement = Buffer.from(proofHex, "hex");

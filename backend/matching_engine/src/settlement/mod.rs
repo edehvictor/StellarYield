@@ -3,6 +3,13 @@
 //! Handles on-chain settlement of matched trades with joint signatures.
 //! Creates atomic settlement payloads for Soroban contract execution.
 
+pub mod reconcile;
+
+pub use reconcile::{
+    LedgerError, PendingTrade, ReconcileConfig, ReconciliationReport, RetryStatus,
+    SettlementLedger, SettlementState, TradeRecord,
+};
+
 use crate::orderbook::Trade;
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
@@ -59,17 +66,14 @@ impl SettlementPayload {
         taker_key: &SigningKey,
         engine_key: &SigningKey,
     ) -> Result<Self, SettlementError> {
-        // Determine amounts based on trade side
-        let (amount0, amount1) = match trade.side {
-            crate::orderbook::Side::Buy => {
-                // Buyer receives token0, pays token1 (price is in token1 per token0)
-                (trade.amount, trade.amount.saturating_mul(trade.price))
+        // The token1 leg is amount * price. Saturating here would settle the
+        // wrong amount on-chain, so an overflow rejects the settlement instead.
+        let amount1 = trade.amount.checked_mul(trade.price).ok_or_else(|| {
+            SettlementError::AmountOverflow {
+                trade_id: trade.id.clone(),
             }
-            crate::orderbook::Side::Sell => {
-                // Seller receives token1, pays token0
-                (trade.amount, trade.amount.saturating_mul(trade.price))
-            }
-        };
+        })?;
+        let amount0 = trade.amount;
 
         let data = SettlementData {
             trade_id: trade.id.clone(),
@@ -181,6 +185,8 @@ pub enum SettlementError {
     DecodingError(#[from] hex::FromHexError),
     #[error("Signature conversion error")]
     SignatureConversionError,
+    #[error("Settlement amount overflow for trade {trade_id}")]
+    AmountOverflow { trade_id: String },
 }
 
 /// Settlement batch for multiple trades
@@ -199,10 +205,41 @@ pub struct SettlementBatch {
 }
 
 impl SettlementBatch {
+    /// Build a batch, saturating the totals at `u128::MAX` if they would
+    /// overflow. Prefer [`SettlementBatch::try_new`], which reports an overflow.
     pub fn new(settlements: Vec<SettlementPayload>) -> Self {
-        let total_amount0: u128 = settlements.iter().map(|s| s.data.amount0).sum();
-        let total_amount1: u128 = settlements.iter().map(|s| s.data.amount1).sum();
+        let total_amount0 = settlements
+            .iter()
+            .fold(0u128, |sum, s| sum.saturating_add(s.data.amount0));
+        let total_amount1 = settlements
+            .iter()
+            .fold(0u128, |sum, s| sum.saturating_add(s.data.amount1));
+        Self::with_totals(settlements, total_amount0, total_amount1)
+    }
 
+    /// Build a batch, failing if either total would overflow `u128`
+    pub fn try_new(settlements: Vec<SettlementPayload>) -> Result<Self, SettlementError> {
+        let mut total_amount0 = 0u128;
+        let mut total_amount1 = 0u128;
+        for settlement in &settlements {
+            let overflow = || SettlementError::AmountOverflow {
+                trade_id: settlement.data.trade_id.clone(),
+            };
+            total_amount0 = total_amount0
+                .checked_add(settlement.data.amount0)
+                .ok_or_else(overflow)?;
+            total_amount1 = total_amount1
+                .checked_add(settlement.data.amount1)
+                .ok_or_else(overflow)?;
+        }
+        Ok(Self::with_totals(settlements, total_amount0, total_amount1))
+    }
+
+    fn with_totals(
+        settlements: Vec<SettlementPayload>,
+        total_amount0: u128,
+        total_amount1: u128,
+    ) -> Self {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -414,10 +451,10 @@ mod tests {
 
         let trade = create_test_trade();
 
-        let s1 = SettlementPayload::from_trade(&trade, &maker_key, &taker_key, &engine_key)
-            .unwrap();
-        let s2 = SettlementPayload::from_trade(&trade, &maker_key, &taker_key, &engine_key)
-            .unwrap();
+        let s1 =
+            SettlementPayload::from_trade(&trade, &maker_key, &taker_key, &engine_key).unwrap();
+        let s2 =
+            SettlementPayload::from_trade(&trade, &maker_key, &taker_key, &engine_key).unwrap();
 
         // Same trade_id but each settlement gets a distinct nonce, so hashes differ
         assert_eq!(s1.data.trade_id, s2.data.trade_id);
@@ -429,5 +466,64 @@ mod tests {
             s1.data_hash, s2.data_hash,
             "different nonces must produce different settlement hashes"
         );
+    }
+
+    #[test]
+    fn test_settlement_rejects_amount_overflow() {
+        let mut csprng = OsRng;
+        let maker_key = SigningKey::generate(&mut csprng);
+        let taker_key = SigningKey::generate(&mut csprng);
+        let engine_key = SigningKey::generate(&mut csprng);
+
+        let mut trade = create_test_trade();
+        trade.amount = u128::MAX;
+        trade.price = 2;
+
+        let result = SettlementPayload::from_trade(&trade, &maker_key, &taker_key, &engine_key);
+        assert!(matches!(
+            result,
+            Err(SettlementError::AmountOverflow { ref trade_id }) if *trade_id == trade.id
+        ));
+    }
+
+    #[test]
+    fn test_settlement_at_the_largest_exact_amount() {
+        let mut csprng = OsRng;
+        let maker_key = SigningKey::generate(&mut csprng);
+        let taker_key = SigningKey::generate(&mut csprng);
+        let engine_key = SigningKey::generate(&mut csprng);
+
+        let mut trade = create_test_trade();
+        trade.amount = u128::MAX;
+        trade.price = 1;
+
+        let settlement =
+            SettlementPayload::from_trade(&trade, &maker_key, &taker_key, &engine_key).unwrap();
+        assert_eq!(settlement.data.amount0, u128::MAX);
+        assert_eq!(settlement.data.amount1, u128::MAX);
+    }
+
+    #[test]
+    fn test_batch_totals_overflow_is_reported_or_saturated() {
+        let mut csprng = OsRng;
+        let maker_key = SigningKey::generate(&mut csprng);
+        let taker_key = SigningKey::generate(&mut csprng);
+        let engine_key = SigningKey::generate(&mut csprng);
+
+        let mut trade = create_test_trade();
+        trade.amount = u128::MAX;
+        trade.price = 1;
+        let settlement =
+            SettlementPayload::from_trade(&trade, &maker_key, &taker_key, &engine_key).unwrap();
+
+        let batch = vec![settlement.clone(), settlement];
+        assert!(matches!(
+            SettlementBatch::try_new(batch.clone()),
+            Err(SettlementError::AmountOverflow { .. })
+        ));
+        // `new` keeps working and saturates instead of wrapping or panicking.
+        let saturated = SettlementBatch::new(batch);
+        assert_eq!(saturated.total_amount0, u128::MAX);
+        assert_eq!(saturated.total_amount1, u128::MAX);
     }
 }

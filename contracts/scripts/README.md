@@ -38,7 +38,9 @@ Edit `.env.deploy` with your values. The file is gitignored — never commit sec
 
 | Variable | Description |
 |---|---|
-| `STELLAR_RPC_URL` | Soroban RPC endpoint (default: Stellar testnet) |
+| `STELLAR_RPC_URL` | Primary Soroban RPC endpoint (default: Stellar testnet) |
+| `STELLAR_RPC_FALLBACK_URLS` | Optional comma-separated backup Soroban RPC endpoints for automatic failover |
+| `STELLAR_RPC_ALERT_WEBHOOK` | Optional webhook URL for deployment failover alert notifications |
 | `STELLAR_NETWORK_PASSPHRASE` | Network passphrase |
 | `STELLAR_SOURCE_ACCOUNT` | Secret key (`S...`) or named CLI identity |
 
@@ -70,6 +72,13 @@ This file can be consumed by other scripts or CI pipelines.
 ## Registry Validation
 
 The project maintains a global contract registry in `contracts/registry.json`. This file must be validated to ensure all required contracts have valid addresses for each supported network.
+The server verifies the registry against the checked-in `contracts/registry.sha256` SHA-256 digest during startup and fails closed if the digest is missing, malformed, or mismatched. `deploy.sh` refreshes the digest whenever it updates the registry; if you edit `registry.json` manually, regenerate the digest with:
+
+```bash
+node -e 'const fs=require("fs"),crypto=require("crypto");fs.writeFileSync("contracts/registry.sha256",crypto.createHash("sha256").update(fs.readFileSync("contracts/registry.json")).digest("hex")+"\n")'
+```
+
+Commit the registry and checksum together.
 
 To run the validator:
 ```bash

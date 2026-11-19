@@ -1,5 +1,7 @@
 import { Router, Request, Response } from "express";
 import { PrismaClient } from "@prisma/client";
+import { sendError } from "../utils/errorResponse";
+import { idempotency } from "../middleware/idempotency";
 
 const router = Router();
 const prisma = new PrismaClient();
@@ -65,8 +67,10 @@ router.post("/quote", (req: Request, res: Response) => {
   }
 });
 
-// POST /api/onramp/intent - Confirm intent and create pending transaction
-router.post("/intent", async (req: Request, res: Response) => {
+// POST /api/onramp/intent - Confirm intent and create pending transaction.
+// An `Idempotency-Key` header makes retries return the original transaction
+// instead of creating a duplicate PENDING deposit (see middleware/idempotency.ts).
+router.post("/intent", idempotency({ scope: "onramp.intent" }), async (req: Request, res: Response) => {
   try {
     getProviderConfig();
     const { quoteId, walletAddress } = req.body;
@@ -135,10 +139,10 @@ router.get("/status/:txId", async (req: Request, res: Response) => {
 router.post("/cancel", async (req: Request, res: Response) => {
   try {
     getProviderConfig();
-    const { txId } = req.body;
+    const { txId, walletAddress } = req.body;
 
-    if (!txId) {
-      res.status(400).json({ error: "Missing txId." });
+    if (typeof txId !== "string" || txId.trim() === "" || typeof walletAddress !== "string" || walletAddress.trim() === "") {
+      sendError(res, 400, "INVALID_REQUEST", "txId and walletAddress are required.");
       return;
     }
 
@@ -147,18 +151,23 @@ router.post("/cancel", async (req: Request, res: Response) => {
     });
 
     if (!tx) {
-      res.status(404).json({ error: "Transaction not found." });
+      sendError(res, 404, "INTENT_NOT_FOUND", "Transaction intent not found.");
+      return;
+    }
+
+    if (tx.walletAddress !== walletAddress) {
+      sendError(res, 403, "UNAUTHORIZED_INTENT", "The transaction intent belongs to a different client.");
       return;
     }
 
     if (tx.status !== "PENDING") {
-      res.status(400).json({ error: `Cannot cancel transaction in ${tx.status} state.` });
+      sendError(res, 409, "INVALID_INTENT_STATE", `Cannot cancel transaction in ${tx.status} state.`);
       return;
     }
 
     const updatedTx = await prisma.onRampTransaction.update({
       where: { providerTxId: txId },
-      data: { status: "FAILED" }, // Normalized status failure state
+      data: { status: "CANCELLED" },
     });
 
     res.json({ success: true, transaction: updatedTx });

@@ -501,6 +501,206 @@ export const FAILOVER_FIXTURES: FailoverFixture[] = [
   },
 ];
 
+// ── Backtest benchmark fixtures (volatile / flat / declining) ─────────────
+
+export type YieldMarketRegime = "volatile" | "flat" | "declining";
+
+/** Build a deterministic day count between two ISO dates (inclusive). */
+export function countBacktestDays(startDate: string, endDate: string): number {
+  const start = new Date(startDate).getTime();
+  const end = new Date(endDate).getTime();
+  return Math.round((end - start) / 86_400_000) + 1;
+}
+
+export function buildVolatileApySeries(days: number): number[] {
+  return Array.from({ length: days }, (_, i) => (i % 2 === 0 ? 15 : 3));
+}
+
+export function buildFlatApySeries(days: number, apy = 8.5): number[] {
+  return Array.from({ length: days }, () => apy);
+}
+
+export function buildDecliningApySeries(days: number, startApy = 10, endApy = 7): number[] {
+  if (days <= 1) return [startApy];
+  return Array.from({ length: days }, (_, i) =>
+    startApy - ((startApy - endApy) * i) / (days - 1),
+  );
+}
+
+export interface BacktestBenchmarkFixture {
+  description: string;
+  regime: YieldMarketRegime;
+  input: FailoverFixture["input"] & {
+    allocations: Array<
+      FailoverFixture["input"]["allocations"][number] & { dailyApy?: number[] }
+    >;
+  };
+  expectedOutput: {
+    snapshotCount: number;
+    portfolioReturnPctRange: { min: number; max: number };
+    passiveReturnPctRange: { min: number; max: number };
+    rebalanceCountMin: number;
+    rebalanceCountMax: number;
+    totalFeesUsdMin: number;
+    maxDrawdownPctMax?: number;
+  };
+}
+
+const BENCHMARK_WINDOW = {
+  startDate: "2025-01-01",
+  endDate: "2025-03-31",
+  initialValueUsd: 100_000,
+} as const;
+
+const BENCHMARK_DAYS = countBacktestDays(BENCHMARK_WINDOW.startDate, BENCHMARK_WINDOW.endDate);
+
+const benchmarkAllocations = (dailyApy: number[]) => [
+  { label: "Blend-Stable", targetWeight: 60, apy: dailyApy[0], dailyApy },
+  { label: "Blend-Growth", targetWeight: 40, apy: dailyApy[0], dailyApy },
+];
+
+export const BACKTEST_BENCHMARK_FIXTURES: BacktestBenchmarkFixture[] = [
+  {
+    description: "Volatile yield market with alternating high/low APY",
+    regime: "volatile",
+    input: {
+      ...BENCHMARK_WINDOW,
+      allocations: benchmarkAllocations(buildVolatileApySeries(BENCHMARK_DAYS)),
+      strategy: "schedule",
+      rebalanceIntervalDays: 30,
+    },
+    expectedOutput: {
+      snapshotCount: BENCHMARK_DAYS,
+      portfolioReturnPctRange: { min: 1.5, max: 4.5 },
+      passiveReturnPctRange: { min: 1.5, max: 4.5 },
+      rebalanceCountMin: 2,
+      rebalanceCountMax: 3,
+      totalFeesUsdMin: 0,
+      maxDrawdownPctMax: 5,
+    },
+  },
+  {
+    description: "Flat yield market with stable APY",
+    regime: "flat",
+    input: {
+      ...BENCHMARK_WINDOW,
+      allocations: benchmarkAllocations(buildFlatApySeries(BENCHMARK_DAYS)),
+      strategy: "schedule",
+      rebalanceIntervalDays: 30,
+    },
+    expectedOutput: {
+      snapshotCount: BENCHMARK_DAYS,
+      portfolioReturnPctRange: { min: 2.0, max: 2.3 },
+      passiveReturnPctRange: { min: 2.0, max: 2.3 },
+      rebalanceCountMin: 2,
+      rebalanceCountMax: 3,
+      totalFeesUsdMin: 0,
+      maxDrawdownPctMax: 0.5,
+    },
+  },
+  {
+    description: "Declining yield market with linear APY drop",
+    regime: "declining",
+    input: {
+      ...BENCHMARK_WINDOW,
+      allocations: benchmarkAllocations(buildDecliningApySeries(BENCHMARK_DAYS)),
+      strategy: "schedule",
+      rebalanceIntervalDays: 30,
+    },
+    expectedOutput: {
+      snapshotCount: BENCHMARK_DAYS,
+      portfolioReturnPctRange: { min: 1.6, max: 2.2 },
+      passiveReturnPctRange: { min: 1.6, max: 2.2 },
+      rebalanceCountMin: 2,
+      rebalanceCountMax: 3,
+      totalFeesUsdMin: 0,
+      maxDrawdownPctMax: 1,
+    },
+  },
+];
+
+function computeMaxDrawdownPct(
+  snapshots: Array<{ portfolioValue: number }>,
+  initialValue: number,
+): number {
+  let peak = initialValue;
+  let maxDrawdown = 0;
+  for (const snap of snapshots) {
+    peak = Math.max(peak, snap.portfolioValue);
+    const drawdown = peak > 0 ? ((peak - snap.portfolioValue) / peak) * 100 : 0;
+    maxDrawdown = Math.max(maxDrawdown, drawdown);
+  }
+  return maxDrawdown;
+}
+
+export function validateBacktestBenchmarkResult(
+  fixture: BacktestBenchmarkFixture,
+  result: {
+    portfolioReturnPct: number;
+    passiveReturnPct: number;
+    rebalanceCount: number;
+    totalFeesUsd: number;
+    snapshots: Array<{ portfolioValue: number }>;
+    finalPortfolioValue: number;
+  },
+): { valid: boolean; errors: string[] } {
+  const errors: string[] = [];
+  const exp = fixture.expectedOutput;
+
+  if (result.snapshots.length !== exp.snapshotCount) {
+    errors.push(`Expected ${exp.snapshotCount} snapshots, got ${result.snapshots.length}`);
+  }
+
+  if (result.portfolioReturnPct < exp.portfolioReturnPctRange.min) {
+    errors.push(
+      `Portfolio return ${result.portfolioReturnPct}% below min ${exp.portfolioReturnPctRange.min}%`,
+    );
+  }
+  if (result.portfolioReturnPct > exp.portfolioReturnPctRange.max) {
+    errors.push(
+      `Portfolio return ${result.portfolioReturnPct}% above max ${exp.portfolioReturnPctRange.max}%`,
+    );
+  }
+
+  if (result.passiveReturnPct < exp.passiveReturnPctRange.min) {
+    errors.push(
+      `Passive return ${result.passiveReturnPct}% below min ${exp.passiveReturnPctRange.min}%`,
+    );
+  }
+  if (result.passiveReturnPct > exp.passiveReturnPctRange.max) {
+    errors.push(
+      `Passive return ${result.passiveReturnPct}% above max ${exp.passiveReturnPctRange.max}%`,
+    );
+  }
+
+  if (result.rebalanceCount < exp.rebalanceCountMin) {
+    errors.push(`Expected >= ${exp.rebalanceCountMin} rebalances, got ${result.rebalanceCount}`);
+  }
+  if (result.rebalanceCount > exp.rebalanceCountMax) {
+    errors.push(`Expected <= ${exp.rebalanceCountMax} rebalances, got ${result.rebalanceCount}`);
+  }
+
+  if (result.totalFeesUsd < exp.totalFeesUsdMin) {
+    errors.push(`Expected fees >= ${exp.totalFeesUsdMin}, got ${result.totalFeesUsd}`);
+  }
+
+  if (typeof exp.maxDrawdownPctMax === "number") {
+    const drawdown = computeMaxDrawdownPct(result.snapshots, fixture.input.initialValueUsd);
+    if (drawdown > exp.maxDrawdownPctMax) {
+      errors.push(`Max drawdown ${drawdown.toFixed(2)}% exceeds ${exp.maxDrawdownPctMax}%`);
+    }
+  }
+
+  if (result.finalPortfolioValue <= fixture.input.initialValueUsd && fixture.regime !== "declining") {
+    // flat and volatile benchmarks should still grow over 90 days at these APYs
+    if (fixture.regime === "flat" || fixture.regime === "volatile") {
+      errors.push("Expected final portfolio value above initial for growing benchmark");
+    }
+  }
+
+  return { valid: errors.length === 0, errors };
+}
+
 export function validateRebalanceResult(
   fixture: RebalanceFixture,
   result: any,

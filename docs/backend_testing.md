@@ -358,7 +358,7 @@ The following table maps each route file in `server/src/routes/` to its primary 
 | `export.ts` | `POST /export/preview`, `/export/download` - Tax lot data previews and CSV export file downloads | `exportService.ts` | `exportService.test.ts`, `csvExport.test.ts`, `taxLotPreview.test.ts` |
 | `fees.ts` | `/` - Fetches current transactional network gas and protocol fee details | `feeOracleService.ts` | N/A |
 | `fragmentation.ts` | `GET /fragmentation`, `/fragmentation/history` - Retrieve liquidity fragmentation metrics & historical TVL splits | `MockFragmentationService`, `MockHistoricalService` | `fragmentation.test.ts`, `fragmentationHistory.test.ts` |
-| `governance.ts` | `/` - Governance voting shifts APY impact forecasting | `governanceForecastService.ts` | `governanceForecast.test.ts` |
+| `governance.ts` | `POST /forecast`, `POST /quorum-progress`, `POST /proposals/attachments/validate` - governance impact forecasting, signer quorum, and attachment validation with privacy-safe stage diagnostics | `governanceForecastService.ts`, `signerQuorumService.ts` | `governanceForecast.test.ts`, `governanceDiagnostics.test.ts`, `governanceProposalAttachments.test.ts` |
 | `health.ts` | `GET /` - Basic service status health and indexer synchronization check | `PrismaClient` (direct database access) | `health.test.ts` |
 | `incidents.ts` | `GET /`, `GET /:id`, `POST /`, `PATCH /:id/resolve`, `GET /:id/recommendations` - Track protocol risk incidents (hack/pause) | `incidentService.ts` | `incidentService.test.ts` |
 | `indexer.ts` | `/` - Block indexer sync delay monitoring | `stellarNetworkService.ts` | `indexerStatus.test.ts` |

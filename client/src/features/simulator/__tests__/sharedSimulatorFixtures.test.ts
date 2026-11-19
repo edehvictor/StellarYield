@@ -5,12 +5,14 @@ import {
   REBALANCE_FIXTURES,
   REBALANCE_EDGE_CASES,
   FAILOVER_FIXTURES,
+  BACKTEST_BENCHMARK_FIXTURES,
   validateSimulationResult,
   validateRebalanceResult,
   validateFailoverResult,
   type SimulatorFixture,
   type RebalanceFixture,
   type FailoverFixture,
+  type BacktestBenchmarkFixture,
 } from '../../../../../shared/test-fixtures/simulatorFixtures';
 
 describe('Shared Simulator Fixtures – Client', () => {
@@ -132,6 +134,32 @@ describe('Shared Simulator Fixtures – Client', () => {
         const end = new Date(fixture.input.endDate);
         expect(start.getTime()).toBeLessThan(end.getTime());
         expect(fixture.input.initialValueUsd).toBeGreaterThan(0);
+      });
+    }
+  });
+
+  describe('Backtest benchmark fixture contracts (#1043)', () => {
+    it('exports volatile, flat, and declining benchmark fixtures', () => {
+      expect(BACKTEST_BENCHMARK_FIXTURES).toHaveLength(3);
+      expect(BACKTEST_BENCHMARK_FIXTURES.map((f) => f.regime).sort()).toEqual([
+        'declining',
+        'flat',
+        'volatile',
+      ]);
+    });
+
+    for (const fixture of BACKTEST_BENCHMARK_FIXTURES) {
+      it(`benchmark "${fixture.description}" has daily APY schedules`, () => {
+        const fixtureShape = fixture as BacktestBenchmarkFixture;
+        expect(fixtureShape.input.allocations.length).toBeGreaterThan(0);
+        for (const alloc of fixtureShape.input.allocations) {
+          expect(alloc.dailyApy?.length).toBe(fixtureShape.expectedOutput.snapshotCount);
+        }
+        const weightSum = fixtureShape.input.allocations.reduce(
+          (sum, alloc) => sum + alloc.targetWeight,
+          0,
+        );
+        expect(weightSum).toBeCloseTo(100, 0);
       });
     }
   });

@@ -453,4 +453,84 @@ describe('RebalanceQueueService', () => {
       expect(result.status).toBe(REBALANCE_STATUS.CANCELLED);
     });
   });
+
+  // ── Queue health summary (#1076) ─────────────────────────────────────────
+
+  describe('getQueueHealthSummary', () => {
+    const NOW = new Date('2026-06-30T12:00:00.000Z');
+
+    it('queries only PENDING, PROCESSING, and FAILED entries', async () => {
+      mockPrisma.rebalanceQueueEntry.findMany.mockResolvedValue([]);
+
+      await service.getQueueHealthSummary(undefined, NOW);
+
+      expect(mockPrisma.rebalanceQueueEntry.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({
+            status: {
+              in: [REBALANCE_STATUS.PENDING, REBALANCE_STATUS.PROCESSING, REBALANCE_STATUS.FAILED],
+            },
+          }),
+        }),
+      );
+    });
+
+    it('scopes the query to a vault when vaultId is provided', async () => {
+      mockPrisma.rebalanceQueueEntry.findMany.mockResolvedValue([]);
+
+      await service.getQueueHealthSummary('vault-1', NOW);
+
+      expect(mockPrisma.rebalanceQueueEntry.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({ vaultId: 'vault-1' }),
+        }),
+      );
+    });
+
+    it('returns an all-zero summary for an empty result set', async () => {
+      mockPrisma.rebalanceQueueEntry.findMany.mockResolvedValue([]);
+
+      const result = await service.getQueueHealthSummary(undefined, NOW);
+
+      expect(result.total).toBe(0);
+      expect(result.active).toBe(0);
+      expect(result.deadLettered).toBe(0);
+    });
+
+    it('classifies a mixed result set into the correct buckets', async () => {
+      mockPrisma.rebalanceQueueEntry.findMany.mockResolvedValue([
+        {
+          status: REBALANCE_STATUS.PENDING,
+          executionType: EXECUTION_TYPE.FULL,
+          attemptCount: 0,
+          maxRetries: 3,
+          nextRetryAt: null,
+          deferredUntil: null,
+        },
+        {
+          status: REBALANCE_STATUS.PROCESSING,
+          executionType: EXECUTION_TYPE.FULL,
+          attemptCount: 0,
+          maxRetries: 3,
+          nextRetryAt: null,
+          deferredUntil: null,
+        },
+        {
+          status: REBALANCE_STATUS.FAILED,
+          executionType: EXECUTION_TYPE.FULL,
+          attemptCount: 3,
+          maxRetries: 3,
+          nextRetryAt: null,
+          deferredUntil: null,
+        },
+      ]);
+
+      const result = await service.getQueueHealthSummary(undefined, NOW);
+
+      expect(result.waiting).toBe(1);
+      expect(result.active).toBe(1);
+      expect(result.deadLettered).toBe(1);
+      expect(result.total).toBe(3);
+    });
+  });
 });

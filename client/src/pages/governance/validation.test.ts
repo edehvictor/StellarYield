@@ -4,6 +4,8 @@ import {
   validateNumber,
   getRiskLevel,
   validateTransactionBuilder,
+  validateSignerSet,
+  validateThresholdForExecution,
 } from "./validation";
 import type { AdminActionOption } from "./types";
 
@@ -158,10 +160,10 @@ describe("validateTransactionBuilder", () => {
       ],
     };
     const result = validateTransactionBuilder(action, validWallet, {
-      keeper: "GBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
+      keeper: validWallet,
     });
     expect(result?.isValid).toBe(true);
-    expect(result?.target).toContain("GBBBBBB");
+    expect(result?.target).toContain("GAAAAAA");
   });
 
   it("rejects register keeper with invalid address", () => {
@@ -337,11 +339,11 @@ describe("validateTransactionBuilder", () => {
       ],
     };
     const result = validateTransactionBuilder(action, validWallet, {
-      target: "GCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC",
+      target: validWallet,
       amount: "5000000",
     });
     expect(result?.isValid).toBe(true);
-    expect(result?.target).toContain("GCCCCCC");
+    expect(result?.target).toContain("GAAAAAA");
   });
 
   it("rejects rescue_funds with zero amount", () => {
@@ -367,7 +369,7 @@ describe("validateTransactionBuilder", () => {
       ],
     };
     const result = validateTransactionBuilder(action, validWallet, {
-      target: "GCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC",
+      target: validWallet,
       amount: "0",
     });
     expect(result?.isValid).toBe(false);
@@ -390,10 +392,10 @@ describe("validateTransactionBuilder", () => {
       ],
     };
     const result = validateTransactionBuilder(action, validWallet, {
-      new_admin: "GDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD",
+      new_admin: validWallet,
     });
     expect(result?.isValid).toBe(true);
-    expect(result?.target).toContain("GDDDDDD");
+    expect(result?.target).toContain("GAAAAAA");
     expect(result?.risk).toBe("critical");
   });
 
@@ -425,5 +427,130 @@ describe("validateTransactionBuilder", () => {
     });
     expect(result?.isValid).toBe(false);
     expect(result?.errors.length).toBeGreaterThan(1);
+  });
+});
+
+const SIGNER_A = "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF";
+const SIGNER_B = "GBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB";
+const SIGNER_C = "GCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC";
+
+describe("validateSignerSet", () => {
+  it("rejects empty signer set", () => {
+    const result = validateSignerSet([], 1);
+    expect(result.valid).toBe(false);
+    expect(result.errors).toContain("At least one signer is required");
+  });
+
+  it("accepts valid single signer with threshold 1", () => {
+    const result = validateSignerSet([SIGNER_A], 1);
+    expect(result.valid).toBe(true);
+    expect(result.errors).toHaveLength(0);
+  });
+
+  it("accepts valid multi-signer set", () => {
+    const result = validateSignerSet([SIGNER_A, SIGNER_B, SIGNER_C], 2);
+    expect(result.valid).toBe(true);
+  });
+
+  it("rejects duplicate signers", () => {
+    const result = validateSignerSet([SIGNER_A, SIGNER_A], 2);
+    expect(result.valid).toBe(false);
+    expect(result.errors.some((e) => e.includes("Duplicate"))).toBe(true);
+  });
+
+  it("rejects invalid signer address", () => {
+    const result = validateSignerSet([SIGNER_A, "INVALID"], 1);
+    expect(result.valid).toBe(false);
+    expect(result.errors.some((e) => e.includes("Invalid signer"))).toBe(true);
+  });
+
+  it("rejects threshold exceeding signer count", () => {
+    const result = validateSignerSet([SIGNER_A, SIGNER_B], 3);
+    expect(result.valid).toBe(false);
+    expect(result.errors.some((e) => e.includes("exceeds number of signers"))).toBe(true);
+  });
+
+  it("rejects zero threshold", () => {
+    const result = validateSignerSet([SIGNER_A], 0);
+    expect(result.valid).toBe(false);
+    expect(result.errors.some((e) => e.includes("at least 1"))).toBe(true);
+  });
+
+  it("accepts threshold equal to signer count", () => {
+    const result = validateSignerSet([SIGNER_A, SIGNER_B], 2);
+    expect(result.valid).toBe(true);
+  });
+});
+
+describe("validateThresholdForExecution", () => {
+  it("rejects when no signers configured", () => {
+    const result = validateThresholdForExecution([], 1, []);
+    expect(result.valid).toBe(false);
+    expect(result.errors.some((e) => e.includes("No signers"))).toBe(true);
+  });
+
+  it("rejects insufficient signatures", () => {
+    const result = validateThresholdForExecution(
+      [{ publicKey: SIGNER_A, signedAt: Date.now() }],
+      2,
+      [SIGNER_A, SIGNER_B],
+    );
+    expect(result.valid).toBe(false);
+    expect(result.errors.some((e) => e.includes("Insufficient"))).toBe(true);
+  });
+
+  it("accepts sufficient valid signatures", () => {
+    const result = validateThresholdForExecution(
+      [
+        { publicKey: SIGNER_A, signedAt: Date.now() },
+        { publicKey: SIGNER_B, signedAt: Date.now() },
+      ],
+      2,
+      [SIGNER_A, SIGNER_B, SIGNER_C],
+    );
+    expect(result.valid).toBe(true);
+  });
+
+  it("rejects duplicate signatures from same signer", () => {
+    const result = validateThresholdForExecution(
+      [
+        { publicKey: SIGNER_A, signedAt: Date.now() },
+        { publicKey: SIGNER_A, signedAt: Date.now() + 1000 },
+      ],
+      1,
+      [SIGNER_A, SIGNER_B],
+    );
+    expect(result.valid).toBe(false);
+    expect(result.errors.some((e) => e.includes("Duplicate signature"))).toBe(true);
+  });
+
+  it("ignores signatures from non-configured signers", () => {
+    const unknownSigner = "GDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD";
+    const result = validateThresholdForExecution(
+      [
+        { publicKey: SIGNER_A, signedAt: Date.now() },
+        { publicKey: unknownSigner, signedAt: Date.now() },
+      ],
+      2,
+      [SIGNER_A, SIGNER_B],
+    );
+    expect(result.valid).toBe(false);
+    expect(result.errors.some((e) => e.includes("Insufficient"))).toBe(true);
+  });
+
+  it("rejects threshold exceeding configured signers", () => {
+    const result = validateThresholdForExecution(
+      [{ publicKey: SIGNER_A, signedAt: Date.now() }],
+      5,
+      [SIGNER_A, SIGNER_B],
+    );
+    expect(result.valid).toBe(false);
+    expect(result.errors.some((e) => e.includes("exceeds configured"))).toBe(true);
+  });
+
+  it("rejects zero threshold", () => {
+    const result = validateThresholdForExecution([], 0, [SIGNER_A]);
+    expect(result.valid).toBe(false);
+    expect(result.errors.some((e) => e.includes("at least 1"))).toBe(true);
   });
 });

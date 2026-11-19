@@ -3,6 +3,8 @@ import {
   buildRebalanceRequest,
   summarizeApyDelta,
   hasWarnings,
+  isSnapshotStale,
+  formatSnapshotAge,
   type RebalancePreview,
 } from "./rebalancePreview";
 import type { VaultAllocation } from "./types";
@@ -89,5 +91,63 @@ describe("hasWarnings", () => {
     };
     expect(hasWarnings(base)).toBe(false);
     expect(hasWarnings({ ...base, warnings: ["High fees: …"] })).toBe(true);
+  });
+});
+
+describe("isSnapshotStale / formatSnapshotAge (#1149)", () => {
+  const base: RebalancePreview = {
+    isSimulationOnly: true,
+    legs: [],
+    blendedApyBefore: 6,
+    blendedApyAfter: 6,
+    apyDeltaPct: 0,
+    totalTurnoverUsd: 0,
+    estimatedFeeUsd: 0,
+    maxDriftPct: 0,
+    warnings: [],
+  };
+
+  it("is false for a fresh snapshot", () => {
+    const preview: RebalancePreview = {
+      ...base,
+      snapshotFreshness: {
+        snapshotAgeMs: 60_000,
+        isStale: false,
+        staleSnapshotThresholdMs: 1_800_000,
+      },
+    };
+    expect(isSnapshotStale(preview)).toBe(false);
+    expect(formatSnapshotAge(preview)).toBe("1 minute old");
+  });
+
+  it("is true for a stale snapshot with a known age", () => {
+    const preview: RebalancePreview = {
+      ...base,
+      snapshotFreshness: {
+        snapshotAgeMs: 3_600_000,
+        isStale: true,
+        staleSnapshotThresholdMs: 1_800_000,
+      },
+    };
+    expect(isSnapshotStale(preview)).toBe(true);
+    expect(formatSnapshotAge(preview)).toBe("1 hour old");
+  });
+
+  it("is true for a missing/unknown snapshot age (safe fallback, never silently fresh)", () => {
+    const preview: RebalancePreview = {
+      ...base,
+      snapshotFreshness: {
+        snapshotAgeMs: null,
+        isStale: true,
+        staleSnapshotThresholdMs: 1_800_000,
+      },
+    };
+    expect(isSnapshotStale(preview)).toBe(true);
+    expect(formatSnapshotAge(preview)).toBeNull();
+  });
+
+  it("defaults to not-stale when snapshotFreshness is entirely absent (back-compat with old responses)", () => {
+    expect(isSnapshotStale(base)).toBe(false);
+    expect(formatSnapshotAge(base)).toBeNull();
   });
 });

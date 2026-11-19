@@ -3,7 +3,7 @@
  * Drag-slider allocation UI for distributing capital across multiple vaults
  */
 
-import { useState, useCallback, useMemo } from "react";
+import { useState, useCallback, useMemo, useRef } from "react";
 import { Zap, AlertCircle, CheckCircle2 } from "lucide-react";
 import TxStatusTimeline from "../../components/transaction/TxStatusTimeline";
 import type { TxPhase } from "../../services/transactionPhase";
@@ -16,6 +16,11 @@ import {
   applyPreset,
 } from "./portfolioUtils";
 import RebalancePreview from "./RebalancePreviewPanel";
+import AllocationDeltaPreview from "./AllocationDeltaPreview";
+import SignatureRejectionRecovery from "../wallet/SignatureRejectionRecovery";
+import { useSignatureRecovery } from "../wallet/useSignatureRecovery";
+import DustAllocationWarning from "./DustAllocationWarning";
+import { validatePortfolioDust } from "../../../../shared/types/portfolioDust";
 import { useWallet } from "../../context/useWallet";
 import { deposit } from "../../services/soroban";
 
@@ -40,7 +45,12 @@ export default function PortfolioBuilder({
   walletAddress,
   availableVaults,
 }: PortfolioBuilderProps) {
-  const { signTransaction } = useWallet();
+  const {
+    signTransaction,
+    providerId,
+    connectWallet,
+    disconnectWallet,
+  } = useWallet();
   const [totalAmount, setTotalAmount] = useState("");
   const [allocations, setAllocations] = useState<VaultAllocation[]>(() =>
     buildInitialAllocations(availableVaults),
@@ -49,9 +59,37 @@ export default function PortfolioBuilder({
   const [baselineAllocations] = useState<VaultAllocation[]>(() =>
     buildInitialAllocations(availableVaults),
   );
+  // Last-confirmed/saved allocations — used by AllocationDeltaPreview as the
+  // "before" snapshot so users can review pending changes before saving.
+  const [savedAllocations, setSavedAllocations] = useState<VaultAllocation[]>(
+    () => buildInitialAllocations(availableVaults),
+  );
+  const [isSavingAllocation, setIsSavingAllocation] = useState(false);
+  const [isResolvingDust, setIsResolvingDust] = useState(false);
   const [txPhase, setTxPhase] = useState<TxPhase>("idle");
   const [error, setError] = useState("");
   const [executeTx, setExecuteTx] = useState(false);
+  const [completedCount, setCompletedCount] = useState(0);
+  // Index of the vault whose deposit failed, used to resume a batch after a
+  // rejected signature instead of re-depositing into vaults that succeeded.
+  const failedIndexRef = useRef(0);
+  const activeAllocationsRef = useRef<VaultAllocation[]>([]);
+
+  /**
+   * Confirm the current draft allocations as the new saved state.
+   * In a production flow this would persist to a backend; here it updates
+   * the local saved snapshot so the delta preview reflects the new baseline.
+   */
+  const handleSaveAllocation = useCallback(async () => {
+    setIsSavingAllocation(true);
+    try {
+      // Simulate async save (replace with real API call if needed)
+      await new Promise<void>((resolve) => setTimeout(resolve, 400));
+      setSavedAllocations([...allocations]);
+    } finally {
+      setIsSavingAllocation(false);
+    }
+  }, [allocations]);
 
   const handlePresetApply = useCallback(
     (preset: PortfolioPreset) => {
@@ -62,19 +100,48 @@ export default function PortfolioBuilder({
 
   const isValid = useMemo(() => isValidAllocation(allocations), [allocations]);
 
+  // Parse once and treat a decimal/negative/empty input as "no amount" rather
+  // than letting BigInt throw during render.
+  const totalAmountValue = useMemo<bigint | null>(() => {
+    const trimmed = totalAmount.trim();
+    if (!/^\d+$/.test(trimmed)) return null;
+    try {
+      return BigInt(trimmed);
+    } catch {
+      return null;
+    }
+  }, [totalAmount]);
+
   const blendedApy = useMemo(
     () => calculateBlendedApy(allocations),
     [allocations],
   );
 
   const distributedAllocations = useMemo(() => {
-    if (!totalAmount || !isValid) return allocations;
+    if (totalAmountValue === null || totalAmountValue <= 0n || !isValid) {
+      return allocations;
+    }
     try {
-      return distributeAmount(BigInt(totalAmount), allocations);
+      return distributeAmount(totalAmountValue, allocations);
     } catch {
       return allocations;
     }
-  }, [totalAmount, allocations, isValid]);
+  }, [totalAmountValue, allocations, isValid]);
+
+  const dustValidation = useMemo(() => {
+    try {
+      return validatePortfolioDust({
+        totalAmount: totalAmountValue ?? 0n,
+        allocations,
+      });
+    } catch {
+      // The builder already surfaces malformed weight/amount input; dust
+      // validation must never make the panel crash.
+      return null;
+    }
+  }, [totalAmountValue, allocations]);
+
+  const hasDustAllocations = Boolean(dustValidation && !dustValidation.valid);
 
   const handleWeightChange = useCallback(
     (index: number, newWeight: number) => {
@@ -85,14 +152,52 @@ export default function PortfolioBuilder({
     [allocations],
   );
 
+  /**
+   * Execute the current allocation batch, starting at `startIndex`.
+   * A rejected signature is classified into the typed recovery flow; retrying
+   * resumes at the failed vault so already-signed deposits are not repeated.
+   */
+  async function executeDeposits(startIndex: number) {
+  const handleAutoResolveDust = useCallback(() => {
+    if (!dustValidation?.suggestedAllocations) return;
+
+    setIsResolvingDust(true);
+    try {
+      const byId = new Map(
+        allocations.map((allocation) => [allocation.vaultContractId, allocation]),
+      );
+      const rebalanced = dustValidation.suggestedAllocations.flatMap(
+        (suggestion) => {
+          const existing = byId.get(suggestion.vaultContractId);
+          if (!existing) return [];
+          return [{ ...existing, weight: suggestion.weight, amount: 0n }];
+        },
+      );
+      if (rebalanced.length > 0) {
+        setAllocations(normalizeWeights(rebalanced));
+        setError("");
+      }
+    } finally {
+      setIsResolvingDust(false);
+    }
+  }, [allocations, dustValidation]);
+
   const handleExecuteDeposits = useCallback(async () => {
     if (!walletAddress) {
       setError("Wallet not connected");
       return;
     }
 
-    if (!totalAmount || !isValid) {
+    if (totalAmountValue === null || totalAmountValue <= 0n || !isValid) {
       setError("Invalid allocation or amount");
+      return;
+    }
+
+    if (hasDustAllocations) {
+      setError(
+        dustValidation?.message ||
+          "Some allocations are too small to deposit; adjust them before continuing.",
+      );
       return;
     }
 
@@ -104,10 +209,19 @@ export default function PortfolioBuilder({
         const activeAllocations = distributedAllocations.filter(
           (a) => a.amount > 0n,
         );
+        activeAllocationsRef.current = activeAllocations;
         if (activeAllocations.length === 0) {
           throw new Error("No allocations to execute");
         }
-        for (const alloc of activeAllocations) {
+
+        const resumeFrom = Math.min(startIndex, activeAllocations.length - 1);
+        if (resumeFrom === 0) {
+          failedIndexRef.current = 0;
+          setCompletedCount(0);
+        }
+
+        for (let index = resumeFrom; index < activeAllocations.length; index += 1) {
+          const alloc = activeAllocations[index];
           // Deposit into each vault with 1% slippage limit
           const minShares = (alloc.amount * 99n) / 100n;
           const res = await deposit(
@@ -119,11 +233,24 @@ export default function PortfolioBuilder({
             signTransaction,
           );
           if (!res.success) {
+            const rejection = recovery.fail(
+              res.error || `Failed to deposit into ${alloc.vaultName}`,
+            );
+            if (rejection) {
+              failedIndexRef.current = index;
+              setError("");
+              setTxPhase("failure");
+              return;
+            }
             throw new Error(
               res.error || `Failed to deposit into ${alloc.vaultName}`,
             );
           }
+          setCompletedCount(index + 1);
         }
+
+        failedIndexRef.current = 0;
+        recovery.reset();
         setTxPhase("success");
       } else {
         // Mock flow
@@ -139,19 +266,75 @@ export default function PortfolioBuilder({
         setTxPhase("polling");
         await new Promise((resolve) => setTimeout(resolve, 2000));
 
+        recovery.reset();
         setTxPhase("success");
       }
     } catch (err) {
+      const rejection = recovery.fail(err);
       setTxPhase("failure");
-      setError(err instanceof Error ? err.message : "Deposit failed");
+      if (rejection) {
+        failedIndexRef.current = startIndex;
+        setError("");
+      } else {
+        setError(err instanceof Error ? err.message : "Deposit failed");
+      }
     }
-  }, [
+  }
+
+  const recovery = useSignatureRecovery({
+    action: "portfolio_deposit",
+    provider: providerId,
     walletAddress,
-    totalAmount,
+    onRetry: () => executeDeposits(failedIndexRef.current),
+    getProgress: () => ({
+      completed: completedCount,
+      total: activeAllocationsRef.current.length,
+    }),
+  });
+
+  // Plain function (not useCallback): it must read the current render's
+  // amount, allocations, and execute toggle each time it is clicked.
+  // Resume at the failed vault if a batch was interrupted.
+  const handleExecuteDeposits = () => executeDeposits(failedIndexRef.current);
+
+  const handleRetrySignature = async () => {
+    await recovery.retry();
+  };
+
+  const handleReconnectWallet = async () => {
+    const connected = await connectWallet();
+    if (connected && recovery.rejection) {
+      // A deliberate reconnect starts a fresh attempt budget; retry directly
+      // so it also works after the automatic retry limit is reached.
+      recovery.reset();
+      await executeDeposits(failedIndexRef.current);
+    }
+  };
+
+  const handleSwitchWallet = async () => {
+    disconnectWallet();
+    const connected = await connectWallet();
+    if (connected && recovery.rejection) {
+      // Keep the partial-batch cursor: the main execute button resumes after
+      // the vault that failed rather than re-depositing earlier ones.
+      recovery.reset();
+      setTxPhase("idle");
+    }
+  };
+
+  const handleCancelRecovery = () => {
+    recovery.dismiss();
+    failedIndexRef.current = 0;
+    setCompletedCount(0);
+    setTxPhase("idle");
+  };
+    totalAmountValue,
     isValid,
     executeTx,
     distributedAllocations,
     signTransaction,
+    hasDustAllocations,
+    dustValidation?.message,
   ]);
 
   return (
@@ -167,7 +350,11 @@ export default function PortfolioBuilder({
           <input
             type="number"
             value={totalAmount}
-            onChange={(e) => setTotalAmount(e.target.value)}
+            onChange={(e) => {
+              setTotalAmount(e.target.value);
+              // Editing the amount invalidates the previous attempt/progress.
+              if (recovery.rejection) handleCancelRecovery();
+            }}
             placeholder="Enter amount to allocate"
             className="w-full bg-black/50 border border-gray-600 rounded-lg px-3 py-2 text-white"
           />
@@ -175,7 +362,9 @@ export default function PortfolioBuilder({
 
         {/* Presets */}
         <div className="space-y-2">
-          <label className="block text-sm text-gray-400">Allocation Presets</label>
+          <label className="block text-sm text-gray-400">
+            Allocation Presets
+          </label>
           <div className="flex flex-wrap gap-2">
             {(
               [
@@ -220,9 +409,9 @@ export default function PortfolioBuilder({
               </div>
               <div className="text-right">
                 <p className="font-semibold">{alloc.weight.toFixed(1)}%</p>
-                {totalAmount && (
+                {totalAmountValue !== null && totalAmountValue > 0n && (
                   <p className="text-xs text-gray-400">
-                    {(BigInt(totalAmount) *
+                    {(totalAmountValue *
                       BigInt(Math.round(alloc.weight * 100))) /
                       BigInt(10000)}{" "}
                     USDC
@@ -255,6 +444,15 @@ export default function PortfolioBuilder({
         )}
       </div>
 
+      {/* Dust validation (#1378) — blocks execution until resolved */}
+      {totalAmountValue !== null && totalAmountValue > 0n && dustValidation && (
+        <DustAllocationWarning
+          validation={dustValidation}
+          onAutoResolve={handleAutoResolveDust}
+          isResolving={isResolvingDust}
+        />
+      )}
+
       {/* Summary */}
       {totalAmount && isValid && (
         <div className="glass-panel p-6 space-y-3">
@@ -273,6 +471,15 @@ export default function PortfolioBuilder({
         </div>
       )}
 
+      {/* Allocation Delta Preview — before/after diff shown before saving */}
+      <AllocationDeltaPreview
+        totalValueUsd={Number(totalAmount) || 0}
+        savedAllocations={savedAllocations}
+        draftAllocations={allocations}
+        onConfirm={handleSaveAllocation}
+        isSaving={isSavingAllocation}
+      />
+
       {/* Rebalance Simulation Sandbox */}
       {totalAmount && Number(totalAmount) > 0 && (
         <RebalancePreview
@@ -280,6 +487,27 @@ export default function PortfolioBuilder({
           currentAllocations={baselineAllocations}
           targetAllocations={allocations}
           disabled={!isValid}
+        />
+      )}
+
+      {/* Rejected signature recovery (#1363) */}
+      {recovery.rejection && (
+        <SignatureRejectionRecovery
+          actionLabel="deposit"
+          rejection={recovery.rejection}
+          isRetrying={recovery.isRetrying}
+          progress={
+            completedCount > 0
+              ? {
+                  completed: completedCount,
+                  total: activeAllocationsRef.current.length,
+                }
+              : undefined
+          }
+          onRetry={() => void handleRetrySignature()}
+          onReconnect={() => void handleReconnectWallet()}
+          onSwitchWallet={() => void handleSwitchWallet()}
+          onCancel={handleCancelRecovery}
         />
       )}
 
@@ -308,7 +536,9 @@ export default function PortfolioBuilder({
       {/* Execute Button */}
       <button
         onClick={handleExecuteDeposits}
-        disabled={!isValid || !totalAmount || txPhase !== "idle"}
+        disabled={
+          !isValid || !totalAmount || hasDustAllocations || txPhase !== "idle"
+        }
         className="w-full bg-gradient-to-r from-purple-600 to-blue-600 hover:from-purple-700 hover:to-blue-700 disabled:opacity-50 text-white font-semibold py-3 rounded-lg flex items-center justify-center gap-2"
       >
         <Zap className="w-5 h-5" />

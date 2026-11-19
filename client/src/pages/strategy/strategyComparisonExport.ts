@@ -44,6 +44,41 @@ function toExportNumber(value: unknown): number {
   return typeof value === "number" && Number.isFinite(value) ? value : 0;
 }
 
+// Validate a single strategy yield entry at the boundary
+// Returns the entry if valid, or null if malformed (safe failure)
+function validateStrategyYield(entry: unknown): StrategyYield | null {
+  if (!entry || typeof entry !== 'object') return null;
+  const s = entry as Record<string, unknown>;
+  if (typeof s.protocolName !== 'string' || s.protocolName.trim() === '') return null;
+  if (typeof s.apy !== 'number' || !Number.isFinite(s.apy)) return null;
+  if (typeof s.rewardApy !== 'number' || !Number.isFinite(s.rewardApy)) return null;
+  if (typeof s.totalApy !== 'number' || !Number.isFinite(s.totalApy)) return null;
+  if (typeof s.tvl !== 'number' || !Number.isFinite(s.tvl)) return null;
+  if (typeof s.riskScore !== 'number') return null;
+  if (typeof s.liquidityUsd !== 'number' || !Number.isFinite(s.liquidityUsd)) return null;
+  if (typeof s.managementFeeBps !== 'number') return null;
+  if (typeof s.performanceFeeBps !== 'number') return null;
+  if (typeof s.capitalEfficiencyPct !== 'number') return null;
+  if (s.rebalancingBehavior !== undefined && 
+      s.rebalancingBehavior !== null &&
+      !['Static', 'Dynamic', 'Yield-Weighted'].includes(s.rebalancingBehavior)) return null;
+  if (typeof s.fetchedAt !== 'string') return null;
+  return {
+    protocolName: s.protocolName,
+    apy: s.apy,
+    rewardApy: s.rewardApy,
+    totalApy: s.totalApy,
+    tvl: s.tvl,
+    riskScore: s.riskScore,
+    liquidityUsd: s.liquidityUsd,
+    rebalancingBehavior: s.rebalancingBehavior || 'Standard',
+    managementFeeBps: s.managementFeeBps,
+    performanceFeeBps: s.performanceFeeBps,
+    capitalEfficiencyPct: s.capitalEfficiencyPct,
+    fetchedAt: s.fetchedAt,
+  } as StrategyYield;
+}
+
 function escapeCsvCell(value: string | number): string {
   const text = String(value);
   if (!/[",\n]/.test(text)) return text;
@@ -64,25 +99,29 @@ export function buildStrategyComparisonExportRows(
 ): StrategyComparisonExportRow[] {
   const generatedAtIso = generatedAt.toISOString();
 
-  return strategies.map((strategy) => {
-    const managementFeeBps = toExportNumber(strategy.managementFeeBps);
-    const performanceFeeBps = toExportNumber(strategy.performanceFeeBps);
+  // Filter out any malformed entries at build time (safe failure, no mutation)
+  const validStrategies = strategies.filter((s) => validateStrategyYield(s) !== null);
+
+  return validStrategies.map((strategy) => {
+    const validated = validateStrategyYield(strategy)!;
+    const managementFeeBps = toExportNumber(validated.managementFeeBps);
+    const performanceFeeBps = toExportNumber(validated.performanceFeeBps);
 
     return {
       generated_at: generatedAtIso,
-      protocol_name: strategy.protocolName,
-      apy: toExportNumber(strategy.apy),
-      reward_apy: toExportNumber(strategy.rewardApy),
-      total_apy: toExportNumber(strategy.totalApy),
-      tvl_usd: toExportNumber(strategy.tvl),
-      risk_score: toExportNumber(strategy.riskScore),
-      liquidity_usd: toExportNumber(strategy.liquidityUsd),
+      protocol_name: validated.protocolName,
+      apy: toExportNumber(validated.apy),
+      reward_apy: toExportNumber(validated.rewardApy),
+      total_apy: toExportNumber(validated.totalApy),
+      tvl_usd: toExportNumber(validated.tvl),
+      risk_score: toExportNumber(validated.riskScore),
+      liquidity_usd: toExportNumber(validated.liquidityUsd),
       fee_drag_bps: managementFeeBps + performanceFeeBps,
       management_fee_bps: managementFeeBps,
       performance_fee_bps: performanceFeeBps,
-      confidence_score: toExportNumber(strategy.capitalEfficiencyPct),
-      rebalancing_behavior: strategy.rebalancingBehavior || "Standard",
-      fetched_at: strategy.fetchedAt ?? "",
+      confidence_score: toExportNumber(validated.capitalEfficiencyPct),
+      rebalancing_behavior: validated.rebalancingBehavior || "Standard",
+      fetched_at: validated.fetchedAt ?? "",
     };
   });
 }

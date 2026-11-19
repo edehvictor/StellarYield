@@ -1,4 +1,4 @@
-import { LiquidationWorker } from '../workers/LiquidationWorker';
+import { LiquidationWorker, evaluateLiquidationDryRun, MAX_PRICE_AGE_MS } from '../workers/LiquidationWorker';
 import { KeeperSigner } from '../signer/KeeperSigner';
 import { Job } from 'bullmq';
 import { LiquidationJobData } from '../queues/types';
@@ -74,7 +74,8 @@ describe('LiquidationWorker', () => {
       expect.any(String),
       'liquidate',
       expect.arrayContaining([expect.anything(), expect.anything()]),
-      expect.objectContaining({ workerName: 'LiquidationWorker', jobId: '1' }),
+      undefined,
+      expect.objectContaining({ workerName: 'LiquidationWorker', jobId: 'job-liq-1' }),
     );
     expect(result).toEqual({ txHash: 'LIQUIDATION_TX_HASH' });
   });
@@ -123,5 +124,62 @@ describe('LiquidationWorker', () => {
     expect(failedHandler).toBeDefined();
     expect(() => failedHandler(null, new Error('liquidation failed'))).not.toThrow();
     expect(() => failedHandler({ id: 'lj2', data: sampleJobData }, new Error('undercollateralized'))).not.toThrow();
+  });
+
+  // ── Stale health data protection (#1535) ──────────────────────────────────
+
+  describe('evaluateLiquidationDryRun — stale health data protection', () => {
+    const now = 1_000_000;
+
+    it('blocks liquidation when price is stale (older than MAX_PRICE_AGE_MS)', () => {
+      const job: LiquidationJobData = {
+        ...sampleJobData,
+        oracleAvailable: true,
+        priceTimestampMs: now - MAX_PRICE_AGE_MS - 1,
+      };
+      const result = evaluateLiquidationDryRun(job, now);
+      expect(result).toEqual({ safe: false, reason: 'stale_price' });
+    });
+
+    it('allows liquidation when price is fresh', () => {
+      const job: LiquidationJobData = {
+        ...sampleJobData,
+        oracleAvailable: true,
+        priceTimestampMs: now - 1000,
+      };
+      const result = evaluateLiquidationDryRun(job, now);
+      expect(result).toEqual({ safe: true });
+    });
+
+    it('blocks liquidation when position recovers between discovery and execution', () => {
+      // Position was undercollateralized at scan time but has since recovered
+      const job: LiquidationJobData = {
+        ...sampleJobData,
+        oracleAvailable: true,
+        priceTimestampMs: now - 1000,
+        currentCrBps: 15000, // above MCR — position recovered
+      };
+      const result = evaluateLiquidationDryRun(job, now);
+      expect(result).toEqual({ safe: false, reason: 'healthy_position' });
+    });
+
+    it('blocks liquidation when oracle is unavailable', () => {
+      const job: LiquidationJobData = {
+        ...sampleJobData,
+        oracleAvailable: false,
+      };
+      const result = evaluateLiquidationDryRun(job, now);
+      expect(result).toEqual({ safe: false, reason: 'missing_oracle' });
+    });
+
+    it('does not block on missing priceTimestampMs (no provenance attached)', () => {
+      const job: LiquidationJobData = {
+        ...sampleJobData,
+        oracleAvailable: true,
+        // priceTimestampMs intentionally omitted
+      };
+      const result = evaluateLiquidationDryRun(job, now);
+      expect(result).toEqual({ safe: true });
+    });
   });
 });

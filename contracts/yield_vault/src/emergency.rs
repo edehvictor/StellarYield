@@ -388,14 +388,23 @@ impl YieldVault {
             return Err(VaultError::ZeroSupply);
         }
 
-        // Determine idle reserves = actual token balance of this contract
+        // Determine idle reserves = actual token balance of this contract.
+        // A withdrawal can only be paid from assets the vault actually holds,
+        // so the pro-rata claim is based on available liquidity, not the
+        // (possibly higher) accounted total assets.
         let token_addr: Address = Self::get_storage_required(env, &DataKey::Token)?;
         let client = token::Client::new(env, &token_addr);
         let vault_addr = env.current_contract_address();
         let idle_balance = client.balance(&vault_addr);
+        let available_assets = idle_balance.min(total_assets_accounted);
 
-        // Proportional claim based on shares vs total_shares, capped by idle balance
-        let mut amount = (shares * total_assets_accounted) / total_shares;
+        if available_assets <= 0 {
+            return Err(VaultError::InsufficientShares);
+        }
+
+        // Proportional claim against available assets, capped by the vault's
+        // idle balance so the vault can never pay out more than it holds.
+        let mut amount = (shares * available_assets) / total_shares;
         if amount > idle_balance {
             amount = idle_balance;
         }

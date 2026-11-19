@@ -7,6 +7,7 @@ import TxStatusTimeline from "../../components/transaction/TxStatusTimeline";
 import TransactionFailedModal from "../../components/transaction/TransactionFailedModal";
 import { decodeTransactionError } from "../../utils/errorDecoder";
 import type { TxPhase } from "../../services/transactionPhase";
+import RewardCampaignCalendar from "./RewardCampaignCalendar";
 
 const CLAIM_PHASE_STEPS: readonly TxPhase[] = ["building", "submitting"];
 
@@ -30,7 +31,7 @@ const getApiBase = () => {
  * Connects the user's wallet, fetches their proof from the backend,
  * and executes the on-chain claim transaction.
  */
-export default function ClaimRewards() {
+function ClaimRewardsContent() {
   const { isConnected, walletAddress } = useWallet();
   const [claimData, setClaimData] = useState<ClaimData | null>(null);
   const [loading, setLoading] = useState(false);
@@ -223,6 +224,15 @@ export default function ClaimRewards() {
         </div>
       )}
     </div>
+  );
+}
+
+export default function ClaimRewards() {
+  return (
+    <main className="mx-auto w-full max-w-6xl space-y-8 px-4">
+      <RewardCampaignCalendar />
+      <ClaimRewardsContent />
+    </main>
   );
 }
 

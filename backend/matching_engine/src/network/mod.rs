@@ -15,6 +15,12 @@ use tokio::sync::mpsc;
 
 use crate::orderbook::Order;
 
+pub mod tie_break;
+
+pub use tie_break::{
+    canonical_cmp, sort_canonical, MatchPriority, MatchSequencer, SequenceOutcome,
+};
+
 /// Network message types
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum NetworkMessage {
