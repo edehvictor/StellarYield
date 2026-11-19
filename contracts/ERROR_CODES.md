@@ -68,14 +68,19 @@ Source: `contracts/stableswap/src/lib.rs`
 | 9    | `MathOverflow`          | A checked intermediate cannot be represented in `i128` | Reduce the amount; see the per-side reserve limit in `docs/contracts/stableswap-invariant.md` |
 | 10   | `ZeroInvariant`         | Pool invariant is zero                       | Pool is empty; add liquidity first          |
 | 11   | `InvalidToken`          | Token address is duplicate, LP token, or unrecognized in swap | Use distinct, registered pool tokens |
+| 12   | `WrongNetwork`          | Live ledger or the caller's context is not the network the pool state is bound to, or `migrate` was asked to adopt another network's state | Read the pool on its bound network; retry with `get_pool_context()` |
+| 13   | `WrongContract`         | The caller's context names a different pool deployment | Use the context from the pool you are calling |
+| 14   | `WrongVersion`          | Stored state or the caller's context is not at the pool context version this code understands | Refresh with `get_pool_context()`; upgrade the contract if the stored version is newer |
 
 `stableswap` uses checked arithmetic and documented floor rounding for every
 invariant, fee, deposit and withdrawal calculation. Boundary values (zero,
 minimum one-unit reserves, maximum `i128` inputs) either produce a defined
 result or a typed error above; a rejected call never changes reserves, LP supply,
-LP balances or token balances. See
-`docs/contracts/stableswap-invariant.md` for the rounding table and numeric
-limits.
+LP balances or token balances. `add_liquidity`, `remove_liquidity` and `swap`
+validate the caller's `PoolContext` (network, deployment, version) before any
+reserve math, transfer or storage write. See
+`docs/contracts/stableswap-invariant.md` for the rounding table, numeric limits
+and context binding.
 
 ---
 
