@@ -10,6 +10,12 @@ export interface SignerQuorumProgress {
 
 export interface PendingTransaction {
   id: string;
+  /**
+   * Immutable governance configuration fingerprint the proposal was prepared
+   * under (#1894). Proposals without this, or with a stale value, must be
+   * refreshed before they can be signed or executed.
+   */
+  configFingerprint?: string;
   description: string;
   method: string;
   args: string[];

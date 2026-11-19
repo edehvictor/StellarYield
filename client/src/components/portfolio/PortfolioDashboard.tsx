@@ -244,7 +244,7 @@ export default function PortfolioDashboard({
       positions.map((p) => ({
         asset: p.asset,
         protocol: p.protocol,
-        valueUsd: p.currentValue,
+        valueUsd: p.currentValue ?? 0,
       })),
     [positions],
   );

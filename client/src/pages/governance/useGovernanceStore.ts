@@ -1,5 +1,10 @@
-import { useState, useCallback } from "react";
+import { useState, useCallback, useMemo } from "react";
 import type { PendingTransaction, GovernanceConfig } from "./types";
+import {
+  assertGovernanceConfigFingerprint,
+  computeGovernanceConfigFingerprint,
+  validateGovernanceConfigSnapshot,
+} from "../../../../shared/types/governanceConfigSnapshot";
 import {
   createSignerRotationAuditRecord,
   type SignerRotationAuditRecord,
@@ -29,6 +34,11 @@ const DEFAULT_CONFIG: GovernanceConfig = {
   contractId: import.meta.env.VITE_CONTRACT_ID ?? "",
 };
 
+function configErrorMessage(config: GovernanceConfig): string {
+  const validation = validateGovernanceConfigSnapshot(config);
+  return validation.issues.map((issue) => `${issue.field}: ${issue.message}`).join("; ");
+}
+
 export function useGovernanceStore() {
   const [transactions, setTransactions] = useState<PendingTransaction[]>(() =>
     loadFromStorage(STORAGE_KEY, []),
@@ -40,17 +50,30 @@ export function useGovernanceStore() {
     SignerRotationAuditRecord[]
   >(() => loadFromStorage(SIGNER_ROTATION_AUDIT_KEY, []));
 
+  const configFingerprint = useMemo(
+    () => computeGovernanceConfigFingerprint(config).fingerprint,
+    [config],
+  );
+
   const addTransaction = useCallback(
     (tx: PendingTransaction) => {
-      const updated = [...transactions, tx];
+      const boundTx = tx.configFingerprint
+        ? tx
+        : { ...tx, configFingerprint };
+      const updated = [...transactions, boundTx];
       setTransactions(updated);
       saveToStorage(STORAGE_KEY, updated);
     },
-    [transactions],
+    [transactions, configFingerprint],
   );
 
   const addSignature = useCallback(
     (txId: string, publicKey: string) => {
+      const target = transactions.find((tx) => tx.id === txId);
+      if (!target) return;
+
+      assertGovernanceConfigFingerprint(config, target.configFingerprint);
+
       const updated = transactions.map((tx) => {
         if (tx.id !== txId) return tx;
 
@@ -70,25 +93,52 @@ export function useGovernanceStore() {
       setTransactions(updated);
       saveToStorage(STORAGE_KEY, updated);
     },
-    [transactions],
+    [transactions, config],
   );
 
   const markExecuted = useCallback(
     (txId: string) => {
+      const target = transactions.find((tx) => tx.id === txId);
+      if (!target) return;
+
+      assertGovernanceConfigFingerprint(config, target.configFingerprint);
+
       const updated = transactions.map((tx) =>
         tx.id === txId ? { ...tx, status: "executed" as const } : tx,
       );
       setTransactions(updated);
       saveToStorage(STORAGE_KEY, updated);
     },
-    [transactions],
+    [transactions, config],
+  );
+
+  /**
+   * Explicitly re-bind a stale proposal to the current configuration. The
+   * proposal, its existing signatures and its status are preserved so the
+   * signer can safely retry after reviewing the new configuration.
+   */
+  const refreshTransactionConfig = useCallback(
+    (txId: string) => {
+      const updated = transactions.map((tx) =>
+        tx.id === txId ? { ...tx, configFingerprint } : tx,
+      );
+      setTransactions(updated);
+      saveToStorage(STORAGE_KEY, updated);
+    },
+    [transactions, configFingerprint],
   );
 
   const updateConfig = useCallback(
     (newConfig: GovernanceConfig, actor: string) => {
+      const validation = validateGovernanceConfigSnapshot(newConfig);
+      if (!validation.valid) {
+        throw new Error(`Invalid governance configuration: ${configErrorMessage(newConfig)}`);
+      }
+
+      const normalizedConfig = validation.snapshot;
       const record = createSignerRotationAuditRecord(
         config,
-        newConfig,
+        normalizedConfig,
         actor,
         new Date().toISOString(),
       );
@@ -98,7 +148,7 @@ export function useGovernanceStore() {
       let configPersisted = false;
 
       try {
-        saveToStorage(CONFIG_KEY, newConfig);
+        saveToStorage(CONFIG_KEY, normalizedConfig);
         configPersisted = true;
         if (record) {
           saveToStorage(SIGNER_ROTATION_AUDIT_KEY, updatedAudit);
@@ -118,7 +168,7 @@ export function useGovernanceStore() {
         );
       }
 
-      setConfig(newConfig);
+      setConfig(normalizedConfig);
       if (record) setSignerRotationAudit(updatedAudit);
     },
     [config, signerRotationAudit],
@@ -127,10 +177,12 @@ export function useGovernanceStore() {
   return {
     transactions,
     config,
+    configFingerprint,
     signerRotationAudit,
     addTransaction,
     addSignature,
     markExecuted,
+    refreshTransactionConfig,
     updateConfig,
   };
 }
