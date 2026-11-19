@@ -127,3 +127,36 @@ invocations and decode the new `HealthFactor` shape.
 | 15 | `StaleConfig` | Fingerprint does not match the current configuration; refresh and retry |
 
 See `contracts/ERROR_CODES.md` for the full table.
+
+## Rounding and numeric limits
+
+All amounts are non-negative integer token units, so every division rounds
+**down** unless noted.
+
+| Calculation | Rule | Effect |
+|---|---|---|
+| Collateral value | `floor(collateral · price_bps / 10_000)` | A price below one bps of a unit values the collateral at zero |
+| Borrow limit | `floor(collateral_value · collateral_factor_bps / 10_000)` | Borrowing at the limit is allowed; one unit more is rejected |
+| Reserve requirement | `floor(total_supplied · reserve_bps / 10_000)` | One bp of a small pool reserves nothing |
+| Index growth | `floor(index · rate · elapsed_ledgers / 10^9)` | No interest accrues within the same ledger |
+| Accrued interest / debt | `floor(total_debt · growth / index)`, `floor(debt · index / debt_index)` | Rounds in favour of borrowers |
+| Protocol fees | `floor(interest · fee_bps / 10_000)` | Rounds in favour of borrowers |
+| Close-factor cap | `ceil(debt · close_factor_bps / 10_000)`, capped at `debt` | A 100% close factor can always clear a position |
+| Seized collateral | `floor(repaid · 10_000 / price_bps)` | The liquidator never receives more value than it repaid |
+| Available liquidity | `max(0, supplied − debt − pending − reserve)` | Never returns a negative number |
+
+Every arithmetic step is checked. Amounts beyond `i128`, or a subtraction below
+zero, return `MathOverflow`; zero or negative amounts return `InvalidAmount`; a
+zero price, zero factor or out-of-range bps value returns `InvalidConfig`.
+A one-unit position at a factor below 10 000 has a zero borrow limit, so the
+smallest debt needs a 100% factor.
+
+## Failure atomicity and retries
+
+Operations compute every checked value and validate balances and limits
+**before** transferring tokens or writing reserves, debt, supply, pending
+withdrawals or a liquidation id. A typed error therefore leaves token balances,
+positions, totals, the borrow index, accrual markers and the liquidation id
+unchanged, so the same call can be retried with corrected inputs. Examples:
+repay debt before borrowing another unit, withdraw no more than redeemable
+cash, or refresh the configuration fingerprint after an admin change and retry.

@@ -1,4 +1,32 @@
 #![no_std]
+//! Isolated lending markets: each pair is an independent pool of one
+//! collateral token and one debt token.
+//!
+//! ## Rounding and numeric limits
+//!
+//! All share, value and interest arithmetic is integer arithmetic on
+//! non-negative amounts, so every division rounds **down** unless stated:
+//!
+//! - `collateral_value` = `floor(collateral · price_bps / 10_000)`;
+//! - the borrow limit = `floor(collateral_value · collateral_factor_bps / 10_000)`;
+//! - the reserve requirement = `floor(total_supplied · reserve_bps / 10_000)`;
+//! - accrued index growth and interest = `floor(...)`, and a borrower's debt is
+//!   `floor(debt · index / debt_index)`;
+//! - protocol fees = `floor(interest · fee_bps / 10_000)`;
+//! - the liquidation close-factor cap rounds **up** (`ceil(debt · bps / 10_000)`
+//!   capped at the debt itself) so a 100% close factor can always clear a
+//!   position;
+//! - collateral seized for a repayment = `floor(repaid · 10_000 / price_bps)`,
+//!   so the liquidator never receives more value than it repaid;
+//! - `get_available_liquidity` floors at zero rather than returning a negative
+//!   number.
+//!
+//! Every arithmetic operation is checked. Amounts that cannot be represented
+//! (zero, negative, or beyond `i128`), as well as zero-valued prices or
+//! indices, fail with a typed error (`InvalidAmount`, `InvalidConfig`,
+//! `MathOverflow`). A failing call returns before any token transfer or storage
+//! write, so balances, reserves, debt and configuration are unchanged and the
+//! same operation can be retried with corrected inputs.
 
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, symbol_short, token, xdr::ToXdr, Address,
@@ -305,6 +333,22 @@ impl IsolatedLendingPair {
             return Err(IsolatedLendingError::InvalidAmount);
         }
         Self::require_init(&env)?;
+        // Compute every checked value before moving tokens or writing storage:
+        // returning `Err` does not roll back changes the call already made.
+        let key = PairDataKey::Supply(user.clone());
+        let old_supply: i128 = env.storage().persistent().get(&key).unwrap_or(0);
+        let new_supply = old_supply
+            .checked_add(amount)
+            .ok_or(IsolatedLendingError::MathOverflow)?;
+        let total_supplied: i128 = env
+            .storage()
+            .instance()
+            .get(&PairDataKey::TotalSupplied)
+            .unwrap_or(0);
+        let new_total_supplied = total_supplied
+            .checked_add(amount)
+            .ok_or(IsolatedLendingError::MathOverflow)?;
+
         let debt_token: Address = env
             .storage()
             .instance()
@@ -315,25 +359,10 @@ impl IsolatedLendingPair {
             &env.current_contract_address(),
             &amount,
         );
-
-        let key = PairDataKey::Supply(user.clone());
-        let old_supply: i128 = env.storage().persistent().get(&key).unwrap_or(0);
-        let new_supply = old_supply
-            .checked_add(amount)
-            .ok_or(IsolatedLendingError::MathOverflow)?;
         env.storage().persistent().set(&key, &new_supply);
-
-        let total_supplied: i128 = env
-            .storage()
+        env.storage()
             .instance()
-            .get(&PairDataKey::TotalSupplied)
-            .unwrap_or(0);
-        env.storage().instance().set(
-            &PairDataKey::TotalSupplied,
-            &total_supplied
-                .checked_add(amount)
-                .ok_or(IsolatedLendingError::MathOverflow)?,
-        );
+            .set(&PairDataKey::TotalSupplied, &new_total_supplied);
         Ok(())
     }
 
@@ -355,20 +384,23 @@ impl IsolatedLendingPair {
         if Self::redeemable_cash(&env)? < amount {
             return Err(IsolatedLendingError::InsufficientLiquidity);
         }
-        env.storage().persistent().set(&key, &(old_supply - amount));
-        Self::consume_pending_withdrawal(&env, &user, amount);
-
+        // Validate the total before any storage write or transfer so a failure
+        // leaves the supplier's balance and the market totals intact.
         let total_supplied: i128 = env
             .storage()
             .instance()
             .get(&PairDataKey::TotalSupplied)
             .unwrap_or(0);
-        env.storage().instance().set(
-            &PairDataKey::TotalSupplied,
-            &total_supplied
-                .checked_sub(amount)
-                .ok_or(IsolatedLendingError::MathOverflow)?,
-        );
+        if total_supplied < amount {
+            return Err(IsolatedLendingError::MathOverflow);
+        }
+        let new_total_supplied = total_supplied - amount;
+
+        env.storage().persistent().set(&key, &(old_supply - amount));
+        Self::consume_pending_withdrawal(&env, &user, amount);
+        env.storage()
+            .instance()
+            .set(&PairDataKey::TotalSupplied, &new_total_supplied);
 
         let debt_token: Address = env
             .storage()
@@ -393,6 +425,13 @@ impl IsolatedLendingPair {
             return Err(IsolatedLendingError::InvalidAmount);
         }
         Self::require_init(&env)?;
+        // Checked before the transfer: an `Err` return would otherwise keep the
+        // deposited tokens without crediting collateral.
+        let key = PairDataKey::Collateral(user.clone());
+        let old_collateral: i128 = env.storage().persistent().get(&key).unwrap_or(0);
+        let new_collateral = old_collateral
+            .checked_add(amount)
+            .ok_or(IsolatedLendingError::MathOverflow)?;
         let collateral_token: Address = env
             .storage()
             .instance()
@@ -403,15 +442,7 @@ impl IsolatedLendingPair {
             &env.current_contract_address(),
             &amount,
         );
-
-        let key = PairDataKey::Collateral(user.clone());
-        let old_collateral: i128 = env.storage().persistent().get(&key).unwrap_or(0);
-        env.storage().persistent().set(
-            &key,
-            &old_collateral
-                .checked_add(amount)
-                .ok_or(IsolatedLendingError::MathOverflow)?,
-        );
+        env.storage().persistent().set(&key, &new_collateral);
         Ok(())
     }
 
@@ -467,14 +498,14 @@ impl IsolatedLendingPair {
         if Self::spendable_liquidity(&env)? < amount {
             return Err(IsolatedLendingError::InsufficientLiquidity);
         }
+        let new_total_debt = total_debt
+            .checked_add(amount)
+            .ok_or(IsolatedLendingError::MathOverflow)?;
 
         Self::store_debt(&env, &user, new_debt, index);
-        env.storage().instance().set(
-            &PairDataKey::TotalDebt,
-            &total_debt
-                .checked_add(amount)
-                .ok_or(IsolatedLendingError::MathOverflow)?,
-        );
+        env.storage()
+            .instance()
+            .set(&PairDataKey::TotalDebt, &new_total_debt);
 
         let debt_token: Address = env
             .storage()
@@ -723,6 +754,8 @@ impl IsolatedLendingPair {
         }
 
         // One liquidation may repay at most the close factor's share of the debt.
+        // The share rounds up, but is capped at the debt so a rounding step can
+        // never owe more than the borrower actually has.
         let close_factor_bps: i128 = env
             .storage()
             .instance()
@@ -733,11 +766,14 @@ impl IsolatedLendingPair {
             .and_then(|v| v.checked_add(BPS_DENOMINATOR - 1))
             .and_then(|v| v.checked_div(BPS_DENOMINATOR))
             .ok_or(IsolatedLendingError::MathOverflow)?;
+        let max_repay = if max_repay < debt { max_repay } else { debt };
         let mut repaid = if repay_amount < max_repay {
             repay_amount
         } else {
             max_repay
         };
+        // Rounds down: the liquidator never receives more collateral value than
+        // it repaid.
         let mut seized = repaid
             .checked_mul(BPS_DENOMINATOR)
             .ok_or(IsolatedLendingError::MathOverflow)?
@@ -751,6 +787,34 @@ impl IsolatedLendingPair {
         }
         if repaid <= 0 {
             return Err(IsolatedLendingError::InvalidAmount);
+        }
+        if repaid > debt {
+            return Err(IsolatedLendingError::MathOverflow);
+        }
+
+        // Compute the resulting position and any written-off debt before tokens
+        // move, so a boundary failure leaves the liquidation fully unapplied.
+        let remaining_collateral = collateral
+            .checked_sub(seized)
+            .ok_or(IsolatedLendingError::MathOverflow)?;
+        let mut remaining_debt = debt
+            .checked_sub(repaid)
+            .ok_or(IsolatedLendingError::MathOverflow)?;
+        let mut total_debt_reduction = repaid;
+        let mut new_bad_debt: Option<i128> = None;
+        if remaining_collateral == 0 && remaining_debt > 0 {
+            let bad_debt: i128 = env
+                .storage()
+                .instance()
+                .get(&PairDataKey::BadDebt)
+                .unwrap_or(0);
+            new_bad_debt = Some(
+                bad_debt
+                    .checked_add(remaining_debt)
+                    .ok_or(IsolatedLendingError::MathOverflow)?,
+            );
+            total_debt_reduction = debt;
+            remaining_debt = 0;
         }
 
         let debt_token: Address = env
@@ -781,25 +845,11 @@ impl IsolatedLendingPair {
             &seized,
         );
 
-        let remaining_collateral = collateral - seized;
-        let mut remaining_debt = debt - repaid;
-        let mut total_debt_reduction = repaid;
-        if remaining_collateral == 0 && remaining_debt > 0 {
-            let bad_debt: i128 = env
-                .storage()
+        if let Some(bad_debt) = new_bad_debt {
+            env.storage()
                 .instance()
-                .get(&PairDataKey::BadDebt)
-                .unwrap_or(0);
-            env.storage().instance().set(
-                &PairDataKey::BadDebt,
-                &bad_debt
-                    .checked_add(remaining_debt)
-                    .ok_or(IsolatedLendingError::MathOverflow)?,
-            );
-            total_debt_reduction = debt;
-            remaining_debt = 0;
+                .set(&PairDataKey::BadDebt, &bad_debt);
         }
-
         env.storage()
             .persistent()
             .set(&collateral_key, &remaining_collateral);
@@ -1269,8 +1319,11 @@ impl IsolatedLendingPair {
             .instance()
             .get(&PairDataKey::TotalDebt)
             .unwrap_or(0);
+        let index_growth = new_index
+            .checked_sub(index)
+            .ok_or(IsolatedLendingError::MathOverflow)?;
         let interest = total_debt
-            .checked_mul(new_index - index)
+            .checked_mul(index_growth)
             .and_then(|v| v.checked_div(index))
             .ok_or(IsolatedLendingError::MathOverflow)?;
         Ok((index, new_index, interest))
@@ -1281,17 +1334,17 @@ impl IsolatedLendingPair {
     fn accrue(env: &Env) -> Result<i128, IsolatedLendingError> {
         let (index, new_index, interest) = Self::pending_interest(env)?;
         if new_index != index {
+            // Compute all checked values before persisting any of them. A
+            // partial accrual followed by `Err` would inflate totals without
+            // moving the index, and the next touch would double-count interest.
             let total_debt: i128 = env
                 .storage()
                 .instance()
                 .get(&PairDataKey::TotalDebt)
                 .unwrap_or(0);
-            env.storage().instance().set(
-                &PairDataKey::TotalDebt,
-                &total_debt
-                    .checked_add(interest)
-                    .ok_or(IsolatedLendingError::MathOverflow)?,
-            );
+            let new_total_debt = total_debt
+                .checked_add(interest)
+                .ok_or(IsolatedLendingError::MathOverflow)?;
             let fee_bps: u32 = env
                 .storage()
                 .instance()
@@ -1306,12 +1359,16 @@ impl IsolatedLendingPair {
                 .instance()
                 .get(&PairDataKey::ProtocolFees)
                 .unwrap_or(0);
-            env.storage().instance().set(
-                &PairDataKey::ProtocolFees,
-                &fees
-                    .checked_add(fee)
-                    .ok_or(IsolatedLendingError::MathOverflow)?,
-            );
+            let new_fees = fees
+                .checked_add(fee)
+                .ok_or(IsolatedLendingError::MathOverflow)?;
+
+            env.storage()
+                .instance()
+                .set(&PairDataKey::TotalDebt, &new_total_debt);
+            env.storage()
+                .instance()
+                .set(&PairDataKey::ProtocolFees, &new_fees);
             env.storage()
                 .instance()
                 .set(&PairDataKey::BorrowIndex, &new_index);
@@ -2708,5 +2765,416 @@ mod test {
         let refreshed = s.pair.get_health_factor(&s.borrower);
         assert_ne!(refreshed.config_fingerprint, health.config_fingerprint);
         assert_eq!(refreshed.threshold_bps, 7_000);
+    }
+
+    // ── Boundary-value calculations (#1756) ─────────────────────────
+
+    fn set_persistent(env: &Env, contract: &Address, key: PairDataKey, value: i128) {
+        env.as_contract(contract, || {
+            env.storage().persistent().set(&key, &value);
+        });
+    }
+
+    fn set_instance(env: &Env, contract: &Address, key: PairDataKey, value: i128) {
+        env.as_contract(contract, || {
+            env.storage().instance().set(&key, &value);
+        });
+    }
+
+    fn instance_i128(env: &Env, contract: &Address, key: PairDataKey) -> Option<i128> {
+        env.as_contract(contract, || env.storage().instance().get(&key))
+    }
+
+    #[test]
+    fn supply_overflow_is_rejected_before_the_transfer() {
+        let s = setup();
+        let user = Address::generate(&s.env);
+        mint(&s.env, &s.debt_token, &user, 10);
+        // A corrupted balance at the i128 maximum cannot absorb even one unit.
+        set_persistent(
+            &s.env,
+            &s.pair.address,
+            PairDataKey::Supply(user.clone()),
+            i128::MAX,
+        );
+
+        let user_balance = balance(&s.env, &s.debt_token, &user);
+        let pair_balance = balance(&s.env, &s.debt_token, &s.pair.address);
+        assert_eq!(
+            s.pair.try_supply(&user, &1),
+            Err(Ok(IsolatedLendingError::MathOverflow))
+        );
+
+        // No tokens moved and the market total is unchanged.
+        assert_eq!(balance(&s.env, &s.debt_token, &user), user_balance);
+        assert_eq!(
+            balance(&s.env, &s.debt_token, &s.pair.address),
+            pair_balance
+        );
+        assert_eq!(s.pair.get_totals(), (1_000, 80));
+    }
+
+    #[test]
+    fn post_collateral_overflow_is_rejected_before_the_transfer() {
+        let s = setup();
+        let user = Address::generate(&s.env);
+        mint(&s.env, &s.collateral_token, &user, 1);
+        set_persistent(
+            &s.env,
+            &s.pair.address,
+            PairDataKey::Collateral(user.clone()),
+            i128::MAX,
+        );
+
+        let user_balance = balance(&s.env, &s.collateral_token, &user);
+        assert_eq!(
+            s.pair.try_post_collateral(&user, &1),
+            Err(Ok(IsolatedLendingError::MathOverflow))
+        );
+        assert_eq!(balance(&s.env, &s.collateral_token, &user), user_balance);
+        assert_eq!(s.pair.get_position(&s.borrower), (100, 80));
+    }
+
+    #[test]
+    fn withdraw_total_underflow_preserves_supplier_and_balances() {
+        let s = setup();
+        // Corrupt the market total so the withdrawal cannot be recorded.
+        set_instance(&s.env, &s.pair.address, PairDataKey::TotalSupplied, 0);
+        let before = balance(&s.env, &s.debt_token, &s.lender);
+        assert_eq!(
+            instance_i128(&s.env, &s.pair.address, PairDataKey::TotalSupplied),
+            Some(0)
+        );
+        assert_eq!(s.pair.get_totals().0, 0);
+
+        assert_eq!(
+            s.pair.try_withdraw(&s.lender, &10),
+            Err(Ok(IsolatedLendingError::MathOverflow))
+        );
+
+        assert_eq!(balance(&s.env, &s.debt_token, &s.lender), before);
+        assert_eq!(
+            s.env.as_contract(&s.pair.address, || s
+                .env
+                .storage()
+                .persistent()
+                .get::<_, i128>(&PairDataKey::Supply(s.lender.clone()))),
+            Some(1_000)
+        );
+    }
+
+    #[test]
+    fn borrow_over_the_limit_preserves_state_and_safe_retry_succeeds() {
+        let s = setup();
+        let position = s.pair.get_position(&s.borrower);
+        let totals = s.pair.get_totals();
+        let borrower_balance = balance(&s.env, &s.debt_token, &s.borrower);
+        let pair_balance = balance(&s.env, &s.debt_token, &s.pair.address);
+
+        // 80 of debt against a 100 * 80% = 80 limit: one more unit is rejected.
+        assert_eq!(
+            s.pair.try_borrow(&s.borrower, &1, &s.fp()),
+            Err(Ok(IsolatedLendingError::InsufficientCollateral))
+        );
+        assert_eq!(s.pair.get_position(&s.borrower), position);
+        assert_eq!(s.pair.get_totals(), totals);
+        assert_eq!(
+            balance(&s.env, &s.debt_token, &s.borrower),
+            borrower_balance
+        );
+        assert_eq!(
+            balance(&s.env, &s.debt_token, &s.pair.address),
+            pair_balance
+        );
+
+        // Releasing debt restores headroom; the same logical operation can retry.
+        s.pair.repay(&s.borrower, &10);
+        s.pair.borrow(&s.borrower, &10, &s.fp());
+        assert_eq!(s.pair.get_position(&s.borrower), (100, 80));
+    }
+
+    #[test]
+    fn zero_amounts_are_typed_and_do_not_change_state() {
+        let s = setup();
+        let position = s.pair.get_position(&s.borrower);
+        let totals = s.pair.get_totals();
+
+        assert_eq!(
+            s.pair.try_supply(&s.lender, &0),
+            Err(Ok(IsolatedLendingError::InvalidAmount))
+        );
+        assert_eq!(
+            s.pair.try_withdraw(&s.lender, &0),
+            Err(Ok(IsolatedLendingError::InvalidAmount))
+        );
+        assert_eq!(
+            s.pair.try_post_collateral(&s.borrower, &0),
+            Err(Ok(IsolatedLendingError::InvalidAmount))
+        );
+        assert_eq!(
+            s.pair.try_withdraw_collateral(&s.borrower, &0, &s.fp()),
+            Err(Ok(IsolatedLendingError::InvalidAmount))
+        );
+        assert_eq!(
+            s.pair.try_borrow(&s.borrower, &0, &s.fp()),
+            Err(Ok(IsolatedLendingError::InvalidAmount))
+        );
+        assert_eq!(
+            s.pair.try_repay(&s.borrower, &0),
+            Err(Ok(IsolatedLendingError::InvalidAmount))
+        );
+        assert_eq!(
+            s.pair.try_queue_withdrawal(&s.lender, &0),
+            Err(Ok(IsolatedLendingError::InvalidAmount))
+        );
+        let liquidator = Address::generate(&s.env);
+        assert_eq!(
+            s.pair
+                .try_liquidate(&liquidator, &s.borrower, &1, &0, &s.fp()),
+            Err(Ok(IsolatedLendingError::InvalidAmount))
+        );
+
+        assert_eq!(s.pair.get_position(&s.borrower), position);
+        assert_eq!(s.pair.get_totals(), totals);
+    }
+
+    #[test]
+    fn minimum_position_lifecycle() {
+        let s = setup();
+        // A one-unit collateral position is rounded to a zero borrow limit at 80%.
+        let user = Address::generate(&s.env);
+        mint(&s.env, &s.collateral_token, &user, 1);
+        s.pair.post_collateral(&user, &1);
+        assert_eq!(
+            s.pair.try_borrow(&user, &1, &s.fp()),
+            Err(Ok(IsolatedLendingError::InsufficientCollateral))
+        );
+
+        // At a 100% factor the same single unit backs the smallest nonzero debt.
+        s.pair.set_collateral_factor(&s.admin, &10_000);
+        s.pair.borrow(&user, &1, &s.fp());
+        assert_eq!(s.pair.get_position(&user), (1, 1));
+
+        s.pair.repay(&user, &1);
+        assert_eq!(s.pair.get_position(&user), (1, 0));
+        s.pair.withdraw_collateral(&user, &1, &s.fp());
+        assert_eq!(s.pair.get_position(&user), (0, 0));
+    }
+
+    #[test]
+    fn rounding_floors_the_borrow_limit_and_collateral_value() {
+        let s = setup();
+        s.pair.set_collateral_factor(&s.admin, &9_999);
+        let user = Address::generate(&s.env);
+        mint(&s.env, &s.collateral_token, &user, 3);
+        s.pair.post_collateral(&user, &3);
+
+        // floor(3 * 9_999 / 10_000) = 2, so only two units can be borrowed.
+        s.pair.borrow(&user, &2, &s.fp());
+        assert_eq!(
+            s.pair.try_borrow(&user, &1, &s.fp()),
+            Err(Ok(IsolatedLendingError::InsufficientCollateral))
+        );
+
+        // Collateral value also floors: 100 at 3_333 bps is worth 33, and one
+        // unit is worth nothing.
+        s.pair.set_collateral_price(&s.admin, &3_333);
+        let tiny = Address::generate(&s.env);
+        mint(&s.env, &s.collateral_token, &tiny, 1);
+        s.pair.post_collateral(&tiny, &1);
+        assert_eq!(s.pair.get_health_factor(&tiny).collateral_value, 0);
+        assert_eq!(s.pair.get_health_factor(&s.borrower).collateral_value, 33);
+    }
+
+    #[test]
+    fn rounding_floors_reserve_and_protocol_fee_shares() {
+        let s = setup();
+        // One bp of 1_000 floors to zero, so borrowable liquidity is unchanged.
+        s.pair.set_reserve_bps(&s.admin, &1);
+        assert_eq!(s.pair.get_available_liquidity(), 920);
+
+        // floor(10 interest * 3_333 bps / 10_000) = 3.
+        s.pair.set_interest_rate(&s.admin, &RATE);
+        s.pair.set_protocol_fee_bps(&s.admin, &3_333);
+        set_ledger(&s.env, 1);
+        assert_eq!(s.pair.get_protocol_fees(), 3);
+    }
+
+    #[test]
+    fn available_liquidity_floors_at_zero() {
+        let s = setup();
+        // Queued withdrawals beyond the supply cannot make liquidity negative.
+        set_instance(
+            &s.env,
+            &s.pair.address,
+            PairDataKey::PendingWithdrawals,
+            2_000,
+        );
+        assert_eq!(s.pair.get_available_liquidity(), 0);
+    }
+
+    #[test]
+    fn interest_overflow_is_typed_and_leaves_accrual_markers_untouched() {
+        let s = setup();
+        s.pair.set_interest_rate(&s.admin, &RATE);
+        // A corrupted index cannot be grown by 12.5% per ledger.
+        set_instance(
+            &s.env,
+            &s.pair.address,
+            PairDataKey::BorrowIndex,
+            i128::MAX / 2,
+        );
+        set_ledger(&s.env, 10);
+
+        let index_before = instance_i128(&s.env, &s.pair.address, PairDataKey::BorrowIndex);
+        let debt_before = instance_i128(&s.env, &s.pair.address, PairDataKey::TotalDebt);
+
+        assert_eq!(
+            s.pair.try_borrow(&s.borrower, &1, &s.fp()),
+            Err(Ok(IsolatedLendingError::MathOverflow))
+        );
+
+        assert_eq!(
+            instance_i128(&s.env, &s.pair.address, PairDataKey::BorrowIndex),
+            index_before
+        );
+        assert_eq!(
+            instance_i128(&s.env, &s.pair.address, PairDataKey::TotalDebt),
+            debt_before
+        );
+        // Reads surface the same typed failure instead of panicking.
+        assert_eq!(
+            s.pair.try_get_position(&s.borrower),
+            Err(Ok(IsolatedLendingError::MathOverflow))
+        );
+    }
+
+    #[test]
+    fn liquidation_seizure_overflow_leaves_position_and_id_untouched() {
+        let s = setup();
+        // Debt far above the borrow limit and a repayment large enough that
+        // scaling it by 10_000 overflows.
+        let huge = i128::MAX / 2;
+        set_persistent(
+            &s.env,
+            &s.pair.address,
+            PairDataKey::Debt(s.borrower.clone()),
+            huge,
+        );
+        set_persistent(
+            &s.env,
+            &s.pair.address,
+            PairDataKey::DebtIndex(s.borrower.clone()),
+            INDEX_SCALE,
+        );
+        s.pair.set_collateral_factor(&s.admin, &4_000);
+        s.pair.set_collateral_price(&s.admin, &1);
+        let liquidator = Address::generate(&s.env);
+        mint(&s.env, &s.debt_token, &liquidator, 10);
+
+        assert_eq!(
+            s.pair
+                .try_liquidate(&liquidator, &s.borrower, &9, &(i128::MAX / 4), &s.fp()),
+            Err(Ok(IsolatedLendingError::MathOverflow))
+        );
+
+        // The stored position is untouched (the view itself cannot scale a
+        // debt this large, and reports the same typed error).
+        assert_eq!(
+            s.env.as_contract(&s.pair.address, || s
+                .env
+                .storage()
+                .persistent()
+                .get::<_, i128>(&PairDataKey::Debt(s.borrower.clone()))),
+            Some(huge)
+        );
+        assert_eq!(
+            s.pair.try_get_position(&s.borrower),
+            Err(Ok(IsolatedLendingError::MathOverflow))
+        );
+        assert_eq!(balance(&s.env, &s.debt_token, &liquidator), 10);
+        assert_eq!(balance(&s.env, &s.collateral_token, &liquidator), 0);
+        assert!(s.env.as_contract(&s.pair.address, || !s
+            .env
+            .storage()
+            .persistent()
+            .has(&PairDataKey::Liquidation(s.borrower.clone(), 9))));
+    }
+
+    #[test]
+    fn bad_debt_overflow_is_rejected_before_transfers() {
+        let s = setup();
+        // Collateral worth 50 against 80 of debt; the write-off would overflow.
+        s.pair.set_collateral_price(&s.admin, &5_000);
+        set_instance(
+            &s.env,
+            &s.pair.address,
+            PairDataKey::BadDebt,
+            i128::MAX - 10,
+        );
+        let liquidator = Address::generate(&s.env);
+        mint(&s.env, &s.debt_token, &liquidator, 80);
+        let pair_collateral = balance(&s.env, &s.collateral_token, &s.pair.address);
+
+        assert_eq!(
+            s.pair
+                .try_liquidate(&liquidator, &s.borrower, &2, &80, &s.fp()),
+            Err(Ok(IsolatedLendingError::MathOverflow))
+        );
+
+        // Nothing moved, the position is unchanged and the id can be retried
+        // once the corruption that caused the overflow is gone.
+        assert_eq!(s.pair.get_position(&s.borrower), (100, 80));
+        assert_eq!(balance(&s.env, &s.debt_token, &liquidator), 80);
+        assert_eq!(balance(&s.env, &s.collateral_token, &liquidator), 0);
+        assert_eq!(
+            balance(&s.env, &s.collateral_token, &s.pair.address),
+            pair_collateral
+        );
+        assert!(s.env.as_contract(&s.pair.address, || !s
+            .env
+            .storage()
+            .persistent()
+            .has(&PairDataKey::Liquidation(s.borrower.clone(), 2))));
+    }
+
+    #[test]
+    fn zero_configuration_values_are_rejected() {
+        let s = setup();
+        assert_eq!(
+            s.pair.try_set_collateral_price(&s.admin, &0),
+            Err(Ok(IsolatedLendingError::InvalidConfig))
+        );
+        assert_eq!(
+            s.pair.try_set_collateral_factor(&s.admin, &0),
+            Err(Ok(IsolatedLendingError::InvalidConfig))
+        );
+        assert_eq!(
+            s.pair.try_set_close_factor(&s.admin, &0),
+            Err(Ok(IsolatedLendingError::InvalidConfig))
+        );
+        assert_eq!(
+            s.pair.try_set_reserve_bps(&s.admin, &10_001),
+            Err(Ok(IsolatedLendingError::InvalidConfig))
+        );
+        assert_eq!(
+            s.pair.try_set_oracle_policy(&s.admin, &10_001, &10),
+            Err(Ok(IsolatedLendingError::InvalidConfig))
+        );
+
+        let env = Env::default();
+        env.mock_all_auths();
+        let admin = Address::generate(&env);
+        let pair_id = env.register(IsolatedLendingPair, ());
+        let pair = IsolatedLendingPairClient::new(&env, &pair_id);
+        let (col, debt) = (new_token(&env), new_token(&env));
+        assert_eq!(
+            pair.try_initialize(&admin, &col, &debt, &0),
+            Err(Ok(IsolatedLendingError::InvalidConfig))
+        );
+        assert_eq!(
+            pair.try_get_totals(),
+            Err(Ok(IsolatedLendingError::NotInitialized))
+        );
     }
 }
