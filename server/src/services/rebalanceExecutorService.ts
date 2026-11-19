@@ -13,6 +13,12 @@
 import * as StellarSdk from '@stellar/stellar-sdk';
 import { RebalanceExecutionResult } from './rebalanceQueueService';
 import { RebalanceQueueEntryDTO } from './rebalanceQueueService';
+import {
+  createTransactionReviewContext,
+  validateTransactionReviewContext,
+  type TransactionReviewContext,
+  type NetworkPassphrase,
+} from '../services/transactionReviewContext';
 
 // ── Execution failure classes ──────────────────────────────────────────────
 
@@ -105,9 +111,40 @@ export class RebalanceExecutorService {
   private config: ExecutorConfig;
   private server: any;
 
+  private reviewContext: TransactionReviewContext | null = null;
+
   constructor(config: Partial<ExecutorConfig> = {}) {
     this.config = { ...DEFAULT_CONFIG, ...config };
     this.server = new SorobanRpc.Server(this.config.rpcUrl);
+  }
+
+  /**
+   * Set the review context for this execution session.
+   * All subsequent operations will validate against this context.
+   */
+  setReviewContext(context: TransactionReviewContext): void {
+    this.reviewContext = context;
+  }
+
+  /**
+   * Validate the current review context before execution.
+   * Returns an error string if context validation fails, or null if valid.
+   */
+  private validateReviewContext(): string | null {
+    if (!this.reviewContext) return null;
+
+    const networkPassphrase: NetworkPassphrase = this.config.networkPassphrase as unknown as NetworkPassphrase;
+    const rpcUrl = this.config.rpcUrl ?? "https://soroban-testnet.stellar.org";
+
+    return validateTransactionReviewContext(
+      this.reviewContext,
+      createTransactionReviewContext(
+        networkPassphrase,
+        rpcUrl,
+        0,
+        'pending'
+      )
+    );
   }
 
   /**
@@ -184,6 +221,14 @@ export class RebalanceExecutorService {
     }
 
     lock(entry.id);
+
+    // ── 0. Validate review context ──────────────────────────────────────
+    const contextValidation = this.validateReviewContext();
+    if (contextValidation) {
+      attempt.failureClass = FAILURE_CLASS.CONSTRAINT;
+      attempt.failureReason = `Context validation failed: ${contextValidation}`;
+      throw new Error(`Context validation failed: ${contextValidation}`);
+    }
 
     try {
       // ── 1. Dry-run ───────────────────────────────────────────────────────

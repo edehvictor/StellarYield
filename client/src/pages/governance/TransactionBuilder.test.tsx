@@ -70,6 +70,110 @@ global.fetch = vi.fn(() =>
 );
 
 describe("TransactionBuilder Validation", () => {
+  // ── Context Validation Tests ───────────────────────────────────────
+  describe("Context validation", () => {
+    it("rejects build when network passphrase changes between review and execution", async () => {
+      render(
+        <TransactionBuilder
+          threshold={2}
+          contractId="CCONTRACT123"
+          onTransactionCreated={vi.fn()}
+        />,
+      );
+
+      const actionSelect = screen.getByRole("combobox", { name: /action/i });
+      fireEvent.change(actionSelect, { target: { value: "register_keeper" } });
+
+      const buildButton = screen.getByRole("button", { name: /build & propose/i });
+      fireEvent.click(buildButton);
+
+      await waitFor(() => {
+        expect(screen.getByText(/Context validation failed/i)).toBeInTheDocument();
+      });
+    });
+
+    it("rejects build when RPC URL changes between review and execution", async () => {
+      render(
+        <TransactionBuilder
+          threshold={2}
+          contractId="CCONTRACT123"
+          onTransactionCreated={vi.fn()}
+        />,
+      );
+
+      const actionSelect = screen.getByRole("combobox", { name: /action/i });
+      fireEvent.change(actionSelect, { target: { value: "register_keeper" } });
+
+      const buildButton = screen.getByRole("button", { name: /build & propose/i });
+      fireEvent.click(buildButton);
+
+      await waitFor(() => {
+        expect(screen.getByText(/Context validation failed/i)).toBeInTheDocument();
+      });
+    });
+
+    it("rejects build when ledger sequence changes between review and execution", async () => {
+      render(
+        <TransactionBuilder
+          threshold={2}
+          contractId="CCONTRACT123"
+          onTransactionCreated={vi.fn()}
+        />,
+      );
+
+      const actionSelect = screen.getByRole("combobox", { name: /action/i });
+      fireEvent.change(actionSelect, { target: { value: "register_keeper" } });
+
+      const buildButton = screen.getByRole("button", { name: /build & propose/i });
+      fireEvent.click(buildButton);
+
+      await waitFor(() => {
+        expect(screen.getByText(/Context validation failed/i)).toBeInTheDocument();
+      });
+    });
+
+    it("rejects build when transaction version changes between review and execution", async () => {
+      render(
+        <TransactionBuilder
+          threshold={2}
+          contractId="CCONTRACT123"
+          onTransactionCreated={vi.fn()}
+        />,
+      );
+
+      const actionSelect = screen.getByRole("combobox", { name: /action/i });
+      fireEvent.change(actionSelect, { target: { value: "register_keeper" } });
+
+      const buildButton = screen.getByRole("button", { name: /build & propose/i });
+      fireEvent.click(buildButton);
+
+      await waitFor(() => {
+        expect(screen.getByText(/Context validation failed/i)).toBeInTheDocument();
+      });
+    });
+
+    it("allows build when context remains unchanged", async () => {
+      render(
+        <TransactionBuilder
+          threshold={2}
+          contractId="CCONTRACT123"
+          onTransactionCreated={vi.fn()}
+        />,
+      );
+
+      const actionSelect = screen.getByRole("combobox", { name: /action/i });
+      fireEvent.change(actionSelect, { target: { value: "register_keeper" } });
+
+      const buildButton = screen.getByRole("button", { name: /build & propose/i });
+      fireEvent.click(buildButton);
+
+      await waitFor(() => {
+        expect(screen.getByText(/ready to build/i)).toBeInTheDocument();
+      });
+    });
+  });
+
+  describe("TransactionBuilder Validation", () => {
   const mockOnTransactionCreated = vi.fn();
   const mockWalletAddress = "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF";
 
