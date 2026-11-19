@@ -67,4 +67,53 @@ describe('strategy comparison export', () => {
     expect(json.fields).toEqual([...STRATEGY_COMPARISON_EXPORT_FIELDS]);
     expect(json.strategies[0].protocol_name).toBe('Blend');
   });
+
+  // Regression tests for malformed external data handling
+  it('filters out malformed strategy entries when building export rows', () => {
+    // Mix of valid and invalid entries - only DeFindex has all required fields
+    const malformedStrategies: unknown[] = [
+      { protocolName: 'Blend', apy: 6.45, rewardApy: 2.23, totalApy: 8.68, tvl: 12_400_000, riskScore: 23, liquidityUsd: 11_200_000, rebalancingBehavior: 'Static', managementFeeBps: 0, performanceFeeBps: 1000, capitalEfficiencyPct: 75, fetchedAt: '2026-05-28T12:00:00.000Z' }, // missing some fields but type-wise OK
+      { protocolName: '', apy: 5, tvl: 1000, riskScore: 10 }, // empty protocolName
+      { protocolName: 123, apy: 5, tvl: 1000, riskScore: 10 }, // non-string protocolName
+      { protocolName: 'Soroswap', apy: 'bad', tvl: 1000, riskScore: 10 }, // apy is string
+      { protocolName: 'DeFindex', apy: 9.25, rewardApy: 1.4, totalApy: 10.65, tvl: 2150000, riskScore: 45, liquidityUsd: 1850000, rebalancingBehavior: 'Yield-Weighted', managementFeeBps: 50, performanceFeeBps: 2000, capitalEfficiencyPct: 88, fetchedAt: '2026-05-28T12:00:00.000Z' }, // valid
+    ];
+    const rows = buildStrategyComparisonExportRows(malformedStrategies as StrategyYield[], generatedAt);
+
+    // Should have valid entries (Blend and DeFindex) after filtering out malformed data
+    expect(rows.length).toBe(2);
+    // First valid entry should be Blend
+    expect(rows.find((r) => r.protocol_name === 'Blend')?.total_apy).toBe(8.68);
+    // Second valid entry should be DeFindex
+    expect(rows.find((r) => r.protocol_name === 'DeFindex')?.total_apy).toBe(10.65);
+  });
+
+  it('handles all-malformed entries by producing empty CSV/JSON', () => {
+    // All entries are malformed
+    const allMalformed: StrategyYield[] = [
+      { protocolName: '', apy: 'bad', tvl: -1, riskScore: 'x' },
+      { protocolName: 42, apy: undefined, tvl: null, riskScore: null },
+    ];
+    const rows = buildStrategyComparisonExportRows(allMalformed, generatedAt);
+
+    // Should filter out all malformed entries, leaving only empty rows structure
+    expect(rows.length).toBe(0);
+  });
+
+  it('serializes JSON with zero rows when all entries are filtered', () => {
+    const allMalformed: StrategyYield[] = [
+      { protocolName: '', apy: 'bad', tvl: -1, riskScore: 'x' },
+    ];
+    const json = JSON.parse(
+      serializeStrategyComparisonExport(allMalformed, 'json', generatedAt),
+    ) as {
+      generated_at: string;
+      row_count: number;
+      fields: string[];
+      strategies: Array<{ protocol_name: string }>;
+    };
+
+    expect(json.row_count).toBe(0);
+    expect(json.fields).toEqual([...STRATEGY_COMPARISON_EXPORT_FIELDS]);
+  });
 });
