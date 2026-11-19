@@ -8,8 +8,9 @@
 
 - `initialize(admin, oracle)`
 - `mint(minter, option_type, underlying_asset, quote_asset, strike_price, opening_time, expiration_time, collateral_amount)`
-- `exercise(exerciser, option_id)` exercises all remaining collateral
-- `exercise_partial(exerciser, option_id, amount)` exercises part of the collateral
+- `exercise(exerciser, option_id, expected_config_fingerprint)` exercises all remaining collateral
+- `exercise_partial(exerciser, option_id, amount, expected_config_fingerprint)` exercises part of the collateral
+- `get_config_snapshot()` / `get_config_fingerprint()` expose the configuration settlement is validated against
 - `cancel(minter, option_id)` cancels an unexpired option and returns its unexercised collateral
 - `expire(option_id)`
 - `deposit(owner, asset, amount)` / `withdraw(owner, asset, amount)`
@@ -34,9 +35,32 @@ and ledger timestamp.
 
 `deposit` and `withdraw` continue to emit their existing collateral events.
 
+Admin configuration changes (`migrate`, `set_oracle_max_age`,
+`clear_oracle_max_age`) publish a `config` event with topics `(config,)` and
+the payload `(admin, new_fingerprint)`, so clients can invalidate a cached
+fingerprint immediately.
+
 ## Errors
 
 `OptionsError` covers initialization, authorization, invalid option state, expiry windows, and amount/price validation.
+
+## Configuration Fingerprint
+
+Settlement executes under the contract configuration the caller observed.
+`get_config_snapshot()` returns the admin-controlled configuration settlement
+depends on — `admin`, `oracle`, `oracle_max_age` and the active
+`storage_version` — and `get_config_fingerprint()` returns its SHA-256
+fingerprint (domain-separated). The fingerprint is a pure function of those
+values: it does not change when options are minted, exercised, cancelled or
+expired, and it changes exactly when an admin changes the configuration.
+
+Clients capture the fingerprint before preparing a settlement and pass it to
+`exercise` / `exercise_partial`. The fingerprint is validated first, before the
+position is read again and before any collateral moves; a mismatch (for example
+after the admin enables the oracle guard or migrates storage) fails with
+`StaleConfig`. A rejected settlement leaves balances, reserves, exercised
+amounts and the position record untouched, so the caller can refresh the
+fingerprint with `get_config_fingerprint()` and retry the same operation safely.
 
 ## Collateral Accounting
 
@@ -87,8 +111,10 @@ existing deployments behave exactly as before.
 
 ## Storage Model
 
-- Instance: admin, oracle, option counter, oracle guard max age.
+- Instance: admin, oracle, option counter, oracle guard max age, storage version.
 - Persistent: option records by id, free and reserved collateral per `(owner, asset)`, and the amount already paid out by partial exercises per option.
+- The configuration fingerprint is derived on demand from the instance
+  configuration; nothing is stored for it, so it cannot go out of sync.
 
 ## Local Test
 
