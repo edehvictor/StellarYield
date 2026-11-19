@@ -286,6 +286,41 @@ Source: `contracts/stealth_addresses/src/lib.rs`
 
 ---
 
+## options — `OptionsError`
+
+Source: `contracts/options/src/lib.rs`
+
+| Code | Name                      | Meaning                                               | Remediation                                                   |
+| ---- | ------------------------- | ----------------------------------------------------- | ------------------------------------------------------------- |
+| 1    | `AlreadyInitialized`      | `initialize()` was called twice                       | No action needed                                              |
+| 2    | `NotInitialized`          | Contract not initialized                              | Call `initialize(admin, oracle)`                              |
+| 3    | `Unauthorized`            | Caller does not own the position being cancelled      | Use the minter address                                        |
+| 4    | `InvalidOption`           | Reserved for invalid option definitions               | Check the option parameters                                   |
+| 5    | `NotExpired`              | `expire` called before `expiration_time`              | Wait until the exercise window closes                         |
+| 6    | `AlreadyExercised`        | Position was already fully exercised                  | No action needed                                              |
+| 7    | `AlreadyExpired`          | Position has already been closed by expiry            | No action needed                                              |
+| 8    | `ZeroAmount`              | Amount is zero or negative                            | Pass a positive amount                                        |
+| 9    | `InvalidPrice`            | Oracle price is non-positive, zero-timestamped, or from the future | Check the oracle observation                        |
+| 10   | `TooEarly`                | Exercise attempted before `opening_time`              | Retry inside the exercise window                              |
+| 11   | `ExerciseWindowClosed`    | Exercise attempted after `expiration_time`            | Use `expire` instead                                          |
+| 12   | `InvalidExerciseWindow`   | `opening_time` is not strictly before `expiration_time` | Order the window correctly                                   |
+| 13   | `InsufficientFreeCollateral` | Withdrawal exceeds free (unreserved) collateral    | Withdraw no more than `get_free_collateral` reports            |
+| 14   | `ExceedsCollateral`       | Exercise amount exceeds the remaining collateral      | Exercise no more than the remaining collateral                 |
+| 15   | `MathOverflow`            | A checked intermediate cannot be represented in `i128` | Reduce input amounts                                         |
+| 16   | `OracleObservationMissing` | Oracle has no observation for a required asset       | Publish an observation for the underlying and collateral asset |
+| 17   | `StaleOracleObservation`  | Observation older than the configured `oracle_max_age` | Publish a fresh observation                                  |
+| 18   | `InvalidMaxAge`           | `set_oracle_max_age(0)` was rejected                   | Pass a non-zero max age                                       |
+| 19   | `CancellationWindowClosed` | Cancellation attempted after `expiration_time`       | Use `expire` instead                                          |
+| 20   | `AlreadyCancelled`        | Position was already cancelled                        | No action needed                                              |
+| 21   | `StaleConfig`             | Configuration changed since the caller captured its fingerprint | Refresh with `get_config_fingerprint` and retry settlement |
+
+`exercise` and `exercise_partial` validate the expected configuration
+fingerprint before any collateral moves, so a `StaleConfig` rejection leaves
+balances, reserves, exercised amounts and the position record unchanged and the
+same settlement can be retried under the refreshed configuration.
+
+---
+
 ## Panic Paths
 
 In addition to typed errors, contracts may call `panic_with_error!` or `panic!` for invariant violations. These surface as generic transaction failures without a typed code. Common causes:
