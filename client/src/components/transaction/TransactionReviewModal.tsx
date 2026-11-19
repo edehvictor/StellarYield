@@ -8,6 +8,11 @@ import {
   ExternalLink,
   Wallet,
 } from "lucide-react";
+import {
+  buildTransactionReviewFailureDiagnostics,
+  getTransactionReviewStageLabel,
+  type TransactionReviewDiagnostic,
+} from "../../../../shared/types/transactionReviewDiagnostic";
 import { QuoteAssumptionFingerprintDisplay } from "./QuoteAssumptionFingerprintDisplay";
 import type { QuoteAssumptions } from "../../../../shared/types/quoteAssumptionFingerprint";
 
@@ -33,6 +38,12 @@ export interface TransactionReviewModalProps {
   isStale?: boolean;
   onRefreshQuote?: () => void;
   error?: string | null;
+  /**
+   * Privacy-safe stage diagnostics for the failure. When `error` is set and no
+   * diagnostics are supplied, a `CONTEXT_INSUFFICIENT` diagnostic is shown so
+   * the user still gets a remediation path and a state-preserved statement.
+   */
+  diagnostics?: readonly TransactionReviewDiagnostic[] | null;
 }
 
 export function TransactionReviewModal({
@@ -50,6 +61,7 @@ export function TransactionReviewModal({
   isStale = false,
   onRefreshQuote,
   error = null,
+  diagnostics = null,
 }: TransactionReviewModalProps) {
   // Close on Escape key
   const handleKeyDown = useCallback(
@@ -71,6 +83,12 @@ export function TransactionReviewModal({
   if (!isOpen) return null;
 
   const canConfirm = !isSubmitting && !isStale && !error;
+  const shownDiagnostics: readonly TransactionReviewDiagnostic[] =
+    diagnostics && diagnostics.length > 0
+      ? diagnostics
+      : error
+        ? buildTransactionReviewFailureDiagnostics("CONTEXT_INSUFFICIENT", { stage: "unknown" })
+        : [];
 
   return (
     <div
@@ -170,6 +188,24 @@ export function TransactionReviewModal({
                 <p>{error}</p>
               </div>
             </div>
+          )}
+
+          {shownDiagnostics.length > 0 && (
+            <ul
+              data-testid="transaction-review-diagnostics"
+              aria-label="Transaction review diagnostics"
+              className="space-y-2 rounded-xl border border-amber-500/20 bg-amber-500/5 p-3"
+            >
+              {shownDiagnostics.map((d) => (
+                <li key={`${d.code}-${d.stage}`} className="text-xs text-gray-300">
+                  <p className="font-medium text-amber-200">
+                    {getTransactionReviewStageLabel(d.stage)} · {d.code}
+                  </p>
+                  <p className="mt-0.5">{d.summary}</p>
+                  <p className="mt-0.5 text-gray-400">Next: {d.remediation}</p>
+                </li>
+              ))}
+            </ul>
           )}
         </div>
 

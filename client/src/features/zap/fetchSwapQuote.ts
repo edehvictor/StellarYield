@@ -1,5 +1,9 @@
 import type { ZapQuoteRequest, ZapQuoteResponse } from "./types";
 import { apiUrl } from "../../lib/api";
+import {
+  parseTransactionReviewDiagnostics,
+  type TransactionReviewDiagnostic,
+} from "../../../../shared/types/transactionReviewDiagnostic";
 
 /** Subset of the server's `ErrorResponse` payload relevant to quote previews. */
 interface ZapQuoteErrorBody {
@@ -7,6 +11,7 @@ interface ZapQuoteErrorBody {
   message?: unknown;
   requestId?: unknown;
   recoverable?: unknown;
+  diagnostics?: unknown;
 }
 
 /**
@@ -23,6 +28,8 @@ export class ZapQuoteError extends Error {
   readonly requestId?: string;
   /** Whether recovery actions should be offered for this failure. */
   readonly recoverable: boolean;
+  /** Privacy-safe stage diagnostics from the server, validated client-side. */
+  readonly diagnostics: TransactionReviewDiagnostic[];
 
   constructor(
     message: string,
@@ -31,6 +38,7 @@ export class ZapQuoteError extends Error {
       status: number;
       requestId?: string;
       recoverable?: boolean;
+      diagnostics?: TransactionReviewDiagnostic[];
     },
   ) {
     super(message);
@@ -39,6 +47,7 @@ export class ZapQuoteError extends Error {
     this.status = options.status;
     this.requestId = options.requestId;
     this.recoverable = options.recoverable ?? false;
+    this.diagnostics = options.diagnostics ?? [];
   }
 }
 
@@ -71,6 +80,7 @@ async function toZapQuoteError(res: Response): Promise<ZapQuoteError> {
     status: res.status,
     requestId: asString(body.requestId),
     recoverable: body.recoverable === true,
+    diagnostics: parseTransactionReviewDiagnostics(body.diagnostics),
   });
 }
 

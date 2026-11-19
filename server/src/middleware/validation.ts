@@ -1,6 +1,13 @@
 import { Request, Response, NextFunction } from "express";
 import { StrKey } from "@stellar/stellar-sdk";
 import { sendError } from "../utils/errorResponse";
+import { buildTransactionReviewFailureDiagnostics } from "../../../shared/types/transactionReviewDiagnostic";
+
+function zapValidationDiagnostics() {
+  return buildTransactionReviewFailureDiagnostics("VALIDATION_FAILED", {
+    stage: "request-validation",
+  });
+}
 
 export function validateWalletAddress(req: Request, res: Response, next: NextFunction): void {
   const address = req.params.address || req.params.walletAddress;
@@ -28,11 +35,11 @@ export function validatePagination(req: Request, res: Response, next: NextFuncti
 export function validateZapQuote(req: Request, res: Response, next: NextFunction): void {
   const { inputTokenContract, vaultTokenContract, amountInStroops } = req.body;
   if (!inputTokenContract || !vaultTokenContract || amountInStroops === undefined) {
-    sendError(res, 400, "MISSING_FIELDS", "inputTokenContract, vaultTokenContract, and amountInStroops are required.");
+    sendError(res, 400, "MISSING_FIELDS", "inputTokenContract, vaultTokenContract, and amountInStroops are required.", undefined, undefined, undefined, zapValidationDiagnostics());
     return;
   }
   if (typeof amountInStroops !== "string" || !/^-?\d+$/.test(amountInStroops)) {
-    sendError(res, 400, "INVALID_AMOUNT", "amountInStroops must be an integer string.");
+    sendError(res, 400, "INVALID_AMOUNT", "amountInStroops must be an integer string.", undefined, undefined, undefined, zapValidationDiagnostics());
     return;
   }
   next();

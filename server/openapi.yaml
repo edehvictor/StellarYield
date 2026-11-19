@@ -5588,10 +5588,53 @@ Incident:
             retrying (e.g. STALE_QUOTE, CONFIG_DRIFT, ROUTE_MISMATCH,
             UNSUPPORTED_ASSET, transient QUOTE_FAILED). Absent or false for
             validation failures that require changing inputs.
+        diagnostics:
+          type: array
+          description: >
+            Privacy-safe stage diagnostics for transaction review failures
+            (#1893). The first entry names the failed stage and the remediation
+            path; a trailing `STATE_PRESERVED` entry confirms balances and
+            quotes were not modified. Text comes from fixed templates and never
+            contains raw error output, addresses, URLs or stack traces. See
+            docs/transaction-review-diagnostics.md.
+          items:
+            type: object
+            required: [code, stage, severity, summary, remediation, retryable, privacySafe]
+            properties:
+              code:
+                type: string
+                enum: [CONTEXT_INSUFFICIENT, VALIDATION_FAILED, STAGE_UNAVAILABLE, QUOTE_REFRESH_REQUIRED, STATE_PRESERVED, RETRY_UNSAFE]
+              stage:
+                type: string
+                enum: [request-validation, quote, quote-verification, wallet-signing, submission, confirmation, state-persistence, unknown]
+              severity:
+                type: string
+                enum: [info, warning, critical]
+              summary:
+                type: string
+              remediation:
+                type: string
+              retryable:
+                type: boolean
+              privacySafe:
+                type: boolean
+                enum: [true]
+              affectedStages:
+                type: array
+                items:
+                  type: string
       example:
         error: "STALE_QUOTE"
         message: "Quote has expired"
         recoverable: true
+        diagnostics:
+          - code: "QUOTE_REFRESH_REQUIRED"
+            stage: "quote-verification"
+            severity: "warning"
+            summary: "The quote no longer matches current conditions and was not accepted."
+            remediation: "Request a fresh quote and review it again; the old quote cannot be reused."
+            retryable: true
+            privacySafe: true
 
     ZapSupportedAssetsResponse:
       type: object
