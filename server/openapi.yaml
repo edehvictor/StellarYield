@@ -2341,10 +2341,21 @@ paths:
   /api/alerts/preferences:
     put:
       summary: Update alert preferences
-      description: Updates alert preferences for a wallet and vault with operation identity deduplication
+      description: >-
+        Updates alert preferences for a wallet and vault with operation identity
+        deduplication and optional optimistic concurrency. Send the version from a
+        previous read as `If-Match` (or `expectedVersion` in the body); the write
+        commits only if no other write happened since. A replayed operation
+        identity returns its original result and version.
       tags:
         - Alerts
       parameters:
+        - name: If-Match
+          in: header
+          required: false
+          description: Expected preference version, e.g. `"3"`. `"0"` means create only.
+          schema:
+            type: string
         - name: X-Operation-Identity
           in: header
           required: false
@@ -2372,6 +2383,10 @@ paths:
                   type: string
                 operationIdentity:
                   type: string
+                expectedVersion:
+                  type: integer
+                  minimum: 0
+                  description: Used when no If-Match header is sent.
                 preferences:
                   $ref: '#/components/schemas/AlertPreferences'
       responses:
@@ -2381,14 +2396,25 @@ paths:
             X-Idempotent-Replayed:
               schema:
                 type: string
+            ETag:
+              description: The committed version, quoted.
+              schema:
+                type: string
+            X-Preferences-Version:
+              schema:
+                type: integer
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/AlertPreferences'
         '400':
-          description: Invalid preference parameters
+          description: Invalid preference parameters, or a malformed If-Match / expectedVersion (`INVALID_EXPECTED_VERSION`)
         '409':
-          description: Operation identity conflict
+          description: >-
+            `OPERATION_IDENTITY_CONFLICT` (identity reused with different parameters) or
+            `PREFERENCE_VERSION_CONFLICT` (another write committed first). The latter body
+            carries `expectedVersion`, `currentVersion` and the current `preferences`;
+            nothing was changed.
         '500':
           description: Failed to update alert preferences
 
@@ -2412,6 +2438,14 @@ paths:
       responses:
         '200':
           description: Alert preferences retrieved successfully
+          headers:
+            ETag:
+              description: Current preference version, quoted; send it back as If-Match.
+              schema:
+                type: string
+            X-Preferences-Version:
+              schema:
+                type: integer
           content:
             application/json:
               schema:
