@@ -100,6 +100,7 @@ Source: `contracts/isolated_lending/src/lib.rs`
 | 13   | `OracleQuoteStale`       | Oracle quote older than the policy allows | Push a fresh quote                         |
 | 14   | `OracleConfidenceTooLow` | Oracle quote confidence below the policy | Wait for a higher-confidence quote          |
 | 15   | `StaleConfig`            | Configuration changed since the caller captured its fingerprint | Refresh with `get_config_fingerprint` and retry |
+| 16   | `StaleState`             | Market or subject state changed since the caller captured its state fingerprint | Refresh with `get_state_fingerprint` and retry |
 
 `isolated_lending` uses checked arithmetic and documented floor rounding for
 values, limits, interest, fees and liquidation payouts (the close-factor cap is
