@@ -26,14 +26,67 @@ export function validatePagination(req: Request, res: Response, next: NextFuncti
 }
 
 export function validateZapQuote(req: Request, res: Response, next: NextFunction): void {
-  const { inputTokenContract, vaultTokenContract, amountInStroops } = req.body;
+  const {
+    inputTokenContract,
+    vaultTokenContract,
+    amountInStroops,
+    slippageTolerance,
+    inputDecimals,
+    vaultDecimals,
+    walletAddress,
+  } = req.body;
+
   if (!inputTokenContract || !vaultTokenContract || amountInStroops === undefined) {
     sendError(res, 400, "MISSING_FIELDS", "inputTokenContract, vaultTokenContract, and amountInStroops are required.");
     return;
   }
-  if (typeof amountInStroops !== "string" || !/^-?\d+$/.test(amountInStroops)) {
+
+  if (
+    typeof inputTokenContract !== "string" ||
+    inputTokenContract.trim() === "" ||
+    typeof vaultTokenContract !== "string" ||
+    vaultTokenContract.trim() === ""
+  ) {
+    sendError(res, 400, "INVALID_CONTRACT", "inputTokenContract and vaultTokenContract must be non-empty strings.");
+    return;
+  }
+
+  if (typeof amountInStroops !== "string" || !/^\d+$/.test(amountInStroops) || BigInt(amountInStroops) <= 0n) {
     sendError(res, 400, "INVALID_AMOUNT", "amountInStroops must be an integer string.");
     return;
   }
+
+  if (slippageTolerance !== undefined && slippageTolerance !== null) {
+    const numSlippage = Number(slippageTolerance);
+    if (!Number.isFinite(numSlippage) || numSlippage < 0 || numSlippage > 50) {
+      sendError(res, 400, "INVALID_SLIPPAGE", "slippageTolerance must be a finite percentage between 0 and 50.");
+      return;
+    }
+  }
+
+  if (inputDecimals !== undefined && inputDecimals !== null) {
+    const dec = Number(inputDecimals);
+    if (!Number.isInteger(dec) || dec < 0 || dec > 18) {
+      sendError(res, 400, "INVALID_DECIMALS", "inputDecimals must be an integer between 0 and 18.");
+      return;
+    }
+  }
+
+  if (vaultDecimals !== undefined && vaultDecimals !== null) {
+    const dec = Number(vaultDecimals);
+    if (!Number.isInteger(dec) || dec < 0 || dec > 18) {
+      sendError(res, 400, "INVALID_DECIMALS", "vaultDecimals must be an integer between 0 and 18.");
+      return;
+    }
+  }
+
+  if (typeof walletAddress === "string" && walletAddress.trim() !== "") {
+    const cleanAddr = walletAddress.trim();
+    if (!/^[GC][A-Za-z0-9_-]{9,64}$/.test(cleanAddr)) {
+      sendError(res, 400, "INVALID_ADDRESS", "walletAddress must be a valid Stellar public key or contract address.");
+      return;
+    }
+  }
+
   next();
 }

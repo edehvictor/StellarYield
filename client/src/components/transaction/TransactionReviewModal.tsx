@@ -1,4 +1,4 @@
-import React, { useEffect, useCallback } from "react";
+import React, { useEffect, useCallback, useMemo } from "react";
 import {
   X,
   ArrowRight,
@@ -10,6 +10,10 @@ import {
 } from "lucide-react";
 import { QuoteAssumptionFingerprintDisplay } from "./QuoteAssumptionFingerprintDisplay";
 import type { QuoteAssumptions } from "../../../../shared/types/quoteAssumptionFingerprint";
+import {
+  validateTransactionReview,
+  type TransactionReviewValidationError,
+} from "../../../../shared/types/transactionReview";
 
 export interface TransactionReviewTokenDetail {
   symbol: string;
@@ -33,6 +37,7 @@ export interface TransactionReviewModalProps {
   isStale?: boolean;
   onRefreshQuote?: () => void;
   error?: string | null;
+  onValidationError?: (error: TransactionReviewValidationError) => void;
 }
 
 export function TransactionReviewModal({
@@ -50,7 +55,26 @@ export function TransactionReviewModal({
   isStale = false,
   onRefreshQuote,
   error = null,
+  onValidationError,
 }: TransactionReviewModalProps) {
+  // Boundary validation against malformed external data (#1889)
+  const validationResult = useMemo(() => {
+    return validateTransactionReview({
+      walletAddress,
+      inputToken,
+      vaultToken,
+      slippageTolerance,
+      assumptions,
+      fingerprint,
+    });
+  }, [walletAddress, inputToken, vaultToken, slippageTolerance, assumptions, fingerprint]);
+
+  useEffect(() => {
+    if (isOpen && !validationResult.valid && onValidationError) {
+      onValidationError(validationResult.error);
+    }
+  }, [isOpen, validationResult, onValidationError]);
+
   // Close on Escape key
   const handleKeyDown = useCallback(
     (e: KeyboardEvent) => {
@@ -68,9 +92,38 @@ export function TransactionReviewModal({
     }
   }, [isOpen, handleKeyDown]);
 
+  const canConfirm = !isSubmitting && !isStale && !error && validationResult.valid;
+
+  const handleConfirm = useCallback(() => {
+    if (!canConfirm || !validationResult.valid) {
+      return;
+    }
+    void onConfirm();
+  }, [canConfirm, validationResult.valid, onConfirm]);
+
   if (!isOpen) return null;
 
-  const canConfirm = !isSubmitting && !isStale && !error;
+  const formattedAddress =
+    typeof walletAddress === "string" && walletAddress.trim().length >= 10
+      ? `${walletAddress.trim().slice(0, 6)}…${walletAddress.trim().slice(-4)}`
+      : "Invalid account";
+
+  const displayInputAmount = validationResult.valid
+    ? validationResult.sanitized.inputToken.amount
+    : String(inputToken?.amount ?? "");
+  const displayInputSymbol = validationResult.valid
+    ? validationResult.sanitized.inputToken.symbol
+    : String(inputToken?.symbol ?? "");
+
+  const displayVaultAmount = validationResult.valid
+    ? validationResult.sanitized.vaultToken.amount
+    : String(vaultToken?.amount ?? "");
+  const displayVaultSymbol = validationResult.valid
+    ? validationResult.sanitized.vaultToken.symbol
+    : String(vaultToken?.symbol ?? "");
+  const displayMinAmount = validationResult.valid
+    ? validationResult.sanitized.vaultToken.minAmount
+    : vaultToken?.minAmount ? String(vaultToken.minAmount) : undefined;
 
   return (
     <div
@@ -113,8 +166,8 @@ export function TransactionReviewModal({
               <Wallet className="h-3.5 w-3.5 text-gray-400" />
               Connected Account
             </span>
-            <span className="font-mono text-gray-200">
-              {walletAddress.slice(0, 6)}…{walletAddress.slice(-4)}
+            <span className="font-mono text-gray-200" data-testid="review-connected-account">
+              {formattedAddress}
             </span>
           </div>
 
@@ -123,24 +176,24 @@ export function TransactionReviewModal({
             <div className="flex items-center justify-between">
               <div>
                 <span className="text-xs text-gray-400 block">You Deposit</span>
-                <span className="text-lg font-bold text-white">
-                  {inputToken.amount} {inputToken.symbol}
+                <span className="text-lg font-bold text-white" data-testid="review-input-amount">
+                  {displayInputAmount} {displayInputSymbol}
                 </span>
               </div>
               <ArrowRight className="h-5 w-5 text-gray-500" />
               <div className="text-right">
                 <span className="text-xs text-gray-400 block">Estimated Output</span>
-                <span className="text-lg font-bold text-white">
-                  {vaultToken.amount} {vaultToken.symbol}
+                <span className="text-lg font-bold text-white" data-testid="review-vault-amount">
+                  {displayVaultAmount} {displayVaultSymbol}
                 </span>
               </div>
             </div>
 
-            {vaultToken.minAmount && (
+            {displayMinAmount && (
               <div className="flex items-center justify-between pt-2 border-t border-white/10 text-xs">
                 <span className="text-gray-400">Guaranteed Minimum ({slippageTolerance}% slippage)</span>
-                <span className="font-mono text-emerald-300">
-                  {vaultToken.minAmount} {vaultToken.symbol}
+                <span className="font-mono text-emerald-300" data-testid="review-min-amount">
+                  {displayMinAmount} {displayVaultSymbol}
                 </span>
               </div>
             )}
@@ -157,6 +210,23 @@ export function TransactionReviewModal({
               initialExpanded={false}
             />
           </div>
+
+          {/* Boundary Validation Failure Alert (#1889) */}
+          {!validationResult.valid && (
+            <div
+              data-testid="transaction-review-validation-error"
+              className="flex items-start gap-2 rounded-xl border border-red-500/30 bg-red-500/10 p-3 text-xs text-red-200"
+              role="alert"
+            >
+              <AlertTriangle className="h-4 w-4 shrink-0 text-red-400 mt-0.5" />
+              <div>
+                <p className="font-semibold text-red-300">
+                  Review blocked ({validationResult.error.code})
+                </p>
+                <p>{validationResult.error.message}</p>
+              </div>
+            </div>
+          )}
 
           {/* Error Message if Present */}
           {error && (
@@ -185,7 +255,7 @@ export function TransactionReviewModal({
           </button>
           <button
             type="button"
-            onClick={() => void onConfirm()}
+            onClick={handleConfirm}
             disabled={!canConfirm}
             data-testid="confirm-transaction-btn"
             className="inline-flex items-center gap-2 rounded-xl bg-gradient-to-r from-blue-500 to-purple-600 px-5 py-2.5 text-sm font-semibold text-white shadow-lg hover:from-blue-600 hover:to-purple-700 transition-all disabled:opacity-50 disabled:cursor-not-allowed"

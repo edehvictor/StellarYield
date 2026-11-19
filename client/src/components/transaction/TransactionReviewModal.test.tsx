@@ -143,4 +143,163 @@ describe("TransactionReviewModal", () => {
     fireEvent.click(screen.getByLabelText(/close review dialog/i));
     expect(onClose).toHaveBeenCalledTimes(2);
   });
+
+  describe("boundary validation against malformed external data (#1889)", () => {
+    it("rejects non-numeric input amounts and blocks confirmation without mutating state", () => {
+      const onConfirm = vi.fn();
+      render(
+        <TransactionReviewModal
+          isOpen={true}
+          onClose={vi.fn()}
+          onConfirm={onConfirm}
+          walletAddress="GBWM7FAKESTELLARWALLETADDRESS123456"
+          inputToken={{ symbol: "USDC", amount: "not-a-number" }}
+          vaultToken={{ symbol: "yUSDC", amount: "99.5" }}
+          slippageTolerance={0.5}
+        />,
+      );
+
+      expect(screen.getByTestId("transaction-review-validation-error")).toBeInTheDocument();
+      expect(screen.getByText(/INVALID_INPUT_AMOUNT/i)).toBeInTheDocument();
+
+      const confirmBtn = screen.getByTestId("confirm-transaction-btn");
+      expect(confirmBtn).toBeDisabled();
+
+      fireEvent.click(confirmBtn);
+      expect(onConfirm).not.toHaveBeenCalled();
+    });
+
+    it("rejects malformed wallet address and blocks confirmation", () => {
+      const onConfirm = vi.fn();
+      render(
+        <TransactionReviewModal
+          isOpen={true}
+          onClose={vi.fn()}
+          onConfirm={onConfirm}
+          walletAddress="bad-address"
+          inputToken={{ symbol: "USDC", amount: "100" }}
+          vaultToken={{ symbol: "yUSDC", amount: "99.5" }}
+          slippageTolerance={0.5}
+        />,
+      );
+
+      expect(screen.getByTestId("transaction-review-validation-error")).toBeInTheDocument();
+      expect(screen.getByText(/INVALID_WALLET_ADDRESS/i)).toBeInTheDocument();
+      expect(screen.getByTestId("confirm-transaction-btn")).toBeDisabled();
+      fireEvent.click(screen.getByTestId("confirm-transaction-btn"));
+      expect(onConfirm).not.toHaveBeenCalled();
+    });
+
+    it("rejects minAmount that exceeds output amount", () => {
+      const onConfirm = vi.fn();
+      render(
+        <TransactionReviewModal
+          isOpen={true}
+          onClose={vi.fn()}
+          onConfirm={onConfirm}
+          walletAddress="GBWM7FAKESTELLARWALLETADDRESS123456"
+          inputToken={{ symbol: "USDC", amount: "100" }}
+          vaultToken={{ symbol: "yUSDC", amount: "99.5", minAmount: "120.0" }}
+          slippageTolerance={0.5}
+        />,
+      );
+
+      expect(screen.getByTestId("transaction-review-validation-error")).toBeInTheDocument();
+      expect(screen.getByText(/MIN_AMOUNT_EXCEEDS_OUTPUT/i)).toBeInTheDocument();
+      expect(screen.getByTestId("confirm-transaction-btn")).toBeDisabled();
+      fireEvent.click(screen.getByTestId("confirm-transaction-btn"));
+      expect(onConfirm).not.toHaveBeenCalled();
+    });
+
+    it("rejects invalid slippage tolerance percentage", () => {
+      const onConfirm = vi.fn();
+      render(
+        <TransactionReviewModal
+          isOpen={true}
+          onClose={vi.fn()}
+          onConfirm={onConfirm}
+          walletAddress="GBWM7FAKESTELLARWALLETADDRESS123456"
+          inputToken={{ symbol: "USDC", amount: "100" }}
+          vaultToken={{ symbol: "yUSDC", amount: "99.5" }}
+          slippageTolerance={-1}
+        />,
+      );
+
+      expect(screen.getByTestId("transaction-review-validation-error")).toBeInTheDocument();
+      expect(screen.getByText(/INVALID_SLIPPAGE/i)).toBeInTheDocument();
+      expect(screen.getByTestId("confirm-transaction-btn")).toBeDisabled();
+      fireEvent.click(screen.getByTestId("confirm-transaction-btn"));
+      expect(onConfirm).not.toHaveBeenCalled();
+    });
+
+    it("rejects expired quote assumptions at the review boundary", () => {
+      const onConfirm = vi.fn();
+      const expiredAssumptions = {
+        ...mockAssumptions,
+        expiresAt: new Date(Date.now() - 1000).toISOString(),
+      };
+      render(
+        <TransactionReviewModal
+          isOpen={true}
+          onClose={vi.fn()}
+          onConfirm={onConfirm}
+          walletAddress="GBWM7FAKESTELLARWALLETADDRESS123456"
+          inputToken={{ symbol: "USDC", amount: "100" }}
+          vaultToken={{ symbol: "yUSDC", amount: "99.5" }}
+          slippageTolerance={0.5}
+          assumptions={expiredAssumptions}
+          fingerprint={computeQuoteAssumptionFingerprint(expiredAssumptions).fingerprint}
+        />,
+      );
+
+      expect(screen.getByTestId("transaction-review-validation-error")).toBeInTheDocument();
+      expect(screen.getByText(/ASSUMPTIONS_EXPIRED/i)).toBeInTheDocument();
+      expect(screen.getByTestId("confirm-transaction-btn")).toBeDisabled();
+      fireEvent.click(screen.getByTestId("confirm-transaction-btn"));
+      expect(onConfirm).not.toHaveBeenCalled();
+    });
+
+    it("supports safe retry behavior when malformed data is corrected", () => {
+      const onConfirm = vi.fn();
+      const { rerender } = render(
+        <TransactionReviewModal
+          isOpen={true}
+          onClose={vi.fn()}
+          onConfirm={onConfirm}
+          walletAddress="GBWM7FAKESTELLARWALLETADDRESS123456"
+          inputToken={{ symbol: "USDC", amount: "malformed" }}
+          vaultToken={{ symbol: "yUSDC", amount: "99.5" }}
+          slippageTolerance={0.5}
+        />,
+      );
+
+      // Initially blocked
+      expect(screen.getByTestId("transaction-review-validation-error")).toBeInTheDocument();
+      const confirmBtn = screen.getByTestId("confirm-transaction-btn");
+      expect(confirmBtn).toBeDisabled();
+      fireEvent.click(confirmBtn);
+      expect(onConfirm).not.toHaveBeenCalled();
+
+      // Retry with valid corrected input
+      rerender(
+        <TransactionReviewModal
+          isOpen={true}
+          onClose={vi.fn()}
+          onConfirm={onConfirm}
+          walletAddress="GBWM7FAKESTELLARWALLETADDRESS123456"
+          inputToken={{ symbol: "USDC", amount: "100" }}
+          vaultToken={{ symbol: "yUSDC", amount: "99.5" }}
+          slippageTolerance={0.5}
+        />,
+      );
+
+      // Error clears and confirm button becomes enabled
+      expect(screen.queryByTestId("transaction-review-validation-error")).not.toBeInTheDocument();
+      expect(confirmBtn).not.toBeDisabled();
+
+      // Confirm succeeds cleanly
+      fireEvent.click(confirmBtn);
+      expect(onConfirm).toHaveBeenCalledTimes(1);
+    });
+  });
 });
