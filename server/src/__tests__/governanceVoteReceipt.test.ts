@@ -1,11 +1,12 @@
 import {
   submitVoteReceipt,
+  submitVoteReceiptOnce,
   reconcileVoteReceipts,
   getVoteReceipt,
   listVoteReceipts,
   clearReceiptStore,
   type IndexedGovernanceEvent,
-} from "../../services/governanceVoteReceiptService";
+} from "../services/governanceVoteReceiptService";
 
 beforeEach(() => {
   clearReceiptStore();
@@ -29,10 +30,92 @@ describe("governanceVoteReceiptService (#1190)", () => {
       expect(receipt.failureReason).toBeUndefined();
     });
 
-    it("assigns a unique receiptId per submission", () => {
+    it("assigns a unique receiptId per distinct vote, even within one millisecond", () => {
+      // Fake timers freeze Date.now(), so ids must not depend on the clock alone.
+      const r1 = submitVoteReceipt("p-1", "GABC", "yes");
+      const r2 = submitVoteReceipt("p-1", "GDEF", "yes");
+      const r3 = submitVoteReceipt("p-2", "GABC", "yes");
+      expect(new Set([r1.receiptId, r2.receiptId, r3.receiptId]).size).toBe(3);
+      expect(listVoteReceipts("p-1")).toHaveLength(2);
+    });
+  });
+
+  describe("safe retries (#1896)", () => {
+    it("returns the existing receipt when the same vote is submitted again", () => {
+      const first = submitVoteReceiptOnce("p-1", "GABC", "yes");
+      const retry = submitVoteReceiptOnce("p-1", "GABC", "yes");
+
+      expect(first.outcome).toBe("created");
+      expect(retry.outcome).toBe("replayed");
+      expect(retry.receipt.receiptId).toBe(first.receipt.receiptId);
+      expect(listVoteReceipts("p-1")).toHaveLength(1);
+    });
+
+    it("submitVoteReceipt resolves a retry to the same receipt", () => {
       const r1 = submitVoteReceipt("p-1", "GABC", "yes");
       const r2 = submitVoteReceipt("p-1", "GABC", "yes");
-      expect(r1.receiptId).not.toBe(r2.receiptId);
+      expect(r2.receiptId).toBe(r1.receiptId);
+      expect(listVoteReceipts("p-1")).toHaveLength(1);
+    });
+
+    it("rejects a different choice for a vote that is already in flight and keeps the receipt", () => {
+      const first = submitVoteReceiptOnce("p-1", "GABC", "yes");
+      const conflict = submitVoteReceiptOnce("p-1", "GABC", "no");
+
+      expect(conflict.outcome).toBe("conflict");
+      expect(conflict.receipt.receiptId).toBe(first.receipt.receiptId);
+      expect(conflict.receipt.choice).toBe("yes");
+      const stored = listVoteReceipts("p-1");
+      expect(stored).toHaveLength(1);
+      expect(stored[0].choice).toBe("yes");
+    });
+
+    it("keeps a recorded vote final: a retry replays it and a new choice conflicts", () => {
+      submitVoteReceipt("p-1", "GABC", "yes");
+      reconcileVoteReceipts([
+        { proposalId: "p-1", voter: "GABC", choice: "yes", txHash: "TX1", indexedAt: new Date().toISOString() },
+      ]);
+
+      expect(submitVoteReceiptOnce("p-1", "GABC", "yes").outcome).toBe("replayed");
+      const conflict = submitVoteReceiptOnce("p-1", "GABC", "no");
+      expect(conflict.outcome).toBe("conflict");
+      expect(conflict.receipt.status).toBe("recorded");
+      expect(listVoteReceipts("p-1")).toHaveLength(1);
+    });
+
+    it("treats a delayed vote as still in flight", () => {
+      submitVoteReceipt("p-1", "GABC", "yes");
+      jest.advanceTimersByTime(6 * 60 * 1000);
+
+      const retry = submitVoteReceiptOnce("p-1", "GABC", "yes");
+      expect(retry.outcome).toBe("replayed");
+      expect(retry.receipt.status).toBe("delayed");
+    });
+
+    it("lets the voter resubmit once the earlier receipt failed", () => {
+      const first = submitVoteReceipt("p-1", "GABC", "yes");
+      jest.advanceTimersByTime(31 * 60 * 1000);
+      reconcileVoteReceipts([]); // pending -> failed
+
+      const again = submitVoteReceiptOnce("p-1", "GABC", "no");
+      expect(again.outcome).toBe("created");
+      expect(again.receipt.receiptId).not.toBe(first.receiptId);
+      expect(again.receipt.status).toBe("pending");
+      expect(getVoteReceipt(first.receiptId)?.status).toBe("failed");
+    });
+
+    it("does not confuse voters or proposals that share a prefix", () => {
+      const a = submitVoteReceiptOnce("p:1", "GABC", "yes");
+      const b = submitVoteReceiptOnce("p", "1:GABC", "yes");
+      expect(a.outcome).toBe("created");
+      expect(b.outcome).toBe("created");
+      expect(a.receipt.receiptId).not.toBe(b.receipt.receiptId);
+    });
+
+    it("lets different voters vote on the same proposal", () => {
+      expect(submitVoteReceiptOnce("p-1", "GABC", "yes").outcome).toBe("created");
+      expect(submitVoteReceiptOnce("p-1", "GDEF", "no").outcome).toBe("created");
+      expect(listVoteReceipts("p-1")).toHaveLength(2);
     });
   });
 
