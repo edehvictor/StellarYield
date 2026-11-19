@@ -54,10 +54,22 @@ export default function StrategyComparison() {
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const yields = await res.json();
       
-      // Filter for the 3 distinct strategies we augmented
-      const strategies = yields.filter((y: StrategyYield) => 
-        ['Blend', 'Soroswap', 'DeFindex'].includes(y.protocolName)
-      );
+      // Validate untrusted fields at the boundary - return empty (safe failure)
+      // without mutating state. Skip any entries with missing or malformed data.
+      const strategies = yields.filter((y: StrategyYield) => {
+        if (!y?.protocolName) return false;
+        if (!['Blend', 'Soroswap', 'DeFindex'].includes(y.protocolName)) return false;
+        if (typeof y.apy !== 'number' || !Number.isFinite(y.apy)) return false;
+        if (typeof y.tvl !== 'number' || !Number.isFinite(y.tvl)) return false;
+        if (typeof y.riskScore !== 'number') return false;
+        if (typeof y.liquidityUsd !== 'number' || !Number.isFinite(y.liquidityUsd)) return false;
+        if (typeof y.riskScore !== 'number') return false;
+        if (y.rebalancingBehavior && !['Static', 'Dynamic', 'Yield-Weighted'].includes(y.rebalancingBehavior)) return false;
+        return true;
+      });
+      
+      // Set filtered data - if all entries were invalid, data will be empty
+      // This preserves state and doesn't mutate it with error status
       setData(strategies);
     } catch (err: unknown) {
       setError(getErrorMessage(err));
