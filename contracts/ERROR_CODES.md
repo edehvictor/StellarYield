@@ -68,14 +68,19 @@ Source: `contracts/stableswap/src/lib.rs`
 | 9    | `MathOverflow`          | A checked intermediate cannot be represented in `i128` | Reduce the amount; see the per-side reserve limit in `docs/contracts/stableswap-invariant.md` |
 | 10   | `ZeroInvariant`         | Pool invariant is zero                       | Pool is empty; add liquidity first          |
 | 11   | `InvalidToken`          | Token address is duplicate, LP token, or unrecognized in swap | Use distinct, registered pool tokens |
+| 12   | `WrongNetwork`          | Live ledger or the caller's context is not the network the pool state is bound to, or `migrate` was asked to adopt another network's state | Read the pool on its bound network; retry with `get_pool_context()` |
+| 13   | `WrongContract`         | The caller's context names a different pool deployment | Use the context from the pool you are calling |
+| 14   | `WrongVersion`          | Stored state or the caller's context is not at the pool context version this code understands | Refresh with `get_pool_context()`; upgrade the contract if the stored version is newer |
 
 `stableswap` uses checked arithmetic and documented floor rounding for every
 invariant, fee, deposit and withdrawal calculation. Boundary values (zero,
 minimum one-unit reserves, maximum `i128` inputs) either produce a defined
 result or a typed error above; a rejected call never changes reserves, LP supply,
-LP balances or token balances. See
-`docs/contracts/stableswap-invariant.md` for the rounding table and numeric
-limits.
+LP balances or token balances. `add_liquidity`, `remove_liquidity` and `swap`
+validate the caller's `PoolContext` (network, deployment, version) before any
+reserve math, transfer or storage write. See
+`docs/contracts/stableswap-invariant.md` for the rounding table, numeric limits
+and context binding.
 
 ---
 
@@ -291,6 +296,41 @@ Source: `contracts/stealth_addresses/src/lib.rs`
 | 7    | `Unauthorized`        | Caller is not the deposit recipient | Use the correct recipient key                 |
 | 8    | `MetaLabelTooLong`    | Metadata label exceeds length limit | Shorten the label string                      |
 | 9    | `MetaAddressNotFound` | Meta-address not registered         | Register the meta-address first               |
+
+---
+
+## options — `OptionsError`
+
+Source: `contracts/options/src/lib.rs`
+
+| Code | Name                      | Meaning                                               | Remediation                                                   |
+| ---- | ------------------------- | ----------------------------------------------------- | ------------------------------------------------------------- |
+| 1    | `AlreadyInitialized`      | `initialize()` was called twice                       | No action needed                                              |
+| 2    | `NotInitialized`          | Contract not initialized                              | Call `initialize(admin, oracle)`                              |
+| 3    | `Unauthorized`            | Caller does not own the position being cancelled      | Use the minter address                                        |
+| 4    | `InvalidOption`           | Reserved for invalid option definitions               | Check the option parameters                                   |
+| 5    | `NotExpired`              | `expire` called before `expiration_time`              | Wait until the exercise window closes                         |
+| 6    | `AlreadyExercised`        | Position was already fully exercised                  | No action needed                                              |
+| 7    | `AlreadyExpired`          | Position has already been closed by expiry            | No action needed                                              |
+| 8    | `ZeroAmount`              | Amount is zero or negative                            | Pass a positive amount                                        |
+| 9    | `InvalidPrice`            | Oracle price is non-positive, zero-timestamped, or from the future | Check the oracle observation                        |
+| 10   | `TooEarly`                | Exercise attempted before `opening_time`              | Retry inside the exercise window                              |
+| 11   | `ExerciseWindowClosed`    | Exercise attempted after `expiration_time`            | Use `expire` instead                                          |
+| 12   | `InvalidExerciseWindow`   | `opening_time` is not strictly before `expiration_time` | Order the window correctly                                   |
+| 13   | `InsufficientFreeCollateral` | Withdrawal exceeds free (unreserved) collateral    | Withdraw no more than `get_free_collateral` reports            |
+| 14   | `ExceedsCollateral`       | Exercise amount exceeds the remaining collateral      | Exercise no more than the remaining collateral                 |
+| 15   | `MathOverflow`            | A checked intermediate cannot be represented in `i128` | Reduce input amounts                                         |
+| 16   | `OracleObservationMissing` | Oracle has no observation for a required asset       | Publish an observation for the underlying and collateral asset |
+| 17   | `StaleOracleObservation`  | Observation older than the configured `oracle_max_age` | Publish a fresh observation                                  |
+| 18   | `InvalidMaxAge`           | `set_oracle_max_age(0)` was rejected                   | Pass a non-zero max age                                       |
+| 19   | `CancellationWindowClosed` | Cancellation attempted after `expiration_time`       | Use `expire` instead                                          |
+| 20   | `AlreadyCancelled`        | Position was already cancelled                        | No action needed                                              |
+| 21   | `StaleConfig`             | Configuration changed since the caller captured its fingerprint | Refresh with `get_config_fingerprint` and retry settlement |
+
+`exercise` and `exercise_partial` validate the expected configuration
+fingerprint before any collateral moves, so a `StaleConfig` rejection leaves
+balances, reserves, exercised amounts and the position record unchanged and the
+same settlement can be retried under the refreshed configuration.
 
 ---
 

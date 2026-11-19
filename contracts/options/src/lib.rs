@@ -3,8 +3,11 @@
 
 use soroban_sdk::{
     contract, contractclient, contracterror, contractimpl, contracttype, symbol_short, token,
-    Address, Env,
+    xdr::ToXdr, Address, Bytes, BytesN, Env,
 };
+
+/// Domain separator for the configuration fingerprint (versioned).
+const CONFIG_FINGERPRINT_DOMAIN: &[u8] = b"stellaryield_options_config_v1";
 
 mod events;
 mod math;
@@ -12,7 +15,9 @@ mod storage;
 #[cfg(test)]
 mod tests;
 
-use events::{emit_cancelled, emit_created, emit_exercised, emit_expired, emit_filled};
+use events::{
+    emit_cancelled, emit_config_updated, emit_created, emit_exercised, emit_expired, emit_filled,
+};
 use math::black_scholes_call;
 use storage::{
     clear_oracle_max_age, has_admin, read_admin, read_cancelled, read_exercised_amount,
@@ -58,6 +63,9 @@ pub enum OptionsError {
     CancellationWindowClosed = 19,
     /// The option has already been cancelled.
     AlreadyCancelled = 20,
+    /// The configuration changed since the caller captured its fingerprint.
+    /// Refresh with `get_config_fingerprint` and retry settlement.
+    StaleConfig = 21,
 }
 
 /// Price source consulted when the oracle guard is enabled. `get_price`
@@ -67,6 +75,24 @@ pub enum OptionsError {
 #[allow(dead_code)]
 pub trait OracleInterface {
     fn get_price(env: Env, asset: Address) -> Option<(i128, u64)>;
+}
+
+/// Immutable snapshot of the admin-controlled configuration that shapes
+/// settlement.
+///
+/// Only configuration is included: option records, balances and oracle quotes
+/// change continuously and must not invalidate a caller's snapshot. Two
+/// deployments with identical configuration produce identical snapshots, and
+/// any admin change produces a different one.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ConfigSnapshot {
+    pub admin: Address,
+    pub oracle: Address,
+    /// Oracle freshness guard in seconds, or `None` when the guard is off.
+    pub oracle_max_age: Option<u64>,
+    /// Active storage layout version.
+    pub storage_version: u32,
 }
 
 #[contracttype]
@@ -109,6 +135,7 @@ impl OptionsContract {
 
         if read_storage_version(&env) < CURRENT_STORAGE_VERSION {
             write_storage_version(&env, CURRENT_STORAGE_VERSION);
+            publish_config_update(&env, &admin);
         }
         Ok(())
     }
@@ -124,7 +151,9 @@ impl OptionsContract {
         if max_age == 0 {
             return Err(OptionsError::InvalidMaxAge);
         }
+        let admin = read_admin(&env);
         write_oracle_max_age(&env, max_age);
+        publish_config_update(&env, &admin);
         Ok(())
     }
 
@@ -133,14 +162,38 @@ impl OptionsContract {
         if !has_admin(&env) {
             return Err(OptionsError::NotInitialized);
         }
-        read_admin(&env).require_auth();
+        let admin = read_admin(&env);
+        admin.require_auth();
         clear_oracle_max_age(&env);
+        publish_config_update(&env, &admin);
         Ok(())
     }
 
     /// Maximum accepted observation age, or `None` when the guard is off.
     pub fn get_oracle_max_age(env: Env) -> Option<u64> {
         read_oracle_max_age(&env)
+    }
+
+    /// Current admin-controlled configuration that settlement depends on.
+    pub fn get_config_snapshot(env: Env) -> Result<ConfigSnapshot, OptionsError> {
+        if !has_admin(&env) {
+            return Err(OptionsError::NotInitialized);
+        }
+        Ok(config_snapshot(&env))
+    }
+
+    /// SHA-256 fingerprint of [`Self::get_config_snapshot`].
+    ///
+    /// Callers capture this before preparing a settlement and pass it to
+    /// `exercise` or `exercise_partial`. If any configuration changes in
+    /// between, the fingerprint no longer matches and settlement fails with
+    /// `StaleConfig` before any collateral moves, so the caller can refresh and
+    /// retry under terms it has actually seen.
+    pub fn get_config_fingerprint(env: Env) -> Result<BytesN<32>, OptionsError> {
+        if !has_admin(&env) {
+            return Err(OptionsError::NotInitialized);
+        }
+        Ok(config_fingerprint(&env))
     }
 
     pub fn mint(
@@ -223,24 +276,52 @@ impl OptionsContract {
     }
 
     /// Exercises the whole option.
-    pub fn exercise(env: Env, exerciser: Address, option_id: u32) -> Result<(), OptionsError> {
+    ///
+    /// `expected_config_fingerprint` is the value `get_config_fingerprint`
+    /// returned when the caller prepared the settlement. If the configuration
+    /// changed since then, the call fails with `StaleConfig` before any state
+    /// or balance is touched.
+    pub fn exercise(
+        env: Env,
+        exerciser: Address,
+        option_id: u32,
+        expected_config_fingerprint: BytesN<32>,
+    ) -> Result<(), OptionsError> {
         exerciser.require_auth();
         let option = read_option(&env, option_id);
-        Self::settle(&env, exerciser, option_id, option, None)
+        Self::settle(
+            &env,
+            exerciser,
+            option_id,
+            option,
+            None,
+            &expected_config_fingerprint,
+        )
     }
 
     /// Exercises `amount` of the option's collateral. The matching reserve is
     /// released; the rest stays reserved until the option is fully exercised or
     /// expires.
+    ///
+    /// `expected_config_fingerprint` is validated exactly like it is in
+    /// `exercise`: a stale snapshot is rejected before any collateral moves.
     pub fn exercise_partial(
         env: Env,
         exerciser: Address,
         option_id: u32,
         amount: i128,
+        expected_config_fingerprint: BytesN<32>,
     ) -> Result<(), OptionsError> {
         exerciser.require_auth();
         let option = read_option(&env, option_id);
-        Self::settle(&env, exerciser, option_id, option, Some(amount))
+        Self::settle(
+            &env,
+            exerciser,
+            option_id,
+            option,
+            Some(amount),
+            &expected_config_fingerprint,
+        )
     }
 
     /// Cancels an unexpired option and returns only its unexercised collateral
@@ -436,7 +517,13 @@ impl OptionsContract {
         option_id: u32,
         mut option: OptionData,
         amount: Option<i128>,
+        expected_config_fingerprint: &BytesN<32>,
     ) -> Result<(), OptionsError> {
+        // Reject a stale configuration snapshot before validating the position
+        // or moving any collateral: the caller prepares settlement under terms
+        // it has seen, and a mismatch means those terms no longer hold.
+        require_config(env, expected_config_fingerprint)?;
+
         if read_cancelled(env, option_id) {
             return Err(OptionsError::AlreadyCancelled);
         }
@@ -512,6 +599,37 @@ impl OptionsContract {
 
         Ok(())
     }
+}
+
+/// Read the configuration settlement depends on, applying the same defaults
+/// the execution paths use.
+fn config_snapshot(env: &Env) -> ConfigSnapshot {
+    ConfigSnapshot {
+        admin: read_admin(env),
+        oracle: read_oracle(env),
+        oracle_max_age: read_oracle_max_age(env),
+        storage_version: read_storage_version(env),
+    }
+}
+
+/// Deterministic SHA-256 fingerprint of the current configuration.
+fn config_fingerprint(env: &Env) -> BytesN<32> {
+    let mut preimage = Bytes::from_slice(env, CONFIG_FINGERPRINT_DOMAIN);
+    preimage.append(&config_snapshot(env).to_xdr(env));
+    env.crypto().sha256(&preimage).to_bytes()
+}
+
+/// Reject settlement whose caller observed a different configuration.
+fn require_config(env: &Env, expected: &BytesN<32>) -> Result<(), OptionsError> {
+    if config_fingerprint(env) != *expected {
+        return Err(OptionsError::StaleConfig);
+    }
+    Ok(())
+}
+
+/// Announce the new configuration fingerprint after an admin change.
+fn publish_config_update(env: &Env, admin: &Address) {
+    emit_config_updated(env, admin, &config_fingerprint(env));
 }
 
 /// Requires the configured oracle to hold a valid, recent observation for
