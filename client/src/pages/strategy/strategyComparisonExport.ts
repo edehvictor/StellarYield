@@ -61,7 +61,8 @@ function validateStrategyYield(entry: unknown): StrategyYield | null {
   if (typeof s.capitalEfficiencyPct !== 'number') return null;
   if (s.rebalancingBehavior !== undefined && 
       s.rebalancingBehavior !== null &&
-      !['Static', 'Dynamic', 'Yield-Weighted'].includes(s.rebalancingBehavior)) return null;
+      (typeof s.rebalancingBehavior !== 'string' ||
+        !['Static', 'Dynamic', 'Yield-Weighted'].includes(s.rebalancingBehavior))) return null;
   if (typeof s.fetchedAt !== 'string') return null;
   return {
     protocolName: s.protocolName,
