@@ -45,6 +45,7 @@ import {
     validateFailoverIncidentsPayload,
     validateTransparencySummaryPayload,
     type SubsystemState,
+    type TransparencyHealthInput,
     type TransparencyHealthSummary,
     type TransparencySummaryPayload,
     type ValidatedFailoverIncident,
@@ -128,6 +129,12 @@ export default function TransparencyDashboard() {
     const [smokeHistory, setSmokeHistory] = useState<Array<NonNullable<ReturnType<typeof parseSmokeRunResult>>>>([]);
     const [failoverIncidents, setFailoverIncidents] = useState<FailoverIncident[]>([]);
     const [healthSummary, setHealthSummary] = useState<TransparencyHealthSummary | null>(null);
+    /** Retry counter: bumping it re-runs the reads without clearing existing state. */
+    const [reloadToken, setReloadToken] = useState(0);
+    /** Last observed subsystem signals, used to preserve state when a retry fails. */
+    const lastHealthRef = useRef<Partial<TransparencyHealthInput> | null>(null);
+
+    const handleRetry = () => setReloadToken((token) => token + 1);
 
     const fetchData = useCallback(async () => {
         setLoading((prev) => (data === null ? true : prev));
@@ -188,7 +195,7 @@ export default function TransparencyDashboard() {
         }
         void loadFailoverHistory();
         return () => { cancelled = true; };
-    }, []);
+    }, [reloadToken]);
 
     useEffect(() => {
         async function loadServiceHealth() {
@@ -228,18 +235,22 @@ export default function TransparencyDashboard() {
                 smokeStatus?.checks,
             );
 
-            setHealthSummary(
-                summarizeTransparencyHealth({
+            // Preserve last known-good signals when a retry comes back missing.
+            const summary = summarizeTransparencyHealth(
+                {
                     indexer: indexerState,
                     relayer: relayerState,
                     registry: registryState,
                     smokeTest: smokeState,
-                }),
+                },
+                lastHealthRef.current ?? undefined,
             );
+            lastHealthRef.current = summary.subsystems;
+            setHealthSummary(summary);
         }
 
         void loadServiceHealth();
-    }, [smokeStatus]);
+    }, [smokeStatus, reloadToken]);
 
     const healthBadgeClass = (state: SubsystemState) => {
         switch (state) {
@@ -287,6 +298,8 @@ export default function TransparencyDashboard() {
         );
     }
 
+    const summaryDiagnostics = data.diagnostics ?? [];
+
     return (
         <div className="space-y-8 animate-in fade-in slide-in-from-bottom-4 duration-700">
             {/* Header */}
@@ -308,6 +321,66 @@ export default function TransparencyDashboard() {
                     Refresh
                 </button>
             </header>
+
+            {/* A failed refresh keeps the rendered snapshot visible. */}
+            {error && (
+                <div
+                    role="alert"
+                    className="glass-panel rounded-2xl p-4 border border-amber-500/20 text-sm text-amber-200 flex items-center justify-between gap-4"
+                >
+                    <span>
+                        Showing the last known-good snapshot. Latest refresh failed: {error}
+                    </span>
+                    <button
+                        type="button"
+                        onClick={handleRetry}
+                        className="inline-flex items-center gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-1.5 text-xs text-amber-200"
+                    >
+                        <RefreshCw size={12} /> Retry
+                    </button>
+                </div>
+            )}
+
+            {summaryDiagnostics.length > 0 && (
+                <div
+                    role="alert"
+                    aria-label="Transparency data diagnostics"
+                    className="glass-panel rounded-2xl p-6 border border-amber-500/20"
+                >
+                    <div className="flex items-center justify-between gap-4 mb-3">
+                        <div className="flex items-center gap-2">
+                            <AlertTriangle size={18} className="text-amber-400" />
+                            <h3 className="font-semibold text-white">Transparency data diagnostics</h3>
+                        </div>
+                        <span className="text-xs uppercase tracking-wide text-amber-300">
+                            {data.status ?? "degraded"}
+                        </span>
+                    </div>
+                    <ul className="space-y-2">
+                        {summaryDiagnostics.map((diagnostic, index) => (
+                            <li
+                                key={`${diagnostic.code}-${diagnostic.stage}-${index}`}
+                                className="rounded-xl border border-amber-500/20 bg-amber-500/5 p-3"
+                            >
+                                <p className="text-xs uppercase tracking-wide text-amber-300">
+                                    {getTransparencyStageLabel(diagnostic.stage)} · {diagnostic.code}
+                                </p>
+                                <p className="text-sm text-white mt-1">{diagnostic.summary}</p>
+                                <p className="text-xs text-gray-400 mt-1">
+                                    Next: {diagnostic.remediation}
+                                </p>
+                            </li>
+                        ))}
+                    </ul>
+                    <button
+                        type="button"
+                        onClick={handleRetry}
+                        className="mt-4 inline-flex items-center gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-1.5 text-xs text-amber-200"
+                    >
+                        <RefreshCw size={12} /> Retry
+                    </button>
+                </div>
+            )}
 
             {/* Stat cards */}
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
@@ -438,6 +511,32 @@ export default function TransparencyDashboard() {
                             );
                         })}
                     </div>
+                    {healthSummary.diagnostics.length > 0 && (
+                        <div className="mt-4 space-y-2">
+                            {healthSummary.diagnostics.map((diagnostic, index) => (
+                                <div
+                                    key={`${diagnostic.code}-${diagnostic.stage}-${index}`}
+                                    className="rounded-xl border border-amber-500/20 bg-amber-500/5 p-3"
+                                >
+                                    <p className="text-xs uppercase tracking-wide text-amber-300">
+                                        {getTransparencyStageLabel(diagnostic.stage)} · {diagnostic.code}
+                                    </p>
+                                    <p className="text-xs text-gray-400 mt-1">
+                                        Next: {diagnostic.remediation}
+                                    </p>
+                                </div>
+                            ))}
+                            {!healthSummary.contextSufficient && (
+                                <button
+                                    type="button"
+                                    onClick={handleRetry}
+                                    className="inline-flex items-center gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-1.5 text-xs text-amber-200"
+                                >
+                                    <RefreshCw size={12} /> Retry
+                                </button>
+                            )}
+                        </div>
+                    )}
                 </div>
             )}
 

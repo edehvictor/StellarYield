@@ -16,12 +16,23 @@
  *
  * Data is cached for 60 seconds to avoid expensive on-chain queries
  * on every page load.
+ *
+ * Failure behaviour (#1917): a snapshot is validated before it replaces the
+ * cache. If aggregation or validation fails, the previous known-good snapshot
+ * is served unchanged with `status: "degraded"` and a privacy-safe diagnostic
+ * naming the failed stage. Responses never echo raw error text, RPC URLs,
+ * wallets, or stack traces.
  */
 import { Router, type Request, type Response } from "express";
 import {
   failoverIncidentHistoryService,
   FailoverIncidentValidationError,
 } from "../services/failoverIncidentHistoryService";
+import {
+    buildTransparencyDiagnostic,
+    redactDiagnosticText,
+    type TransparencyDiagnostic,
+} from "../../../shared/types/transparencyDiagnostic";
 
 const transparencyRouter = Router();
 
@@ -333,8 +344,6 @@ async function aggregateTransparencyData(options?: { forceRefresh?: boolean }): 
         history: summary.history.map((point) => ({ ...point })),
         cachedAt: Date.now(),
     };
-
-    return cache;
 }
 
 // ── Routes ────────────────────────────────────────────────────────────────
@@ -481,6 +490,27 @@ transparencyRouter.post(
     res.json(incident);
   },
 );
+
+/** @internal Test hook: replace the aggregator used by the route. */
+export function __setTransparencyAggregatorForTesting(
+    aggregator: (() => Promise<TransparencyData>) | null,
+): void {
+    aggregatorOverride = aggregator;
+}
+
+/** @internal Test hook: force the next read to bypass the fresh cache. */
+export function __expireTransparencyCacheForTesting(): void {
+    if (cache) {
+        cache = { ...cache, cachedAt: 0 };
+    }
+}
+
+/** @internal Test hook: restore the module to its initial state. */
+export function __resetTransparencyStateForTesting(): void {
+    cache = null;
+    lastKnownGood = null;
+    aggregatorOverride = null;
+}
 
 export { aggregateTransparencyData };
 export default transparencyRouter;
