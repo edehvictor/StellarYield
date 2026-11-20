@@ -299,6 +299,7 @@ describe('Incident Replay', () => {
 
             expect(export_.replayAnomalies.length).toBeGreaterThan(0);
             expect(export_.summary.replayAnomalyCount).toBe(export_.replayAnomalies.length);
+            expect(export_.replayAnomalies.every((a) => a.details.length > 0)).toBe(true);
             expect(export_.replayAnomalies.every((a: ReplayAnomaly) => a.details.length > 0)).toBe(true);
         });
 
