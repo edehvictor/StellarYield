@@ -32,6 +32,38 @@ synchronous step in the service, so no other request can interleave between
 the check and the write. If recording the audit entry fails, the previous
 preferences and version are restored before the error is returned.
 
+## Network / ledger context (#1908)
+
+Every stored record is also bound to an explicit **ledger context**, mirroring
+the isolated lending contract's `LedgerContext`:
+
+| Field | Meaning |
+| --- | --- |
+| `networkId` | SHA-256 of the Stellar network passphrase the record belongs to |
+| `vaultId` | Vault deployment the record belongs to |
+| `schemaVersion` | Preference record layout version (`1`) |
+
+The binding is stamped on the first write (including initial preferences sent
+with `POST /api/alerts`) and preserved by later writes, reverts, and failed
+writes. Reads and writes send it either as headers
+`X-Alert-Network-Passphrase` / `X-Alert-Network-Id`, `X-Alert-Schema-Version`,
+`X-Alert-Context-Vault`, or as `context` in the JSON body. Responses echo the
+binding as `X-Alert-Network-Id`, `X-Alert-Schema-Version`, and
+`X-Alert-Context-Vault`.
+
+A context that names another network, another schema version, or a different
+stored binding is rejected with `409 PREFERENCE_CONTEXT_CONFLICT` and a
+`reason` of `WRONG_NETWORK`, `WRONG_VERSION`, or `STORED_CONTEXT_MISMATCH`.
+Nothing is written, no audit entry is recorded, and the operation identity is
+not consumed. Malformed contexts are `400 INVALID_ALERT_CONTEXT`. Context
+checks run before version checks and before any database or audit write.
+
+After a deliberate network/schema transition an operator or client can call
+`POST /api/alerts/:wallet/preferences/:vaultId/rebind` with the old `context`
+(and optionally the current version via `If-Match`). The preferences are kept;
+only the binding and version change. Repeating the call returns
+`X-Idempotent-Replayed: true` and writes nothing.
+
 ## Retries
 
 - A retry with the same `X-Operation-Identity` / `Idempotency-Key` returns the
@@ -50,11 +82,19 @@ preferences and version are restored before the error is returned.
   `currentPreferences`) on a version conflict.
 - `updateAlertPreferencesSafely(wallet, vault, change, maxAttempts = 3)` reads,
   applies `change`, saves against that version, and on a conflict re-applies
-  `change` to the server's newer record. Other errors are not retried.
+  `change` to the server's newer record. Other errors are not retried. The
+  context is built once from `getNetworkPassphrase()` and reused for all
+  attempts; a context conflict is never retried.
 - `fetchAlertPreferences` / `saveAlertPreferences` keep their signatures;
-  `saveAlertPreferences` takes an optional fifth `expectedVersion`.
+  `saveAlertPreferences` takes an optional fifth `expectedVersion` and a sixth
+  `context`. All helpers accept `{ context }` in their options.
+- `buildAlertPreferenceContext(vaultId)` derives the context from the client's
+  configured network. `rebindAlertPreferenceContext(wallet, vault,
+  expectedContext, expectedVersion?)` performs an explicit transition.
 
 ## Tests
 
 - `server/src/__tests__/alertPreferencesConcurrency.test.ts`
+- `server/src/__tests__/alertPreferencesContext.test.ts`
 - `client/src/features/alerts/__tests__/alertsApi.concurrency.test.ts`
+- `client/src/features/alerts/__tests__/alertsApi.context.test.ts`

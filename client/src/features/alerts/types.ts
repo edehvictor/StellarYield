@@ -18,6 +18,16 @@ export interface UserAlert {
   createdAt: string;
 }
 
+/** Explicit network/ledger binding for alert preferences (Issue #1908). */
+export interface AlertPreferenceContext {
+  /** Raw network passphrase; the server hashes it to its network id. */
+  networkPassphrase: string;
+  /** Vault deployment this record belongs to. */
+  vaultId: string;
+  /** Preference record layout version. */
+  schemaVersion: number;
+}
+
 export interface CreateAlertPayload {
   walletAddress: string;
   vaultId: string;
@@ -26,6 +36,7 @@ export interface CreateAlertPayload {
   email?: string;
   preferences?: AlertPreferences;
   operationIdentity?: string;
+  context?: AlertPreferenceContext;
 }
 
 export interface ChannelNotificationPreferences {
@@ -51,6 +62,8 @@ export interface UpdateAlertPreferencesPayload {
   vaultId: string;
   preferences: AlertPreferences;
   operationIdentity?: string;
+  expectedVersion?: number;
+  context?: AlertPreferenceContext;
 }
 
 export interface WatchlistDigestPreference {
