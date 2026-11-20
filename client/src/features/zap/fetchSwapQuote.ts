@@ -201,6 +201,8 @@ const VERIFY_FAILURE_MESSAGES: Record<string, string> = {
   INVALID_QUOTE: "Quote is invalid. Refresh and try again.",
   VERIFY_FAILED: "Quote validation failed. Refresh and try again.",
   NETWORK_ERROR: "Could not verify quote due to a network error. Try again.",
+  ASSUMPTION_DRIFT: "Quote assumptions have changed. Refresh and try again.",
+  INVALID_FINGERPRINT: "Quote fingerprint is missing or invalid. Refresh and try again.",
 };
 
 /** Returns true when the server rejected the quote because its TTL elapsed. */
