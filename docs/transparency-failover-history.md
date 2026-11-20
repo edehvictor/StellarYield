@@ -16,6 +16,18 @@ query parameters or payloads return HTTP 400 with a typed error `code`
 (`INVALID_QUERY_PARAMETER` or `MALFORMED_INCIDENT_PAYLOAD`) and leave the
 incident history unchanged, so the caller can correct and retry the request.
 
+Every incident carries a `version` field, starting at `1` on creation and
+incrementing on each mutation. Resolution accepts an optional `version` field
+for optimistic concurrency control:
+
+- If `version` is omitted, the resolve proceeds against the current open
+  incident and increments its version.
+- If `version` is provided and matches the incident's current version, the
+  resolve proceeds and increments the version.
+- If `version` is provided but does not match the current version (the state
+  changed concurrently), the request returns HTTP 409 and no mutation occurs,
+  so existing state is preserved and the caller can re-read and retry.
+
 For safe resolution retries after a lost response, send the same `recoveredAt`
 value each time. Repeating a completed resolution with that timestamp returns
 the already resolved incident and does not create or mutate another record.

@@ -170,6 +170,54 @@ describe("failover incident history validation and retries", () => {
         expect(retried.body.durationMs).toBe(300_000);
         expect(failoverIncidentHistoryService.getHistory("blend")).toHaveLength(1);
     });
+
+    it("returns 409 when a concurrent resolve uses a stale version and preserves state", async () => {
+        const app = createApp();
+        await request(app).post("/api/transparency/failover-history").send({
+            protocolId: "blend",
+            protocolName: "Blend",
+            reasons: ["status=down"],
+            startedAt: "2026-01-01T00:00:00.000Z",
+        });
+
+        // First resolution succeeds at v1.
+        const first = await request(app)
+            .post("/api/transparency/failover-history/blend/resolve")
+            .send({ recoveredAt: "2026-01-01T00:05:00.000Z", version: 1 });
+        expect(first.status).toBe(200);
+        expect(first.body.version).toBe(2);
+
+        // A stale retry at v1 conflicts; state is preserved (still resolved once).
+        const conflict = await request(app)
+            .post("/api/transparency/failover-history/blend/resolve")
+            .send({ recoveredAt: "2026-01-01T00:05:00.000Z", version: 1 });
+        expect(conflict.status).toBe(409);
+        expect(failoverIncidentHistoryService.getHistory("blend")).toHaveLength(1);
+        expect(failoverIncidentHistoryService.getHistory("blend")[0].version).toBe(2);
+    });
+
+    it("resolves successfully when the version matches current state", async () => {
+        const app = createApp();
+        await request(app).post("/api/transparency/failover-history").send({
+            protocolId: "soroswap",
+            protocolName: "Soroswap",
+            reasons: ["status=down"],
+            startedAt: "2026-01-01T00:00:00.000Z",
+        });
+        const created = await request(app).post("/api/transparency/failover-history").send({
+            protocolId: "soroswap",
+            protocolName: "Soroswap",
+            reasons: ["status=down"],
+            startedAt: "2026-01-01T00:00:00.000Z",
+        });
+        const version = created.body.version;
+
+        const res = await request(app)
+            .post("/api/transparency/failover-history/soroswap/resolve")
+            .send({ recoveredAt: "2026-01-01T00:05:00.000Z", version });
+        expect(res.status).toBe(200);
+        expect(res.body.version).toBe(version + 1);
+    });
 });
 
 describe("malformed external data hardening (#1913)", () => {

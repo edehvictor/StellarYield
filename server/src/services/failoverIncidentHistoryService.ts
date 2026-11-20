@@ -23,6 +23,8 @@ export interface FailoverIncident {
   recoveredAt?: string; // ISO-8601, set on recovery
   durationMs?: number;  // set on recovery
   resolved: boolean;
+  /** Optimistic concurrency token. Increments on every mutation. */
+  version: number;
 }
 
 let _incidents: FailoverIncident[] = [];
@@ -39,6 +41,14 @@ export class FailoverIncidentValidationError extends Error {
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** Thrown when a caller's expected version no longer matches the stored state. */
+export class ConcurrencyConflictError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ConcurrencyConflictError";
+  }
 }
 
 function parseTimestamp(value: string, field: string): number {
@@ -106,6 +116,7 @@ export const failoverIncidentHistoryService = {
       reasons: [...validated.reasons],
       startedAt: validated.startedAt,
       resolved: false,
+      version: 1,
     };
     _incidents.push(incident);
     _nextId += 1;
@@ -115,13 +126,25 @@ export const failoverIncidentHistoryService = {
   /**
    * Mark an open incident for a protocol as resolved.
    * Returns the updated incident, or null if none was open.
+   *
+   * Optimistic concurrency: when `expectedVersion` is provided and does not
+   * match the stored incident's current version, the state has changed
+   * concurrently and a `ConcurrencyConflictError` is thrown without mutating
+   * anything, so the caller can re-read and retry safely.
    */
-  resolveIncident(protocolId: string, recoveredAt?: string): FailoverIncident | null {
+  resolveIncident(
+    protocolId: string,
+    recoveredAt?: string,
+    expectedVersion?: number,
+  ): FailoverIncident | null {
     if (typeof protocolId !== "string" || !protocolId.trim()) {
       throw new FailoverIncidentValidationError("protocolId must not be empty.");
     }
     if (recoveredAt !== undefined && typeof recoveredAt !== "string") {
       throw new FailoverIncidentValidationError("recoveredAt must be a valid ISO-8601 timestamp.");
+    }
+    if (expectedVersion !== undefined && !Number.isInteger(expectedVersion)) {
+      throw new FailoverIncidentValidationError("expectedVersion must be an integer.");
     }
     const recoveryTs = recoveredAt ?? new Date().toISOString();
     const recoveryTime = parseTimestamp(recoveryTs, "recoveredAt");
@@ -140,6 +163,14 @@ export const failoverIncidentHistoryService = {
       return null;
     }
 
+    // Optimistic concurrency guard: reject if the caller's view is stale.
+    // This runs before any mutation, so existing state is preserved on conflict.
+    if (expectedVersion !== undefined && incident.version !== expectedVersion) {
+      throw new ConcurrencyConflictError(
+        `Incident ${incident.id} for protocol ${protocolId.trim()} has been updated concurrently (expected v${expectedVersion}, current v${incident.version}).`,
+      );
+    }
+
     const startedTime = parseTimestamp(incident.startedAt, "startedAt");
     if (recoveryTime < startedTime) {
       throw new FailoverIncidentValidationError("recoveredAt must be at or after startedAt.");
@@ -147,7 +178,7 @@ export const failoverIncidentHistoryService = {
 
     const durationMs = recoveryTime - startedTime;
     // Prepare all completion fields before mutating the stored open incident.
-    Object.assign(incident, { recoveredAt: recoveryTs, durationMs, resolved: true });
+    Object.assign(incident, { recoveredAt: recoveryTs, durationMs, resolved: true, version: incident.version + 1 });
     return { ...incident, reasons: [...incident.reasons] };
   },
 
