@@ -1,6 +1,6 @@
 /**
  * Integration tests for client and server simulator consistency.
- * 
+ *
  * These tests verify that the client-side and server-side simulator
  * implementations produce identical results for the same inputs.
  */
@@ -26,7 +26,7 @@ describe("Client-Side Simulator Consistency Tests", () => {
         if (!validation.valid) {
           console.log(
             `Validation errors for "${fixture.description}":`,
-            validation.errors
+            validation.errors,
           );
         }
         expect(validation.errors).toEqual([]);
@@ -46,7 +46,7 @@ describe("Client-Side Simulator Consistency Tests", () => {
         if (!validation.valid) {
           console.log(
             `Validation errors for "${fixture.description}":`,
-            validation.errors
+            validation.errors,
           );
         }
         expect(validation.errors).toEqual([]);
@@ -82,7 +82,9 @@ describe("Client-Side Simulator Consistency Tests", () => {
         token: "USDC",
       });
 
-      const networkFee = result.fees.find((f) => f.type === "Network Fee Estimate");
+      const networkFee = result.fees.find(
+        (f) => f.type === "Network Fee Estimate",
+      );
       expect(networkFee).toBeDefined();
       expect(networkFee!.amount).toBe(0.05);
     });
@@ -156,6 +158,23 @@ describe("Client-Side Simulator Consistency Tests", () => {
   });
 
   describe("Warning triggers", () => {
+    it("rejects non-finite and unsafe boundary amounts without mutating state", () => {
+      for (const amount of [
+        Number.NaN,
+        Number.POSITIVE_INFINITY,
+        Number.MAX_SAFE_INTEGER + 1,
+      ]) {
+        const result = clientSimulate({
+          strategyId: "blend-stable",
+          amount,
+          token: "USDC",
+        });
+        expect(result.allocations).toEqual([]);
+        expect(result.expectedShares).toBe(0);
+        expect(result.warnings.length).toBeGreaterThan(0);
+      }
+    });
+
     it("should warn about high slippage for deposits > 100k", () => {
       const result = clientSimulate({
         strategyId: "blend-stable",
@@ -164,7 +183,7 @@ describe("Client-Side Simulator Consistency Tests", () => {
       });
 
       expect(result.warnings).toContain(
-        "High slippage expected for deposits over 100k."
+        "High slippage expected for deposits over 100k.",
       );
     });
 
@@ -176,7 +195,7 @@ describe("Client-Side Simulator Consistency Tests", () => {
       });
 
       expect(result.warnings).toContain(
-        "Insufficient liquidity to route this deposit fully."
+        "Insufficient liquidity to route this deposit fully.",
       );
     });
 
@@ -231,7 +250,9 @@ describe("Client-Side Simulator Consistency Tests", () => {
         token: "USDC",
       });
 
-      expect(result.warnings).toContain("Unsupported strategy or asset combination.");
+      expect(result.warnings).toContain(
+        "Unsupported strategy or asset combination.",
+      );
       expect(result.allocations.length).toBeGreaterThan(0); // Falls back
     });
   });

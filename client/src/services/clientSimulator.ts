@@ -1,7 +1,7 @@
 /**
  * Client-side simulator for deposit calculations.
  * This implementation mirrors the server-side logic to ensure consistency.
- * 
+ *
  * All calculations must produce identical results to the server simulator.
  */
 
@@ -15,6 +15,11 @@ const PROTOCOLS: ProtocolDef[] = [
   { protocolName: "Soroswap", protocolType: "amm", baseApyBps: 300 },
   { protocolName: "DeFindex", protocolType: "index", baseApyBps: 400 },
 ];
+const MAX_SAFE_SIMULATION_AMOUNT = Number.MAX_SAFE_INTEGER;
+
+function roundTokenAmount(value: number): number {
+  return Math.round((value + Number.EPSILON) * 1e7) / 1e7;
+}
 export interface SimulationParams {
   strategyId: string;
   amount: number;
@@ -34,6 +39,7 @@ export interface SimulationFee {
 
 export interface SimulationResult {
   isSimulationOnly: true;
+  netAmount: number;
   allocations: SimulationAllocation[];
   expectedShares: number;
   fees: SimulationFee[];
@@ -49,10 +55,10 @@ export interface SimulationResult {
 
 /**
  * Simulates a deposit across strategies.
- * 
+ *
  * This function implements the exact same logic as the server simulator
  * to ensure client and server remain in sync.
- * 
+ *
  * @param params - The simulation parameters
  * @returns The simulation result
  */
@@ -62,6 +68,7 @@ export function simulateDeposit(params: SimulationParams): SimulationResult {
   // We explicitly mark this as simulation-only
   const result: SimulationResult = {
     isSimulationOnly: true,
+    netAmount: 0,
     allocations: [],
     expectedShares: 0,
     fees: [],
@@ -70,27 +77,32 @@ export function simulateDeposit(params: SimulationParams): SimulationResult {
     warnings: [],
   };
 
-  if (amount <= 0) {
+  if (!Number.isFinite(amount) || amount <= 0) {
     result.warnings.push("Amount must be greater than zero.");
+    return result;
+  }
+  if (amount > MAX_SAFE_SIMULATION_AMOUNT) {
+    result.warnings.push("Amount is too large to calculate safely.");
     return result;
   }
 
   // Fees - MUST MATCH SERVER
   // Base deposit fee (e.g. 0.1%)
-  const entryFee = amount * 0.001;
+  const entryFee = roundTokenAmount(amount * 0.001);
   result.fees.push({ type: "Entry Fee", amount: entryFee });
-  
+
   // Gas estimate - MUST MATCH SERVER
   const networkFee = 0.05; // 0.05 units of token/XLM
   result.fees.push({ type: "Network Fee Estimate", amount: networkFee });
-  
-  const netAmount = amount - entryFee;
+
+  const netAmount = roundTokenAmount(amount - entryFee);
+  result.netAmount = netAmount;
 
   // Illiquidity / Slippage warnings - MUST MATCH SERVER
   if (amount > 100000) {
     result.warnings.push("High slippage expected for deposits over 100k.");
   }
-  
+
   if (amount > 1000000) {
     result.warnings.push("Insufficient liquidity to route this deposit fully.");
   }
@@ -101,7 +113,8 @@ export function simulateDeposit(params: SimulationParams): SimulationResult {
 
   if (strategyId.toLowerCase().includes("aggressive")) {
     targetProtocols = PROTOCOLS.filter((p) => p.protocolType !== "blend");
-    baseApySum = targetProtocols.reduce((acc, p) => acc + p.baseApyBps, 0) || 1000;
+    baseApySum =
+      targetProtocols.reduce((acc, p) => acc + p.baseApyBps, 0) || 1000;
   }
 
   if (targetProtocols.length === 0) {
@@ -117,12 +130,12 @@ export function simulateDeposit(params: SimulationParams): SimulationResult {
   targetProtocols.forEach((p, index) => {
     let allocAmount = 0;
     if (index === targetProtocols.length - 1) {
-      allocAmount = netAmount - allocated;
+      allocAmount = roundTokenAmount(netAmount - allocated);
     } else {
-      allocAmount = netAmount * (p.baseApyBps / baseApySum);
+      allocAmount = roundTokenAmount(netAmount * (p.baseApyBps / baseApySum));
     }
     allocated += allocAmount;
-    
+
     // Weight APY
     blendedApyBps += (p.baseApyBps * allocAmount) / netAmount;
 
@@ -131,15 +144,17 @@ export function simulateDeposit(params: SimulationParams): SimulationResult {
       amount: allocAmount,
       percentage: (allocAmount / amount) * 100, // percentage of *base* amount for clarity
     });
-    
+
     result.routing.path.push(p.protocolName);
   });
 
   result.postDepositExposure.expectedApy = blendedApyBps / 100;
 
   // Slippage calculation - must match server exactly
-  const slippageLoss = amount > 100000 ? netAmount * 0.01 : netAmount * 0.001; 
-  result.expectedShares = netAmount - slippageLoss;
+  const slippageLoss = roundTokenAmount(
+    amount > 100000 ? netAmount * 0.01 : netAmount * 0.001,
+  );
+  result.expectedShares = roundTokenAmount(netAmount - slippageLoss);
   result.routing.expectedOutput = result.expectedShares;
 
   return result;
@@ -160,14 +175,24 @@ export function validateSimulatorResult(result: SimulationResult): {
     warnings.push("Result not marked as simulation-only");
   }
 
-  // Ensure expected shares is less than net amount (due to slippage)
-  if (result.expectedShares >= result.expectedShares) {
-    warnings.push("Expected shares should be less than net amount due to slippage");
+  // Ensure expected shares is less than the allocated net amount (due to slippage).
+  const allocatedAmount = result.allocations.reduce(
+    (sum, allocation) => sum + allocation.amount,
+    0,
+  );
+  if (
+    !Number.isFinite(allocatedAmount) ||
+    !Number.isFinite(result.expectedShares) ||
+    result.expectedShares < 0 ||
+    result.expectedShares >= allocatedAmount
+  ) {
+    warnings.push(
+      "Expected shares should be less than net amount due to slippage",
+    );
   }
 
   // Ensure allocations sum to approximately net amount
-  const allocSum = result.allocations.reduce((sum, a) => sum + a.amount, 0);
-  if (Math.abs(allocSum - (result.expectedShares + 0.05)) > 0.1) {
+  if (Math.abs(allocatedAmount - result.netAmount) > 0.0000001) {
     warnings.push("Allocations do not sum correctly");
   }
 
