@@ -64,6 +64,30 @@ toTokenUnits(2 ** 60);                     // throws InvalidAmountError
 formatTokenUnits(15_000_000n, 7);          // "1.5"
 ```
 
+### Boundary-safe simulation math
+
+`simulateDeposit()` validates `strategyId`, `token`, and `amount` before any
+network request. Invalid values throw a non-retryable `InvalidAmountError` or
+`InvalidSimulationParamsError`, so callers keep their last accepted snapshot
+and can retry after supplying corrected input.
+
+For local previews, `previewDepositShares()` and `previewWithdrawAssets()` use
+BigInt checked arithmetic and the vault rounding rules: share minting rounds
+up, asset redemption rounds down, zero deposits mint zero shares, and a first
+deposit into an empty vault is 1:1. Values outside the signed 128-bit range or
+non-positive reserves return a typed `{ ok: false, failure }` result rather
+than wrapping silently.
+
+```typescript
+import { previewDepositShares } from '@stellaryield/sdk';
+
+previewDepositShares({ amount: 10n, reserveBefore: 3n, sharesBefore: 3n });
+// { ok: true, value: 10n }
+
+previewDepositShares({ amount: 1n, reserveBefore: 0n, sharesBefore: 0n });
+// { ok: true, value: 1n }
+```
+
 ### API Client
 
 ```typescript
@@ -98,7 +122,9 @@ const vaultData = await api.getVaultData('vault-contract-id');
   - `getCurrentAPY()`: Get current APY
   - `getTVL()`: Get Total Value Locked
   - `getHistoricalData()`: Get APY/TVL history
-  - `getVaultData()`: Get complete vault data
+   - `getVaultData()`: Get complete vault data
+   - `simulateDeposit()`: Validated deposit simulation request; rejects malformed boundary values before sending
+
 
 ## Deposit simulation fixtures
 

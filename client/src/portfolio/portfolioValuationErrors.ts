@@ -10,7 +10,8 @@ export type PortfolioValuationErrorCode =
   | "VALUATION_REFRESH_FAILED"
   | "PRICE_FEED_UNAVAILABLE"
   | "NETWORK_ERROR"
-  | "RATE_LIMITED";
+  | "RATE_LIMITED"
+  | "INVALID_VALUATION_DATA";
 
 export interface PortfolioValuationFailure {
   /** Stable machine-readable code. */
@@ -46,6 +47,8 @@ const KNOWN_ERROR_MESSAGES: Record<PortfolioValuationErrorCode, string> = {
     "Network connectivity lost. Retaining active portfolio view.",
   RATE_LIMITED:
     "Valuation provider rate limit reached. Please wait a moment before refreshing.",
+  INVALID_VALUATION_DATA:
+    "Received invalid portfolio valuation data. Displaying last known positions.",
 };
 
 /**

@@ -245,3 +245,200 @@ export function computePortfolioValuationSummary(
     unpricedAssets,
   };
 }
+
+export type PortfolioValuationValidationCode =
+  | "INVALID_POSITIONS"
+  | "INVALID_POSITION"
+  | "INVALID_FIELD";
+
+/** Typed, boundary-safe failure for untrusted portfolio valuation input. */
+export interface PortfolioValuationInputFailure {
+  code: PortfolioValuationValidationCode;
+  message: string;
+  field?: string;
+  index?: number;
+}
+
+export type ValidatedPositionInputResult =
+  | { ok: true; value: PositionValuationInput }
+  | { ok: false; failure: PortfolioValuationInputFailure };
+
+export type ValidatedPortfolioInputsResult =
+  | { ok: true; positions: PositionValuationInput[] }
+  | { ok: false; failure: PortfolioValuationInputFailure };
+
+export type ValidatedPortfolioSummaryResult =
+  | { ok: true; summary: PortfolioValuationSummary }
+  | { ok: false; failure: PortfolioValuationInputFailure };
+
+const VALID_PRICE_STATUSES: readonly ValuationPriceStatus[] = ["priced", "unpriced", "zero"];
+
+function invalidField(
+  field: string,
+  reason: string,
+  index?: number,
+): ValidatedPositionInputResult {
+  return {
+    ok: false,
+    failure: {
+      code: "INVALID_FIELD",
+      message: `Invalid ${field}: ${reason}`,
+      field,
+      ...(index === undefined ? {} : { index }),
+    },
+  };
+}
+
+function isFiniteNonNegativeNumber(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0;
+}
+
+/**
+ * Validate one untrusted position at the boundary.
+ *
+ * The input object is never mutated. A successful result contains a fresh
+ * normalized copy with only known, validated fields.
+ */
+export function validatePositionValuationInput(
+  input: unknown,
+  index?: number,
+): ValidatedPositionInputResult {
+  if (typeof input !== "object" || input === null || Array.isArray(input)) {
+    return {
+      ok: false,
+      failure: {
+        code: "INVALID_POSITION",
+        message: "Position must be an object",
+        ...(index === undefined ? {} : { index }),
+      },
+    };
+  }
+
+  const candidate = input as Record<string, unknown>;
+
+  if (typeof candidate.protocol !== "string" || candidate.protocol.trim() === "") {
+    return invalidField("protocol", "must be a non-empty string", index);
+  }
+  if (typeof candidate.asset !== "string" || candidate.asset.trim() === "") {
+    return invalidField("asset", "must be a non-empty string", index);
+  }
+
+  for (const field of ["deposited", "shares", "apy"] as const) {
+    const value = candidate[field];
+    if (value === undefined || value === null) {
+      continue;
+    }
+    if (!isFiniteNonNegativeNumber(value)) {
+      return invalidField(field, "must be a finite, non-negative number", index);
+    }
+  }
+
+  if (
+    candidate.currentValue !== undefined &&
+    candidate.currentValue !== null &&
+    !isFiniteNonNegativeNumber(candidate.currentValue)
+  ) {
+    return invalidField("currentValue", "must be a finite, non-negative number or null", index);
+  }
+
+  if (
+    candidate.fetchedAt !== undefined &&
+    candidate.fetchedAt !== null &&
+    (typeof candidate.fetchedAt !== "string" ||
+      Number.isNaN(Date.parse(candidate.fetchedAt)))
+  ) {
+    return invalidField("fetchedAt", "must be an ISO-8601 timestamp or null", index);
+  }
+
+  if (candidate.isPriceUnavailable !== undefined && typeof candidate.isPriceUnavailable !== "boolean") {
+    return invalidField("isPriceUnavailable", "must be a boolean", index);
+  }
+
+  if (
+    candidate.priceStatus !== undefined &&
+    (typeof candidate.priceStatus !== "string" ||
+      !VALID_PRICE_STATUSES.includes(candidate.priceStatus as ValuationPriceStatus))
+  ) {
+    return invalidField("priceStatus", "must be priced, unpriced, or zero", index);
+  }
+
+  if (
+    candidate.unpricedReason !== undefined &&
+    candidate.unpricedReason !== null &&
+    typeof candidate.unpricedReason !== "string"
+  ) {
+    return invalidField("unpricedReason", "must be a string or null", index);
+  }
+
+  const value: PositionValuationInput = {
+    protocol: candidate.protocol,
+    asset: candidate.asset,
+  };
+  if (typeof candidate.deposited === "number") {
+    value.deposited = candidate.deposited;
+  }
+  if (candidate.currentValue !== undefined) {
+    value.currentValue = candidate.currentValue as number | null;
+  }
+  if (typeof candidate.shares === "number") {
+    value.shares = candidate.shares;
+  }
+  if (typeof candidate.apy === "number") {
+    value.apy = candidate.apy;
+  }
+  if (typeof candidate.fetchedAt === "string" || candidate.fetchedAt === null) {
+    value.fetchedAt = candidate.fetchedAt;
+  }
+  if (typeof candidate.isPriceUnavailable === "boolean") {
+    value.isPriceUnavailable = candidate.isPriceUnavailable;
+  }
+  if (typeof candidate.priceStatus === "string") {
+    value.priceStatus = candidate.priceStatus as ValuationPriceStatus;
+  }
+  if (typeof candidate.unpricedReason === "string") {
+    value.unpricedReason = candidate.unpricedReason;
+  }
+
+  return { ok: true, value };
+}
+
+/**
+ * Validate an untrusted list of positions before any aggregate is computed.
+ * Returns a typed failure on the first invalid entry and leaves the caller's
+ * data untouched so previously accepted state can be retained.
+ */
+export function validatePortfolioValuationInputs(
+  input: unknown,
+): ValidatedPortfolioInputsResult {
+  if (!Array.isArray(input)) {
+    return {
+      ok: false,
+      failure: {
+        code: "INVALID_POSITIONS",
+        message: "Portfolio positions must be an array",
+      },
+    };
+  }
+
+  const positions: PositionValuationInput[] = [];
+  for (let index = 0; index < input.length; index++) {
+    const result = validatePositionValuationInput(input[index], index);
+    if (!result.ok) {
+      return { ok: false, failure: result.failure };
+    }
+    positions.push(result.value);
+  }
+
+  return { ok: true, positions };
+}
+
+/** Validate first, then aggregate. Never returns a partially computed summary. */
+export function computeValidatedPortfolioValuationSummary(
+  input: unknown,
+): ValidatedPortfolioSummaryResult {
+  const validated = validatePortfolioValuationInputs(input);
+  if (!validated.ok) {
+    return { ok: false, failure: validated.failure };
+  }
+  return { ok: true, summary: computePortfolioValuationSummary(validated.positions) };
+}
