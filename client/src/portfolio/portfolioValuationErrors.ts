@@ -6,6 +6,8 @@
  * exceptions, and supports state-preserving recovery flows.
  */
 
+import { isValuationConfigError } from "../../../shared/types/portfolioValuationConfig";
+
 export type PortfolioValuationErrorCode =
   | "VALUATION_REFRESH_FAILED"
   | "PRICE_FEED_UNAVAILABLE"
@@ -14,7 +16,9 @@ export type PortfolioValuationErrorCode =
   | "DUPLICATE_VALUATION_SUBMISSION"
   | "VALUATION_IN_PROGRESS"
   | "VALUATION_IDENTITY_CONFLICT"
-  | "VALUATION_CONTEXT_MISMATCH";
+  | "VALUATION_CONTEXT_MISMATCH"
+  /** Configuration changed while a refresh was in flight; result discarded (#1862). */
+  | "VALUATION_CONFIG_STALE";
 
 export interface PortfolioValuationFailure {
   /** Stable machine-readable code. */
@@ -58,6 +62,8 @@ const KNOWN_ERROR_MESSAGES: Record<PortfolioValuationErrorCode, string> = {
     "Operation identity conflict: the submitted parameters do not match the original submission.",
   VALUATION_CONTEXT_MISMATCH:
     "The portfolio network or ledger changed. Refresh the portfolio before retrying.",
+  VALUATION_CONFIG_STALE:
+    "Valuation settings changed during the refresh. Showing your last confirmed positions — retry to revalue with the current settings.",
 };
 
 /**
@@ -73,6 +79,19 @@ export function describeValuationFailure(error: unknown): PortfolioValuationFail
       message: error.message,
       retryable: error.retryable,
       timestamp: error.timestamp,
+    };
+  }
+
+  if (isValuationConfigError(error)) {
+    const stale = error.code === "VALUATION_CONFIG_STALE";
+    const code: PortfolioValuationErrorCode = stale
+      ? "VALUATION_CONFIG_STALE"
+      : "VALUATION_REFRESH_FAILED";
+    return {
+      code,
+      message: KNOWN_ERROR_MESSAGES[code],
+      retryable: stale,
+      timestamp,
     };
   }
 
