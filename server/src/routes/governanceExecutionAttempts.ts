@@ -19,15 +19,126 @@ import {
   recordExecutionAttemptOnce,
   getExecutionAttempt,
   listExecutionAttemptsForProposal,
-  markExecutionSucceeded,
-  markExecutionFailed,
-  markExecutionRolledBack,
+  transitionExecutionAttempt,
+  ExecutionAttemptVersionConflictError,
   type ExecutionAttemptStatus,
+  type ExecutionTransition,
   type GovernanceExecutionAttempt,
   type RecordExecutionAttemptInput,
 } from "../services/governanceExecutionAttemptService";
 
 const router = Router();
+
+// ── Optimistic concurrency (#1895) ──────────────────────────────────────────
+
+class InvalidExpectedVersionError extends Error {}
+
+/**
+ * The attempt version a write expects, from `If-Match` (`"3"`, `W/"3"` or `3`)
+ * or else `expectedVersion` in the JSON body. `undefined` when neither is sent,
+ * which keeps the unconditional write.
+ */
+export function readExpectedVersion(req: Request): number | undefined {
+  const header = req.headers["if-match"];
+  const raw =
+    typeof header === "string" && header.trim() !== ""
+      ? header.trim().replace(/^W\//, "").replace(/^"(.*)"$/, "$1")
+      : (req.body as { expectedVersion?: unknown } | undefined)?.expectedVersion;
+  if (raw === undefined || raw === null) return undefined;
+  const text = String(raw).trim();
+  const value = typeof raw === "number" ? raw : Number(text);
+  if (text === "" || !Number.isSafeInteger(value) || value < 0) {
+    throw new InvalidExpectedVersionError(
+      "If-Match / expectedVersion must be a non-negative integer version.",
+    );
+  }
+  return value;
+}
+
+/** Parses the expected version, answering 400 itself when it is malformed. */
+function expectedVersionOr400(
+  req: Request,
+  res: Response,
+): { ok: true; value: number | undefined } | { ok: false } {
+  try {
+    return { ok: true, value: readExpectedVersion(req) };
+  } catch (err) {
+    if (err instanceof InvalidExpectedVersionError) {
+      sendError(res, 400, "INVALID_EXPECTED_VERSION", err.message);
+      return { ok: false };
+    }
+    throw err;
+  }
+}
+
+function setVersionHeader(res: Response, attempt: GovernanceExecutionAttempt | undefined): void {
+  res.setHeader("ETag", `"${attempt?.version ?? 0}"`);
+}
+
+/** Sends the 409 for a lost race, or returns false for any other error. */
+function sendVersionConflict(res: Response, err: unknown): boolean {
+  // Matched by code so the check also holds across module mocks.
+  if ((err as { code?: unknown } | null)?.code !== "EXECUTION_ATTEMPT_VERSION_CONFLICT") {
+    return false;
+  }
+  const conflict = err as ExecutionAttemptVersionConflictError;
+  setVersionHeader(res, conflict.currentAttempt);
+  sendError(
+    res,
+    409,
+    "EXECUTION_ATTEMPT_VERSION_CONFLICT",
+    "The execution attempt changed since you read it. Nothing was written; reload the attempt and retry.",
+    {
+      expectedVersion: conflict.expectedVersion,
+      currentVersion: conflict.currentVersion,
+      attempt: conflict.currentAttempt ?? null,
+    },
+  );
+  return true;
+}
+
+/**
+ * Apply one lifecycle transition and answer for every outcome. A transition
+ * that would overwrite a finished attempt is 409 and writes nothing; repeating
+ * a finished transition returns the stored attempt with `Idempotent-Replayed`.
+ */
+function respondToTransition(
+  req: Request,
+  res: Response,
+  attemptId: string,
+  transition: ExecutionTransition,
+): void {
+  const expected = expectedVersionOr400(req, res);
+  if (!expected.ok) return;
+
+  let result;
+  try {
+    result = transitionExecutionAttempt(attemptId, transition, {
+      expectedVersion: expected.value,
+    });
+  } catch (err) {
+    if (sendVersionConflict(res, err)) return;
+    throw err;
+  }
+
+  if (result.outcome === "not_found" || !result.attempt) {
+    sendError(res, 404, "ATTEMPT_NOT_FOUND", "No execution attempt found for the given id.");
+    return;
+  }
+  setVersionHeader(res, result.attempt);
+  if (result.outcome === "state_conflict") {
+    sendError(
+      res,
+      409,
+      "EXECUTION_STATE_CONFLICT",
+      `The attempt is already ${result.attempt.status}, so this report was ignored. The stored attempt was not changed.`,
+      { attempt: result.attempt },
+    );
+    return;
+  }
+  if (result.outcome === "unchanged") res.set(IDEMPOTENT_REPLAYED_HEADER, "true");
+  res.json(result.attempt);
+}
 
 function isTxPhase(value: unknown): value is "idle" | "building" | "simulating" | "waiting_for_wallet" | "submitting" | "polling" | "recovering" | "success" | "failure" {
   return typeof value === "string" && [
@@ -68,6 +179,12 @@ function isExecutionAttemptStatus(value: unknown): value is ExecutionAttemptStat
  * txHash is 409 OPERATION_ID_CONFLICT, and a stale retry never moves a finished
  * attempt to another status: the stored attempt is returned unchanged and the
  * response carries `Idempotent-Replayed: true`.
+ *
+ * Send the attempt `version` you last read as `If-Match: "<version>"` (or
+ * `expectedVersion` in the body) to make an update conditional (#1895): if
+ * another writer committed first the answer is 409
+ * EXECUTION_ATTEMPT_VERSION_CONFLICT and nothing is written. `0` means "create
+ * only". Without it the write is unconditional, as before.
  */
 const OPERATION_ID_PATTERN = /^[A-Za-z0-9._:-]{1,128}$/;
 
@@ -109,7 +226,11 @@ router.post("/", (req: Request, res: Response) => {
     return;
   }
 
+  const expected = expectedVersionOr400(req, res);
+  if (!expected.ok) return;
+
   const input: RecordExecutionAttemptInput = {
+    expectedVersion: expected.value,
     proposalId: body.proposalId,
     operationId: body.operationId,
     txHash: body.txHash,
@@ -120,7 +241,15 @@ router.post("/", (req: Request, res: Response) => {
     failedAtPhase: body.failedAtPhase,
   };
 
-  const { outcome, attempt } = recordExecutionAttemptOnce(input);
+  let result;
+  try {
+    result = recordExecutionAttemptOnce(input);
+  } catch (err) {
+    if (sendVersionConflict(res, err)) return;
+    throw err;
+  }
+  const { outcome, attempt } = result;
+  setVersionHeader(res, attempt);
   if (outcome === "conflict") {
     sendError(
       res,
@@ -152,6 +281,7 @@ router.get("/:attemptId", (req: Request, res: Response) => {
     return;
   }
 
+  setVersionHeader(res, attempt);
   res.json(attempt);
 });
 
@@ -174,30 +304,23 @@ router.get("/", (req: Request, res: Response) => {
 
 /**
  * POST /api/governance/execution-attempts/:attemptId/succeeded
- * Mark an in-flight attempt as succeeded.
+ * Mark an in-flight attempt as succeeded. Repeating it, or sending it for an
+ * attempt that is already final, returns the stored attempt unchanged.
  */
 router.post("/:attemptId/succeeded", (req: Request, res: Response) => {
-  const { attemptId } = req.params;
-  const { txHash } = req.body as { txHash?: string };
-
-  const attempt = markExecutionSucceeded(attemptId, txHash);
-  if (!attempt) {
-    sendError(res, 404, "ATTEMPT_NOT_FOUND", "No execution attempt found for the given id.");
-    return;
-  }
-
-  res.json(attempt);
+  const { txHash } = (req.body ?? {}) as { txHash?: string };
+  respondToTransition(req, res, req.params.attemptId, { kind: "succeeded", txHash });
 });
 
 /**
  * POST /api/governance/execution-attempts/:attemptId/failed
- * Mark an in-flight attempt as failed.
+ * Mark an in-flight attempt as failed. A succeeded or rolled-back attempt is
+ * final: the report is 409 EXECUTION_STATE_CONFLICT and nothing is written.
  *
  * Body: { error, failedAtPhase }
  */
 router.post("/:attemptId/failed", (req: Request, res: Response) => {
-  const { attemptId } = req.params;
-  const { error, failedAtPhase } = req.body as {
+  const { error, failedAtPhase } = (req.body ?? {}) as {
     error?: string;
     failedAtPhase?: string;
   };
@@ -211,29 +334,20 @@ router.post("/:attemptId/failed", (req: Request, res: Response) => {
     return;
   }
 
-  const attempt = markExecutionFailed(attemptId, error, failedAtPhase ?? "submitting");
-  if (!attempt) {
-    sendError(res, 404, "ATTEMPT_NOT_FOUND", "No execution attempt found for the given id.");
-    return;
-  }
-
-  res.json(attempt);
+  respondToTransition(req, res, req.params.attemptId, {
+    kind: "failed",
+    error,
+    failedAtPhase: failedAtPhase ?? "submitting",
+  });
 });
 
 /**
  * POST /api/governance/execution-attempts/:attemptId/rolled-back
  * Mark an in-flight attempt as rolled back (discarded without re-submission).
+ * A succeeded attempt cannot be rolled back (409 EXECUTION_STATE_CONFLICT).
  */
 router.post("/:attemptId/rolled-back", (req: Request, res: Response) => {
-  const { attemptId } = req.params;
-
-  const attempt = markExecutionRolledBack(attemptId);
-  if (!attempt) {
-    sendError(res, 404, "ATTEMPT_NOT_FOUND", "No execution attempt found for the given id.");
-    return;
-  }
-
-  res.json(attempt);
+  respondToTransition(req, res, req.params.attemptId, { kind: "rolled_back" });
 });
 
 export default router;

@@ -166,6 +166,59 @@ The `succeeded`, `failed` and `rolled-back` actions on an attempt now update tha
 attempt in place. Before, an attempt that had no `txHash` yet was not found by hash,
 so these actions added a second record with the same attempt number.
 
+### Concurrent changes
+
+Two tabs, two signers, or a slow retry can act on the same record at once. The
+execution-attempt endpoints serialize each read-check-write into one step and add
+optimistic concurrency, so the last writer can no longer overwrite a newer state
+silently (#1895).
+
+**Versions.** Every execution attempt has an integer `version`. It is `1` when
+created and goes up by one with each committed change. Replays and no-ops do not
+change it. Reads and writes return it in the body and as `ETag: "<version>"`.
+
+**Conditional writes.** Send the version you read as `If-Match: "<version>"`
+(`W/"3"` and a bare number are also accepted) or as `expectedVersion` in the JSON
+body. It applies to `POST /api/governance/execution-attempts` and to the
+`/succeeded`, `/failed` and `/rolled-back` actions. `0` means "create only".
+Without it the write is unconditional, as before.
+
+| Situation | Response | Stored state |
+|---|---|---|
+| Version matches | success, new version in `ETag` | written |
+| Another writer committed first | `409 EXECUTION_ATTEMPT_VERSION_CONFLICT`; `details` has `expectedVersion`, `currentVersion` and the current `attempt` | unchanged |
+| A version is expected but the attempt does not exist | `409` with `currentVersion: 0` and `attempt: null` | nothing created |
+| Malformed version | `400 INVALID_EXPECTED_VERSION` | unchanged |
+| Retry of a finished action (same `operationId`, or `/succeeded` again) | `200`, `Idempotent-Replayed: true` | unchanged, even with an old version |
+
+A conflict does not consume the `operationId`. Reload the attempt, decide again,
+and retry with the new version.
+
+**Final states.** `succeeded` and `rolled_back` attempts are final. A report that
+would move one is never applied:
+
+| Report | On a `succeeded` attempt | On a `rolled_back` attempt |
+|---|---|---|
+| `/failed` | `409 EXECUTION_STATE_CONFLICT` | `409 EXECUTION_STATE_CONFLICT` |
+| `/rolled-back` | `409 EXECUTION_STATE_CONFLICT` | `200`, `Idempotent-Replayed: true` |
+| `/succeeded` | `200`, `Idempotent-Replayed: true` | `200`, `Idempotent-Replayed: true`, unchanged |
+| `POST` with another status (by `txHash` or `operationId`) | `200`, `Idempotent-Replayed: true` | `200`, `Idempotent-Replayed: true` |
+
+A `failed` attempt can still be confirmed (`/succeeded`) or discarded
+(`/rolled-back`), for example when a transaction that looked lost lands later.
+Before this change a late `/failed` report could overwrite a `succeeded` attempt.
+The 409 body carries the stored attempt so the UI can show the real outcome.
+
+**Attempt numbers.** A client-supplied `attemptNumber` is used only if no attempt
+of that proposal has it. Otherwise the next free number is assigned, so two tabs
+that both start "attempt 2" get different numbers.
+
+**Vote status in the client.** `GovernanceVoteStatus` runs one status request at a
+time, drops a reply that is no longer for the shown receipt, and ignores a reply
+older than what it already shows (a `recorded` vote is never moved back to
+`pending` by a lagging response). A failed refresh keeps the last known status and
+shows a notice instead of replacing it with an error.
+
 ## Using the Forecast Tool Before Proposing
 
 Before creating a proposal, signers can use the **Impact Forecast** panel (`client/src/pages/governance/GovernanceForecast.tsx`) to preview the expected effect on yield, exposure, and fee revenue. This is especially useful for `fee_change`, `allocation_limit`, and `strategy_param` actions. The forecast calls the backend at `/api/governance/forecast` and displays warnings when the projected impact exceeds safe thresholds.
@@ -187,3 +240,5 @@ Running a forecast is optional but strongly encouraged for parameter changes tha
 | `client/src/pages/governance/GovernanceDiagnosticsList.tsx` | Renders stage, code, and remediation inline |
 | `client/src/pages/governance/types.ts` | TypeScript interfaces for proposals and config |
 | `client/src/pages/governance/governanceActions.ts` | Definitions of all supported admin actions |
+| `client/src/features/governance/GovernanceVoteStatus.tsx` | Vote receipt status with stale-reply protection |
+| `server/src/services/governanceExecutionAttemptService.ts` | Execution attempts: versions, final states, attempt numbers |
