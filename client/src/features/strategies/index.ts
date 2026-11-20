@@ -8,3 +8,4 @@ export type {
   RiskLabel,
   DataFreshness,
 } from "./types";
+export * from "./strategyComparisonMath";
