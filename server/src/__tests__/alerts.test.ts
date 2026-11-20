@@ -27,11 +27,19 @@ jest.mock("../services/alertsService", () => ({
   listAlerts: jest.fn(),
   deleteAlert: jest.fn(),
   evaluateAlerts: jest.fn(),
+  getAlertPreferences: jest.fn(),
+  setAlertPreferences: jest.fn(),
+  getAlertPreferencesVersion: jest.fn(() => 1),
+  computeAlertFingerprint: jest.fn(),
+  clearAlertOperationStore: jest.fn(),
+  clearAlertPreferencesStore: jest.fn(),
 }));
 
 const mockCreate = alertsService.createAlert as jest.MockedFunction<typeof alertsService.createAlert>;
 const mockList = alertsService.listAlerts as jest.MockedFunction<typeof alertsService.listAlerts>;
 const mockDelete = alertsService.deleteAlert as jest.MockedFunction<typeof alertsService.deleteAlert>;
+const mockGetPreferences = alertsService.getAlertPreferences as jest.MockedFunction<typeof alertsService.getAlertPreferences>;
+const mockSetPreferences = alertsService.setAlertPreferences as jest.MockedFunction<typeof alertsService.setAlertPreferences>;
 
 const SAMPLE_ALERT: UserAlert = {
   id: "alert-1",
@@ -112,6 +120,247 @@ describe("POST /api/alerts", () => {
       email: "user@example.com",
     });
     expect(res.status).toBe(429);
+  });
+
+  it("passes operationIdentity to createAlert from header or body", async () => {
+    mockCreate.mockResolvedValue(SAMPLE_ALERT);
+
+    const res = await request(app)
+      .post("/api/alerts")
+      .set("x-operation-identity", "op-test-123")
+      .send({
+        walletAddress: "GTEST123",
+        vaultId: "Blend",
+        condition: "above",
+        thresholdValue: 10,
+        email: "user@example.com",
+        preferences: {
+          channel: "email",
+          cooldownMinutes: 30,
+          severityThreshold: 5,
+          quietHoursStart: 22,
+          quietHoursEnd: 7,
+        },
+      });
+
+    expect(res.status).toBe(201);
+    expect(mockCreate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        operationIdentity: "op-test-123",
+      }),
+    );
+  });
+
+  it("returns 200 and X-Idempotent-Replayed on safe duplicate retry", async () => {
+    mockCreate.mockResolvedValue({
+      ...SAMPLE_ALERT,
+      __replayed: true,
+    } as any);
+
+    const res = await request(app)
+      .post("/api/alerts")
+      .set("idempotency-key", "op-retry-1")
+      .send({
+        walletAddress: "GTEST123",
+        vaultId: "Blend",
+        condition: "above",
+        thresholdValue: 10,
+        email: "user@example.com",
+      });
+
+    expect(res.status).toBe(200);
+    expect(res.headers["x-idempotent-replayed"]).toBe("true");
+    expect(res.body.id).toBe("alert-1");
+    expect(res.body.__replayed).toBeUndefined();
+  });
+
+  it("returns 409 conflict when operation identity is reused with conflicting parameters", async () => {
+    const conflictError = new Error(
+      "Operation identity has already been used with different parameters.",
+    );
+    (conflictError as any).code = "OPERATION_IDENTITY_CONFLICT";
+    mockCreate.mockRejectedValue(conflictError);
+
+    const res = await request(app)
+      .post("/api/alerts")
+      .set("x-operation-identity", "op-conflict-1")
+      .send({
+        walletAddress: "GTEST123",
+        vaultId: "Blend",
+        condition: "above",
+        thresholdValue: 10,
+        email: "user@example.com",
+      });
+
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe("OPERATION_IDENTITY_CONFLICT");
+  });
+
+  it("preserves state on validation error without invoking createAlert", async () => {
+    const res = await request(app)
+      .post("/api/alerts")
+      .send({
+        walletAddress: "GTEST123",
+        vaultId: "Blend",
+        condition: "above",
+        thresholdValue: -5, // Invalid threshold
+        email: "user@example.com",
+      });
+
+    expect(res.status).toBe(400);
+    expect(mockCreate).not.toHaveBeenCalled();
+  });
+});
+
+describe("PUT /api/alerts/preferences", () => {
+  const app = createApp();
+
+  beforeEach(() => jest.clearAllMocks());
+
+  it("updates preferences with operation identity", async () => {
+    mockSetPreferences.mockReturnValue({
+      preferences: {
+        channel: "email",
+        cooldownMinutes: 60,
+        severityThreshold: 10,
+        quietHoursStart: 23,
+        quietHoursEnd: 6,
+      },
+      replayed: false,
+      version: 1,
+    });
+
+    const res = await request(app)
+      .put("/api/alerts/preferences")
+      .set("x-operation-identity", "op-pref-1")
+      .send({
+        walletAddress: "GTEST123",
+        vaultId: "Blend",
+        preferences: {
+          channel: "email",
+          cooldownMinutes: 60,
+          severityThreshold: 10,
+          quietHoursStart: 23,
+          quietHoursEnd: 6,
+        },
+      });
+
+    expect(res.status).toBe(200);
+    expect(mockSetPreferences).toHaveBeenCalledWith(
+      "GTEST123",
+      "Blend",
+      expect.objectContaining({
+        channel: "email",
+        cooldownMinutes: 60,
+      }),
+      "op-pref-1",
+    );
+  });
+
+  it("returns X-Idempotent-Replayed on duplicate preference submission", async () => {
+    mockSetPreferences.mockReturnValue({
+      preferences: {
+        channel: "email",
+        cooldownMinutes: 60,
+        severityThreshold: 10,
+        quietHoursStart: 23,
+        quietHoursEnd: 6,
+      },
+      replayed: true,
+      version: 1,
+    });
+
+    const res = await request(app)
+      .put("/api/alerts/preferences")
+      .set("idempotency-key", "op-pref-dup")
+      .send({
+        walletAddress: "GTEST123",
+        vaultId: "Blend",
+        preferences: {
+          channel: "email",
+          cooldownMinutes: 60,
+          severityThreshold: 10,
+          quietHoursStart: 23,
+          quietHoursEnd: 6,
+        },
+      });
+
+    expect(res.status).toBe(200);
+    expect(res.headers["x-idempotent-replayed"]).toBe("true");
+  });
+
+  it("returns 409 when preference operation identity has conflicting parameters", async () => {
+    const conflictError = new Error(
+      "Operation identity has already been used with different parameters.",
+    );
+    (conflictError as any).code = "OPERATION_IDENTITY_CONFLICT";
+    mockSetPreferences.mockImplementation(() => {
+      throw conflictError;
+    });
+
+    const res = await request(app)
+      .put("/api/alerts/preferences")
+      .set("x-operation-identity", "op-pref-conflict")
+      .send({
+        walletAddress: "GTEST123",
+        vaultId: "Blend",
+        preferences: {
+          channel: "email",
+          cooldownMinutes: 60,
+          severityThreshold: 10,
+          quietHoursStart: 23,
+          quietHoursEnd: 6,
+        },
+      });
+
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe("OPERATION_IDENTITY_CONFLICT");
+  });
+
+  it("returns 400 and preserves existing state when preferences are invalid", async () => {
+    const res = await request(app)
+      .put("/api/alerts/preferences")
+      .send({
+        walletAddress: "GTEST123",
+        vaultId: "Blend",
+        preferences: {
+          channel: "invalid_channel",
+          cooldownMinutes: 60,
+          severityThreshold: 10,
+          quietHoursStart: 23,
+          quietHoursEnd: 6,
+        },
+      });
+
+    expect(res.status).toBe(400);
+    expect(mockSetPreferences).not.toHaveBeenCalled();
+  });
+});
+
+describe("GET /api/alerts/preferences/:wallet/:vaultId", () => {
+  const app = createApp();
+
+  beforeEach(() => jest.clearAllMocks());
+
+  it("returns alert preferences when found", async () => {
+    mockGetPreferences.mockReturnValue({
+      channel: "email",
+      cooldownMinutes: 60,
+      severityThreshold: 10,
+      quietHoursStart: 23,
+      quietHoursEnd: 6,
+    });
+
+    const res = await request(app).get("/api/alerts/preferences/GTEST123/Blend");
+    expect(res.status).toBe(200);
+    expect(res.body.channel).toBe("email");
+  });
+
+  it("returns 404 when alert preferences are not found", async () => {
+    mockGetPreferences.mockReturnValue(undefined);
+
+    const res = await request(app).get("/api/alerts/preferences/GTEST123/UnknownVault");
+    expect(res.status).toBe(404);
   });
 });
 
@@ -289,5 +538,97 @@ describe("alert delivery resilience", () => {
     expect(deliveryMetrics).toHaveProperty("failed");
     expect(deliveryMetrics).toHaveProperty("retried");
     expect(deliveryMetrics).toHaveProperty("deadLettered");
+  });
+});
+
+describe("alertsService operation identity & preference store", () => {
+  beforeEach(async () => {
+    jest.resetModules();
+    jest.unmock("../services/alertsService");
+  });
+
+  it("stores alert preferences and handles safe retry deduplication", async () => {
+    const {
+      setAlertPreferences,
+      getAlertPreferences,
+      clearAlertOperationStore,
+      clearAlertPreferencesStore,
+    } = await import("../services/alertsService");
+
+    clearAlertOperationStore();
+    clearAlertPreferencesStore();
+
+    const prefs = {
+      channel: "email" as const,
+      cooldownMinutes: 45,
+      severityThreshold: 8,
+      quietHoursStart: 22,
+      quietHoursEnd: 6,
+    };
+
+    // First submission
+    const firstResult = setAlertPreferences("gtest1", "blend", prefs, "op-pref-unit-1");
+    expect(firstResult.replayed).toBe(false);
+    expect(firstResult.preferences).toEqual(prefs);
+
+    // Verified stored
+    expect(getAlertPreferences("gtest1", "blend")).toEqual(prefs);
+
+    // Safe duplicate retry with same operation identity and same params
+    const retryResult = setAlertPreferences("gtest1", "blend", prefs, "op-pref-unit-1");
+    expect(retryResult.replayed).toBe(true);
+    expect(retryResult.preferences).toEqual(prefs);
+  });
+
+  it("rejects duplicate operation identity when parameters conflict", async () => {
+    const {
+      setAlertPreferences,
+      clearAlertOperationStore,
+      clearAlertPreferencesStore,
+    } = await import("../services/alertsService");
+
+    clearAlertOperationStore();
+    clearAlertPreferencesStore();
+
+    const prefsA = {
+      channel: "email" as const,
+      cooldownMinutes: 45,
+      severityThreshold: 8,
+      quietHoursStart: 22,
+      quietHoursEnd: 6,
+    };
+
+    const prefsB = {
+      ...prefsA,
+      cooldownMinutes: 90, // Different cooldown
+    };
+
+    setAlertPreferences("gtest1", "blend", prefsA, "op-pref-unit-2");
+
+    expect(() => {
+      setAlertPreferences("gtest1", "blend", prefsB, "op-pref-unit-2");
+    }).toThrow("Operation identity has already been used with different parameters.");
+  });
+
+  it("computes deterministic fingerprints for inputs", async () => {
+    const { computeAlertFingerprint } = await import("../services/alertsService");
+
+    const fp1 = computeAlertFingerprint({
+      walletAddress: "GTEST1",
+      vaultId: "Blend",
+      condition: "above",
+      thresholdValue: 12.5,
+      email: "User@Example.com",
+    });
+
+    const fp2 = computeAlertFingerprint({
+      walletAddress: "gtest1",
+      vaultId: "blend",
+      condition: "above",
+      thresholdValue: 12.5,
+      email: "user@example.com",
+    });
+
+    expect(fp1).toBe(fp2);
   });
 });

@@ -217,3 +217,75 @@ describe("terminal transitions (#1899)", () => {
   });
 });
 
+describe("POST /api/governance/execution-attempts operationId (#1896)", () => {
+  it("creates once and answers 200 with the same attempt on a retry", async () => {
+    const app = buildApp();
+    const first = await postAttempt(app, { proposalId: "proposal-1", operationId: "op-1" });
+    const retry = await postAttempt(app, { proposalId: "proposal-1", operationId: "op-1" });
+
+    expect(first.status).toBe(201);
+    expect(retry.status).toBe(200);
+    expect(retry.body.attemptId).toBe(first.body.attemptId);
+    expect(countExecutionAttempts()).toBe(1);
+  });
+
+  it("answers 409 and leaves the attempt alone when the operationId meets a different txHash", async () => {
+    const app = buildApp();
+    const first = await postAttempt(app, {
+      proposalId: "proposal-1",
+      operationId: "op-1",
+      txHash: "abc123",
+      status: "polling",
+    });
+    const clash = await postAttempt(app, {
+      proposalId: "proposal-1",
+      operationId: "op-1",
+      txHash: "zzz999",
+      status: "failed",
+    });
+
+    expect(clash.status).toBe(409);
+    expect(clash.body.error).toBe("OPERATION_ID_CONFLICT");
+    expect(clash.body.details.attemptId).toBe(first.body.attemptId);
+
+    const stored = await request(app).get(
+      `/api/governance/execution-attempts/${first.body.attemptId}`,
+    );
+    expect(stored.body.txHash).toBe("abc123");
+    expect(stored.body.status).toBe("polling");
+  });
+
+  it("replays a finished attempt unchanged and flags the response", async () => {
+    const app = buildApp();
+    await postAttempt(app, {
+      proposalId: "proposal-1",
+      operationId: "op-1",
+      txHash: "abc123",
+      status: "succeeded",
+      phase: "success",
+    });
+    const stale = await postAttempt(app, {
+      proposalId: "proposal-1",
+      operationId: "op-1",
+      txHash: "abc123",
+      status: "polling",
+      phase: "polling",
+    });
+
+    expect(stale.status).toBe(200);
+    expect(stale.headers["idempotent-replayed"]).toBe("true");
+    expect(stale.body.status).toBe("succeeded");
+    expect(countExecutionAttempts()).toBe(1);
+  });
+
+  it.each(["", "has space", "x".repeat(129), 42])(
+    "rejects a malformed operationId (%p) and stores nothing",
+    async (operationId) => {
+      const res = await postAttempt(buildApp(), { proposalId: "proposal-1", operationId });
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toBe("INVALID_OPERATION_ID");
+      expect(countExecutionAttempts()).toBe(0);
+    },
+  );
+});
