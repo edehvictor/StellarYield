@@ -50,12 +50,14 @@ export class VaultClient {
   public readonly networkPassphrase: string;
   public readonly rpcUrl: string;
   public readonly specHash: string;
+  public readonly configFingerprint?: string;
 
   constructor(config: VaultConfig) {
     this.contractId = config.contractId;
     this.networkPassphrase = config.networkPassphrase;
     this.rpcUrl = config.rpcUrl;
     this.specHash = config.specHash || YIELD_VAULT_SPEC_HASH;
+    this.configFingerprint = config.configFingerprint;
 
     if (config.specHash && config.specHash !== YIELD_VAULT_SPEC_HASH) {
       throw new SpecMismatchError(YIELD_VAULT_SPEC_HASH, config.specHash);
@@ -159,12 +161,17 @@ export class VaultClient {
           typeof value === "bigint" ? value.toString() : value
         ),
         specHash: this.specHash,
+        configFingerprint: this.configFingerprint,
       };
 
       return new PreparedTransaction<TResult>(rawXdr, meta);
     } catch (error) {
       throw parseContractError(error, undefined, undefined, "simulate");
     }
+  }
+
+  public getConfigFingerprint(): string | undefined {
+    return this.configFingerprint;
   }
 
   // Read-only view methods
