@@ -3,14 +3,36 @@ import {
   setAuditContext,
   getAuditLogs,
   getAuditStatistics,
-  exportAuditLogsToCSV,
+  auditEntriesToCsv,
   verifyAuditTrailIntegrity,
+  recordAdminConfirmation,
+  recordCancelledAction,
 } from "../middleware/audit";
+import {
+  AUDIT_EXPORT_MAX_ROWS,
+  parseAuditLogFilterQuery,
+} from "../utils/auditFilters";
+import { sendError } from "../utils/errorResponse";
 import { uploadVaultMetadata } from "../services/ipfs/vaultMetadataService";
 import { freezeService } from "../services/freezeService";
-import { parsePaginationLimit, type PaginatedResponse } from "../types/pagination";
+import {
+  vaultRegistryService,
+  VaultRegistryValidationError,
+  type VaultStatus,
+} from "../services/vaultRegistryService";
+import {
+  parsePaginationLimit,
+  type PaginatedResponse,
+} from "../types/pagination";
 import { PROTOCOLS } from "../config/protocols";
 import { strategyStateTransitionAuditService } from "../services/strategyStateTransitionAuditService";
+import {
+  rebalanceSagaService,
+  SAGA_STATE,
+} from "../services/rebalanceSagaService";
+import { recoverStuckSagas } from "../services/rebalanceSagaExecutor";
+import { promoteYieldSource } from "../services/yieldSourceRegistryService";
+import { YieldSourceOnboardingError } from "../services/yieldSourceOnboardingService";
 
 const adminRouter = Router();
 
@@ -65,6 +87,85 @@ adminRouter.post(
           error instanceof Error
             ? error.message
             : "Failed to update vault parameters",
+      });
+    }
+  },
+);
+
+/**
+ * List all vaults in the registry
+ * GET /api/admin/vaults/registry
+ */
+adminRouter.get(
+  "/vaults/registry",
+  requireAdmin,
+  (req: Request, res: Response): void => {
+    const requestedStatus = req.query.status;
+    if (requestedStatus === undefined) {
+      res.json({ vaults: vaultRegistryService.listVaults() });
+      return;
+    }
+
+    if (typeof requestedStatus !== "string") {
+      res.status(400).json({
+        error: "status must be one of: ACTIVE, PAUSED, DEPRECATED",
+      });
+      return;
+    }
+
+    const status = requestedStatus.toUpperCase() as VaultStatus;
+    if (!["ACTIVE", "PAUSED", "DEPRECATED"].includes(status)) {
+      res.status(400).json({
+        error: "status must be one of: ACTIVE, PAUSED, DEPRECATED",
+      });
+      return;
+    }
+
+    res.json({ vaults: vaultRegistryService.listVaults(status) });
+  },
+);
+
+/**
+ * Admin-only vault registry update workflow: updates a vault's registry
+ * metadata (name, strategy, status, cap). Distinct from the parameters
+ * placeholder above, this actually persists (in-memory) and is captured by
+ * the audit trail via setAuditContext.
+ * POST /api/admin/vaults/:vaultId/registry
+ */
+adminRouter.post(
+  "/vaults/:vaultId/registry",
+  requireAdmin,
+  async (req: Request, res: Response): Promise<void> => {
+    try {
+      const { vaultId } = req.params;
+      const { name, strategy, status, capUsd } = req.body ?? {};
+      const actor =
+        (req as unknown as { user?: { id?: string } }).user?.id ?? "unknown";
+
+      setAuditContext(req, {
+        action: "UPDATE_VAULT_REGISTRY",
+        resource: "VAULT_REGISTRY",
+        resourceId: vaultId,
+        changes: { name, strategy, status, capUsd },
+      });
+
+      const updated = vaultRegistryService.updateVault(
+        vaultId,
+        { name, strategy, status, capUsd },
+        actor,
+      );
+
+      res.json({ success: true, vault: updated });
+    } catch (error) {
+      if (error instanceof VaultRegistryValidationError) {
+        res.status(400).json({ error: error.message });
+        return;
+      }
+      res.status(500).json({
+        error:
+          error instanceof Error
+            ? error.message
+            : "Failed to update vault registry",
       });
     }
   },
@@ -282,33 +383,44 @@ adminRouter.post(
 /**
  * Get audit logs
  * GET /api/admin/audit-logs
+ *
+ * Filters (all optional, combined with AND): `wallet`, `action` (one, a
+ * comma-separated list, or repeated), `startDate` / `endDate` (a calendar date
+ * or an ISO 8601 date-time with a zone), `userId`, `resource`.
+ * Invalid filters answer 400 with a stable error code instead of an empty page.
  */
 adminRouter.get(
   "/audit-logs",
   requireAdmin,
   async (req: Request, res: Response): Promise<void> => {
     try {
-      const { userId, action, resource, startDate, endDate, limit, cursor } = req.query;
+      const parsed = parseAuditLogFilterQuery(req.query);
+      if (!parsed.ok) {
+        sendError(res, 400, parsed.error.code, parsed.error.message, {
+          field: parsed.error.field,
+        });
+        return;
+      }
 
+      const { limit, cursor } = req.query;
       const effectiveLimit = parsePaginationLimit(limit);
 
       const logs = await getAuditLogs({
-        userId: userId as string,
-        action: action as string,
-        resource: resource as string,
-        startDate: startDate as string,
-        endDate: endDate as string,
+        ...parsed.filters,
         limit: effectiveLimit + 1,
-        cursor: cursor as string | undefined,
+        cursor: typeof cursor === "string" ? cursor : undefined,
       });
 
       const hasMore = logs.length > effectiveLimit;
       const page = hasMore ? logs.slice(0, effectiveLimit) : logs;
       const nextCursor = hasMore ? page[page.length - 1].id : null;
 
-      const response: PaginatedResponse<(typeof page)[0]> = {
+      const response: PaginatedResponse<(typeof page)[0]> & {
+        filters: typeof parsed.filters;
+      } = {
         data: page,
         pagination: { nextCursor, hasMore, limit: effectiveLimit },
+        filters: parsed.filters,
       };
 
       res.json(response);
@@ -358,15 +470,27 @@ adminRouter.get(
   requireAdmin,
   async (req: Request, res: Response): Promise<void> => {
     try {
-      const { userId, action, resource, startDate, endDate } = req.query;
+      const parsed = parseAuditLogFilterQuery(req.query);
+      if (!parsed.ok) {
+        sendError(res, 400, parsed.error.code, parsed.error.message, {
+          field: parsed.error.field,
+        });
+        return;
+      }
 
-      const csv = await exportAuditLogsToCSV({
-        userId: userId as string,
-        action: action as string,
-        resource: resource as string,
-        startDate: startDate as string,
-        endDate: endDate as string,
+      // The default page size is 100, which would silently drop rows from an
+      // export. Ask for one row past the cap so truncation can be reported.
+      const entries = await getAuditLogs({
+        ...parsed.filters,
+        limit: AUDIT_EXPORT_MAX_ROWS + 1,
       });
+      const truncated = entries.length > AUDIT_EXPORT_MAX_ROWS;
+      const csv = auditEntriesToCsv(
+        truncated ? entries.slice(0, AUDIT_EXPORT_MAX_ROWS) : entries,
+      );
+      if (truncated) {
+        res.setHeader("X-Audit-Export-Truncated", "true");
+      }
 
       res.setHeader("Content-Type", "text/csv");
       res.setHeader(
@@ -506,7 +630,8 @@ adminRouter.post(
   async (req: Request, res: Response): Promise<void> => {
     try {
       const { protocol, reason } = req.body;
-      const actor = (req as unknown as { user?: { id: string } }).user?.id || "admin";
+      const actor =
+        (req as unknown as { user?: { id: string } }).user?.id || "admin";
 
       let state;
       if (protocol) {
@@ -565,7 +690,8 @@ adminRouter.post(
   async (req: Request, res: Response): Promise<void> => {
     try {
       const { protocol } = req.body;
-      const actor = (req as unknown as { user?: { id: string } }).user?.id || "admin";
+      const actor =
+        (req as unknown as { user?: { id: string } }).user?.id || "admin";
 
       let state;
       if (protocol) {
@@ -608,6 +734,365 @@ adminRouter.post(
       res.json({ success: true, state });
     } catch {
       res.status(500).json({ error: "Failed to resume recommendations" });
+    }
+  },
+);
+
+/**
+ * Record a successful admin confirmation after an action is applied.
+ * POST /api/admin/confirm
+ *
+ * Body:
+ *   actionType      — e.g. "UPDATE_TREASURY_FEE"
+ *   resource        — e.g. "TREASURY", "GOVERNANCE"
+ *   resourceId?     — specific id
+ *   confirmationText — the text the actor reviewed in the UI
+ *   changes?        — the payload that was applied
+ */
+adminRouter.post(
+  "/confirm",
+  requireAdmin,
+  async (req: Request, res: Response): Promise<void> => {
+    try {
+      const { actionType, resource, resourceId, confirmationText, changes } =
+        req.body as {
+          actionType?: string;
+          resource?: string;
+          resourceId?: string;
+          confirmationText?: string;
+          changes?: Record<string, unknown>;
+        };
+
+      if (!actionType || !resource || !confirmationText) {
+        res.status(400).json({
+          error: "actionType, resource, and confirmationText are required.",
+        });
+        return;
+      }
+
+      const user = (req as unknown as Record<string, unknown>).user as
+        | { id?: string; email?: string }
+        | undefined;
+
+      const entry = await recordAdminConfirmation({
+        actorId: user?.id ?? "ANONYMOUS",
+        actorEmail: user?.email,
+        actionType,
+        resource,
+        resourceId,
+        confirmationText,
+        changes,
+        ipAddress:
+          (req.headers["x-forwarded-for"] as string)?.split(",")[0].trim() ??
+          req.socket.remoteAddress ??
+          "UNKNOWN",
+        userAgent: req.headers["user-agent"] ?? "UNKNOWN",
+      });
+
+      res.json({
+        success: true,
+        auditId: entry.id,
+        timestamp: entry.timestamp,
+      });
+    } catch (error) {
+      res.status(500).json({
+        error:
+          error instanceof Error
+            ? error.message
+            : "Failed to record admin confirmation.",
+      });
+    }
+  },
+);
+
+/**
+ * GET /api/admin/rebalance-sagas
+ * List rebalance sagas with optional filters.
+ */
+adminRouter.get(
+  "/rebalance-sagas",
+  requireAdmin,
+  async (req: Request, res: Response): Promise<void> => {
+    try {
+      const { vaultId, state, limit, offset } = req.query;
+
+      const result = await rebalanceSagaService.listSagas({
+        vaultId: vaultId as string | undefined,
+        state: state as
+          | (typeof SAGA_STATE)[keyof typeof SAGA_STATE]
+          | undefined,
+        limit: limit ? parseInt(limit as string) : 50,
+        offset: offset ? parseInt(offset as string) : 0,
+      });
+
+      res.json({
+        success: true,
+        data: result.sagas,
+        total: result.total,
+      });
+    } catch (error) {
+      res.status(500).json({
+        error:
+          error instanceof Error
+            ? error.message
+            : "Failed to list rebalance sagas",
+      });
+    }
+  },
+);
+
+/**
+ * GET /api/admin/rebalance-sagas/:sagaId
+ * Get detailed saga state with checkpoints and retry history.
+ */
+adminRouter.get(
+  "/rebalance-sagas/:sagaId",
+  requireAdmin,
+  async (req: Request, res: Response): Promise<void> => {
+    try {
+      const { sagaId } = req.params;
+      const result = await rebalanceSagaService.getSagaWithHistory(sagaId);
+
+      if (!result) {
+        res.status(404).json({ error: `Saga ${sagaId} not found` });
+        return;
+      }
+
+      res.json({
+        success: true,
+        data: result,
+      });
+    } catch (error) {
+      res.status(500).json({
+        error:
+          error instanceof Error ? error.message : "Failed to get saga details",
+      });
+    }
+  },
+);
+
+/**
+ * POST /api/admin/rebalance-sagas/:sagaId/cancel
+ * Cancel a saga.
+ */
+adminRouter.post(
+  "/rebalance-sagas/:sagaId/cancel",
+  requireAdmin,
+  async (req: Request, res: Response): Promise<void> => {
+    try {
+      const { sagaId } = req.params;
+      const { reason } = req.body as { reason?: string };
+
+      const saga = await rebalanceSagaService.cancelSaga(
+        sagaId,
+        reason ?? "Cancelled by admin",
+      );
+
+      setAuditContext(req, {
+        action: "CANCEL_REBALANCE_SAGA",
+        resource: "REBALANCE_SAGA",
+        resourceId: sagaId,
+        changes: { reason },
+      });
+
+      res.json({ success: true, data: saga });
+    } catch (error) {
+      res.status(500).json({
+        error:
+          error instanceof Error
+            ? error.message
+            : "Failed to record admin confirmation.",
+      });
+    }
+  },
+);
+
+/**
+ * Record that an admin cancelled an action without applying changes.
+ * POST /api/admin/cancel
+ *
+ * Body:
+ *   actionType          — the action that was cancelled
+ *   resource            — resource category
+ *   resourceId?         — specific resource id
+ *   cancellationReason? — optional note
+ */
+adminRouter.post(
+  "/cancel",
+  requireAdmin,
+  async (req: Request, res: Response): Promise<void> => {
+    try {
+      const { actionType, resource, resourceId, cancellationReason } =
+        req.body as {
+          actionType?: string;
+          resource?: string;
+          resourceId?: string;
+          cancellationReason?: string;
+        };
+
+      if (!actionType || !resource) {
+        res.status(400).json({
+          error: "actionType and resource are required.",
+        });
+        return;
+      }
+
+      const user = (req as unknown as Record<string, unknown>).user as
+        | { id?: string; email?: string }
+        | undefined;
+
+      const entry = await recordCancelledAction({
+        actorId: user?.id ?? "ANONYMOUS",
+        actorEmail: user?.email,
+        actionType,
+        resource,
+        resourceId,
+        cancellationReason,
+        ipAddress:
+          (req.headers["x-forwarded-for"] as string)?.split(",")[0].trim() ??
+          req.socket.remoteAddress ??
+          "UNKNOWN",
+        userAgent: req.headers["user-agent"] ?? "UNKNOWN",
+      });
+
+      res.json({
+        success: true,
+        auditId: entry.id,
+        timestamp: entry.timestamp,
+      });
+    } catch (error) {
+      res.status(500).json({
+        error:
+          error instanceof Error
+            ? error.message
+            : "Failed to record cancelled action.",
+      });
+    }
+  },
+);
+
+/**
+ * POST /api/admin/rebalance-sagas/:sagaId/resolve-review
+ * Resolve a manual review (retry or cancel).
+ */
+adminRouter.post(
+  "/rebalance-sagas/:sagaId/resolve-review",
+  requireAdmin,
+  async (req: Request, res: Response): Promise<void> => {
+    try {
+      const { sagaId } = req.params;
+      const { decision, reason } = req.body as {
+        decision?: "retry" | "cancel";
+        reason?: string;
+      };
+
+      if (!decision || !["retry", "cancel"].includes(decision)) {
+        res.status(400).json({ error: "decision must be 'retry' or 'cancel'" });
+        return;
+      }
+
+      const actor =
+        (req as unknown as { user?: { id: string } }).user?.id || "admin";
+      const saga = await rebalanceSagaService.resolveManualReview(
+        sagaId,
+        decision,
+        actor,
+        reason,
+      );
+
+      setAuditContext(req, {
+        action: "RESOLVE_REBALANCE_SAGA_REVIEW",
+        resource: "REBALANCE_SAGA",
+        resourceId: sagaId,
+        changes: { decision, reason },
+      });
+
+      res.json({ success: true, data: saga });
+    } catch (error) {
+      res.status(500).json({
+        error:
+          error instanceof Error
+            ? error.message
+            : "Failed to resolve saga review",
+      });
+    }
+  },
+);
+
+/**
+ * POST /api/admin/rebalance-sagas/recover
+ * Recover stuck sagas (expired locks, interrupted executions).
+ */
+adminRouter.post(
+  "/rebalance-sagas/recover",
+  requireAdmin,
+  async (req: Request, res: Response): Promise<void> => {
+    try {
+      const workerId = `admin-${Date.now()}`;
+      const result = await recoverStuckSagas(workerId);
+
+      setAuditContext(req, {
+        action: "RECOVER_REBALANCE_SAGAS",
+        resource: "REBALANCE_SAGA",
+        changes: { recovered: result.recovered },
+      });
+
+      res.json({
+        success: true,
+        recovered: result.recovered,
+        sagas: result.sagas,
+      });
+    } catch (error) {
+      res.status(500).json({
+        error:
+          error instanceof Error
+            ? error.message
+            : "Failed to recover stuck sagas",
+      });
+    }
+  },
+);
+
+/**
+ * Promote a yield source after it passes the onboarding checklist (#1156).
+ * Incomplete entries are rejected with every missing field named, so they can
+ * never become visible on production routes.
+ * POST /api/admin/yield-sources/promote
+ */
+adminRouter.post(
+  "/yield-sources/promote",
+  requireAdmin,
+  (req: Request, res: Response): void => {
+    try {
+      const body = req.body ?? {};
+      const id = typeof body.id === "string" ? body.id : undefined;
+
+      setAuditContext(req, {
+        action: "PROMOTE_YIELD_SOURCE",
+        resource: "YIELD_SOURCE_REGISTRY",
+        resourceId: id,
+        changes: { id: body.id, name: body.name, source: body.source },
+      });
+
+      const promoted = promoteYieldSource(body);
+
+      res.json({ success: true, source: promoted });
+    } catch (error) {
+      if (error instanceof YieldSourceOnboardingError) {
+        res.status(error.statusCode).json({
+          error: error.message,
+          code: error.code,
+          missingFields: error.details.missingFields,
+          issues: error.details.issues,
+        });
+        return;
+      }
+      res.status(500).json({
+        error:
+          error instanceof Error
+            ? error.message
+            : "Failed to promote yield source",
+      });
     }
   },
 );

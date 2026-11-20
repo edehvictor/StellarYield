@@ -10,6 +10,9 @@ import TxStatusTimeline from "../../components/transaction/TxStatusTimeline";
 import TransactionFailedModal from "../../components/transaction/TransactionFailedModal";
 import { decodeTransactionError } from "../../utils/errorDecoder";
 import type { TxPhase } from "../../services/transactionPhase";
+import { getNetworkPassphrase, getRpcUrl } from "../../lib/networkEnv";
+import GovernanceDiagnosticsList from "./GovernanceDiagnosticsList";
+import { buildProposalBuildDiagnostics } from "./governanceDiagnostics";
 
 const BUILD_PHASE_STEPS: readonly TxPhase[] = ["building", "simulating"];
 
@@ -19,10 +22,8 @@ interface TransactionBuilderProps {
   onTransactionCreated: (tx: PendingTransaction) => void;
 }
 
-const RPC_URL =
-  import.meta.env.VITE_SOROBAN_RPC_URL ?? "https://soroban-testnet.stellar.org";
-const NETWORK_PASSPHRASE =
-  import.meta.env.VITE_NETWORK_PASSPHRASE ?? "Test SDF Network ; September 2015";
+const RPC_URL = getRpcUrl();
+const NETWORK_PASSPHRASE = getNetworkPassphrase();
 
 async function getRecommendedBaseFee(): Promise<string> {
   try {
@@ -50,6 +51,9 @@ export default function TransactionBuilder({
   const [building, setBuilding] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [phase, setPhase] = useState<TxPhase>("idle");
+  const [failedAtPhase, setFailedAtPhase] = useState<"building" | "simulating" | null>(
+    null,
+  );
   const [showFailedModal, setShowFailedModal] = useState(false);
 
   const action = ADMIN_ACTIONS.find((a) => a.method === selectedAction);
@@ -65,6 +69,7 @@ export default function TransactionBuilder({
     setBuilding(true);
     setError(null);
     setShowFailedModal(false);
+    setFailedAtPhase("building");
     setPhase("building");
 
     try {
@@ -104,6 +109,7 @@ export default function TransactionBuilder({
         .setTimeout(86400) // 24h expiry for multi-sig collection
         .build();
 
+      setFailedAtPhase("simulating");
       setPhase("simulating");
       const simulated = await server.simulateTransaction(tx);
 
@@ -156,7 +162,7 @@ export default function TransactionBuilder({
             setShowFailedModal(false);
             void handleBuild();
           }}
-          failurePhase="simulating"
+          failurePhase={failedAtPhase ?? "simulating"}
           walletConnected={Boolean(walletAddress)}
         />
       )}
@@ -214,10 +220,14 @@ export default function TransactionBuilder({
               steps={BUILD_PHASE_STEPS}
               phase={phase}
               errorMessage={phase === "failure" ? error : null}
-              failedAtPhase={phase === "failure" ? "simulating" : null}
+              failedAtPhase={phase === "failure" ? failedAtPhase ?? "simulating" : null}
               onRetry={phase === "failure" ? () => void handleBuild() : undefined}
               className="mb-2"
             />
+
+            {phase === "failure" && (
+              <GovernanceDiagnosticsList diagnostics={buildProposalBuildDiagnostics()} />
+            )}
 
             {validationSummary && (
               <div

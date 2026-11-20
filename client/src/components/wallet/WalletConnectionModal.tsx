@@ -126,7 +126,7 @@ export default function WalletConnectionModal({
           type="button"
           onClick={handleClose}
           className="absolute right-5 top-5 p-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-400 hover:text-slate-700 transition-all cursor-pointer"
-          aria-label="Close wallet connection dialog"
+          aria-label="Close wallet dialog"
         >
           <X size={16} aria-hidden="true" />
         </button>

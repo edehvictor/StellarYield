@@ -107,8 +107,26 @@ Keep the claim visible in the issue thread, and ask contributors to link their P
 - If a PR is ready for review for more than 24 hours, tag the reviewer rotation with the PR link and the first needed action.
 - If a contributor needs to hand off a claimed issue, ask them to leave their branch, test notes, and remaining task list in the issue.
 
+## Issue Canvas Selection & Scoping
+
+When triaging or scoping complex issues, maintainers should convert or enhance raw issue tickets with the corresponding **Issue Canvas** (`docs/issue-canvases.md`):
+
+| Issue Classification | Recommended Issue Canvas | Template Link |
+| :--- | :--- | :--- |
+| **New Feature / Epic** | Feature & Epic Canvas | [`docs/templates/issue-canvases/feature-canvas.md`](./templates/issue-canvases/feature-canvas.md) |
+| **Complex Defect / RCA** | Bug Investigation Canvas | [`docs/templates/issue-canvases/bug-investigation-canvas.md`](./templates/issue-canvases/bug-investigation-canvas.md) |
+| **Soroban Smart Contract** | Smart Contract Canvas | [`docs/templates/issue-canvases/contract-invariant-canvas.md`](./templates/issue-canvases/contract-invariant-canvas.md) |
+| **Refactor / Schema Migration** | Architecture & Refactor Canvas | [`docs/templates/issue-canvases/architecture-refactor-canvas.md`](./templates/issue-canvases/architecture-refactor-canvas.md) |
+| **Security / Exploit Fix** | Security Remediation Canvas | [`docs/templates/issue-canvases/security-remediation-canvas.md`](./templates/issue-canvases/security-remediation-canvas.md) |
+| **Stellar Wave Task / Bounty** | Contributor Task Canvas | [`docs/templates/issue-canvases/contributor-task-canvas.md`](./templates/issue-canvases/contributor-task-canvas.md) |
+
+> [!TIP]
+> Using standard canvases ensures contributors have clear acceptance criteria, explicit invariant definitions, and exact verification commands before commencing work.
+
 ## Tools & Links
 
+- **Issue Canvases Guide:** [docs/issue-canvases.md](./issue-canvases.md)
+- **Canvas Templates:** [docs/templates/issue-canvases/](./templates/issue-canvases/README.md)
 - **Triage Dashboard:** `node scripts/issue-triage.js`
 - **Saved Searches:** https://github.com/edehvictor/StellarYield/issues
 - **GitHub Tokens:** https://github.com/settings/tokens

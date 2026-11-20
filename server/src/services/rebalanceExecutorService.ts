@@ -13,6 +13,18 @@
 import * as StellarSdk from '@stellar/stellar-sdk';
 import { RebalanceExecutionResult } from './rebalanceQueueService';
 import { RebalanceQueueEntryDTO } from './rebalanceQueueService';
+import {
+  checkStrategyCompatibility,
+  type RebalanceExecutionStrategy,
+} from './vaultStrategyCompatibilityService';
+import {
+  isNonceConflictError,
+  isSafeToRetryAfterNonceConflict,
+  submitWithNonceConflictHandling,
+  type NonceConflictResolution,
+  type RelayAttemptRecord,
+} from '../relayer/nonceConflict';
+import { computeTransactionFingerprintForTx } from '../relayer/relayer';
 
 // ── Execution failure classes ──────────────────────────────────────────────
 
@@ -41,6 +53,14 @@ export interface ExecutionAttempt {
   status: 'pending' | 'submitted' | 'confirmed' | 'failed';
   failureClass?: FailureClass;
   failureReason?: string;
+  /**
+   * Set when submission hit a relayer nonce/sequence conflict (#1153).
+   * Rebalance transactions are Soroban `invokeHostFunction` calls, which
+   * this codebase cannot fingerprint (see computeTransactionFingerprintForTx
+   * in relayer.ts) or otherwise prove weren't already executed by a prior
+   * attempt — so they are never auto-retried, only reported.
+   */
+  nonceConflict?: NonceConflictResolution;
 }
 
 export interface DryRunResult {
@@ -50,18 +70,48 @@ export interface DryRunResult {
 }
 
 // ── In-process idempotency lock ────────────────────────────────────────────
+//
+// Each entry stores the generation number that holds the lock.  When `execute`
+// acquires the lock it atomically records its generation; `unlock` only clears
+// the entry when the generation still matches, so a stale unlock from a crashed
+// previous invocation cannot remove a freshly acquired lock.
+//
+// A new generation is obtained by calling `nextLockGeneration()`.  Callers that
+// want to re-enter after a previous crash increment the generation first (via
+// `forceUnlock`), which makes the old generation invalid and allows fresh entry.
 
-const inFlightLocks = new Set<string>();
+const inFlightLocks = new Map<string, number>();
+let _lockGeneration = 0;
+
+function nextLockGeneration(): number {
+  return ++_lockGeneration;
+}
 
 export function isLocked(entryId: string): boolean {
   return inFlightLocks.has(entryId);
 }
 
-function lock(entryId: string): void {
-  inFlightLocks.add(entryId);
+function lock(entryId: string): number {
+  const gen = nextLockGeneration();
+  inFlightLocks.set(entryId, gen);
+  return gen;
 }
 
-function unlock(entryId: string): void {
+function unlock(entryId: string, generation: number): void {
+  // Only release if this exact generation still holds the lock.
+  // Guards against a stale unlock from an earlier execution that crashed
+  // before its finally block ran.
+  if (inFlightLocks.get(entryId) === generation) {
+    inFlightLocks.delete(entryId);
+  }
+}
+
+/**
+ * Forcibly remove any in-process lock for `entryId`, regardless of generation.
+ * Use only after confirming the previous holder is no longer active (e.g. the
+ * saga's DB lock has expired and been stolen by this worker).
+ */
+export function forceUnlock(entryId: string): void {
   inFlightLocks.delete(entryId);
 }
 
@@ -144,7 +194,18 @@ export class RebalanceExecutorService {
     }
 
     // Check intent expiry via executionStrategy metadata
-    const strategy = entry.executionStrategy as Record<string, unknown>;
+    const strategy = entry.executionStrategy;
+    if (strategy.strategyCompatibility !== undefined) {
+      const compatibility = checkStrategyCompatibility(strategy.strategyCompatibility);
+      if (!compatibility.compatible) {
+        return {
+          viable: false,
+          estimatedFill: 0,
+          reason: `Strategy compatibility check failed: ${compatibility.issues.join('; ')}`,
+        };
+      }
+    }
+
     if (strategy.intentValidUntil) {
       const expiry = new Date(strategy.intentValidUntil as string).getTime();
       if (Date.now() > expiry) {
@@ -183,7 +244,7 @@ export class RebalanceExecutorService {
       );
     }
 
-    lock(entry.id);
+    const lockGen = lock(entry.id);
 
     try {
       // ── 1. Dry-run ───────────────────────────────────────────────────────
@@ -202,8 +263,11 @@ export class RebalanceExecutorService {
       // ── 3. Obtain fee-bump from relayer ──────────────────────────────────
       const feeBumpXdr = await this.signWithRelayer(innerXdr);
 
-      // ── 4. Submit to Stellar RPC ─────────────────────────────────────────
-      const submitResult = await this.submitTransaction(feeBumpXdr);
+      // ── 4. Submit to Stellar RPC (nonce-conflict aware, #1153) ────────────
+      const submitResult = await this.submitTransactionWithNonceConflictHandling(
+        feeBumpXdr,
+        attempt,
+      );
       attempt.transactionHash = submitResult.innerHash;
       attempt.feeBumpHash = submitResult.feeBumpHash;
       attempt.status = 'submitted';
@@ -232,7 +296,7 @@ export class RebalanceExecutorService {
         },
       };
     } finally {
-      unlock(entry.id);
+      unlock(entry.id, lockGen);
       attempt.completedAt = new Date();
     }
   }
@@ -243,7 +307,7 @@ export class RebalanceExecutorService {
     entry: RebalanceQueueEntryDTO,
   ): Promise<string> {
     // Derive the vault contract address from the execution strategy metadata.
-    const strategy = entry.executionStrategy as Record<string, unknown>;
+    const strategy: RebalanceExecutionStrategy = entry.executionStrategy;
     const vaultContractId =
       (strategy.vaultContractId as string | undefined) ??
       process.env.VAULT_CONTRACT_ID;
@@ -311,7 +375,13 @@ export class RebalanceExecutorService {
     const result = await this.server.sendTransaction(tx);
 
     if (result.status === 'ERROR') {
-      throw new Error(`Transaction submission failed: ${JSON.stringify(result.errorResult)}`);
+      // Attach the decoded errorResult so isNonceConflictError can inspect
+      // it precisely rather than string-matching a JSON dump.
+      const error = new Error(
+        `Transaction submission failed: ${JSON.stringify(result.errorResult)}`,
+      ) as Error & { errorResult?: unknown };
+      error.errorResult = result.errorResult;
+      throw error;
     }
 
     const feeBumpHash = result.hash;
@@ -324,7 +394,49 @@ export class RebalanceExecutorService {
     return { innerHash, feeBumpHash };
   }
 
-  private async confirmTransaction(txHash: string): Promise<boolean> {
+  /**
+   * Submit `feeBumpXdr`, detecting and handling relayer nonce/sequence
+   * conflicts (#1153).
+   *
+   * Rebalance transactions invoke the vault's `rebalance` Soroban function
+   * (`invokeHostFunction`), which `computeTransactionFingerprintForTx`
+   * cannot fingerprint (it only recognises simple `payment` operations) —
+   * so there is no way to confirm a prior conflicting attempt didn't
+   * already land. Retry eligibility is therefore always false here, and a
+   * nonce conflict is surfaced as a clear `UNSAFE_TO_RETRY` reason rather
+   * than being silently retried or silently failed.
+   */
+  private async submitTransactionWithNonceConflictHandling(
+    feeBumpXdr: string,
+    attempt: ExecutionAttempt,
+  ): Promise<{ innerHash: string; feeBumpHash: string }> {
+    const innerTx = StellarSdk.TransactionBuilder.fromXDR(
+      feeBumpXdr,
+      this.config.networkPassphrase,
+    );
+    const retryEligible = isSafeToRetryAfterNonceConflict(
+      innerTx instanceof StellarSdk.FeeBumpTransaction
+        ? (innerTx.innerTransaction as StellarSdk.Transaction)
+        : (innerTx as StellarSdk.Transaction),
+      computeTransactionFingerprintForTx,
+    );
+
+    const outcome = await submitWithNonceConflictHandling(
+      () => this.submitTransaction(feeBumpXdr),
+      { retryEligible, maxRetries: this.config.networkRetries },
+    );
+
+    if (outcome.status === 'SUCCESS') {
+      return outcome.result;
+    }
+
+    attempt.nonceConflict = outcome;
+    attempt.failureClass = FAILURE_CLASS.FEE_SEQUENCE;
+    attempt.failureReason = outcome.reason;
+    throw new Error(outcome.reason ?? 'Transaction submission failed');
+  }
+
+  async confirmTransaction(txHash: string): Promise<boolean> {
     const deadlineMs = Date.now() + this.config.confirmationTimeoutSecs * 1000;
 
     while (Date.now() < deadlineMs) {
@@ -346,6 +458,10 @@ export class RebalanceExecutorService {
    * Classify a caught error into a FailureClass for downstream retry logic.
    */
   classifyError(error: Error): FailureClass {
+    // Precise nonce/sequence-conflict detection (#1153) — checks a decoded
+    // errorResult when present, before falling back to string matching.
+    if (isNonceConflictError(error)) return FAILURE_CLASS.FEE_SEQUENCE;
+
     const msg = error.message.toLowerCase();
     if (msg.includes('expired') || msg.includes('stale')) return FAILURE_CLASS.STALE_INTENT;
     if (msg.includes('constraint') || msg.includes('slippage') || msg.includes('dry-run')) {

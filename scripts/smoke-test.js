@@ -20,12 +20,125 @@ function parseArgs(argv) {
   for (const a of argv) {
     if (a === '--report') flags.add('report');
     else if (a === '--markdown') flags.add('markdown');
+    else if (a === '--release-gate' || a === '--check-client-config') flags.add('release-gate');
     else if (a.startsWith('--markdown-out=')) {
       flags.add('markdown');
       opts.markdownOut = a.slice('--markdown-out='.length).trim() || null;
     }
   }
   return { flags, opts };
+}
+
+function normalizeApiBaseUrl(value) {
+  return String(value || '').trim().replace(/\/+$/, '');
+}
+
+function resolveClientApiBaseUrl(env = process.env) {
+  const configured = normalizeApiBaseUrl(env.VITE_API_BASE_URL || env.VITE_API_URL || env.API_BASE_URL);
+
+  if (!configured) {
+    return {
+      ok: false,
+      reason: 'Missing deployed client API URL. Set VITE_API_BASE_URL or VITE_API_URL before promoting a release.',
+    };
+  }
+
+  if (!/^https?:\/\//i.test(configured)) {
+    return {
+      ok: false,
+      reason: `Invalid API URL: "${configured}". Must start with http:// or https://`,
+    };
+  }
+
+  return { ok: true, baseUrl: configured };
+}
+
+async function evaluateReleaseGate(opts = {}) {
+  const {
+    env = process.env,
+    frontendUrl = FRONTEND_URL,
+    backendUrl = BACKEND_URL,
+    healthPath = BACKEND_HEALTH_PATH,
+    getStatus = getStatusCode,
+  } = opts;
+
+  const checks = [];
+  const clientConfig = resolveClientApiBaseUrl(env);
+
+  if (!clientConfig.ok) {
+    checks.push({
+      label: 'Client API configuration',
+      url: frontendUrl,
+      httpCode: 0,
+      status: 'fail',
+      message: clientConfig.reason,
+    });
+    return { ok: false, checks, summary: clientConfig.reason };
+  }
+
+  const clientHealthUrl = `${clientConfig.baseUrl}${healthPath}`;
+  const configuredHealthCode = await getStatus(clientHealthUrl);
+  checks.push({
+    label: 'Client API configuration',
+    url: clientHealthUrl,
+    httpCode: configuredHealthCode,
+    status: configuredHealthCode === 200 ? 'pass' : 'fail',
+    message:
+      configuredHealthCode === 200
+        ? 'Configured client API URL is reachable and healthy.'
+        : `Configured client API URL is not reachable (${configuredHealthCode || 'unreachable'}).`,
+  });
+
+  const backendHealthUrl = `${backendUrl}${healthPath}`;
+  const backendHealthCode = await getStatus(backendHealthUrl);
+  checks.push({
+    label: 'Backend health',
+    url: backendHealthUrl,
+    httpCode: backendHealthCode,
+    status: backendHealthCode === 200 ? 'pass' : 'fail',
+    message:
+      backendHealthCode === 200
+        ? 'Backend health endpoint responds successfully.'
+        : `Backend is unreachable or unhealthy (${backendHealthCode || 'unreachable'}).`,
+  });
+
+  const ok = configuredHealthCode === 200 && backendHealthCode === 200;
+  return {
+    ok,
+    checks,
+    summary: ok
+      ? 'Client configuration and backend health are both healthy.'
+      : 'Client configuration or backend health checks failed; release promotion is blocked.',
+  };
+}
+
+async function runReleaseGate() {
+  console.log('----------------------------------------');
+  console.log('StellarYield Release Gate');
+  console.log('----------------------------------------');
+  console.log(`Target Frontend: ${FRONTEND_URL}`);
+  console.log(`Target Backend:  ${BACKEND_URL}`);
+  console.log('----------------------------------------');
+
+  const { ok, checks, summary } = await evaluateReleaseGate();
+
+  for (const check of checks) {
+    const pass = check.status === 'pass';
+    if (pass) {
+      console.log(`[PASS] ${check.label} (${check.httpCode || 200})`);
+    } else {
+      console.log(`[FAIL] ${check.label} (${check.httpCode || 'unreachable'})`);
+      console.log(`   URL: ${check.url}`);
+      if (check.message) console.log(`   Hint: ${check.message}`);
+    }
+  }
+
+  console.log('');
+  console.log('----------------------------------------');
+  console.log(summary);
+  console.log('----------------------------------------');
+
+  process.exit(ok ? 0 : 1);
 }
 
 /**
@@ -259,7 +372,12 @@ async function runSmokeTest() {
 if (require.main === module) {
   const { flags, opts } = parseArgs(process.argv.slice(2));
 
-  if (flags.has('report')) {
+  if (flags.has('release-gate')) {
+    runReleaseGate().catch((error) => {
+      console.error('Release gate failed with error:', error);
+      process.exit(1);
+    });
+  } else if (flags.has('report')) {
     runSmokeReport(opts).catch((error) => {
       console.error('Smoke test failed with error:', error);
       process.exit(1);
@@ -272,4 +390,13 @@ if (require.main === module) {
   }
 }
 
-module.exports = { runSmokeTest, runSmokeReport, getStatusCode, expect200, collectSmokeResults, buildMarkdownReport };
+module.exports = {
+  runSmokeTest,
+  runSmokeReport,
+  getStatusCode,
+  expect200,
+  collectSmokeResults,
+  buildMarkdownReport,
+  resolveClientApiBaseUrl,
+  evaluateReleaseGate,
+};

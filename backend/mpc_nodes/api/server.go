@@ -4,18 +4,16 @@ package api
 import (
 	"context"
 	"encoding/hex"
-	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/pkg/errors"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/stellaryield/mpc_nodes/coordinator"
 	"github.com/stellaryield/mpc_nodes/stellar"
 	"github.com/stellaryield/mpc_nodes/storage"
-	"github.com/stellaryield/mpc_nodes/tss"
 )
 
 // APIConfig holds API server configuration
@@ -28,21 +26,29 @@ type APIConfig struct {
 	EnableCORS bool
 	// AllowedOrigins is the list of allowed CORS origins
 	AllowedOrigins []string
+	// Participants is the configured MPC participant set. Ceremony messages
+	// from senders outside it (or revoked) are rejected; when nil, ceremony
+	// message routes fail closed.
+	Participants *ParticipantRegistry
+	// MaxMessageAge bounds participant message timestamp skew
+	// (default DefaultMaxMessageAge).
+	MaxMessageAge time.Duration
 }
 
 // MPCService provides MPC treasury operations
 type MPCService struct {
-	ceremonyCoord *coordinator.CeremonyCoordinator
+	ceremonyCoord  *coordinator.CeremonyCoordinator
 	treasuryClient *stellar.TreasuryClient
-	storage       storage.KeyShareStorage
-	audit         *storage.AuditLogger
+	storage        storage.KeyShareStorage
+	audit          *storage.AuditLogger
 }
 
 // Server is the HTTP API server
 type Server struct {
-	config  *APIConfig
-	service *MPCService
-	router  *gin.Engine
+	config    *APIConfig
+	service   *MPCService
+	router    *gin.Engine
+	readiness *ReadinessChecker
 }
 
 // APIResponse represents a standard API response
@@ -55,9 +61,9 @@ type APIResponse struct {
 
 // KeyGenRequest represents a key generation request
 type KeyGenRequest struct {
-	PartyID     string `json:"party_id" binding:"required"`
-	Threshold   int    `json:"threshold" binding:"required,min=1"`
-	TotalParties int   `json:"total_parties" binding:"required,min=1"`
+	PartyID      string `json:"party_id" binding:"required"`
+	Threshold    int    `json:"threshold" binding:"required,min=1"`
+	TotalParties int    `json:"total_parties" binding:"required,min=1"`
 }
 
 // SigningRequest represents a signing request
@@ -80,10 +86,20 @@ type TreasuryRequest struct {
 func NewServer(config *APIConfig, service *MPCService) *Server {
 	router := gin.Default()
 
+	var ks storage.KeyShareStorage
+	var horizonURL string
+	if service != nil {
+		ks = service.storage
+		if service.treasuryClient != nil {
+			horizonURL = service.treasuryClient.GetHorizonURL()
+		}
+	}
+
 	server := &Server{
-		config:  config,
-		service: service,
-		router:  router,
+		config:    config,
+		service:   service,
+		router:    router,
+		readiness: NewReadinessChecker(ks, horizonURL),
 	}
 
 	server.setupRoutes()
@@ -98,8 +114,9 @@ func (s *Server) setupRoutes() {
 		s.router.Use(corsMiddleware(s.config.AllowedOrigins))
 	}
 
-	// Health check
+	// Health check (liveness) and readiness probe
 	s.router.GET("/health", s.healthCheck)
+	s.router.GET("/ready", s.readinessCheck)
 
 	// Metrics
 	if s.config.EnableMetrics {
@@ -111,14 +128,14 @@ func (s *Server) setupRoutes() {
 	{
 		// Key generation ceremony
 		v1.POST("/ceremony/keygen", s.startKeyGenCeremony)
-		v1.POST("/ceremony/keygen/commit", s.submitKeyGenCommit)
-		v1.POST("/ceremony/keygen/reveal", s.submitKeyGenReveal)
+		v1.POST("/ceremony/keygen/commit", s.requireParticipant, s.submitKeyGenCommit)
+		v1.POST("/ceremony/keygen/reveal", s.requireParticipant, s.submitKeyGenReveal)
 		v1.GET("/ceremony/keygen/status/:session_id", s.getKeyGenStatus)
 
 		// Signing ceremony
 		v1.POST("/ceremony/signing", s.startSigningCeremony)
-		v1.POST("/ceremony/signing/commit", s.submitSigningCommit)
-		v1.POST("/ceremony/signing/reveal", s.submitSigningReveal)
+		v1.POST("/ceremony/signing/commit", s.requireParticipant, s.submitSigningCommit)
+		v1.POST("/ceremony/signing/reveal", s.requireParticipant, s.submitSigningReveal)
 		v1.GET("/ceremony/signing/status/:session_id", s.getSigningStatus)
 
 		// Treasury operations
@@ -151,9 +168,9 @@ func (s *Server) Run(ctx context.Context) error {
 	go func() {
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			s.service.audit.Log(&storage.AuditLogEntry{
-				Timestamp:   time.Now(),
-				Action:      "SERVER_ERROR",
-				Success:     false,
+				Timestamp:    time.Now(),
+				Action:       "SERVER_ERROR",
+				Success:      false,
 				ErrorMessage: err.Error(),
 			})
 		}
@@ -216,7 +233,8 @@ func (s *Server) startKeyGenCeremony(c *gin.Context) {
 
 // submitKeyGenCommit handles key generation commit submission
 func (s *Server) submitKeyGenCommit(c *gin.Context) {
-	sessionID := c.Param("session_id")
+	msg := participantMessage(c)
+	sessionID := msg.SessionID
 
 	// Process commit message
 	// In production, broadcast to other parties
@@ -225,6 +243,7 @@ func (s *Server) submitKeyGenCommit(c *gin.Context) {
 		Timestamp: time.Now(),
 		Action:    "KEYGEN_COMMIT_SUBMITTED",
 		SessionID: sessionID,
+		PartyID:   msg.SenderID,
 		Success:   true,
 	})
 
@@ -232,6 +251,7 @@ func (s *Server) submitKeyGenCommit(c *gin.Context) {
 		Success: true,
 		Data: map[string]interface{}{
 			"session_id": sessionID,
+			"sender_id":  msg.SenderID,
 			"status":     "COMMIT_RECEIVED",
 		},
 	})
@@ -239,7 +259,8 @@ func (s *Server) submitKeyGenCommit(c *gin.Context) {
 
 // submitKeyGenReveal handles key generation reveal submission
 func (s *Server) submitKeyGenReveal(c *gin.Context) {
-	sessionID := c.Param("session_id")
+	msg := participantMessage(c)
+	sessionID := msg.SessionID
 
 	// Process reveal message
 	// In production, verify commitment and aggregate public key
@@ -248,6 +269,7 @@ func (s *Server) submitKeyGenReveal(c *gin.Context) {
 		Timestamp: time.Now(),
 		Action:    "KEYGEN_REVEAL_SUBMITTED",
 		SessionID: sessionID,
+		PartyID:   msg.SenderID,
 		Success:   true,
 	})
 
@@ -255,6 +277,7 @@ func (s *Server) submitKeyGenReveal(c *gin.Context) {
 		Success: true,
 		Data: map[string]interface{}{
 			"session_id": sessionID,
+			"sender_id":  msg.SenderID,
 			"status":     "REVEAL_RECEIVED",
 		},
 	})
@@ -318,12 +341,14 @@ func (s *Server) startSigningCeremony(c *gin.Context) {
 
 // submitSigningCommit handles signing commit submission
 func (s *Server) submitSigningCommit(c *gin.Context) {
-	sessionID := c.Param("session_id")
+	msg := participantMessage(c)
+	sessionID := msg.SessionID
 
 	s.service.audit.Log(&storage.AuditLogEntry{
 		Timestamp: time.Now(),
 		Action:    "SIGNING_COMMIT_SUBMITTED",
 		SessionID: sessionID,
+		PartyID:   msg.SenderID,
 		Success:   true,
 	})
 
@@ -331,6 +356,7 @@ func (s *Server) submitSigningCommit(c *gin.Context) {
 		Success: true,
 		Data: map[string]interface{}{
 			"session_id": sessionID,
+			"sender_id":  msg.SenderID,
 			"status":     "COMMIT_RECEIVED",
 		},
 	})
@@ -338,12 +364,14 @@ func (s *Server) submitSigningCommit(c *gin.Context) {
 
 // submitSigningReveal handles signing reveal submission
 func (s *Server) submitSigningReveal(c *gin.Context) {
-	sessionID := c.Param("session_id")
+	msg := participantMessage(c)
+	sessionID := msg.SessionID
 
 	s.service.audit.Log(&storage.AuditLogEntry{
 		Timestamp: time.Now(),
 		Action:    "SIGNING_REVEAL_SUBMITTED",
 		SessionID: sessionID,
+		PartyID:   msg.SenderID,
 		Success:   true,
 	})
 
@@ -351,6 +379,7 @@ func (s *Server) submitSigningReveal(c *gin.Context) {
 		Success: true,
 		Data: map[string]interface{}{
 			"session_id": sessionID,
+			"sender_id":  msg.SenderID,
 			"status":     "SIGNATURE_COMPLETE",
 		},
 	})
@@ -442,6 +471,9 @@ func (s *Server) signTransaction(c *gin.Context) {
 func (s *Server) submitTransaction(c *gin.Context) {
 	var req struct {
 		SignedTransactionXDR string `json:"signed_transaction_xdr" binding:"required"`
+		// NetworkPassphrase optionally pins the network the caller intends
+		// to broadcast on; it must match the node's configured network.
+		NetworkPassphrase string `json:"network_passphrase"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, APIResponse{
@@ -455,7 +487,22 @@ func (s *Server) submitTransaction(c *gin.Context) {
 	result, err := s.service.treasuryClient.SubmitTransaction(
 		c.Request.Context(),
 		req.SignedTransactionXDR,
+		req.NetworkPassphrase,
 	)
+	if errors.Is(err, stellar.ErrNetworkMismatch) {
+		s.service.audit.Log(&storage.AuditLogEntry{
+			Timestamp:    time.Now(),
+			Action:       "TRANSACTION_REJECTED_NETWORK_MISMATCH",
+			Success:      false,
+			ErrorMessage: err.Error(),
+		})
+		c.JSON(http.StatusConflict, APIResponse{
+			Success: false,
+			Error:   err.Error(),
+			Code:    "NETWORK_MISMATCH",
+		})
+		return
+	}
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, APIResponse{
 			Success: false,
@@ -484,9 +531,9 @@ func (s *Server) getTransactionStatus(c *gin.Context) {
 	c.JSON(http.StatusOK, APIResponse{
 		Success: true,
 		Data: map[string]interface{}{
-			"hash":    hash,
-			"status":  "SUCCESS",
-			"ledger":  12345,
+			"hash":   hash,
+			"status": "SUCCESS",
+			"ledger": 12345,
 		},
 	})
 }
@@ -506,7 +553,7 @@ func (s *Server) listKeys(c *gin.Context) {
 	c.JSON(http.StatusOK, APIResponse{
 		Success: true,
 		Data: map[string]interface{}{
-			"keys": keys,
+			"keys":  keys,
 			"count": len(keys),
 		},
 	})
@@ -604,9 +651,9 @@ func NewMPCService(
 	audit *storage.AuditLogger,
 ) *MPCService {
 	return &MPCService{
-		ceremonyCoord: ceremonyCoord,
+		ceremonyCoord:  ceremonyCoord,
 		treasuryClient: treasuryClient,
-		storage:       storage,
-		audit:         audit,
+		storage:        storage,
+		audit:          audit,
 	}
 }

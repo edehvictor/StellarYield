@@ -3,6 +3,7 @@ import type { Queue } from 'bullmq';
 import { getQueueHealth } from '../queues';
 import { logger } from '../utils/logger';
 import { keeperAuditLog } from '../audit/KeeperAuditLog';
+import { ledgerLagMonitor, type LedgerLagSnapshot } from '../monitors/LedgerLagMonitor';
 
 /**
  * Starts a minimal HTTP server exposing keeper queue health.
@@ -10,6 +11,8 @@ import { keeperAuditLog } from '../audit/KeeperAuditLog';
  * GET /health        — liveness probe: always 200 while the process is alive.
  * GET /health/queues — queue depth and failure counts; 200 on success, 503 on error.
  *                      Body `overallStatus` field distinguishes "healthy" from "warning".
+ * GET /health/data   — Soroban RPC data freshness: `dataFreshnessMs`, `lagStatus`,
+ *                      and `lastSuccessAt`; 200 always (status embedded in body).
  * GET /audit/export?stream=&from=&to= — bounded export of a keeper decision audit
  *                      stream (see issue #912); 400 if `stream` is missing, 500 on error.
  *
@@ -20,6 +23,7 @@ export function startKeeperHealthServer(
   queues: Queue[],
   port = Number(process.env.KEEPER_HEALTH_PORT ?? 3002),
   auditLog: Pick<typeof keeperAuditLog, 'exportStream'> = keeperAuditLog,
+  lagMonitor: Pick<typeof ledgerLagMonitor, 'getSnapshot'> = ledgerLagMonitor,
 ): http.Server {
   const server = http.createServer((req, res) => {
     const url = req.url ?? '';
@@ -65,6 +69,13 @@ export function startKeeperHealthServer(
           res.writeHead(503, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ error: 'Queue health check failed' }));
         });
+      return;
+    }
+
+    if (req.method === 'GET' && url === '/health/data') {
+      const snap: LedgerLagSnapshot = lagMonitor.getSnapshot();
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ...snap, timestamp: new Date().toISOString() }));
       return;
     }
 

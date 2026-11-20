@@ -48,6 +48,22 @@ const withdrawn = await (await withdrawal.submit(vault.rpcUrl)).wait();
 
 If a simulation reports expired ledger entries, it throws `RestoreRequiredError` (`error.restorePreamble`) — pass that into the exported `restoreAndRetry()` helper, then retry `prepare()`. See `src/examples/basic.ts` for a full worked example including the restore path.
 
+### Token amounts
+
+Amount arguments (`amount`, `shares`, `min_shares_out`, `min_amount_out`) take a `bigint`, a base-unit integer string, or a `number` that is a safe integer. Fractional numbers and integers above `Number.MAX_SAFE_INTEGER` throw `InvalidAmountError` before any transaction is built, because they cannot be represented exactly.
+
+Use `toTokenUnits` to convert human-readable decimal strings and `formatTokenUnits` to display them:
+
+```typescript
+import { toTokenUnits, formatTokenUnits } from '@stellaryield/sdk';
+
+toTokenUnits('1.5', { decimals: 7 });      // 15_000_000n
+toTokenUnits('9007199254740993');          // 9007199254740993n (exact)
+toTokenUnits(1.5);                         // throws InvalidAmountError
+toTokenUnits(2 ** 60);                     // throws InvalidAmountError
+formatTokenUnits(15_000_000n, 7);          // "1.5"
+```
+
 ### API Client
 
 ```typescript
@@ -83,6 +99,27 @@ const vaultData = await api.getVaultData('vault-contract-id');
   - `getTVL()`: Get Total Value Locked
   - `getHistoricalData()`: Get APY/TVL history
   - `getVaultData()`: Get complete vault data
+
+## Deposit simulation fixtures
+
+Offline tests can import `depositSimulationScenarios` and `createDepositSimulation`
+from `test/fixtures/depositSimulation.ts`. Scenarios cover a first deposit, an
+existing vault's non-1:1 share ratio, and amounts above `Number.MAX_SAFE_INTEGER`.
+Every amount is a decimal string in base units; parse with `toTokenUnits`/`BigInt`,
+never `Number`. Each factory call returns fresh XDR and transaction-data objects
+compatible with `rpc.Api.SimulateTransactionSuccessResponse`.
+
+| Field | Meaning |
+| --- | --- |
+| `amount` | Vault tokens deposited, in token base units. |
+| `minSharesOut` | Requested slippage floor, in share base units. |
+| `mintedShares` | Expected deposit return value, encoded as an i128 `ScVal`. |
+| `minResourceFee` | Simulated Soroban resource fee in stroops, also present in `transactionData`; excludes the classic inclusion fee and the token principal. |
+| `reserveBefore`, `reserveAfter` | Test-only idle-token balance snapshots for an ordinary deposit with no concurrent strategy movement: `after = before + amount`. These are not RPC response fields, total portfolio assets, a live quote, or a claim about spendable XLM reserves. |
+
+The fixtures do not contact RPC, sign, submit, or export new production APIs.
+Run `npm test -- test/depositSimulation.test.ts` from `packages/sdk`; `npm test`
+runs the complete SDK suite.
 
 ## License
 

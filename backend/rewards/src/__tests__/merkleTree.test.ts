@@ -417,3 +417,38 @@ describe("previewRewardClaim", () => {
     expect(result.errorCode).toBe("proof_verification_failed");
   });
 });
+
+// ── Campaign / asset binding ────────────────────────────────────────────
+
+describe("leaf context binding", () => {
+  const entries: RewardEntry[] = [
+    { index: 0, address: "GCLAIMANT1", amount: "1000" },
+    { index: 1, address: "GCLAIMANT2", amount: "2000" },
+  ];
+  const context = { campaignId: 1, asset: "CASSET1" };
+
+  it("verifies a proof against the campaign and asset it was built for", () => {
+    const tree = generateMerkleTree(entries, context);
+    const claim = tree.claims["GCLAIMANT1"];
+    expect(
+      verifyProof(tree.root, claim.index, "GCLAIMANT1", claim.amount, claim.proof, context),
+    ).toBe(true);
+  });
+
+  it("rejects the same proof under another campaign or asset", () => {
+    const tree = generateMerkleTree(entries, context);
+    const claim = tree.claims["GCLAIMANT1"];
+    expect(
+      verifyProof(tree.root, claim.index, "GCLAIMANT1", claim.amount, claim.proof, {
+        ...context,
+        campaignId: 2,
+      }),
+    ).toBe(false);
+    expect(
+      verifyProof(tree.root, claim.index, "GCLAIMANT1", claim.amount, claim.proof, {
+        ...context,
+        asset: "CASSET2",
+      }),
+    ).toBe(false);
+  });
+});

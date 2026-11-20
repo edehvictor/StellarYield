@@ -1,5 +1,19 @@
+export interface SignerQuorumProgress {
+  signed: number;
+  required: number;
+  remaining: number;
+  /** Progress toward quorum as a percentage 0–100. */
+  progressPct: number;
+  met: boolean;
+  perSigner: { address: string; signed: boolean }[];
+}
+
+import type { GovernanceExecutionState } from "./governanceOperation";
+
 export interface PendingTransaction {
   id: string;
+  /** Durable execution checkpoint; survives reloads so retries can resume safely (#1899). */
+  operation?: GovernanceExecutionState;
   description: string;
   method: string;
   args: string[];

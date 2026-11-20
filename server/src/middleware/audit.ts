@@ -2,6 +2,74 @@ import { Request, Response, NextFunction } from "express";
 import crypto from "crypto";
 import fs from "fs/promises";
 import path from "path";
+import { auditEntryInvolvesWallet } from "../utils/auditFilters";
+
+/**
+ * Best-effort Prisma client for durable audit persistence (#1329). Loaded
+ * dynamically and cached, mirroring app.ts's loadPrismaClient(): if
+ * @prisma/client isn't generated/available (e.g. in unit tests without a
+ * DATABASE_URL), audit writes silently fall back to the existing in-memory
+ * array + JSONL file, which remain the source of truth for
+ * verifyAuditTrailIntegrity().
+ */
+type CriticalActionAuditLogPrismaClient = {
+  criticalActionAuditLog: {
+    create: (args: { data: Record<string, unknown> }) => Promise<unknown>;
+  };
+};
+
+let cachedPrismaClient: CriticalActionAuditLogPrismaClient | null | undefined;
+
+async function loadAuditPrismaClient(): Promise<CriticalActionAuditLogPrismaClient | null> {
+  if (cachedPrismaClient !== undefined) {
+    return cachedPrismaClient;
+  }
+  try {
+    const prismaModule = (await import("@prisma/client")) as unknown as {
+      PrismaClient?: new () => CriticalActionAuditLogPrismaClient;
+    };
+    cachedPrismaClient = prismaModule.PrismaClient
+      ? new prismaModule.PrismaClient()
+      : null;
+  } catch {
+    cachedPrismaClient = null;
+  }
+  return cachedPrismaClient;
+}
+
+/** Persist an audit entry to Postgres. Best-effort: never throws. */
+async function persistAuditEntryToDatabase(entry: AuditLogEntry): Promise<void> {
+  try {
+    const client = await loadAuditPrismaClient();
+    if (!client) return;
+    await client.criticalActionAuditLog.create({
+      data: {
+        id: entry.id,
+        timestamp: new Date(entry.timestamp),
+        userId: entry.userId,
+        userEmail: entry.userEmail,
+        action: entry.action,
+        resource: entry.resource,
+        resourceId: entry.resourceId,
+        method: entry.method,
+        endpoint: entry.endpoint,
+        status: entry.status,
+        changes: entry.changes ?? undefined,
+        ipAddress: entry.ipAddress,
+        userAgent: entry.userAgent,
+        previousHash: entry.previousHash,
+        hash: entry.hash,
+        signature: entry.signature,
+        confirmationText: entry.confirmationText,
+        cancelled: entry.cancelled ?? false,
+      },
+    });
+  } catch (error) {
+    console.error("Failed to persist audit log entry to database:", error);
+    // Don't throw - matches the existing file-persistence contract: an
+    // audit write must never block the operation it's auditing.
+  }
+}
 
 /**
  * Audit Trail System for Admin Dashboard
@@ -25,6 +93,17 @@ export interface AuditLogEntry {
   previousHash: string;
   hash: string;
   signature?: string;
+  /**
+   * The human-readable confirmation text the actor reviewed before
+   * submitting.  Only present on ADMIN_ACTION_CONFIRMED entries.
+   */
+  confirmationText?: string;
+  /**
+   * True when the actor explicitly cancelled the action without
+   * submitting.  Only present on ADMIN_ACTION_CANCELLED entries.
+   * When true, no `changes` are recorded.
+   */
+  cancelled?: boolean;
 }
 
 export interface AuditContext {
@@ -36,6 +115,28 @@ export interface AuditContext {
   resource?: string;
   resourceId?: string;
   changes?: Record<string, unknown>;
+  confirmationText?: string;
+  cancelled?: boolean;
+}
+
+// ── Admin-confirmation record types ───────────────────────────────────────
+
+export interface AdminConfirmationInput {
+  /** Actor's user id (falls back to ANONYMOUS) */
+  actorId: string;
+  actorEmail?: string;
+  /** Logical action type, e.g. "UPDATE_TREASURY_FEE" */
+  actionType: string;
+  /** Resource category, e.g. "TREASURY", "PROTOCOL", "CAMPAIGN", "GOVERNANCE" */
+  resource: string;
+  /** Specific resource id, e.g. a vault id or campaign id */
+  resourceId?: string;
+  /** The text the actor read and confirmed in the UI */
+  confirmationText: string;
+  /** The delta / payload that was applied */
+  changes?: Record<string, unknown>;
+  ipAddress?: string;
+  userAgent?: string;
 }
 
 // In-memory audit log (in production, use a database)
@@ -126,8 +227,7 @@ function extractUserInfo(req: Request): {
 } {
   // Assuming user info is attached to request by auth middleware
   const user = (req as unknown as Record<string, unknown>).user as
-    | { id?: string; email?: string }
-    | undefined;
+    { id?: string; email?: string } | undefined;
   return {
     userId: user?.id || "ANONYMOUS",
     userEmail: user?.email,
@@ -172,6 +272,10 @@ export async function createAuditEntry(
     ipAddress: getClientIp(req),
     userAgent: req.headers["user-agent"] || "UNKNOWN",
     previousHash,
+    ...(context.confirmationText !== undefined && {
+      confirmationText: context.confirmationText,
+    }),
+    ...(context.cancelled !== undefined && { cancelled: context.cancelled }),
   };
 
   const hash = generateHash(entryData);
@@ -194,6 +298,9 @@ export async function createAuditEntry(
     console.error("Failed to persist audit log entry:", error);
     // Don't throw - log should not block operations
   }
+
+  // Persist to database (best-effort; see persistAuditEntryToDatabase)
+  await persistAuditEntryToDatabase(entry);
 
   return entry;
 }
@@ -237,7 +344,16 @@ export function verifyAuditEntry(entry: AuditLogEntry): boolean {
  */
 export async function getAuditLogs(filters?: {
   userId?: string;
+  /**
+   * Stellar public key (#1406). Matches entries where the wallet is the
+   * acting identity, the targeted resource, or a wallet recorded in the
+   * entry's `changes`. Case-insensitive.
+   */
+  wallet?: string;
+  /** A single action name. Case-insensitive. */
   action?: string;
+  /** Any of these action names (#1406). Case-insensitive; combined with `action`. */
+  actions?: string[];
   resource?: string;
   startDate?: string;
   endDate?: string;
@@ -250,8 +366,20 @@ export async function getAuditLogs(filters?: {
     results = results.filter((entry) => entry.userId === filters.userId);
   }
 
-  if (filters?.action) {
-    results = results.filter((entry) => entry.action === filters.action);
+  if (filters?.wallet) {
+    const wallet = filters.wallet;
+    results = results.filter((entry) => auditEntryInvolvesWallet(entry, wallet));
+  }
+
+  const wantedActions = new Set(
+    [...(filters?.actions ?? []), ...(filters?.action ? [filters.action] : [])].map(
+      (action) => action.toUpperCase(),
+    ),
+  );
+  if (wantedActions.size > 0) {
+    results = results.filter((entry) =>
+      wantedActions.has(entry.action.toUpperCase()),
+    );
   }
 
   if (filters?.resource) {
@@ -275,7 +403,8 @@ export async function getAuditLogs(filters?: {
   // Stable ordering: newest first; tie-break by id ascending so equal timestamps
   // produce a deterministic sequence.
   results.sort((a, b) => {
-    const ta = new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime();
+    const ta =
+      new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime();
     if (ta !== 0) return ta;
     if (a.id < b.id) return -1;
     if (a.id > b.id) return 1;
@@ -331,6 +460,58 @@ export function verifyAuditTrailIntegrity(entries: AuditLogEntry[]): {
 }
 
 /**
+ * Loads persisted audit entries from the database, ordered the same way
+ * the ordering contract documented above requires (see the in-memory
+ * getAuditLogs' ordering notes), and re-runs verifyAuditTrailIntegrity
+ * against them. This lets a DB restore or migration be checked
+ * independently of the in-memory/file state, which verifyAuditTrailIntegrity
+ * alone cannot do since it only ever sees whatever array it's handed.
+ * Returns null if the database is unavailable (see loadAuditPrismaClient).
+ */
+export async function verifyPersistedAuditTrailIntegrity(): Promise<{
+  isValid: boolean;
+  invalidEntries: string[];
+} | null> {
+  const client = (await loadAuditPrismaClient()) as unknown as
+    | (CriticalActionAuditLogPrismaClient & {
+        criticalActionAuditLog: {
+          findMany: (args: {
+            orderBy: { timestamp: "asc" };
+          }) => Promise<Array<Record<string, unknown>>>;
+        };
+      })
+    | null;
+  if (!client) return null;
+
+  const rows = await client.criticalActionAuditLog.findMany({
+    orderBy: { timestamp: "asc" },
+  });
+
+  const entries: AuditLogEntry[] = rows.map((row) => ({
+    id: row.id as string,
+    timestamp: (row.timestamp as Date).toISOString(),
+    userId: row.userId as string,
+    userEmail: (row.userEmail as string) ?? undefined,
+    action: row.action as string,
+    resource: row.resource as string,
+    resourceId: (row.resourceId as string) ?? undefined,
+    method: row.method as string,
+    endpoint: row.endpoint as string,
+    status: row.status as number,
+    changes: (row.changes as Record<string, unknown>) ?? undefined,
+    ipAddress: row.ipAddress as string,
+    userAgent: row.userAgent as string,
+    previousHash: row.previousHash as string,
+    hash: row.hash as string,
+    signature: (row.signature as string) ?? undefined,
+    confirmationText: (row.confirmationText as string) ?? undefined,
+    cancelled: (row.cancelled as boolean) ?? undefined,
+  }));
+
+  return verifyAuditTrailIntegrity(entries);
+}
+
+/**
  * Express middleware for automatic audit logging
  */
 export function auditMiddleware(
@@ -378,8 +559,11 @@ export function setAuditContext(req: Request, context: AuditContext): void {
 export async function exportAuditLogsToCSV(
   filters?: Parameters<typeof getAuditLogs>[0],
 ): Promise<string> {
-  const entries = await getAuditLogs(filters);
+  return auditEntriesToCsv(await getAuditLogs(filters));
+}
 
+/** Render already-selected audit entries as CSV (header row + one row each). */
+export function auditEntriesToCsv(entries: AuditLogEntry[]): string {
   const headers = [
     "ID",
     "Timestamp",
@@ -450,4 +634,124 @@ export async function getAuditStatistics(): Promise<{
     resourceCounts,
     lastEntry: entries[0],
   };
+}
+
+// ── Admin confirmation / cancellation helpers ─────────────────────────────
+
+/**
+ * Record a successful admin confirmation.
+ *
+ * Call this after the admin action has been applied successfully.
+ * It creates a signed, chained audit entry with:
+ *   - action = ADMIN_ACTION_CONFIRMED
+ *   - the actor, target resource, changes, and the confirmation text
+ *
+ * This is intentionally a direct call (not middleware-based) so it can be
+ * used in service-layer code that does not have an Express req/res in scope.
+ */
+export async function recordAdminConfirmation(
+  input: AdminConfirmationInput,
+): Promise<AuditLogEntry> {
+  const id = crypto.randomUUID();
+  const timestamp = new Date().toISOString();
+
+  const entryData: Omit<AuditLogEntry, "hash" | "signature"> = {
+    id,
+    timestamp,
+    userId: input.actorId || "ANONYMOUS",
+    userEmail: input.actorEmail,
+    action: "ADMIN_ACTION_CONFIRMED",
+    resource: input.resource,
+    resourceId: input.resourceId,
+    // method / endpoint are synthetic since this is a direct call
+    method: "INTERNAL",
+    endpoint: `admin/${input.actionType.toLowerCase()}`,
+    status: 200,
+    changes: input.changes,
+    ipAddress: input.ipAddress ?? "INTERNAL",
+    userAgent: input.userAgent ?? "INTERNAL",
+    previousHash,
+    confirmationText: input.confirmationText,
+  };
+
+  const hash = generateHash(entryData);
+  const signature = generateSignature(hash);
+  const entry: AuditLogEntry = { ...entryData, hash, signature };
+
+  auditLog.push(entry);
+  previousHash = hash;
+
+  try {
+    await fs.appendFile(AUDIT_LOG_FILE, JSON.stringify(entry) + "\n");
+  } catch (err) {
+    console.error("Failed to persist admin confirmation audit entry:", err);
+  }
+
+  await persistAuditEntryToDatabase(entry);
+
+  return entry;
+}
+
+/**
+ * Record that an admin cancelled an action without applying changes.
+ *
+ * This creates an audit entry with:
+ *   - action = ADMIN_ACTION_CANCELLED
+ *   - cancelled = true
+ *   - NO changes field (nothing was applied)
+ *
+ * Cancelled records are stored so there is a paper trail of intent even
+ * when the actor chose not to proceed.
+ */
+export async function recordCancelledAction(input: {
+  actorId: string;
+  actorEmail?: string;
+  actionType: string;
+  resource: string;
+  resourceId?: string;
+  /** Optional note about why the action was cancelled */
+  cancellationReason?: string;
+  ipAddress?: string;
+  userAgent?: string;
+}): Promise<AuditLogEntry> {
+  const id = crypto.randomUUID();
+  const timestamp = new Date().toISOString();
+
+  const entryData: Omit<AuditLogEntry, "hash" | "signature"> = {
+    id,
+    timestamp,
+    userId: input.actorId || "ANONYMOUS",
+    userEmail: input.actorEmail,
+    action: "ADMIN_ACTION_CANCELLED",
+    resource: input.resource,
+    resourceId: input.resourceId,
+    method: "INTERNAL",
+    endpoint: `admin/${input.actionType.toLowerCase()}`,
+    status: 200,
+    // No changes — nothing was applied
+    ipAddress: input.ipAddress ?? "INTERNAL",
+    userAgent: input.userAgent ?? "INTERNAL",
+    previousHash,
+    cancelled: true,
+    ...(input.cancellationReason !== undefined && {
+      confirmationText: `CANCELLED: ${input.cancellationReason}`,
+    }),
+  };
+
+  const hash = generateHash(entryData);
+  const signature = generateSignature(hash);
+  const entry: AuditLogEntry = { ...entryData, hash, signature };
+
+  auditLog.push(entry);
+  previousHash = hash;
+
+  try {
+    await fs.appendFile(AUDIT_LOG_FILE, JSON.stringify(entry) + "\n");
+  } catch (err) {
+    console.error("Failed to persist cancelled action audit entry:", err);
+  }
+
+  await persistAuditEntryToDatabase(entry);
+
+  return entry;
 }

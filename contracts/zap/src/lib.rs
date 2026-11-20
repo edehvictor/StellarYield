@@ -6,6 +6,22 @@
 //! Accepts any SAC token from the user, swaps it for the vault's required
 //! token via a DEX router, and deposits the result into the YieldVault in
 //! a single transaction. Handles slippage tolerance during the swap.
+//!
+//! ## Partial completion and retry safety
+//!
+//! Every call that moves tokens is guarded by an operation ID
+//! (`op_id: u64`). The contract records `ZapStatus::Pending` before the first
+//! token transfer and `ZapStatus::Settled` on success. If the transaction
+//! fails after the input transfer but before the deposit completes, the caller
+//! can inspect `get_op_status(op_id)` and either:
+//!
+//! - Retry with the **same `op_id`** to resume from the recorded intermediate
+//!   state (refunds any input already on the contract and re-attempts the
+//!   deposit with the amount that was already converted).
+//! - Or, once confirmed settled/failed, start fresh with a new `op_id`.
+//!
+//! An `op_id` already in `Settled` state is rejected with `OpAlreadySettled`
+//! to prevent double-execution.
 
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, symbol_short, token, vec, Address, Env,
@@ -19,6 +35,20 @@ enum DataKey {
     Admin,
     DexRouter,
     Initialized,
+    /// Per-operation status keyed by (user, op_id).
+    OpStatus(Address, u64),
+}
+
+// ── Operation state ───────────────────────────────────────────────────────────
+
+/// Lifecycle of a single zap operation.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ZapStatus {
+    /// Input has been transferred to the contract; swap and deposit pending.
+    Pending,
+    /// Swap and deposit completed successfully; shares credited.
+    Settled,
 }
 
 // ── Errors ───────────────────────────────────────────────────────────────────
@@ -33,6 +63,12 @@ pub enum ZapError {
     Unauthorized = 4,
     SlippageExceeded = 5,
     SwapFailed = 6,
+    /// The ledger closed after the quote's deadline; request a fresh quote.
+    /// Uses its own range so clients can decode it without knowing which
+    /// contract failed (1–11 overlap with `VaultError`).
+    QuoteExpired = 4001,
+    /// The operation was already settled; using the same op_id again is rejected.
+    OpAlreadySettled = 7,
 }
 
 // ── Contract ─────────────────────────────────────────────────────────────────
@@ -98,6 +134,7 @@ impl Zap {
     /// * [`ZapError::SlippageExceeded`] — Swap output below `min_amount_out`, or below
     ///   `expected_amount_out` when partial fills are disallowed.
     /// * [`ZapError::ZeroAmount`] — `amount_in` is not positive.
+    /// * [`ZapError::OpAlreadySettled`] — `op_id` was already successfully completed.
     pub fn zap_deposit(
         env: Env,
         user: Address,
@@ -109,24 +146,149 @@ impl Zap {
         min_shares_out: i128,
         expected_amount_out: i128,
         allow_partial: bool,
+        op_id: u64,
     ) -> Result<i128, ZapError> {
         Self::require_init(&env)?;
+        Self::execute_zap(
+            env,
+            user,
+            input_token,
+            vault_token,
+            vault,
+            amount_in,
+            min_amount_out,
+            min_shares_out,
+            expected_amount_out,
+            allow_partial,
+            op_id,
+        )
+    }
+
+    /// [`zap_deposit`](Self::zap_deposit) bound to a quote deadline.
+    ///
+    /// Rejects the call when the ledger closes after `deadline`, so a
+    /// transaction built from a quote preview cannot execute at a price the
+    /// quote no longer covers (e.g. after sitting in a wallet prompt).
+    ///
+    /// # Arguments
+    ///
+    /// Same as [`zap_deposit`](Self::zap_deposit), plus:
+    ///
+    /// * `deadline` — Unix timestamp (seconds) of the quote's `expiresAt`. The
+    ///   boundary is inclusive: a ledger closing exactly at `deadline` succeeds,
+    ///   matching the off-chain check (expired only when `now > expiresAt`).
+    ///
+    /// # Errors
+    ///
+    /// * [`ZapError::QuoteExpired`] — `ledger.timestamp() > deadline`. Checked
+    ///   before any token moves.
+    /// * Otherwise the same errors as [`zap_deposit`](Self::zap_deposit).
+    pub fn zap_deposit_with_deadline(
+        env: Env,
+        user: Address,
+        input_token: Address,
+        vault_token: Address,
+        vault: Address,
+        amount_in: i128,
+        min_amount_out: i128,
+        min_shares_out: i128,
+        expected_amount_out: i128,
+        allow_partial: bool,
+        op_id: u64,
+        deadline: u64,
+    ) -> Result<i128, ZapError> {
+        Self::require_init(&env)?;
+        if env.ledger().timestamp() > deadline {
+            return Err(ZapError::QuoteExpired);
+        }
+        Self::execute_zap(
+            env,
+            user,
+            input_token,
+            vault_token,
+            vault,
+            amount_in,
+            min_amount_out,
+            min_shares_out,
+            expected_amount_out,
+            allow_partial,
+            op_id,
+        )
+    }
+
+    /// Return the recorded status of an operation, or `None` if `op_id` is unknown.
+    ///
+    /// Clients can call this after a failed or timed-out transaction to decide
+    /// whether to retry (status is `Pending` or absent) or start fresh
+    /// (status is `Settled`).
+    pub fn get_op_status(env: Env, user: Address, op_id: u64) -> Option<ZapStatus> {
+        env.storage()
+            .temporary()
+            .get(&DataKey::OpStatus(user, op_id))
+    }
+
+    // ── Internal ─────────────────────────────────────────────────────
+
+    /// Shared swap-and-deposit body behind both public entry points. Callers
+    /// must have run `require_init` and any deadline check first.
+    fn execute_zap(
+        env: Env,
+        user: Address,
+        input_token: Address,
+        vault_token: Address,
+        vault: Address,
+        amount_in: i128,
+        min_amount_out: i128,
+        min_shares_out: i128,
+        expected_amount_out: i128,
+        allow_partial: bool,
+        op_id: u64,
+    ) -> Result<i128, ZapError> {
         user.require_auth();
 
         if amount_in <= 0 {
             return Err(ZapError::ZeroAmount);
         }
 
+        // Guard against double-execution: a Settled op_id is a hard stop.
+        let op_key = DataKey::OpStatus(user.clone(), op_id);
+        let existing: Option<ZapStatus> = env.storage().temporary().get(&op_key);
+        if let Some(ZapStatus::Settled) = existing {
+            return Err(ZapError::OpAlreadySettled);
+        }
+        // If the op_id is absent or Pending, record Pending now so a mid-flight
+        // failure leaves a recoverable marker. The TTL (1000 ledgers) is enough
+        // for a client to notice a failed transaction and retry.
+        let is_retry = matches!(existing, Some(ZapStatus::Pending));
+        if !is_retry {
+            env.storage()
+                .temporary()
+                .set(&op_key, &ZapStatus::Pending);
+            env.storage().temporary().extend_ttl(&op_key, 1_000, 1_000);
+        }
+
         let zap_addr = env.current_contract_address();
-        let dex_router: Address = env.storage().instance().get(&DataKey::DexRouter).unwrap();
+        let dex_router: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::DexRouter)
+            .ok_or(ZapError::NotInitialized)?;
 
-        // Step 1: Transfer input tokens from user to this contract
+        // Step 1: Transfer input tokens from user to this contract.
+        // On a retry (Pending op_id) the input was already transferred in the
+        // prior attempt; skip the pull and work with whatever the contract holds.
         let input_client = token::Client::new(&env, &input_token);
-        input_client.transfer(&user, &zap_addr, &amount_in);
+        if !is_retry {
+            input_client.transfer(&user, &zap_addr, &amount_in);
+        }
 
-        // Step 2: If input_token == vault_token, skip the swap
+        // Step 2: If input_token == vault_token, skip the swap.
+        // On a retry we may already hold vault_token (prior swap succeeded but
+        // deposit failed); check the balance and skip the swap if sufficient.
         let deposit_amount = if input_token == vault_token {
-            amount_in
+            // Use whatever is on the contract (may be more than amount_in on retry).
+            let held = input_client.balance(&zap_addr);
+            if held > 0 { held } else { amount_in }
         } else {
             // Approve DEX router to spend our input tokens
             input_client.approve(
@@ -184,6 +346,77 @@ impl Zap {
             );
 
             amount_out
+            // On retry: if we already hold vault_token, skip the swap.
+            let vault_client = token::Client::new(&env, &vault_token);
+            let already_converted = vault_client.balance(&zap_addr);
+            if is_retry && already_converted > 0 {
+                // Refund any leftover input that did not get consumed.
+                Self::refund_unused_input(
+                    &env,
+                    &user,
+                    &input_token,
+                    &zap_addr,
+                    symbol_short!("unused_in"),
+                );
+                already_converted
+            } else {
+                // Approve DEX router to spend our input tokens
+                input_client.approve(
+                    &zap_addr,
+                    &dex_router,
+                    &amount_in,
+                    &(env.ledger().sequence() + 100),
+                );
+
+                // Swap via DEX router
+                let swap_fn = Symbol::new(&env, "swap");
+                let swap_args: soroban_sdk::Vec<Val> = vec![
+                    &env,
+                    input_token.into_val(&env),
+                    vault_token.clone().into_val(&env),
+                    amount_in.into_val(&env),
+                    min_amount_out.into_val(&env),
+                ];
+                let amount_out: i128 = env.invoke_contract(&dex_router, &swap_fn, swap_args);
+
+                if amount_out < min_amount_out {
+                    return Err(ZapError::SlippageExceeded);
+                }
+
+                let quoted = if expected_amount_out > 0 {
+                    expected_amount_out
+                } else {
+                    min_amount_out
+                };
+
+                if amount_out < quoted {
+                    if !allow_partial {
+                        return Err(ZapError::SlippageExceeded);
+                    }
+
+                    env.events().publish(
+                        (symbol_short!("zap_part"),),
+                        (
+                            user.clone(),
+                            input_token.clone(),
+                            vault_token.clone(),
+                            amount_in,
+                            quoted,
+                            amount_out,
+                        ),
+                    );
+                }
+
+                Self::refund_unused_input(
+                    &env,
+                    &user,
+                    &input_token,
+                    &zap_addr,
+                    symbol_short!("unused_in"),
+                );
+
+                amount_out
+            }
         };
 
         // Step 3: Deposit into YieldVault — shares go to `user` (payer is this contract)
@@ -196,6 +429,10 @@ impl Zap {
             min_shares_out.into_val(&env),
         ];
         let shares: i128 = env.invoke_contract(&vault, &deposit_fn, deposit_args);
+
+        // Mark the operation settled so it cannot be re-executed.
+        env.storage().temporary().set(&op_key, &ZapStatus::Settled);
+        env.storage().temporary().extend_ttl(&op_key, 1_000, 1_000);
 
         env.events().publish(
             (symbol_short!("zap_dep"),),
@@ -219,7 +456,11 @@ impl Zap {
         Self::require_init(&env)?;
         admin.require_auth();
 
-        let stored_admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(ZapError::NotInitialized)?;
         if admin != stored_admin {
             return Err(ZapError::Unauthorized);
         }
@@ -228,6 +469,95 @@ impl Zap {
             .instance()
             .set(&DataKey::DexRouter, &new_router);
         Ok(())
+    }
+
+    /// Dry-run invoke a candidate router to verify it conforms to the DEX router interface
+    /// before performing any upgrade.
+    ///
+    /// # Arguments
+    ///
+    /// * `router` — Candidate DEX router address to invoke.
+    /// * `token_in` — Input token address.
+    /// * `token_out` — Target output token address.
+    /// * `amount_in` — Test amount to dry-run (must be > 0).
+    ///
+    /// # Errors
+    ///
+    /// * [`ZapError::ZeroAmount`] — If test amount is zero or negative.
+    /// * [`ZapError::SwapFailed`] — If router returns zero or fails swap.
+    pub fn dry_run_router(
+        env: Env,
+        router: Address,
+        token_in: Address,
+        token_out: Address,
+        amount_in: i128,
+    ) -> Result<i128, ZapError> {
+        if amount_in <= 0 {
+            return Err(ZapError::ZeroAmount);
+        }
+
+        let swap_fn = Symbol::new(&env, "swap");
+        let swap_args: soroban_sdk::Vec<Val> =
+            (&token_in, &token_out, amount_in, 0i128).into_val(&env);
+
+        let amount_out: i128 = env.invoke_contract(&router, &swap_fn, swap_args);
+        if amount_out <= 0 {
+            return Err(ZapError::SwapFailed);
+        }
+
+        Ok(amount_out)
+    }
+
+    /// Perform a contract invocation dry-run on a new DEX router and upgrade it if successful.
+    ///
+    /// # Arguments
+    ///
+    /// * `admin` — Must match the admin set in [`initialize`].
+    /// * `new_router` — Candidate DEX router implementing `swap`.
+    /// * `token_in` — Test token in for dry-run invocation.
+    /// * `token_out` — Test token out for dry-run invocation.
+    /// * `test_amount` — Test amount to dry-run (must be > 0).
+    ///
+    /// # Errors
+    ///
+    /// * [`ZapError::Unauthorized`] — Caller is not the stored admin.
+    /// * [`ZapError::ZeroAmount`] — If test amount is zero or negative.
+    /// * [`ZapError::SwapFailed`] — If candidate router dry-run produces zero output or fails.
+    pub fn set_dex_router_with_dry_run(
+        env: Env,
+        admin: Address,
+        new_router: Address,
+        token_in: Address,
+        token_out: Address,
+        test_amount: i128,
+    ) -> Result<i128, ZapError> {
+        Self::require_init(&env)?;
+        admin.require_auth();
+
+        let stored_admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+        if admin != stored_admin {
+            return Err(ZapError::Unauthorized);
+        }
+
+        // Dry-run invocation of candidate router before committing upgrade
+        let simulated_out = Self::dry_run_router(
+            env.clone(),
+            new_router.clone(),
+            token_in,
+            token_out,
+            test_amount,
+        )?;
+
+        env.storage()
+            .instance()
+            .set(&DataKey::DexRouter, &new_router);
+
+        env.events().publish(
+            (symbol_short!("zap_rtr"),),
+            (admin, new_router, simulated_out),
+        );
+
+        Ok(simulated_out)
     }
 
     // ── Internal ─────────────────────────────────────────────────────
@@ -297,6 +627,13 @@ mod tests {
             amount_in: i128,
             min_out: i128,
         ) -> i128 {
+                .set(&RouterKey::Output, &amount_out);
+            env.storage()
+                .instance()
+                .set(&RouterKey::InputUsed, &input_used);
+        }
+
+        pub fn swap(env: Env, from: Address, to: Address, amount_in: i128, min_out: i128) -> i128 {
             let router = env.current_contract_address();
             let zap: Address = env
                 .storage()
@@ -478,6 +815,174 @@ mod tests {
         assert_eq!(result, Err(Ok(ZapError::Unauthorized)));
     }
 
+    #[test]
+    fn test_dry_run_router_success() {
+        let t = setup_zap_env();
+        let candidate_router_id = t.env.register(MockDexRouter, ());
+        let candidate_router = MockDexRouterClient::new(&t.env, &candidate_router_id);
+        candidate_router.configure(&t.zap_id, &4_500, &5_000);
+
+        StellarAssetClient::new(&t.env, &t.vault_token).mint(&candidate_router_id, &10_000);
+
+        let out =
+            t.zap
+                .dry_run_router(&candidate_router_id, &t.input_token, &t.vault_token, &5_000);
+        assert_eq!(out, 4_500);
+    }
+
+    #[test]
+    fn test_dry_run_router_zero_amount() {
+        let t = setup_zap_env();
+        let candidate_router_id = t.env.register(MockDexRouter, ());
+
+        let res =
+            t.zap
+                .try_dry_run_router(&candidate_router_id, &t.input_token, &t.vault_token, &0);
+        assert_eq!(res, Err(Ok(ZapError::ZeroAmount)));
+    }
+
+    #[test]
+    fn test_dry_run_router_reverts_on_zero_output() {
+        let t = setup_zap_env();
+        let candidate_router_id = t.env.register(MockDexRouter, ());
+        let candidate_router = MockDexRouterClient::new(&t.env, &candidate_router_id);
+        candidate_router.configure(&t.zap_id, &0, &5_000);
+
+        let res =
+            t.zap
+                .try_dry_run_router(&candidate_router_id, &t.input_token, &t.vault_token, &5_000);
+        assert_eq!(res, Err(Ok(ZapError::SwapFailed)));
+    }
+
+    #[test]
+    fn test_set_dex_router_with_dry_run_success() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+
+        let zap_id = env.register(Zap, ());
+        let zap = ZapClient::new(&env, &zap_id);
+
+        let admin = Address::generate(&env);
+        let initial_router = Address::generate(&env);
+        zap.initialize(&admin, &initial_router);
+
+        let input_admin = Address::generate(&env);
+        let input_sac = env.register_stellar_asset_contract_v2(input_admin);
+        let input_token = input_sac.address();
+
+        let vault_admin = Address::generate(&env);
+        let vault_sac = env.register_stellar_asset_contract_v2(vault_admin);
+        let vault_token = vault_sac.address();
+
+        let candidate_router_id = env.register(MockDexRouter, ());
+        let candidate_router = MockDexRouterClient::new(&env, &candidate_router_id);
+        candidate_router.configure(&zap_id, &9_500, &10_000);
+        StellarAssetClient::new(&env, &vault_token).mint(&candidate_router_id, &20_000);
+
+        let out = zap.set_dex_router_with_dry_run(
+            &admin,
+            &candidate_router_id,
+            &input_token,
+            &vault_token,
+            &10_000,
+        );
+        assert_eq!(out, 9_500);
+
+        // Verify zap_rtr event was emitted
+        let events = env.events().all();
+        let (_, topics, data) = events.last().unwrap();
+        assert_eq!(event_topic(&env, &topics), symbol_short!("zap_rtr"));
+        let decoded: (Address, Address, i128) = data.clone().into_val(&env);
+        assert_eq!(decoded.0, admin);
+        assert_eq!(decoded.1, candidate_router_id);
+        assert_eq!(decoded.2, 9_500);
+    }
+
+    #[test]
+    fn test_set_dex_router_with_dry_run_unauthorized() {
+        let t = setup_zap_env();
+        let attacker = Address::generate(&t.env);
+        let candidate_router = Address::generate(&t.env);
+
+        let res = t.zap.try_set_dex_router_with_dry_run(
+            &attacker,
+            &candidate_router,
+            &t.input_token,
+            &t.vault_token,
+            &1_000,
+        );
+        assert_eq!(res, Err(Ok(ZapError::Unauthorized)));
+    }
+
+    #[test]
+    fn test_set_dex_router_with_dry_run_aborts_on_failure() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+
+        let zap_id = env.register(Zap, ());
+        let zap = ZapClient::new(&env, &zap_id);
+
+        let admin = Address::generate(&env);
+        let initial_router = Address::generate(&env);
+        zap.initialize(&admin, &initial_router);
+
+        let input_admin = Address::generate(&env);
+        let input_sac = env.register_stellar_asset_contract_v2(input_admin);
+        let input_token = input_sac.address();
+
+        let vault_admin = Address::generate(&env);
+        let vault_sac = env.register_stellar_asset_contract_v2(vault_admin);
+        let vault_token = vault_sac.address();
+
+        // Candidate router that returns 0 (fails dry-run)
+        let broken_router_id = env.register(MockDexRouter, ());
+        let broken_router = MockDexRouterClient::new(&env, &broken_router_id);
+        broken_router.configure(&zap_id, &0, &1_000);
+
+        let res = zap.try_set_dex_router_with_dry_run(
+            &admin,
+            &broken_router_id,
+            &input_token,
+            &vault_token,
+            &1_000,
+        );
+        assert_eq!(res, Err(Ok(ZapError::SwapFailed)));
+    }
+
+    #[test]
+    fn test_set_dex_router_missing_admin_returns_typed_error() {
+        let t = setup_zap_env();
+        t.env.as_contract(&t.zap_id, || {
+            t.env.storage().instance().remove(&DataKey::Admin);
+        });
+
+        let new_router = Address::generate(&t.env);
+        let result = t.zap.try_set_dex_router(&t.user, &new_router);
+        assert_eq!(result, Err(Ok(ZapError::NotInitialized)));
+    }
+
+    #[test]
+    fn test_zap_deposit_missing_router_returns_typed_error() {
+        let t = setup_zap_env();
+        t.env.as_contract(&t.zap_id, || {
+            t.env.storage().instance().remove(&DataKey::DexRouter);
+        });
+
+        let result = t.zap.try_zap_deposit(
+            &t.user,
+            &t.input_token,
+            &t.vault_token,
+            &t.vault_id,
+            &1_000,
+            &500,
+            &1,
+            &900,
+            &false,
+            &1,
+        );
+        assert_eq!(result, Err(Ok(ZapError::NotInitialized)));
+    }
+
     // ── Event assertion tests (#1045) ──────────────────────────────────
 
     #[test]
@@ -520,6 +1025,18 @@ mod tests {
                 &0,
                 &false,
             );
+        let shares = t.zap.zap_deposit(
+            &t.user,
+            &t.vault_token,
+            &t.vault_token,
+            &t.vault_id,
+            &1_000,
+            &0,
+            &1,
+            &0,
+            &false,
+            &1,
+        );
 
         assert_eq!(shares, 1_000);
         assert_eq!(
@@ -563,6 +1080,20 @@ mod tests {
                 &900,
                 &false,
             );
+        t.router.configure(&t.zap_id, &900, &1_000);
+
+        let shares = t.zap.zap_deposit(
+            &t.user,
+            &t.input_token,
+            &t.vault_token,
+            &t.vault_id,
+            &1_000,
+            &800,
+            &1,
+            &900,
+            &false,
+            &1,
+        );
 
         assert_eq!(shares, 900);
         assert_eq!(
@@ -593,6 +1124,18 @@ mod tests {
                 &900,
                 &true,
             );
+        let shares = t.zap.zap_deposit(
+            &t.user,
+            &t.input_token,
+            &t.vault_token,
+            &t.vault_id,
+            &1_000,
+            &500,
+            &1,
+            &900,
+            &true,
+            &1,
+        );
 
         assert_eq!(shares, 600);
         assert_eq!(
@@ -612,6 +1155,9 @@ mod tests {
             .unwrap();
         let decoded: (Address, Address, Address, i128, i128, i128) =
             part_data.into_val(&t.env);
+            .map(|(_, _, data)| data)
+            .unwrap();
+        let decoded: (Address, Address, Address, i128, i128, i128) = part_data.into_val(&t.env);
         assert_eq!(decoded.0, t.user);
         assert_eq!(decoded.1, t.input_token);
         assert_eq!(decoded.2, t.vault_token);
@@ -638,6 +1184,18 @@ mod tests {
                 &900,
                 &false,
             );
+        t.zap.zap_deposit(
+            &t.user,
+            &t.input_token,
+            &t.vault_token,
+            &t.vault_id,
+            &1_000,
+            &800,
+            &1,
+            &900,
+            &false,
+            &1,
+        );
 
         assert_eq!(
             count_zap_events(&t.env, &t.zap_id, symbol_short!("zap_ref")),
@@ -653,6 +1211,7 @@ mod tests {
                 *contract == t.zap_id && event_topic(&t.env, topics) == symbol_short!("zap_ref")
             })
             .map(|(_, _, data)| data.clone())
+            .map(|(_, _, data)| data)
             .unwrap();
         let decoded: (Address, Address, i128, Symbol) = ref_data.into_val(&t.env);
         assert_eq!(decoded.0, t.user);
@@ -682,6 +1241,18 @@ mod tests {
                 &900,
                 &true,
             );
+        t.zap.zap_deposit(
+            &t.user,
+            &t.input_token,
+            &t.vault_token,
+            &t.vault_id,
+            &1_000,
+            &500,
+            &1,
+            &900,
+            &true,
+            &1,
+        );
 
         let topics = zap_event_topics(&t.env, &t.zap_id);
         assert_eq!(topics.len(), 3);
@@ -705,6 +1276,7 @@ mod tests {
             &1,
             &900,
             &false,
+            &1,
         );
         assert_eq!(result, Err(Ok(ZapError::SlippageExceeded)));
         assert_eq!(
@@ -719,5 +1291,267 @@ mod tests {
             count_zap_events(&t.env, &t.zap_id, symbol_short!("zap_ref")),
             0
         );
+    }
+
+    // ── Quote deadline (zap_deposit_with_deadline) ───────────────────
+
+    fn set_ledger_time(env: &Env, ts: u64) {
+        use soroban_sdk::testutils::Ledger;
+        env.ledger().set_timestamp(ts);
+    }
+
+    #[test]
+    fn test_deadline_in_future_executes_swap_and_deposit() {
+        let t = setup_zap_env();
+        set_ledger_time(&t.env, 1_000);
+        t.router.configure(&t.zap_id, &900, &1_000);
+
+        let shares = t.zap.zap_deposit_with_deadline(
+            &t.user,
+            &t.input_token,
+            &t.vault_token,
+            &t.vault_id,
+            &1_000,
+            &800,
+            &1,
+            &900,
+            &false,
+            &1,
+            &1_060,
+        );
+
+        assert_eq!(shares, 900);
+        assert_eq!(
+            count_zap_events(&t.env, &t.zap_id, symbol_short!("zap_dep")),
+            1
+        );
+    }
+
+    #[test]
+    fn test_deadline_equal_to_ledger_time_is_still_valid() {
+        let t = setup_zap_env();
+        set_ledger_time(&t.env, 1_060);
+        StellarAssetClient::new(&t.env, &t.vault_token).mint(&t.user, &1_000);
+
+        let shares = t.zap.zap_deposit_with_deadline(
+            &t.user,
+            &t.vault_token,
+            &t.vault_token,
+            &t.vault_id,
+            &1_000,
+            &0,
+            &1,
+            &0,
+            &false,
+            &1,
+            &1_060,
+        );
+        assert_eq!(shares, 1_000);
+    }
+
+    #[test]
+    fn test_expired_deadline_rejected_before_any_transfer() {
+        let t = setup_zap_env();
+        set_ledger_time(&t.env, 1_061);
+        t.router.configure(&t.zap_id, &900, &1_000);
+        let input = token::Client::new(&t.env, &t.input_token);
+        let before = input.balance(&t.user);
+
+        let result = t.zap.try_zap_deposit_with_deadline(
+            &t.user,
+            &t.input_token,
+            &t.vault_token,
+            &t.vault_id,
+            &1_000,
+            &800,
+            &1,
+            &900,
+            &false,
+            &1,
+            &1_060,
+        );
+
+        assert_eq!(result, Err(Ok(ZapError::QuoteExpired)));
+        assert_eq!(input.balance(&t.user), before);
+        assert_eq!(
+            count_zap_events(&t.env, &t.zap_id, symbol_short!("zap_dep")),
+            0
+        );
+    }
+
+    #[test]
+    fn test_deadline_entry_point_keeps_slippage_guard() {
+        let t = setup_zap_env();
+        set_ledger_time(&t.env, 1_000);
+        t.router.configure(&t.zap_id, &700, &1_000);
+
+        let result = t.zap.try_zap_deposit_with_deadline(
+            &t.user,
+            &t.input_token,
+            &t.vault_token,
+            &t.vault_id,
+            &1_000,
+            &800,
+            &1,
+            &900,
+            &false,
+            &1,
+            &1_060,
+        );
+        assert_eq!(result, Err(Ok(ZapError::SlippageExceeded)));
+    }
+
+    #[test]
+    fn test_quote_expired_code_is_stable() {
+        assert_eq!(ZapError::QuoteExpired as u32, 4001);
+    }
+
+    // ── Partial completion and retry (#1741) ─────────────────────────
+
+    #[test]
+    fn test_op_status_absent_before_any_call() {
+        let t = setup_zap_env();
+        assert_eq!(t.zap.get_op_status(&t.user, &42), None);
+    }
+
+    #[test]
+    fn test_op_status_settled_after_success() {
+        let t = setup_zap_env();
+        t.router.configure(&t.zap_id, &900, &1_000);
+
+        t.zap.zap_deposit(
+            &t.user,
+            &t.input_token,
+            &t.vault_token,
+            &t.vault_id,
+            &1_000,
+            &800,
+            &1,
+            &900,
+            &false,
+            &99,
+        );
+
+        assert_eq!(t.zap.get_op_status(&t.user, &99), Some(ZapStatus::Settled));
+    }
+
+    #[test]
+    fn test_settled_op_id_is_rejected_with_typed_error() {
+        let t = setup_zap_env();
+        StellarAssetClient::new(&t.env, &t.vault_token).mint(&t.user, &2_000);
+
+        t.zap.zap_deposit(
+            &t.user,
+            &t.vault_token,
+            &t.vault_token,
+            &t.vault_id,
+            &1_000,
+            &0,
+            &1,
+            &0,
+            &false,
+            &5,
+        );
+
+        // Same op_id on a second call must be rejected.
+        let result = t.zap.try_zap_deposit(
+            &t.user,
+            &t.vault_token,
+            &t.vault_token,
+            &t.vault_id,
+            &1_000,
+            &0,
+            &1,
+            &0,
+            &false,
+            &5,
+        );
+        assert_eq!(result, Err(Ok(ZapError::OpAlreadySettled)));
+    }
+
+    #[test]
+    fn test_different_op_ids_execute_independently() {
+        let t = setup_zap_env();
+        StellarAssetClient::new(&t.env, &t.vault_token).mint(&t.user, &2_000);
+
+        t.zap.zap_deposit(
+            &t.user,
+            &t.vault_token,
+            &t.vault_token,
+            &t.vault_id,
+            &1_000,
+            &0,
+            &1,
+            &0,
+            &false,
+            &1,
+        );
+        t.zap.zap_deposit(
+            &t.user,
+            &t.vault_token,
+            &t.vault_token,
+            &t.vault_id,
+            &1_000,
+            &0,
+            &1,
+            &0,
+            &false,
+            &2,
+        );
+
+        assert_eq!(
+            count_zap_events(&t.env, &t.zap_id, symbol_short!("zap_dep")),
+            2
+        );
+        assert_eq!(t.zap.get_op_status(&t.user, &1), Some(ZapStatus::Settled));
+        assert_eq!(t.zap.get_op_status(&t.user, &2), Some(ZapStatus::Settled));
+    }
+
+    #[test]
+    fn test_retry_pending_op_completes_deposit_without_re_pulling_input() {
+        let t = setup_zap_env();
+        // Directly write a Pending entry to simulate an op_id whose swap
+        // succeeded but whose deposit was interrupted.
+        // Pre-fund the contract with vault_token to represent the already-converted amount.
+        StellarAssetClient::new(&t.env, &t.vault_token).mint(&t.zap_id, &900);
+        t.env.as_contract(&t.zap_id, || {
+            let op_key = DataKey::OpStatus(t.user.clone(), 7_u64);
+            t.env.storage().temporary().set(&op_key, &ZapStatus::Pending);
+        });
+
+        let user_input_before =
+            token::Client::new(&t.env, &t.input_token).balance(&t.user);
+
+        // Retry: the Pending state should allow completion using the
+        // vault_token already on the contract, without pulling input again.
+        let shares = t.zap.zap_deposit(
+            &t.user,
+            &t.input_token,
+            &t.vault_token,
+            &t.vault_id,
+            &1_000,
+            &800,
+            &1,
+            &900,
+            &false,
+            &7,
+        );
+
+        assert_eq!(shares, 900);
+        // User's input balance must be unchanged (no second pull).
+        assert_eq!(
+            token::Client::new(&t.env, &t.input_token).balance(&t.user),
+            user_input_before
+        );
+        assert_eq!(t.zap.get_op_status(&t.user, &7), Some(ZapStatus::Settled));
+        assert_eq!(
+            count_zap_events(&t.env, &t.zap_id, symbol_short!("zap_dep")),
+            1
+        );
+    }
+
+    #[test]
+    fn test_op_already_settled_error_code_is_stable() {
+        assert_eq!(ZapError::OpAlreadySettled as u32, 7);
     }
 }

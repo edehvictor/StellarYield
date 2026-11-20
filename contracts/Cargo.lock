@@ -287,6 +287,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "clmm_core"
+version = "0.1.0"
+dependencies = [
+ "soroban-sdk",
+]
+
+[[package]]
 name = "const-oid"
 version = "0.9.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -862,7 +869,6 @@ name = "intent_swap"
 version = "0.1.0"
 dependencies = [
  "soroban-sdk",
- "soroban-token-sdk",
 ]
 
 [[package]]
@@ -1026,12 +1032,14 @@ version = "0.1.0"
 dependencies = [
  "proptest",
  "soroban-sdk",
+ "ve_tokenomics",
 ]
 
 [[package]]
 name = "options"
 version = "0.1.0"
 dependencies = [
+ "proptest",
  "soroban-sdk",
  "soroban-token-sdk",
  "storage_helpers",
@@ -1677,6 +1685,13 @@ checksum = "d91ed6c858b01f942cd56b37a94b3e0a1798290327d1236e4d9cf4eaca44d29d"
 dependencies = [
  "base64ct",
  "der",
+]
+
+[[package]]
+name = "stablecoin_basket"
+version = "0.1.0"
+dependencies = [
+ "soroban-sdk",
 ]
 
 [[package]]

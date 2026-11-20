@@ -98,7 +98,7 @@ Manages the multi-phase ceremonies for key generation and signing:
 Provides secure storage for key shards:
 
 - **Memory Storage**: Ephemeral storage for testing
-- **Encrypted Storage**: AES-256-GCM encrypted MongoDB storage
+- **Encrypted Storage**: AES-256-GCM sealed shares in MongoDB or an `encrypted_file` directory. Each share is bound to its session and party ID (associated data) and tagged with a key fingerprint, so a wrong key, tampered ciphertext, or a share moved between sessions is rejected
 - **HSM Integration**: HashiCorp Vault, AWS KMS, GCP KMS, Azure Key Vault
 - **Audit Logging**: Comprehensive audit trail for all key operations
 - **Key Rotation**: Secure key share rotation protocol
@@ -109,7 +109,7 @@ Integrates with Stellar blockchain:
 
 - **Transaction Creation**: Build payment, set options, and custom transactions
 - **TSS Signing**: Sign transactions with threshold signatures
-- **Submission**: Submit signed transactions to Horizon
+- **Submission**: Submit signed transactions to Horizon after a network guard: the group signature must verify for the configured passphrase, an optional caller-supplied `network_passphrase` must match, and the Horizon root must report the same network. Otherwise the request fails with `NETWORK_MISMATCH` (HTTP 409)
 - **Verification**: Verify transaction signatures
 
 ### 5. HTTP API (`/api/`)
@@ -124,6 +124,30 @@ RESTful API for treasury operations:
 | `/api/v1/treasury/sign` | POST | Sign transaction with TSS |
 | `/api/v1/treasury/submit` | POST | Submit signed transaction |
 | `/api/v1/public-key` | GET | Get aggregated public key |
+
+#### Participant authentication
+
+The ceremony message routes (`/ceremony/{keygen,signing}/{commit,reveal}`) only accept messages from the configured participant set (`--participants-file`). Each body is a signed envelope:
+
+```json
+{
+  "session_id": "…",
+  "sender_id": "party_b",
+  "timestamp": 1760000000,
+  "payload": { "…": "…" },
+  "signature": "<base64 ed25519 signature>"
+}
+```
+
+The signature covers `SHA-256("stellaryield/mpc-node-message/v1\n" + route + "\n" + session_id + "\n" + sender_id + "\n" + timestamp + "\n" + payload)`; use `api.SignParticipantMessage` to produce it. Unknown senders and revoked senders get `403` (`UNKNOWN_PARTICIPANT` / `PARTICIPANT_REVOKED`). Bad signatures, including a message replayed on a different route, get `401 INVALID_SIGNATURE`. Timestamps more than 5 minutes from the node clock get `401 STALE_MESSAGE`. If no participant set is configured, these routes fail closed with `503`.
+
+```json
+[
+  { "id": "party_a", "public_key": "GA…" },
+  { "id": "party_b", "public_key": "GB…" },
+  { "id": "party_c", "public_key": "GC…", "revoked": true }
+]
+```
 
 ## 🔒 Security Model
 
@@ -191,7 +215,8 @@ go build -o mpc_node ./cmd/node
   --total-parties 3 \
   --api-port 8081 \
   --storage memory \
-  --stellar-network "Stellar Test Network ; September 2015" \
+  --stellar-network "Test SDF Network ; September 2015" \
+  --participants-file ./participants.json \
   --stellar-horizon "https://horizon-testnet.stellar.org"
 
 # Run Node 2 (Party B) - in another terminal
@@ -250,7 +275,8 @@ curl -X POST http://localhost:8081/api/v1/treasury/sign \
 curl -X POST http://localhost:8081/api/v1/treasury/submit \
   -H "Content-Type: application/json" \
   -d '{
-    "signed_transaction_xdr": "AAAA..."
+    "signed_transaction_xdr": "AAAA...",
+    "network_passphrase": "Test SDF Network ; September 2015"
   }'
 ```
 
@@ -266,7 +292,10 @@ curl -X POST http://localhost:8081/api/v1/treasury/submit \
 | `--api-port` | HTTP API port | 8080 |
 | `--storage` | Storage type | memory |
 | `--mongo-uri` | MongoDB connection string | |
-| `--encryption-key` | AES-256 key (hex) | auto-generated |
+| `--encryption-key-file` | File containing the hex AES-256 key share encryption key | |
+| `--encryption-key` | AES-256 key (hex); prefer the key file or `MPC_KEYSHARE_ENCRYPTION_KEY` | |
+| `--storage-dir` | Directory for `encrypted_file` storage | `./data/key_shares` |
+| `--participants-file` | JSON participant set for ceremony message authentication | (ceremony messages rejected) |
 | `--stellar-network` | Stellar network passphrase | Testnet |
 | `--stellar-horizon` | Horizon API URL | Testnet |
 | `--hsm-provider` | HSM provider | none |
@@ -284,8 +313,17 @@ curl -X POST http://localhost:8081/api/v1/treasury/submit \
 --mongo-uri "mongodb://user:pass@localhost:27017" \
 --mongo-db "mpc_treasury" \
 --mongo-collection "key_shares" \
---encryption-key "YOUR_64_HEX_CHAR_KEY"
+--encryption-key-file /run/secrets/mpc_keyshare_key
 ```
+
+**Encrypted file storage:**
+```bash
+export MPC_KEYSHARE_ENCRYPTION_KEY="$(cat /run/secrets/mpc_keyshare_key)"
+--storage encrypted_file \
+--storage-dir /var/lib/mpc/key_shares
+```
+
+Persistent backends (`mongodb`, `encrypted_file`) need an externally provided 32-byte key. The node checks `--encryption-key-file`, then `MPC_KEYSHARE_ENCRYPTION_KEY`, then `--encryption-key`. If none is set it refuses to start; it never generates or logs a key. Shares sealed with one key cannot be read with another, so back up the key with the same care as the shares.
 
 **HSM Integration:**
 ```bash
@@ -405,7 +443,7 @@ spec:
         - --total-parties=3
         - --storage=mongodb
         env:
-        - name: ENCRYPTION_KEY
+        - name: MPC_KEYSHARE_ENCRYPTION_KEY
           valueFrom:
             secretKeyRef:
               name: mpc-secrets

@@ -17,7 +17,13 @@ import { BackendUnavailable } from '../../components/BackendUnavailable';
 
 
 import {
+  bpsToPercent,
+  formatApy,
+  formatComparisonCurrency,
+} from '../../features/strategies/strategyComparisonMath';
+import {
   downloadStrategyComparisonExport,
+  isComparableStrategy,
   type StrategyComparisonExportFormat,
   type StrategyYield,
 } from './strategyComparisonExport';
@@ -27,12 +33,6 @@ const STRATEGY_THEMES: Record<string, { bg: string; text: string; shadow: string
   Soroswap: { bg: 'from-cyan-500/20 to-blue-600/20', text: 'text-cyan-400', shadow: 'shadow-cyan-500/20' },
   DeFindex: { bg: 'from-amber-500/20 to-orange-600/20', text: 'text-amber-400', shadow: 'shadow-amber-500/20' },
 };
-
-function formatCurrency(value: number): string {
-  if (value >= 1_000_000) return `$${(value / 1_000_000).toFixed(2)}M`;
-  if (value >= 1_000) return `$${(value / 1_000).toFixed(1)}K`;
-  return `$${value.toLocaleString()}`;
-}
 
 function getErrorMessage(error: unknown): string {
   return error instanceof Error && error.message
@@ -52,12 +52,16 @@ export default function StrategyComparison() {
       setLoading(true);
       const res = await fetch(apiUrl('/api/yields'));
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const yields = await res.json();
-      
-      // Filter for the 3 distinct strategies we augmented
-      const strategies = yields.filter((y: StrategyYield) => 
-        ['Blend', 'Soroswap', 'DeFindex'].includes(y.protocolName)
-      );
+      const yields: unknown = await res.json();
+      // A payload that is not a list is a failed fetch: keep the strategies
+      // already on screen untouched and show the retry state.
+      if (!Array.isArray(yields)) throw new Error('Malformed strategy payload');
+
+      // Validate untrusted fields at the boundary (#1922): finite numbers,
+      // non-negative USD amounts, a 0-100 risk score and 0-10,000 bps fees.
+      // Malformed entries are skipped; nothing is computed from them.
+      const strategies = yields.filter(isComparableStrategy);
+
       setData(strategies);
     } catch (err: unknown) {
       setError(getErrorMessage(err));
@@ -96,14 +100,11 @@ export default function StrategyComparison() {
         <header className="mb-6">
           <h2 className="text-4xl font-extrabold tracking-tight mb-2">Strategy Comparison</h2>
         </header>
-        <div className="glass-panel p-12 text-center border border-red-500/30 bg-red-500/5">
-          <AlertTriangle size={32} className="text-red-500 mx-auto mb-4" />
-          <h3 className="text-xl font-bold mb-2">Failed to Load Strategy Data</h3>
-          <p className="text-gray-400 max-w-md mx-auto mb-6">{error}</p>
-          <button onClick={fetchStrategies} className="btn-primary inline-flex items-center gap-2">
-            <RefreshCw size={16} /> Retry Fetch
-          </button>
-        </div>
+        <BackendUnavailable 
+          featureName="Strategy Comparison"
+          reason="The backend service is currently disconnected or unavailable. Please try again later."
+          onRetry={fetchStrategies}
+        />
       </div>
     );
   }
@@ -225,7 +226,7 @@ export default function StrategyComparison() {
                     </div>
                     <div className="flex items-baseline gap-2">
                       <span className="text-4xl font-black text-white">
-                        {strategy.totalApy.toFixed(2)}<span className="text-2xl text-emerald-400">%</span>
+                        {formatApy(strategy.totalApy)}<span className="text-2xl text-emerald-400">%</span>
                       </span>
                     </div>
                   </div>
@@ -264,7 +265,7 @@ export default function StrategyComparison() {
                           Liquidity Check
                         </span>
                         <span className="text-white font-bold text-lg">
-                          {formatCurrency(strategy.liquidityUsd || strategy.tvl)}
+                          {formatComparisonCurrency(strategy.liquidityUsd || strategy.tvl)}
                         </span>
                       </div>
                     </div>
@@ -280,13 +281,13 @@ export default function StrategyComparison() {
                       <div className="flex justify-between items-center">
                         <span className="text-sm text-gray-300">Management</span>
                         <span className="text-sm font-bold text-white bg-white/10 px-2 py-0.5 rounded-md flex items-center gap-1">
-                          {((strategy.managementFeeBps || 0) / 100).toFixed(2)}<Percent size={10} className="text-gray-400"/>
+                          {bpsToPercent(strategy.managementFeeBps ?? 0).toFixed(2)}<Percent size={10} className="text-gray-400"/>
                         </span>
                       </div>
                       <div className="flex justify-between items-center">
                         <span className="text-sm text-gray-300">Performance</span>
                         <span className="text-sm font-bold text-white bg-white/10 px-2 py-0.5 rounded-md flex items-center gap-1">
-                          {((strategy.performanceFeeBps || 0) / 100).toFixed(2)}<Percent size={10} className="text-gray-400"/>
+                          {bpsToPercent(strategy.performanceFeeBps ?? 0).toFixed(2)}<Percent size={10} className="text-gray-400"/>
                         </span>
                       </div>
                     </div>

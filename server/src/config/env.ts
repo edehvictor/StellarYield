@@ -89,6 +89,21 @@ export function validateServerEnv(env: Env = process.env): EnvValidationResult {
     warnings.push("STELLAR_HORIZON_URL is not set; fee and network services will use default Horizon URLs.");
   }
 
+  // VITE_API_BASE_URL / VITE_API_URL are frontend build-time vars that point
+  // the client at the backend API. When both are absent the frontend falls back
+  // to http://localhost:3001, which is unreachable in a deployed environment.
+  const viteApiUrl = env.VITE_API_BASE_URL || env.VITE_API_URL;
+  if (!hasValue(viteApiUrl)) {
+    warnings.push(
+      "Neither VITE_API_BASE_URL nor VITE_API_URL is set; " +
+        "the frontend will fall back to http://localhost:3001 and cannot reach the backend in a deployed environment.",
+    );
+  } else if (isProduction(env) && !/^https:\/\//i.test(viteApiUrl!.trim())) {
+    warnings.push(
+      `VITE_API_BASE_URL should use https:// in production (currently "${viteApiUrl!.trim()}").`,
+    );
+  }
+
   return { errors, warnings };
 }
 

@@ -13,3 +13,4 @@ storage_helpers = { path = "../storage_helpers" }
 
 [dev-dependencies]
 soroban-sdk = { version = "22.0.0", features = ["testutils"] }
+proptest = "1.4.0"
