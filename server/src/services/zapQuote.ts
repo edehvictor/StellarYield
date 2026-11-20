@@ -464,7 +464,9 @@ export type ZapQuoteVerificationErrorCode =
   | "CONFIG_DRIFT"
   | "ROUTE_MISMATCH"
   | "UNSUPPORTED_ASSET"
-  | "SLIPPAGE_EXCEEDED";
+  | "SLIPPAGE_EXCEEDED"
+  | "ASSUMPTION_DRIFT"
+  | "INVALID_FINGERPRINT";
 
 /** Result of verifying a previously issued zap quote. */
 export type ZapQuoteVerification =
@@ -481,6 +483,7 @@ export const RECOVERABLE_VERIFY_ERROR_CODES: ReadonlySet<ZapQuoteVerificationErr
     "CONFIG_DRIFT",
     "ROUTE_MISMATCH",
     "UNSUPPORTED_ASSET",
+    "ASSUMPTION_DRIFT",
   ]);
 
 /**
@@ -567,35 +570,64 @@ export function verifyZapQuote(quote: unknown): ZapQuoteVerification {
   }
 
   // Check cryptographic assumption fingerprint (#1366)
-  if (quote.assumptionFingerprint) {
-    const assumptionsToCheck: QuoteAssumptions = quote.assumptions || {
-      inputTokenContract: quote.inputTokenContract || (quote.path?.[0]?.contractId ?? ""),
-      vaultTokenContract: quote.vaultTokenContract || (quote.path?.[quote.path.length - 1]?.contractId ?? ""),
-      amountInStroops: quote.amountInStroops || "",
-      expectedAmountOutStroops: quote.expectedAmountOutStroops || "",
-      minAmountOutStroops: quote.minAmountOutStroops || quote.amountOutAfterSlippage || "",
-      slippageTolerancePct: typeof quote.slippageApplied === "number" ? quote.slippageApplied * 100 : 0,
-      routeHash: quote.routeHash || currentRouteHash,
-      path: quote.path.map((h: any) => (typeof h === "string" ? h : h.contractId)),
-      source: quote.source || "router_simulation",
-      assetConfigVersion: quote.assetConfigVersion || currentVersion,
-      quotedAt: quote.quotedAt || "",
-      expiresAt: quote.expiresAt || "",
-      protocol: quote.protocol,
-      reserveSafe: quote.reserveCheck ? quote.reserveCheck.safe : undefined,
-    };
+  if (typeof q.assumptionFingerprint === "string" && q.assumptionFingerprint) {
+    const rawPath = Array.isArray(q.path) ? (q.path as { contractId: string }[]) : [];
+
+    const assumptionsToCheck: QuoteAssumptions =
+      q.assumptions != null && typeof q.assumptions === "object"
+        ? (q.assumptions as QuoteAssumptions)
+        : {
+            inputTokenContract:
+              typeof q.inputTokenContract === "string"
+                ? q.inputTokenContract
+                : (rawPath[0]?.contractId ?? ""),
+            vaultTokenContract:
+              typeof q.vaultTokenContract === "string"
+                ? q.vaultTokenContract
+                : (rawPath[rawPath.length - 1]?.contractId ?? ""),
+            amountInStroops: typeof q.amountInStroops === "string" ? q.amountInStroops : "",
+            expectedAmountOutStroops:
+              typeof q.expectedAmountOutStroops === "string" ? q.expectedAmountOutStroops : "",
+            minAmountOutStroops:
+              typeof q.minAmountOutStroops === "string"
+                ? q.minAmountOutStroops
+                : typeof q.amountOutAfterSlippage === "string"
+                  ? q.amountOutAfterSlippage
+                  : "",
+            slippageTolerancePct:
+              typeof q.slippageApplied === "number" ? q.slippageApplied * 100 : 0,
+            routeHash: typeof q.routeHash === "string" ? q.routeHash : currentRouteHash,
+            path: rawPath.map((h) => (typeof h === "string" ? h : h.contractId)),
+            source:
+              typeof q.source === "string"
+                ? (q.source as QuoteAssumptions["source"])
+                : "router_simulation",
+            assetConfigVersion:
+              typeof q.assetConfigVersion === "string"
+                ? q.assetConfigVersion
+                : currentVersion,
+            quotedAt: typeof q.quotedAt === "string" ? q.quotedAt : "",
+            expiresAt: typeof q.expiresAt === "string" ? q.expiresAt : "",
+            protocol: typeof q.protocol === "string" ? q.protocol : undefined,
+            reserveSafe:
+              q.reserveCheck != null &&
+              typeof q.reserveCheck === "object" &&
+              "safe" in q.reserveCheck
+                ? Boolean((q.reserveCheck as { safe: unknown }).safe)
+                : undefined,
+          };
 
     const fpResult = verifyQuoteAssumptionFingerprint(
       assumptionsToCheck,
-      quote.assumptionFingerprint,
-      { nowMs: now },
+      q.assumptionFingerprint,
+      { nowMs: Date.now() },
     );
 
     if (!fpResult.valid) {
       return {
         valid: false,
         reason: fpResult.message,
-        errorCode: fpResult.code,
+        errorCode: fpResult.code as ZapQuoteVerificationErrorCode,
       };
     }
   }
