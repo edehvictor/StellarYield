@@ -16,12 +16,30 @@
  *
  * Data is cached for 60 seconds to avoid expensive on-chain queries
  * on every page load.
+ *
+ * Failure behaviour (#1917): a snapshot is validated before it replaces the
+ * cache. If aggregation or validation fails, the previous known-good snapshot
+ * is served unchanged with `status: "degraded"` and a privacy-safe diagnostic
+ * naming the failed stage. Responses never echo raw error text, RPC URLs,
+ * wallets, or stack traces.
+ *
+ * Stale configuration (#1910): every snapshot is stamped with an immutable
+ * fingerprint of the aggregation configuration. A cached snapshot is only
+ * reused while that fingerprint still matches the active configuration; when it
+ * does not, the snapshot is rejected and re-aggregated instead of being served
+ * as if it were current. On failure the last known-good snapshot is preserved
+ * but reported as `degraded` with a `CONFIG_SNAPSHOT_STALE` diagnostic.
  */
 import { Router, type Request, type Response } from "express";
 import {
-  failoverIncidentHistoryService,
-  FailoverIncidentValidationError,
-} from "../services/failoverIncidentHistoryService";
+    buildTransparencyDiagnostic,
+    redactDiagnosticText,
+    type TransparencyDiagnostic,
+} from "../../../shared/types/transparencyDiagnostic";
+import {
+    computeConfigFingerprint,
+    deepFreezeConfig,
+} from "../../../shared/types/configFingerprint";
 
 const transparencyRouter = Router();
 
@@ -284,7 +302,7 @@ function buildDefaultSeededInput(): { history: TransparencyHistoryPoint[]; total
     const baseRevenue = 12_400; // USDC equivalent
     const baseBurned = 3_200;   // YIELD tokens
 
-    for (let i = 29; i >= 0; i--) {
+    for (let i = config.historyDays - 1; i >= 0; i--) {
         const d = new Date();
         d.setDate(d.getDate() - i);
         const dateStr = d.toISOString().split("T")[0];
@@ -332,9 +350,8 @@ async function aggregateTransparencyData(options?: { forceRefresh?: boolean }): 
         ...summary,
         history: summary.history.map((point) => ({ ...point })),
         cachedAt: Date.now(),
+        configFingerprint: getTransparencyConfigFingerprint(),
     };
-
-    return cache;
 }
 
 // ── Routes ────────────────────────────────────────────────────────────────
@@ -343,7 +360,7 @@ async function aggregateTransparencyData(options?: { forceRefresh?: boolean }): 
  * GET /api/transparency/summary
  *
  * Returns protocol revenue and token burn metrics.
- * Cached for 60 seconds.
+ * Cached for 60 seconds and re-aggregated whenever the configuration changes.
  */
 const handleSummary = async (_req: Request, res: Response): Promise<void> => {
     try {
@@ -481,6 +498,40 @@ transparencyRouter.post(
     res.json(incident);
   },
 );
+
+/** @internal Test hook: replace the aggregator used by the route. */
+export function __setTransparencyAggregatorForTesting(
+    aggregator: (() => Promise<TransparencyAggregation>) | null,
+): void {
+    aggregatorOverride = aggregator;
+}
+
+/** @internal Test hook: replace the active configuration snapshot. */
+export function __setTransparencyConfigForTesting(
+    config: Partial<TransparencyConfig> | null,
+): void {
+    configOverride = config
+        ? deepFreezeConfig({
+              ...getTransparencyConfig(),
+              ...config,
+          })
+        : null;
+}
+
+/** @internal Test hook: force the next read to bypass the fresh cache. */
+export function __expireTransparencyCacheForTesting(): void {
+    if (cache) {
+        cache = { ...cache, cachedAt: 0 };
+    }
+}
+
+/** @internal Test hook: restore the module to its initial state. */
+export function __resetTransparencyStateForTesting(): void {
+    cache = null;
+    lastKnownGood = null;
+    aggregatorOverride = null;
+    configOverride = null;
+}
 
 export { aggregateTransparencyData };
 export default transparencyRouter;
