@@ -91,3 +91,4 @@ If a simulation fails during validation (stale fingerprint, malformed snapshot, 
 - `ApiClient.prototype.setSimulationConfig(config)`: Sets client simulation snapshot.
 - `ApiClient.prototype.getSimulationConfigFingerprint()`: Returns current fingerprint.
 - `ApiClient.prototype.simulateDeposit(params)`: Executes deposit simulation with fingerprint validation and retry support.
+
