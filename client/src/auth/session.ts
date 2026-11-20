@@ -14,6 +14,7 @@ import { getApiBaseUrl } from "../lib/api";
 
 const STORAGE_KEY = "stellar-yield.wallet-session";
 const BROADCAST_CHANNEL_NAME = "stellar-yield-wallet-session";
+const PENDING_OPERATION_KEY = "stellar-yield.wallet-session.pending";
 
 export const SESSION_TTL_MS = 24 * 60 * 60 * 1000;
 export const STALE_THRESHOLD_MS = 30 * 60 * 1000;
@@ -74,6 +75,49 @@ interface VerifyResponse {
   acceptedSignerTypes: string[];
 }
 
+/**
+ * Describes an in-flight wallet lifecycle operation that may have been
+ * interrupted (e.g. tab closed mid-connect). Persisted so that a subsequent
+ * load can either resume or roll back predictably instead of leaving a
+ * half-written session behind.
+ */
+export interface PendingWalletOperation {
+  operationId: string;
+  kind: "connect" | "recover";
+  providerId: WalletProviderId;
+  startedAt: string;
+  /** Snapshot of the session that existed before this operation began. */
+  previousSession: WalletSession | null;
+}
+
+export function generateOperationId(): string {
+  return `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function loadPendingOperation(): PendingWalletOperation | null {
+  try {
+    const raw = window.localStorage.getItem(PENDING_OPERATION_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as PendingWalletOperation;
+    if (!parsed || typeof parsed !== "object" || !parsed.operationId) {
+      window.localStorage.removeItem(PENDING_OPERATION_KEY);
+      return null;
+    }
+    return parsed;
+  } catch {
+    window.localStorage.removeItem(PENDING_OPERATION_KEY);
+    return null;
+  }
+}
+
+function savePendingOperation(operation: PendingWalletOperation) {
+  window.localStorage.setItem(PENDING_OPERATION_KEY, JSON.stringify(operation));
+}
+
+export function clearPendingOperation() {
+  window.localStorage.removeItem(PENDING_OPERATION_KEY);
+}
+
 const providerLabels: Record<WalletProviderId, string> = {
   freighter: "Freighter",
   xbull: "xBull",
@@ -116,6 +160,48 @@ export interface SessionRecoveryResult {
 }
 
 /**
+ * Resolve any pending wallet operation left behind by a previous, interrupted
+ * attempt.  If a pending operation exists we roll back to the snapshot it
+ * captured so that partial writes cannot corrupt stored state.  Returns the
+ * session that should be treated as current after reconciliation.
+ */
+export function reconcilePendingOperation(): WalletSession | null {
+  const pending = loadPendingOperation();
+  if (!pending) {
+    return loadStoredSession();
+  }
+
+  try {
+    if (pending.previousSession) {
+      saveSession(pending.previousSession);
+    } else {
+      window.localStorage.removeItem(STORAGE_KEY);
+    }
+  } catch (error) {
+    console.error("Failed to roll back interrupted wallet operation", error);
+  } finally {
+    clearPendingOperation();
+  }
+
+  return loadStoredSession();
+}
+
+export function beginOperation(
+  kind: PendingWalletOperation["kind"],
+  providerId: WalletProviderId,
+): PendingWalletOperation {
+  const operation: PendingWalletOperation = {
+    operationId: generateOperationId(),
+    kind,
+    providerId,
+    startedAt: new Date().toISOString(),
+    previousSession: loadStoredSession(),
+  };
+  savePendingOperation(operation);
+  return operation;
+}
+
+/**
  * Attempt to recover a stored wallet session after a page reload.
  *
  * Recovery flow:
@@ -132,7 +218,7 @@ export interface SessionRecoveryResult {
  * can choose whether to prompt the user to reconnect.
  */
 export async function recoverSession(): Promise<SessionRecoveryResult> {
-  const session = loadStoredSession();
+  const session = reconcilePendingOperation();
 
   if (!session) {
     return { status: "no_session", session: null };
@@ -201,7 +287,15 @@ export function clearStoredSession() {
   broadcastSessionEvent({ type: "disconnect", payload: null });
 }
 
-function saveSession(session: WalletSession) {
+export function clearPendingWalletOperation() {
+  clearPendingOperation();
+}
+
+export function getPendingWalletOperation(): PendingWalletOperation | null {
+  return loadPendingOperation();
+}
+
+export function saveSession(session: WalletSession) {
   window.localStorage.setItem(STORAGE_KEY, JSON.stringify(session));
   broadcastSessionEvent({ type: "session-update", payload: session });
 }
@@ -304,12 +398,14 @@ export async function connectWalletSession(
 ): Promise<WalletSession> {
   const providerId = options.providerId ?? "freighter";
   const origin = createSessionOrigin();
+  const operation = beginOperation("connect", providerId);
 
   // ── Extension / browser wallet providers ───────────────────────────
   const EXTENSION_PROVIDERS: ExtensionWalletProviderId[] = ["freighter", "xbull", "albedo"];
   if ((EXTENSION_PROVIDERS as WalletProviderId[]).includes(providerId)) {
     const adapter = getAdapter(providerId as ExtensionWalletProviderId);
     if (!adapter) {
+      clearPendingOperation();
       throw new Error(`No adapter found for wallet provider: ${providerId}`);
     }
 
@@ -320,13 +416,20 @@ export async function connectWalletSession(
       providerAvailable = false;
     }
     if (!providerAvailable) {
+      clearPendingOperation();
       throw new Error(
         `${getProviderLabel(providerId)} extension is not available. ` +
         `Install it or check if it was disconnected from another tab.`,
       );
     }
 
-    const walletAddress = await adapter.getPublicKey();
+    let walletAddress: string;
+    try {
+      walletAddress = await adapter.getPublicKey();
+    } catch (error) {
+      clearPendingOperation();
+      throw error;
+    }
     const session: WalletSession = {
       walletAddress,
       walletAddressType: "account",
@@ -340,15 +443,33 @@ export async function connectWalletSession(
       origin,
       providerAvailable: true,
     };
-    saveSession(session);
+    try {
+      saveSession(session);
+    } catch (error) {
+      clearPendingOperation();
+      throw error;
+    }
+    clearPendingOperation();
     return session;
   }
 
-  const loginHint = ensureIdentifier(providerId, options.identifier);
+  let loginHint: string;
+  try {
+    loginHint = ensureIdentifier(providerId, options.identifier);
+  } catch (error) {
+    clearPendingOperation();
+    throw error;
+  }
   const sessionKey = Keypair.random();
-  const walletAddress = await deriveSmartWalletAddress(
-    `${providerId}:${loginHint}`,
-  );
+  let walletAddress: string;
+  try {
+    walletAddress = await deriveSmartWalletAddress(
+      `${providerId}:${loginHint}`,
+    );
+  } catch (error) {
+    clearPendingOperation();
+    throw error;
+  }
 
   const session: WalletSession = {
     walletAddress,
@@ -366,10 +487,22 @@ export async function connectWalletSession(
     providerAvailable: true,
   };
 
-  session.verificationStatus = await verifySmartWalletSession(session);
+  try {
+    session.verificationStatus = await verifySmartWalletSession(session);
+  } catch (error) {
+    // Preserve any pre-existing session rather than persisting a partial one.
+    clearPendingOperation();
+    throw error;
+  }
   if (session.verificationStatus === "verified") {
     session.lastVerifiedAt = new Date().toISOString();
   }
-  saveSession(session);
+  try {
+    saveSession(session);
+  } catch (error) {
+    clearPendingOperation();
+    throw error;
+  }
+  clearPendingOperation();
   return session;
 }
