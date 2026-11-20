@@ -8,6 +8,8 @@ This document audits current storage usage and defines lifecycle policy for cont
 - `contracts/stablecoin_manager/src/storage.rs`
 - `contracts/ve_tokenomics/src/storage.rs`
 - `contracts/strategies/delta_neutral/src/storage.rs`
+- `contracts/isolated_lending/src/lib.rs`
+- `contracts/clmm_core/src/lib.rs`
 
 ## Lifecycle Rules
 
@@ -59,6 +61,41 @@ Notes:
 
 Notes:
 - `Position(user)` should be bumped on open/close/rebalance/funding operations to avoid expiry for low-frequency users.
+
+### `isolated_lending`
+
+| Key | Class | Intended lifetime | TTL extension needed |
+|---|---|---|---|
+| `Initialized`, `Admin`, `CollateralToken`, `DebtToken`, `CollateralFactorBps`, `ReserveBps`, `CloseFactorBps`, `CollateralPriceBps`, `InterestRatePerLedger`, `ProtocolFeeBps`, `Oracle`, `OraclePolicy`, `BorrowIndex`, `LastAccrualLedger`, `TotalSupplied`, `TotalDebt`, `ProtocolFees`, `PendingWithdrawals`, `BadDebt` | instance | contract lifetime | No |
+| `Supply(user)`, `Collateral(user)`, `Debt(user)`, `DebtIndex(user)`, `PendingWithdrawal(user)` | persistent | while the user has a position or queued withdrawal | Yes (recommended) |
+| `Liquidation(borrower, liquidation_id)` | persistent | operation receipt; must outlive retries | Yes (recommended) |
+
+Notes:
+- Configuration snapshots and fingerprints (#1752) are derived from instance
+  configuration; they add no storage key and need no TTL policy.
+- Per-user persistent entries should be bumped on every supply, borrow, repay,
+  withdraw and liquidation touch so inactive positions do not expire.
+- `Liquidation(borrower, liquidation_id)` ids are consumed only by successful
+  liquidations; keep them long enough that a retried settlement is still
+  rejected.
+
+### `clmm_core`
+
+| Key | Class | Intended lifetime | TTL extension needed |
+|---|---|---|---|
+| `Initialized`, `Token0`, `Token1`, `Fee`, `TickSpacing`, `CurrentTick`, `SqrtPriceX96`, `Liquidity`, `FeeGrowthGlobal0X128`, `FeeGrowthGlobal1X128`, `NextPositionId` | instance | contract lifetime | No |
+| `Position(id)` | persistent | while the position holds liquidity | Yes (recommended) |
+| `Tick(tick)` | persistent | while any position references the tick | Yes (recommended) |
+| `Operation(operation_key)` | persistent | retry-protection receipt | Yes (implemented) |
+
+Notes:
+- `Operation(operation_key)` receipts (#1770) are written after a successful
+  mint, burn or collect and are explicitly extended with
+  `OPERATION_TTL_THRESHOLD = 17_280` and `OPERATION_TTL_EXTEND_TO = 518_400`
+  ledgers (~1 day remaining triggers a refresh to ~30 days at 5 second ledgers),
+  so a delayed retry is rejected instead of applied twice.
+- Receipts are per operation; state growth is bounded by the TTL, after which an
+  id is no longer recognized. Clients must not reuse ids for new operations.
 
 ## Adoption and Standardization
 
