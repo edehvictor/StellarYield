@@ -2,11 +2,17 @@ import request from "supertest";
 import { createApp } from "../app";
 import {
     aggregateTransparencyData,
+    assertValidHistoryPoint,
+    buildTransparencySummary,
     computeDeflationaryRatio,
     checkedAdd,
     checkedSum,
+    resetTransparencyCache,
     roundToTwoDecimals,
+    setTransparencyDataSource,
     TransparencyCalculationError,
+    TransparencyValidationError,
+    validateExternalHistory,
 } from "../routes/transparency";
 import { failoverIncidentHistoryService } from "../services/failoverIncidentHistoryService";
 
@@ -163,5 +169,178 @@ describe("failover incident history validation and retries", () => {
         expect(retried.body.id).toBe(created.body.id);
         expect(retried.body.durationMs).toBe(300_000);
         expect(failoverIncidentHistoryService.getHistory("blend")).toHaveLength(1);
+    });
+});
+
+describe("malformed external data hardening (#1913)", () => {
+    beforeEach(() => {
+        resetTransparencyCache();
+        failoverIncidentHistoryService.reset();
+    });
+
+    afterEach(() => {
+        resetTransparencyCache();
+        failoverIncidentHistoryService.reset();
+    });
+
+    it("validates untrusted external history and summary fields at the boundary without mutating inputs", () => {
+        const rawInput = {
+            history: [
+                { date: "2026-05-01", revenue: 12000.456, burned: 3200.129 },
+                { date: "2026-05-02", revenue: 8000, burned: 1800 },
+            ],
+            totalEmissions: 10000,
+        };
+        const snapshot = JSON.parse(JSON.stringify(rawInput));
+
+        const summary = buildTransparencySummary(rawInput);
+        expect(summary.totalRevenueLumens).toBe(20000.46);
+        expect(summary.totalBurnedTokens).toBe(5000.13);
+        expect(summary.deflationaryRatio).toBe(50);
+        expect(rawInput).toEqual(snapshot);
+
+        const malformedPayloads: unknown[] = [
+            null,
+            undefined,
+            "not-an-object",
+            [],
+            { history: [] },
+            { history: "not-an-array" },
+            { history: [null] },
+            { history: [{ date: "not-a-date", revenue: 100, burned: 50 }] },
+            { history: [{ date: "2026-02-30", revenue: 100, burned: 50 }] },
+            { history: [{ date: "2026-05-01", revenue: "100", burned: 50 }] },
+            { history: [{ date: "2026-05-01", revenue: 100, burned: null }] },
+            {
+                history: [{ date: "2026-05-01", revenue: 100, burned: 50 }],
+                totalEmissions: "300000",
+            },
+            {
+                history: [{ date: "2026-05-01", revenue: 100, burned: 50 }],
+                totalEmissions: -1,
+            },
+        ];
+
+        for (const payload of malformedPayloads) {
+            expect(() => buildTransparencySummary(payload)).toThrow(TransparencyValidationError);
+        }
+
+        expect(() => assertValidHistoryPoint(null as never)).toThrow(TransparencyValidationError);
+        expect(() => validateExternalHistory(null)).toThrow(TransparencyValidationError);
+        expect(() => checkedSum("not-an-array" as never)).toThrow(TransparencyValidationError);
+    });
+
+    it("preserves existing cached state and balances when an external data refresh fails validation", async () => {
+        const app = createApp();
+        setTransparencyDataSource(() => ({
+            history: [
+                { date: "2026-05-01", revenue: 15000, burned: 3000 },
+                { date: "2026-05-02", revenue: 25000, burned: 5000 },
+            ],
+            totalEmissions: 40000,
+        }));
+
+        const initial = await request(app).get("/api/transparency/summary");
+        expect(initial.status).toBe(200);
+        expect(initial.body.totalRevenueLumens).toBe(40000);
+        expect(initial.body.totalBurnedTokens).toBe(8000);
+        expect(initial.body.deflationaryRatio).toBe(20);
+
+        // Next upstream fetch returns malformed external data
+        setTransparencyDataSource(() => ({
+            history: [{ date: "invalid-date", revenue: "NaN", burned: -999 }],
+            totalEmissions: "bad",
+        }));
+
+        await expect(aggregateTransparencyData({ forceRefresh: true })).rejects.toThrow(
+            TransparencyValidationError,
+        );
+
+        // Route preserves the previously validated snapshot balances
+        const preserved = await request(app).get("/api/transparency/summary");
+        expect(preserved.status).toBe(200);
+        expect(preserved.body.totalRevenueLumens).toBe(40000);
+        expect(preserved.body.totalBurnedTokens).toBe(8000);
+        expect(preserved.body.deflationaryRatio).toBe(20);
+        expect(preserved.body.history).toHaveLength(2);
+    });
+
+    it("returns a typed failure when cold-start external data is malformed and recovers on retry", async () => {
+        const app = createApp();
+        setTransparencyDataSource(() => ({
+            history: [{ date: "2026-99-99", revenue: "corrupt", burned: 100 }],
+        }));
+
+        const failed = await request(app).get("/api/transparency/summary");
+        expect(failed.status).toBe(500);
+        expect(failed.body.code).toBe("MALFORMED_HISTORY_POINT");
+
+        // Safe retry after external source recovers
+        setTransparencyDataSource(() => ({
+            history: [{ date: "2026-05-03", revenue: 10000, burned: 2500 }],
+            totalEmissions: 10000,
+        }));
+
+        const recovered = await request(app).get("/api/transparency/summary");
+        expect(recovered.status).toBe(200);
+        expect(recovered.body.totalRevenueLumens).toBe(10000);
+        expect(recovered.body.totalBurnedTokens).toBe(2500);
+        expect(recovered.body.deflationaryRatio).toBe(25);
+    });
+
+    it("rejects malformed failover-history query parameters and request payloads without mutating incident state", async () => {
+        const app = createApp();
+
+        // Seed one valid incident
+        const created = await request(app).post("/api/transparency/failover-history").send({
+            protocolId: "blend",
+            protocolName: "Blend",
+            reasons: ["stale feed"],
+            startedAt: "2026-05-01T00:00:00.000Z",
+        });
+        expect(created.status).toBe(201);
+
+        // Malformed query parameter (array and whitespace)
+        const arrayQuery = await request(app).get(
+            "/api/transparency/failover-history?protocolId=blend&protocolId=soroswap",
+        );
+        expect(arrayQuery.status).toBe(400);
+        expect(arrayQuery.body.code).toBe("INVALID_QUERY_PARAMETER");
+
+        const blankQuery = await request(app).get(
+            "/api/transparency/failover-history?protocolId=%20%20",
+        );
+        expect(blankQuery.status).toBe(400);
+        expect(blankQuery.body.code).toBe("INVALID_QUERY_PARAMETER");
+
+        // Malformed POST bodies (non-object array, non-string fields, non-string reason elements)
+        const arrayBody = await request(app)
+            .post("/api/transparency/failover-history")
+            .send(["not-an-object"]);
+        expect(arrayBody.status).toBe(400);
+        expect(arrayBody.body.code).toBe("MALFORMED_INCIDENT_PAYLOAD");
+
+        const nonStringFields = await request(app)
+            .post("/api/transparency/failover-history")
+            .send({
+                protocolId: 123,
+                protocolName: { bad: true },
+                reasons: [456],
+            });
+        expect(nonStringFields.status).toBe(400);
+        expect(nonStringFields.body.code).toBe("MALFORMED_INCIDENT_PAYLOAD");
+
+        // Malformed resolve body
+        const badResolve = await request(app)
+            .post("/api/transparency/failover-history/blend/resolve")
+            .send({ recoveredAt: 12345 });
+        expect(badResolve.status).toBe(400);
+        expect(badResolve.body.code).toBe("MALFORMED_INCIDENT_PAYLOAD");
+
+        // State is untouched: still 1 open incident for blend
+        const history = await request(app).get("/api/transparency/failover-history?protocolId=blend");
+        expect(history.status).toBe(200);
+        expect(history.body.incidents).toHaveLength(1);
+        expect(history.body.incidents[0].resolved).toBe(false);
     });
 });

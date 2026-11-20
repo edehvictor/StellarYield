@@ -6,11 +6,15 @@ The transparency API exposes failover incidents through
 incident for a protocol with
 `POST /api/transparency/failover-history/:protocolId/resolve`.
 
-Record requests require a non-empty `protocolId`, `protocolName`, and at least
-one non-empty reason. Optional `startedAt` must be an ISO-8601 timestamp.
-Resolution accepts an optional ISO-8601 `recoveredAt`, which must not predate
-the incident start. Invalid input returns HTTP 400 and leaves the incident
-history unchanged, so the caller can correct and retry the request.
+Record requests require a JSON object body with a non-empty string
+`protocolId`, `protocolName`, and at least one non-empty string reason.
+Optional `startedAt` must be an ISO-8601 timestamp. Resolution accepts an
+optional JSON object body with an ISO-8601 `recoveredAt`, which must not
+predate the incident start. Optional `GET /api/transparency/failover-history?protocolId=<id>`
+requires `protocolId` to be a single non-empty string when provided. Invalid
+query parameters or payloads return HTTP 400 with a typed error `code`
+(`INVALID_QUERY_PARAMETER` or `MALFORMED_INCIDENT_PAYLOAD`) and leave the
+incident history unchanged, so the caller can correct and retry the request.
 
 For safe resolution retries after a lost response, send the same `recoveredAt`
 value each time. Repeating a completed resolution with that timestamp returns
