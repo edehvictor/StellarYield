@@ -29,6 +29,7 @@ jest.mock("../services/alertsService", () => ({
   evaluateAlerts: jest.fn(),
   getAlertPreferences: jest.fn(),
   setAlertPreferences: jest.fn(),
+  getAlertPreferencesVersion: jest.fn(() => 1),
   computeAlertFingerprint: jest.fn(),
   clearAlertOperationStore: jest.fn(),
   clearAlertPreferencesStore: jest.fn(),
@@ -226,6 +227,7 @@ describe("PUT /api/alerts/preferences", () => {
         quietHoursEnd: 6,
       },
       replayed: false,
+      version: 1,
     });
 
     const res = await request(app)
@@ -265,6 +267,7 @@ describe("PUT /api/alerts/preferences", () => {
         quietHoursEnd: 6,
       },
       replayed: true,
+      version: 1,
     });
 
     const res = await request(app)

@@ -485,6 +485,39 @@ paths:
         submission.
       tags:
         - Yields
+      parameters:
+        - name: protocolFeeBps
+          in: query
+          required: false
+          description: Protocol fee assumption in basis points for the net-yield figures. Must be between 0 and 10000; the engine clamps values above 3000. Non-numeric values are ignored.
+          schema:
+            type: number
+            minimum: 0
+            maximum: 10000
+        - name: vaultFeeBps
+          in: query
+          required: false
+          description: Vault fee assumption in basis points for the net-yield figures. Must be between 0 and 10000; the engine clamps values above 3000. Non-numeric values are ignored.
+          schema:
+            type: number
+            minimum: 0
+            maximum: 10000
+        - name: rebalanceCostBps
+          in: query
+          required: false
+          description: Rebalance cost assumption in basis points for the net-yield figures. Must be between 0 and 10000; the engine clamps values above 3000. Non-numeric values are ignored.
+          schema:
+            type: number
+            minimum: 0
+            maximum: 10000
+        - name: slippageBps
+          in: query
+          required: false
+          description: Slippage assumption in basis points for the net-yield figures. Must be between 0 and 10000; the engine clamps values above 3000. Non-numeric values are ignored.
+          schema:
+            type: number
+            minimum: 0
+            maximum: 10000
       responses:
         '200':
           description: Successful response with yields data
@@ -510,8 +543,10 @@ paths:
                 type: array
                 items:
                   $ref: '#/components/schemas/YieldData'
+        '400':
+          description: An assumption is outside 0-10000 bps (`INVALID_ASSUMPTION`); `details.fields` names each one. No yield data is read.
         '500':
-          description: Failed to fetch yield data
+          description: Failed to fetch yield data (`YIELD_FETCH_FAILED`, `recoverable` true). Safe to retry.
 
   /api/yields/history:
     get:
@@ -2288,14 +2323,16 @@ paths:
                 operationIdentity:
                   type: string
                   description: Unique operation identity token for safe retries
-                preferences:
-                  $ref: '#/components/schemas/AlertPreferences'
-              required:
-                - walletAddress
-                - vaultId
-                - condition
-                - thresholdValue
-                - email
+                 preferences:
+                   $ref: '#/components/schemas/AlertPreferences'
+                 context:
+                   $ref: '#/components/schemas/AlertPreferenceContextInput'
+               required:
+                 - walletAddress
+                 - vaultId
+                 - condition
+                 - thresholdValue
+                 - email
       responses:
         '200':
           description: Alert returned from previous identical submission (safe idempotent replay)
@@ -2317,7 +2354,9 @@ paths:
         '400':
           description: Invalid alert parameters
         '409':
-          description: Operation identity already used with different parameters
+          description: >-
+            `OPERATION_IDENTITY_CONFLICT` (identity reused with different parameters) or
+            `PREFERENCE_CONTEXT_CONFLICT` (initial preferences named another network/ledger)
           content:
             application/json:
               schema:
@@ -2336,10 +2375,21 @@ paths:
   /api/alerts/preferences:
     put:
       summary: Update alert preferences
-      description: Updates alert preferences for a wallet and vault with operation identity deduplication
+      description: >-
+        Updates alert preferences for a wallet and vault with operation identity
+        deduplication and optional optimistic concurrency. Send the version from a
+        previous read as `If-Match` (or `expectedVersion` in the body); the write
+        commits only if no other write happened since. A replayed operation
+        identity returns its original result and version.
       tags:
         - Alerts
       parameters:
+        - name: If-Match
+          in: header
+          required: false
+          description: Expected preference version, e.g. `"3"`. `"0"` means create only.
+          schema:
+            type: string
         - name: X-Operation-Identity
           in: header
           required: false
@@ -2350,6 +2400,24 @@ paths:
           required: false
           schema:
             type: string
+        - name: X-Alert-Network-Passphrase
+          in: header
+          required: false
+          description: Network passphrase this write was prepared on (hashed server-side).
+          schema:
+            type: string
+        - name: X-Alert-Network-Id
+          in: header
+          required: false
+          description: Pre-hashed network id, alternative to the passphrase header.
+          schema:
+            type: string
+            pattern: '^[0-9a-f]{64}$'
+        - name: X-Alert-Schema-Version
+          in: header
+          required: false
+          schema:
+            type: integer
       requestBody:
         required: true
         content:
@@ -2367,8 +2435,14 @@ paths:
                   type: string
                 operationIdentity:
                   type: string
-                preferences:
-                  $ref: '#/components/schemas/AlertPreferences'
+                 expectedVersion:
+                   type: integer
+                   minimum: 0
+                   description: Used when no If-Match header is sent.
+                 context:
+                   $ref: '#/components/schemas/AlertPreferenceContextInput'
+                 preferences:
+                   $ref: '#/components/schemas/AlertPreferences'
       responses:
         '200':
           description: Alert preferences updated or replayed
@@ -2376,14 +2450,34 @@ paths:
             X-Idempotent-Replayed:
               schema:
                 type: string
+            ETag:
+              description: The committed version, quoted.
+              schema:
+                type: string
+            X-Preferences-Version:
+              schema:
+                type: integer
+            X-Alert-Network-Id:
+              schema:
+                type: string
+            X-Alert-Schema-Version:
+              schema:
+                type: integer
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/AlertPreferences'
         '400':
-          description: Invalid preference parameters
+          description: >-
+            Invalid preference parameters, a malformed If-Match / expectedVersion
+            (`INVALID_EXPECTED_VERSION`), or a malformed context (`INVALID_ALERT_CONTEXT`)
         '409':
-          description: Operation identity conflict
+          description: >-
+            `OPERATION_IDENTITY_CONFLICT` (identity reused with different parameters),
+            `PREFERENCE_VERSION_CONFLICT` (another write committed first), or
+            `PREFERENCE_CONTEXT_CONFLICT` (network/ledger binding mismatch). The version
+            body carries `expectedVersion`, `currentVersion` and `preferences`; the context
+            body carries `reason`, `expectedContext` and `currentContext`. Nothing changed.
         '500':
           description: Failed to update alert preferences
 
@@ -2404,15 +2498,131 @@ paths:
           required: true
           schema:
             type: string
+        - name: X-Alert-Network-Passphrase
+          in: header
+          required: false
+          description: Network passphrase the read was prepared on.
+          schema:
+            type: string
+        - name: X-Alert-Network-Id
+          in: header
+          required: false
+          schema:
+            type: string
+            pattern: '^[0-9a-f]{64}$'
+        - name: X-Alert-Schema-Version
+          in: header
+          required: false
+          schema:
+            type: integer
       responses:
         '200':
           description: Alert preferences retrieved successfully
+          headers:
+            ETag:
+              description: Current preference version, quoted; send it back as If-Match.
+              schema:
+                type: string
+            X-Preferences-Version:
+              schema:
+                type: integer
+            X-Alert-Network-Id:
+              schema:
+                type: string
+            X-Alert-Schema-Version:
+              schema:
+                type: integer
+            X-Alert-Context-Vault:
+              schema:
+                type: string
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/AlertPreferences'
+        '400':
+          description: Malformed context (`INVALID_ALERT_CONTEXT`)
         '404':
           description: Alert preferences not found
+        '409':
+          description: `PREFERENCE_CONTEXT_CONFLICT` — record is bound to another network/ledger.
+
+  /api/alerts/{wallet}/preferences/{vaultId}/rebind:
+    post:
+      summary: Rebind alert preferences to the current network/ledger context
+      description: >-
+        Explicitly moves a preference record to this server's network and schema
+        version after a transition. Preferences are preserved; the version is
+        incremented. Repeating the call after it succeeded is a safe replay.
+      tags:
+        - Alerts
+      parameters:
+        - name: wallet
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: vaultId
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: If-Match
+          in: header
+          required: false
+          description: Current preference version (also accepted as `expectedVersion` in the body).
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - context
+              properties:
+                context:
+                  $ref: '#/components/schemas/AlertPreferenceContextInput'
+                expectedVersion:
+                  type: integer
+                  minimum: 0
+                reason:
+                  type: string
+      responses:
+        '200':
+          description: Rebound (or already rebound) preferences
+          headers:
+            X-Preferences-Version:
+              schema:
+                type: integer
+            X-Alert-Network-Id:
+              schema:
+                type: string
+            X-Alert-Schema-Version:
+              schema:
+                type: integer
+            X-Idempotent-Replayed:
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  preferences:
+                    $ref: '#/components/schemas/AlertPreferences'
+                  version:
+                    type: integer
+                  context:
+                    $ref: '#/components/schemas/AlertPreferenceContext'
+                  replayed:
+                    type: boolean
+        '400':
+          description: Malformed context or version (`INVALID_ALERT_CONTEXT` / `INVALID_EXPECTED_VERSION`)
+        '404':
+          description: No preferences found for this wallet and vault
+        '409':
+          description: `PREFERENCE_CONTEXT_CONFLICT` or `PREFERENCE_VERSION_CONFLICT`; nothing changed.
 
   /api/alerts/{wallet}:
     get:
@@ -6120,6 +6330,42 @@ Incident:
         createdAt:
           type: string
           format: date-time
+
+     AlertPreferenceContext:
+      type: object
+      description: Explicit network/ledger binding for an alert preference record (#1908).
+      required:
+        - networkId
+        - vaultId
+        - schemaVersion
+      properties:
+        networkId:
+          type: string
+          pattern: '^[0-9a-f]{64}$'
+          description: SHA-256 of the network passphrase.
+        vaultId:
+          type: string
+        schemaVersion:
+          type: integer
+          minimum: 1
+
+     AlertPreferenceContextInput:
+      type: object
+      description: Caller-supplied context; either networkId or networkPassphrase is required.
+      required:
+        - vaultId
+        - schemaVersion
+      properties:
+        networkId:
+          type: string
+          pattern: '^[0-9a-f]{64}$'
+        networkPassphrase:
+          type: string
+        vaultId:
+          type: string
+        schemaVersion:
+          type: integer
+          minimum: 1
 
      AlertPreferences:
       type: object
