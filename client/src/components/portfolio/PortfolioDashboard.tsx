@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, Suspense } from "react";
+import { useState, useEffect, useMemo, useRef, Suspense } from "react";
 import {
   Wallet,
   TrendingUp,
@@ -31,6 +31,12 @@ import {
   resolvePositionValuation,
   type ValuationPriceStatus,
 } from "../../../../shared/types/portfolioValuation";
+import {
+  computeValuationConfigFingerprint,
+  ValuationConfigError,
+  type PortfolioValuationConfig,
+  type ValuationConfigFingerprint,
+} from "../../../../shared/types/portfolioValuationConfig";
 import {
   describeValuationFailure,
   type PortfolioValuationFailure,
@@ -157,16 +163,40 @@ function formatDate(iso: string): string {
 
 // ── Component ───────────────────────────────────────────────────────────
 
+/** Context handed to `onRefresh` so the fetcher can bind its work to a config (#1862). */
+export interface PortfolioRefreshContext {
+  /** Fingerprint of the valuation configuration the refresh started under. */
+  configFingerprint: ValuationConfigFingerprint | null;
+}
+
 interface PortfolioDashboardProps {
   walletAddress: string;
   initialPositions?: VaultPosition[];
-  onRefresh?: () => Promise<VaultPosition[]>;
+  onRefresh?: (context: PortfolioRefreshContext) => Promise<VaultPosition[]>;
+  /**
+   * Configuration the positions are valued under (#1862). When it changes while a
+   * refresh is in flight, the refreshed positions are discarded and the last
+   * confirmed positions are kept.
+   */
+  valuationConfig?: PortfolioValuationConfig;
+}
+
+function fingerprintOrNull(
+  config: PortfolioValuationConfig | undefined,
+): ValuationConfigFingerprint | null {
+  if (!config) return null;
+  try {
+    return computeValuationConfigFingerprint(config);
+  } catch {
+    return null;
+  }
 }
 
 export default function PortfolioDashboard({
   walletAddress,
   initialPositions,
   onRefresh,
+  valuationConfig,
 }: PortfolioDashboardProps) {
   const [positions, setPositions] = useState<VaultPosition[]>(initialPositions ?? []);
   const [transactions, setTransactions] = useState<Transaction[]>([]);
@@ -174,12 +204,29 @@ export default function PortfolioDashboard({
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [refreshError, setRefreshError] = useState<PortfolioValuationFailure | null>(null);
 
+  // Immutable fingerprint of the active valuation configuration (#1862). The ref
+  // lets an in-flight refresh compare against the *latest* fingerprint once its
+  // await resolves; `positionsFingerprint` records what the shown data used.
+  const configFingerprint = useMemo(
+    () => fingerprintOrNull(valuationConfig),
+    [valuationConfig],
+  );
+  const latestConfigFingerprintRef = useRef(configFingerprint);
+  useEffect(() => {
+    latestConfigFingerprintRef.current = configFingerprint;
+  }, [configFingerprint]);
+  const [positionsFingerprint, setPositionsFingerprint] =
+    useState<ValuationConfigFingerprint | null>(configFingerprint);
+  const isValuationConfigStale =
+    !isLoading && positions.length > 0 && positionsFingerprint !== configFingerprint;
+
   // Fetch daily movement data
   const { movement } = useDailyMovement({ walletAddress, enabled: true });
 
   useEffect(() => {
     if (initialPositions) {
       setPositions(initialPositions);
+      setPositionsFingerprint(latestConfigFingerprintRef.current);
       setTransactions(MOCK_TRANSACTIONS);
       setIsLoading(false);
       return;
@@ -188,6 +235,7 @@ export default function PortfolioDashboard({
     // Simulate loading from chain / backend
     const timer = setTimeout(() => {
       setPositions(MOCK_POSITIONS);
+      setPositionsFingerprint(latestConfigFingerprintRef.current);
       setTransactions(MOCK_TRANSACTIONS);
       setIsLoading(false);
     }, 800);
@@ -251,10 +299,25 @@ export default function PortfolioDashboard({
 
   const handleRefresh = async () => {
     setIsRefreshing(true);
+    // Bind this refresh to the configuration it started under (#1862).
+    const startedWith = latestConfigFingerprintRef.current;
     try {
       if (onRefresh) {
-        const updated = await onRefresh();
+        const updated = await onRefresh({ configFingerprint: startedWith });
+        if (latestConfigFingerprintRef.current !== startedWith) {
+          // Settings changed mid-flight: the result describes a configuration
+          // that no longer applies. Reject it and keep the confirmed positions.
+          throw new ValuationConfigError(
+            "VALUATION_CONFIG_STALE",
+            "Valuation configuration changed while the refresh was in flight.",
+            {
+              expectedFingerprint: startedWith,
+              actualFingerprint: latestConfigFingerprintRef.current,
+            },
+          );
+        }
         setPositions(updated);
+        setPositionsFingerprint(startedWith);
         setRefreshError(null);
       } else {
         await new Promise((resolve) => setTimeout(resolve, 400));
@@ -333,6 +396,30 @@ export default function PortfolioDashboard({
               ✕
             </button>
           </div>
+        </div>
+      )}
+
+      {/* Positions were valued under an older configuration (#1862) */}
+      {isValuationConfigStale && !refreshError && (
+        <div
+          className="glass-panel p-4 border-l-4 border-amber-500 bg-amber-500/10 flex items-center justify-between"
+          role="status"
+          data-testid="valuation-config-stale-notice"
+        >
+          <div className="flex items-center gap-2 text-sm text-amber-200">
+            <AlertTriangle size={16} className="text-amber-400 shrink-0" />
+            <span>Valuation settings changed. Refresh to revalue your positions.</span>
+          </div>
+          {onRefresh && (
+            <button
+              onClick={() => void handleRefresh()}
+              disabled={isRefreshing}
+              className="text-xs bg-white/10 hover:bg-white/20 text-white px-2.5 py-1 rounded transition-colors disabled:opacity-50"
+              data-testid="revalue-portfolio-button"
+            >
+              Revalue
+            </button>
+          )}
         </div>
       )}
 
