@@ -289,23 +289,11 @@ async function signWithFreighter(xdr: string, networkPassphrase: string): Promis
   return signedXdr;
 }
 
-async function submitAndPoll(signedXdr: string, onPhase?: TxPhaseCallback): Promise<TxResult> {
-  onPhase?.("submitting");
-  const server = getServer();
-  const tx = StellarSdk.TransactionBuilder.fromXDR(signedXdr, NETWORK_PASSPHRASE);
-  const sendResponse = await server.sendTransaction(tx);
-
-  if (sendResponse.status === "ERROR") {
-    const parsed = parseContractError(
-      new Error(`Submission rejected: ${sendResponse.errorResult?.toXDR("base64") ?? "unknown"}`)
-    );
-    return {
-      success: false,
-      error: parsed.message,
-    };
-  }
-
-  const hash = sendResponse.hash;
+async function pollSubmittedHash(
+  server: StellarSdk.rpc.Server,
+  hash: string,
+  onPhase?: TxPhaseCallback,
+): Promise<TxResult> {
   const deadline = Date.now() + POLL_TIMEOUT_MS;
   let result = await server.getTransaction(hash);
 
@@ -330,12 +318,70 @@ async function submitAndPoll(signedXdr: string, onPhase?: TxPhaseCallback): Prom
   return { success: false, hash, error: "Transaction timed out" };
 }
 
+async function submitAndPoll(
+  signedXdr: string,
+  onPhase?: TxPhaseCallback,
+  onSubmitted?: (hash: string) => void,
+): Promise<TxResult> {
+  onPhase?.("submitting");
+  const server = getServer();
+  const tx = StellarSdk.TransactionBuilder.fromXDR(signedXdr, NETWORK_PASSPHRASE);
+  const sendResponse = await server.sendTransaction(tx);
+
+  if (sendResponse.status === "ERROR") {
+    const parsed = parseContractError(
+      new Error(`Submission rejected: ${sendResponse.errorResult?.toXDR("base64") ?? "unknown"}`)
+    );
+    return {
+      success: false,
+      error: parsed.message,
+    };
+  }
+
+  const hash = sendResponse.hash;
+  // Persist the hash before polling so an interrupted poll can be resumed
+  // without submitting the same governance action again (#1899).
+  onSubmitted?.(hash);
+  return pollSubmittedHash(server, hash, onPhase);
+}
+
 export async function submitSignedXdrAndPoll(
   signedXdr: string,
   onPhase?: TxPhaseCallback,
+  onSubmitted?: (hash: string) => void,
 ): Promise<TxResult> {
   try {
-    const result = await submitAndPoll(signedXdr, onPhase);
+    const result = await submitAndPoll(signedXdr, onPhase, onSubmitted);
+    onPhase?.(result.success ? "success" : "failure");
+    return result;
+  } catch (err) {
+    onPhase?.("failure");
+    const parsed = parseContractError(err);
+    return {
+      success: false,
+      error: parsed.message,
+    };
+  }
+}
+
+/**
+ * Resume a governance execution that already reached the network. Polls the
+ * saved hash only; never resubmits the transaction.
+ */
+export async function resumeSubmittedTransaction(
+  hash: string,
+  onPhase?: TxPhaseCallback,
+): Promise<TxResult> {
+  const normalized = hash.trim();
+  if (!/^[0-9a-f]{64}$/i.test(normalized)) {
+    return {
+      success: false,
+      error: "Saved transaction hash is invalid. Roll back the attempt only after checking the network.",
+    };
+  }
+
+  try {
+    const result = await pollSubmittedHash(getServer(), normalized, onPhase);
     onPhase?.(result.success ? "success" : "failure");
     return result;
   } catch (err) {

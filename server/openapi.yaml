@@ -472,6 +472,39 @@ paths:
       description: Returns current yield information for all available vaults with APY, TVL, and risk ratings
       tags:
         - Yields
+      parameters:
+        - name: protocolFeeBps
+          in: query
+          required: false
+          description: Protocol fee assumption in basis points for the net-yield figures. Must be between 0 and 10000; the engine clamps values above 3000. Non-numeric values are ignored.
+          schema:
+            type: number
+            minimum: 0
+            maximum: 10000
+        - name: vaultFeeBps
+          in: query
+          required: false
+          description: Vault fee assumption in basis points for the net-yield figures. Must be between 0 and 10000; the engine clamps values above 3000. Non-numeric values are ignored.
+          schema:
+            type: number
+            minimum: 0
+            maximum: 10000
+        - name: rebalanceCostBps
+          in: query
+          required: false
+          description: Rebalance cost assumption in basis points for the net-yield figures. Must be between 0 and 10000; the engine clamps values above 3000. Non-numeric values are ignored.
+          schema:
+            type: number
+            minimum: 0
+            maximum: 10000
+        - name: slippageBps
+          in: query
+          required: false
+          description: Slippage assumption in basis points for the net-yield figures. Must be between 0 and 10000; the engine clamps values above 3000. Non-numeric values are ignored.
+          schema:
+            type: number
+            minimum: 0
+            maximum: 10000
       responses:
         '200':
           description: Successful response with yields data
@@ -481,8 +514,10 @@ paths:
                 type: array
                 items:
                   $ref: '#/components/schemas/YieldData'
+        '400':
+          description: An assumption is outside 0-10000 bps (`INVALID_ASSUMPTION`); `details.fields` names each one. No yield data is read.
         '500':
-          description: Failed to fetch yield data
+          description: Failed to fetch yield data (`YIELD_FETCH_FAILED`, `recoverable` true). Safe to retry.
 
   /api/yields/history:
     get:
@@ -2071,6 +2106,23 @@ paths:
         '403':
           description: FORBIDDEN — admin access required
     post:
+      summary: Create APY alert
+      description: Creates a new APY alert for a wallet and vault with operation identity deduplication
+      tags:
+        - Alerts
+      parameters:
+        - name: X-Operation-Identity
+          in: header
+          required: false
+          schema:
+            type: string
+          description: Unique operation identity token for safe retries and duplicate prevention
+        - name: Idempotency-Key
+          in: header
+          required: false
+          schema:
+            type: string
+          description: Idempotency key header alternative
       summary: Submit a treasury withdrawal (cooldown enforced)
       description: >
         Creates a pending treasury withdrawal for a vault (admin only, #1343).
@@ -2239,6 +2291,11 @@ paths:
                   type: string
                   format: email
                   description: Email address for notifications
+                operationIdentity:
+                  type: string
+                  description: Unique operation identity token for safe retries
+                preferences:
+                  $ref: '#/components/schemas/AlertPreferences'
               required:
                 - walletAddress
                 - vaultId
@@ -2246,6 +2303,17 @@ paths:
                 - thresholdValue
                 - email
       responses:
+        '200':
+          description: Alert returned from previous identical submission (safe idempotent replay)
+          headers:
+            X-Idempotent-Replayed:
+              schema:
+                type: string
+              description: Set to 'true' if the response was replayed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Alert'
         '201':
           description: Alert created successfully
           content:
@@ -2254,10 +2322,137 @@ paths:
                 $ref: '#/components/schemas/Alert'
         '400':
           description: Invalid alert parameters
+        '409':
+          description: Operation identity already used with different parameters
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string
+                  code:
+                    type: string
+                    example: OPERATION_IDENTITY_CONFLICT
         '429':
           description: Maximum alerts per user exceeded
         '500':
           description: Failed to create alert
+
+  /api/alerts/preferences:
+    put:
+      summary: Update alert preferences
+      description: >-
+        Updates alert preferences for a wallet and vault with operation identity
+        deduplication and optional optimistic concurrency. Send the version from a
+        previous read as `If-Match` (or `expectedVersion` in the body); the write
+        commits only if no other write happened since. A replayed operation
+        identity returns its original result and version.
+      tags:
+        - Alerts
+      parameters:
+        - name: If-Match
+          in: header
+          required: false
+          description: Expected preference version, e.g. `"3"`. `"0"` means create only.
+          schema:
+            type: string
+        - name: X-Operation-Identity
+          in: header
+          required: false
+          schema:
+            type: string
+        - name: Idempotency-Key
+          in: header
+          required: false
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - walletAddress
+                - vaultId
+                - preferences
+              properties:
+                walletAddress:
+                  type: string
+                vaultId:
+                  type: string
+                operationIdentity:
+                  type: string
+                expectedVersion:
+                  type: integer
+                  minimum: 0
+                  description: Used when no If-Match header is sent.
+                preferences:
+                  $ref: '#/components/schemas/AlertPreferences'
+      responses:
+        '200':
+          description: Alert preferences updated or replayed
+          headers:
+            X-Idempotent-Replayed:
+              schema:
+                type: string
+            ETag:
+              description: The committed version, quoted.
+              schema:
+                type: string
+            X-Preferences-Version:
+              schema:
+                type: integer
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AlertPreferences'
+        '400':
+          description: Invalid preference parameters, or a malformed If-Match / expectedVersion (`INVALID_EXPECTED_VERSION`)
+        '409':
+          description: >-
+            `OPERATION_IDENTITY_CONFLICT` (identity reused with different parameters) or
+            `PREFERENCE_VERSION_CONFLICT` (another write committed first). The latter body
+            carries `expectedVersion`, `currentVersion` and the current `preferences`;
+            nothing was changed.
+        '500':
+          description: Failed to update alert preferences
+
+  /api/alerts/preferences/{wallet}/{vaultId}:
+    get:
+      summary: Get alert preferences
+      description: Returns alert preferences for a specific wallet and vault
+      tags:
+        - Alerts
+      parameters:
+        - name: wallet
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: vaultId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Alert preferences retrieved successfully
+          headers:
+            ETag:
+              description: Current preference version, quoted; send it back as If-Match.
+              schema:
+                type: string
+            X-Preferences-Version:
+              schema:
+                type: integer
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AlertPreferences'
+        '404':
+          description: Alert preferences not found
 
   /api/alerts/{wallet}:
     get:
@@ -5038,6 +5233,50 @@ components:
         severity:
           type: string
         type:
+  
+  GovernanceExecutionAttempt:
+    type: object
+    description: Durable record of a governance proposal execution attempt (#1899).
+    properties:
+      attemptId:
+        type: string
+        description: Server-generated attempt id.
+      proposalId:
+        type: string
+        description: The governance proposal the attempt belongs to.
+      txHash:
+        type: string
+        description: On-chain transaction hash once the attempt reached the network.
+      status:
+        type: string
+        enum: [submitted, polling, succeeded, failed, rolled_back]
+        description: Lifecycle status of the execution attempt.
+      phase:
+        type: string
+        description: Last observed transaction phase.
+      attemptNumber:
+        type: integer
+        description: 1-based attempt number for this proposal.
+      error:
+        type: string
+        description: Human-readable failure reason when status is failed.
+      failedAtPhase:
+        type: string
+        description: Phase the attempt failed at, when applicable.
+      createdAt:
+        type: string
+        format: date-time
+        description: When the attempt was first recorded.
+      updatedAt:
+        type: string
+        format: date-time
+        description: When the attempt was last updated.
+      completedAt:
+        type: string
+        format: date-time
+        description: When the attempt reached a terminal state, if any.
+
+Incident:
           type: string
         title:
           type: string
@@ -5929,6 +6168,36 @@ components:
           type: string
           format: date-time
 
+     AlertPreferences:
+      type: object
+      properties:
+        channel:
+          type: string
+          enum: [email, in_app]
+        cooldownMinutes:
+          type: number
+          minimum: 0
+          maximum: 1440
+        severityThreshold:
+          type: number
+          minimum: 0
+          maximum: 1000
+        quietHoursStart:
+          type: integer
+          minimum: 0
+          maximum: 23
+        quietHoursEnd:
+          type: integer
+          minimum: 0
+          maximum: 23
+      required:
+        - channel
+        - cooldownMinutes
+        - severityThreshold
+        - quietHoursStart
+        - quietHoursEnd
+
+     FragmentationMetrics:
     FragmentationMetrics:
       type: object
       properties:
