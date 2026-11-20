@@ -109,6 +109,22 @@ export const FALLBACK_TTL_SECONDS = 120;
 
 export type YieldCacheStatus = "HIT" | "MISS";
 
+/**
+ * In-flight refresh promise — coalesces concurrent cache misses so only one
+ * network fetch runs at a time (stampede prevention).  Callers that arrive
+ * while a refresh is already in progress receive the same promise and therefore
+ * the same result, with no duplicate fetches.
+ *
+ * The variable is cleared in the `.finally()` of `getYieldData()` so the next
+ * cache miss after a completed (or failed) fetch always starts a fresh request.
+ */
+let refreshingYieldData: Promise<NormalizedYield[]> | undefined;
+
+/** Exposed for tests to verify exactly one refresh is in flight at a time. */
+export function isYieldRefreshInFlight(): boolean {
+  return refreshingYieldData !== undefined;
+}
+
 export async function getYieldDataWithCacheStatus(): Promise<{
   data: NormalizedYield[];
   cacheStatus: YieldCacheStatus;
@@ -181,64 +197,78 @@ export async function getYieldData(): Promise<NormalizedYield[]> {
   }
 
   const cached = cache.get<NormalizedYield[]>(CACHE_KEY);
-
   if (cached) {
     return cached;
   }
 
-  try {
-    const snapshot = await fetchNetworkSnapshot();
-    const rawYields = await Promise.all(PROTOCOLS.map((protocol) =>
-      buildProtocolSnapshot(
-        protocol,
-        snapshot.ledgerSequence,
-        snapshot.closedAt,
-        snapshot.network,
-      ),
-    ));
-
-    const normalized = normalizeYields(rawYields);
-    cache.set(CACHE_KEY, normalized, CURRENT_YIELDS_TTL_SECONDS);
-    cache.set(LAST_GOOD_CACHE_KEY, normalized, CURRENT_YIELDS_TTL_SECONDS * 6);
-    return normalized;
-  } catch (error) {
-    console.error("Yield fetch failed.", error);
-
-    const lastGood = cache.get<NormalizedYield[]>(LAST_GOOD_CACHE_KEY);
-    if (lastGood) {
-      cache.set(CACHE_KEY, lastGood, Math.min(60, CURRENT_YIELDS_TTL_SECONDS));
-      return lastGood;
-    }
-
-    const fallback = normalizeYields(
-      PROTOCOLS.map((p) => ({
-        protocolName: p.protocolName,
-        protocolType: p.protocolType,
-        apyBps: p.baseApyBps,
-        tvlUsd: p.baseTvlUsd,
-        volatilityPct: p.volatilityPct,
-        protocolAgeDays: p.protocolAgeDays,
-        network: "testnet",
-        source: p.source,
-        fetchedAt: new Date().toISOString(),
-        liquidityUsd: p.liquidityUsd,
-        rebalancingBehavior: p.rebalancingBehavior,
-        managementFeeBps: p.managementFeeBps,
-        performanceFeeBps: p.performanceFeeBps,
-        capitalEfficiencyPct: p.capitalEfficiencyPct,
-        rewards: p.rewardStreams || [],
-        attribution: {
-          baseYield: (p.baseApyBps / 100) * 0.8,
-          incentives: (p.baseApyBps / 100) * 0.1,
-          compounding: (p.baseApyBps / 100) * 0.05,
-          tacticalRotation: (p.baseApyBps / 100) * 0.05,
-        },
-      })),
-    );
-
-    cache.set(CACHE_KEY, fallback, FALLBACK_TTL_SECONDS);
-    return fallback;
+  // Coalesce concurrent cache misses: if a refresh is already in flight,
+  // return the same promise so only one network fetch runs at a time.
+  if (refreshingYieldData) {
+    return refreshingYieldData;
   }
+
+  refreshingYieldData = (async () => {
+    try {
+      const snapshot = await fetchNetworkSnapshot();
+      const rawYields = await Promise.all(PROTOCOLS.map((protocol) =>
+        buildProtocolSnapshot(
+          protocol,
+          snapshot.ledgerSequence,
+          snapshot.closedAt,
+          snapshot.network,
+        ),
+      ));
+
+      const normalized = normalizeYields(rawYields);
+      cache.set(CACHE_KEY, normalized, CURRENT_YIELDS_TTL_SECONDS);
+      cache.set(LAST_GOOD_CACHE_KEY, normalized, CURRENT_YIELDS_TTL_SECONDS * 6);
+      return normalized;
+    } catch (error) {
+      console.error("Yield fetch failed.", error);
+
+      const lastGood = cache.get<NormalizedYield[]>(LAST_GOOD_CACHE_KEY);
+      if (lastGood) {
+        cache.set(CACHE_KEY, lastGood, Math.min(60, CURRENT_YIELDS_TTL_SECONDS));
+        return lastGood;
+      }
+
+      const fallback = normalizeYields(
+        PROTOCOLS.map((p) => ({
+          protocolName: p.protocolName,
+          protocolType: p.protocolType,
+          apyBps: p.baseApyBps,
+          tvlUsd: p.baseTvlUsd,
+          volatilityPct: p.volatilityPct,
+          protocolAgeDays: p.protocolAgeDays,
+          network: "testnet" as const,
+          source: p.source,
+          fetchedAt: new Date().toISOString(),
+          liquidityUsd: p.liquidityUsd,
+          rebalancingBehavior: p.rebalancingBehavior,
+          managementFeeBps: p.managementFeeBps,
+          performanceFeeBps: p.performanceFeeBps,
+          capitalEfficiencyPct: p.capitalEfficiencyPct,
+          rewards: p.rewardStreams || [],
+          attribution: {
+            baseYield: (p.baseApyBps / 100) * 0.8,
+            incentives: (p.baseApyBps / 100) * 0.1,
+            compounding: (p.baseApyBps / 100) * 0.05,
+            tacticalRotation: (p.baseApyBps / 100) * 0.05,
+          },
+        })),
+      );
+
+      cache.set(CACHE_KEY, fallback, FALLBACK_TTL_SECONDS);
+      return fallback;
+    }
+  })().finally(() => {
+    // Always clear the in-flight reference so the next cache miss after this
+    // completes (or fails) triggers a fresh fetch rather than re-awaiting a
+    // settled promise.
+    refreshingYieldData = undefined;
+  });
+
+  return refreshingYieldData;
 }
 
 // ── Portfolio yield summaries ───────────────────────────────────────────

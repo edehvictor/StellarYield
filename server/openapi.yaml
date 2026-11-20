@@ -16,7 +16,15 @@ tags:
   - name: Health
     description: System health monitoring
   - name: Yields
-    description: Yield data and APY information
+    description: |
+      Yield data and APY information.
+
+      **Concurrency guarantee:** `GET /api/yields` coalesces concurrent requests
+      that arrive while the cache is cold into a single upstream network fetch.
+      All callers receive the same result; no duplicate protocol snapshots are
+      built. The `X-Config-Version` header carries the asset-configuration
+      fingerprint so clients can detect when a held quote was priced against a
+      now-stale configuration.
   - name: Portfolio
     description: User portfolio and PnL tracking
   - name: Leaderboard
