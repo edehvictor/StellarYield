@@ -84,17 +84,24 @@ interface FailoverIncident {
 // ── Helpers ───────────────────────────────────────────────────────────────
 
 function formatUSD(value: number): string {
+    if (!Number.isFinite(value)) return "$0";
     return new Intl.NumberFormat("en-US", {
         style: "currency",
         currency: "USD",
         maximumFractionDigits: 0,
-    }).format(value);
+    }).format(Math.max(0, value));
 }
 
 function formatTokens(value: number): string {
+    if (!Number.isFinite(value)) return "0";
     return new Intl.NumberFormat("en-US", { maximumFractionDigits: 2 }).format(
-        value,
+        Math.max(0, value),
     );
+}
+
+function formatRatio(value: number): string {
+    if (!Number.isFinite(value)) return "0.00%";
+    return `${Math.min(100, Math.max(0, value)).toFixed(2)}%`;
 }
 
 // ── Sub-components ────────────────────────────────────────────────────────
@@ -181,10 +188,27 @@ export default function TransparencyDashboard() {
     }, []);
 
     useEffect(() => {
-        fetch(`${getApiBase()}/api/transparency/failover-history`)
-            .then((res) => (res.ok ? res.json() : Promise.resolve({ incidents: [] })))
-            .then((data: { incidents: FailoverIncident[] }) => setFailoverIncidents(data.incidents))
-            .catch(() => setFailoverIncidents([]));
+        let cancelled = false;
+        async function loadFailoverHistory() {
+            // Retry transient failures without replacing a previously loaded
+            // snapshot with an empty result. The API is read-only and safe to retry.
+            for (let attempt = 0; attempt < 3; attempt += 1) {
+                try {
+                    const response = await fetch(`${getApiBase()}/api/transparency/failover-history`);
+                    if (!response.ok) throw new Error(`Server returned ${response.status}`);
+                    const payload = (await response.json()) as { incidents?: unknown };
+                    if (!Array.isArray(payload.incidents)) throw new Error("Malformed failover history response");
+                    if (!cancelled) setFailoverIncidents(payload.incidents as FailoverIncident[]);
+                    return;
+                } catch {
+                    if (attempt < 2) {
+                        await new Promise((resolve) => window.setTimeout(resolve, 250 * (attempt + 1)));
+                    }
+                }
+            }
+        }
+        void loadFailoverHistory();
+        return () => { cancelled = true; };
     }, []);
 
     useEffect(() => {
@@ -312,7 +336,7 @@ export default function TransparencyDashboard() {
                 <StatCard
                     icon={<BarChart2 size={22} className="text-purple-400" />}
                     title="Deflationary Ratio"
-                    value={`${data.deflationaryRatio.toFixed(2)}%`}
+                    value={formatRatio(data.deflationaryRatio)}
                     subtitle="Burn rate vs. emission rate"
                     accent="purple"
                 />
