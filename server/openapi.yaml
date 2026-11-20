@@ -56,6 +56,8 @@ tags:
       | `SLIPPAGE_EXCEEDED` | 400 / 422 | The applied slippage exceeds the maximum allowed threshold (15%). |
       | `ROUTE_MISMATCH` | 400 | The route hash in the quote does not match the current computed path. |
       | `CONFIG_DRIFT` | 400 | The asset configuration version has changed since the quote was issued. |
+      | `ASSUMPTION_DRIFT` | 400 | The cryptographic fingerprint no longer matches the quote assumptions — assumptions were modified after quoting. Re-quote to proceed. Responses carry `recoverable: true`. |
+      | `INVALID_FINGERPRINT` | 400 | The assumption fingerprint is missing or malformed. |
       | `QUOTE_FAILED` | 500 | Quote generation failed due to an internal error. |
       | `VERIFY_FAILED` | 500 | Quote verification failed due to an internal error. |
       | `CONFIG_UNAVAILABLE` | 503 | The supported assets configuration could not be loaded. |
@@ -476,7 +478,19 @@ paths:
   /api/yields:
     get:
       summary: Get current yield data
-      description: Returns current yield information for all available vaults with APY, TVL, and risk ratings
+      description: |
+        Returns current yield information for all available vaults with APY,
+        TVL, and risk ratings.
+
+        Each entry carries `isStale` (boolean) and `warnings` (string[]) so
+        the client can display freshness badges without additional calls.
+
+        The `X-Config-Version` response header is a 64-character SHA-256 hex
+        digest of the current asset configuration snapshot. Clients that hold
+        a quote issued against an earlier snapshot must compare this value with
+        the `assetConfigVersion` in the quote; a mismatch means the
+        configuration has changed and the quote must be refreshed before
+        submission.
       tags:
         - Yields
       parameters:
@@ -515,6 +529,22 @@ paths:
       responses:
         '200':
           description: Successful response with yields data
+          headers:
+            X-Cache-Status:
+              schema:
+                type: string
+                enum: [HIT, MISS]
+              description: Whether the response was served from cache.
+            X-Config-Version:
+              schema:
+                type: string
+                pattern: '^[a-f0-9]{64}$'
+              description: |
+                Immutable SHA-256 fingerprint of the current asset configuration
+                snapshot. Clients use this to detect when a held quote was
+                computed against a now-stale configuration; re-quote before
+                signing when this value differs from the quote's
+                `assetConfigVersion`.
           content:
             application/json:
               schema:
