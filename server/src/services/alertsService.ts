@@ -39,6 +39,7 @@ import {
   resolveContextForRead,
   resolveContextForWrite,
 } from "./alertPreferenceContext";
+import { computeObjectChecksum } from "../utils/checksum";
 
 const prisma = new PrismaClient();
 
@@ -116,6 +117,8 @@ const alertOperationStore = new Map<string, AlertOperationRecord>();
  * 0 means "no preferences yet"; every committed write increments it by one.
  */
 const alertPreferencesVersionStore = new Map<string, number>();
+/** Immutable fingerprint of the currently committed preference snapshot. */
+const alertPreferencesFingerprintStore = new Map<string, string>();
 /**
  * Network/ledger binding per wallet+vault preference record (#1908). Bound on
  * the first write and preserved by later writes and reverts.
@@ -123,6 +126,7 @@ const alertPreferencesVersionStore = new Map<string, number>();
 const alertPreferenceContextStore = new Map<string, AlertPreferenceContext>();
 
 export const PREFERENCE_VERSION_CONFLICT = "PREFERENCE_VERSION_CONFLICT";
+export const PREFERENCE_FINGERPRINT_CONFLICT = "PREFERENCE_FINGERPRINT_CONFLICT";
 
 /**
  * Thrown when a write names an `expectedVersion` that no longer matches the
@@ -134,6 +138,7 @@ export class PreferenceVersionConflictError extends Error {
     readonly expectedVersion: number,
     readonly currentVersion: number,
     readonly currentPreferences: AlertPreferences | null,
+    readonly currentFingerprint: string | null,
   ) {
     super(
       `Alert preferences changed since version ${expectedVersion}; current version is ${currentVersion}. Reload and retry.`,
@@ -142,9 +147,26 @@ export class PreferenceVersionConflictError extends Error {
   }
 }
 
+export class PreferenceFingerprintConflictError extends Error {
+  readonly code = PREFERENCE_FINGERPRINT_CONFLICT;
+  constructor(
+    readonly expectedFingerprint: string,
+    readonly currentFingerprint: string | null,
+    readonly currentPreferences: AlertPreferences | null,
+    readonly currentVersion: number,
+  ) {
+    super("Alert preferences changed since this configuration snapshot was read; refresh and retry.");
+    this.name = "PreferenceFingerprintConflictError";
+  }
+}
+
 /** The current version of a wallet+vault preference record (0 when none). */
 export function getAlertPreferencesVersion(walletAddress: string, vaultId: string): number {
   return alertPreferencesVersionStore.get(toAlertKey(walletAddress, vaultId)) ?? 0;
+}
+
+export function getAlertPreferencesFingerprint(walletAddress: string, vaultId: string): string | null {
+  return alertPreferencesFingerprintStore.get(toAlertKey(walletAddress, vaultId)) ?? null;
 }
 
 /**
@@ -159,6 +181,20 @@ function assertExpectedVersion(key: string, expectedVersion: number | undefined)
       expectedVersion,
       current,
       alertPreferencesStore.get(key) ?? null,
+      alertPreferencesFingerprintStore.get(key) ?? null,
+    );
+  }
+}
+
+function assertExpectedFingerprint(key: string, expectedFingerprint: string | undefined): void {
+  if (expectedFingerprint === undefined) return;
+  const currentFingerprint = alertPreferencesFingerprintStore.get(key) ?? null;
+  if (currentFingerprint !== expectedFingerprint) {
+    throw new PreferenceFingerprintConflictError(
+      expectedFingerprint,
+      currentFingerprint,
+      alertPreferencesStore.get(key) ?? null,
+      alertPreferencesVersionStore.get(key) ?? 0,
     );
   }
 }
@@ -175,16 +211,20 @@ function commitPreferences(
   expectedVersion: number | undefined,
   sideEffect?: (before: AlertPreferences | null) => void,
   context?: AlertPreferenceContext,
+  expectedFingerprint?: string,
 ): number {
   assertExpectedVersion(key, expectedVersion);
+  assertExpectedFingerprint(key, expectedFingerprint);
   const hadBefore = alertPreferencesStore.has(key);
   const before = alertPreferencesStore.get(key) ?? null;
   const previousVersion = alertPreferencesVersionStore.get(key) ?? 0;
+  const previousFingerprint = alertPreferencesFingerprintStore.get(key);
   const hadContext = alertPreferenceContextStore.has(key);
   const previousContext = alertPreferenceContextStore.get(key);
   const nextVersion = previousVersion + 1;
   alertPreferencesStore.set(key, next);
   alertPreferencesVersionStore.set(key, nextVersion);
+  alertPreferencesFingerprintStore.set(key, computeAlertPreferencesFingerprint(next));
   if (context) alertPreferenceContextStore.set(key, context);
   try {
     sideEffect?.(before);
@@ -193,6 +233,8 @@ function commitPreferences(
     else alertPreferencesStore.delete(key);
     if (previousVersion === 0) alertPreferencesVersionStore.delete(key);
     else alertPreferencesVersionStore.set(key, previousVersion);
+    if (previousFingerprint) alertPreferencesFingerprintStore.set(key, previousFingerprint);
+    else alertPreferencesFingerprintStore.delete(key);
     if (hadContext && previousContext) alertPreferenceContextStore.set(key, previousContext);
     else alertPreferenceContextStore.delete(key);
     throw error;
@@ -229,6 +271,19 @@ export function computeAlertFingerprint(input: {
           quietHoursEnd: Number(input.preferences.quietHoursEnd),
         }
       : null,
+  });
+}
+
+/** Hashes only the canonical preference payload, independent of object key order. */
+export function computeAlertPreferencesFingerprint(preferences: AlertPreferences): string {
+  return computeObjectChecksum({
+    channel: preferences.channel,
+    cooldownMinutes: Number(preferences.cooldownMinutes),
+    severityThreshold: Number(preferences.severityThreshold),
+    quietHoursStart: Number(preferences.quietHoursStart),
+    quietHoursEnd: Number(preferences.quietHoursEnd),
+    overrides: preferences.overrides ?? null,
+    precedence: preferences.precedence ?? null,
   });
 }
 
@@ -280,6 +335,7 @@ export function setAlertPreferences(
   operationIdentity?: string,
   expectedVersion?: number,
   context?: AlertContextInput,
+  expectedFingerprint?: string,
 ): { preferences: AlertPreferences; replayed: boolean; version: number } {
   const key = toAlertKey(walletAddress, vaultId);
   const requestedContext = parseAlertContext(context, vaultId);
@@ -323,8 +379,7 @@ export function setAlertPreferences(
 
   // A context or version conflict throws before anything is written or
   // recorded, so the same operation identity can be retried after reload.
-  const version = commitPreferences(key, preferences, expectedVersion, undefined, effectiveContext);
-
+  const version = commitPreferences(key, preferences, expectedVersion, undefined, effectiveContext, expectedFingerprint);
   if (operationIdentity) {
     alertOperationStore.set(operationIdentity, {
       operationIdentity,
@@ -344,6 +399,7 @@ export function clearAlertOperationStore(): void {
 export function clearAlertPreferencesStore(): void {
   alertPreferencesStore.clear();
   alertPreferencesVersionStore.clear();
+  alertPreferencesFingerprintStore.clear();
   alertPreferenceContextStore.clear();
   alertLastTriggeredStore.clear();
 }
@@ -594,6 +650,7 @@ async function dispatchAlertEmail(
 export function resetAlertPreferencesStore(): void {
   alertPreferencesStore.clear();
   alertPreferencesVersionStore.clear();
+  alertPreferencesFingerprintStore.clear();
   alertPreferenceContextStore.clear();
   alertLastTriggeredStore.clear();
 }
@@ -664,6 +721,8 @@ export function updateAlertPreferences(
     expectedVersion?: number;
     /** Ledger context the caller read the record under (#1908). */
     context?: AlertContextInput;
+    /** Immutable preference snapshot fingerprint (#1902). */
+    expectedFingerprint?: string;
   },
 ): {
   preferences: AlertPreferences;
@@ -694,9 +753,14 @@ export function updateAlertPreferences(
       });
     },
     effectiveContext,
+    options?.expectedFingerprint,
   );
 
-  return { preferences: newPreferences, auditEntry: auditEntry!, version };
+  return {
+    preferences: newPreferences,
+    auditEntry: auditEntry!,
+    version,
+  };
 }
 
 /**
@@ -709,6 +773,7 @@ export function revertAlertPreferences(
   targetEntryId?: string,
   expectedVersion?: number,
   context?: AlertContextInput,
+  expectedFingerprint?: string,
 ): {
   preferences: AlertPreferences;
   auditEntry: AlertPreferenceAuditEntry;
@@ -722,6 +787,7 @@ export function revertAlertPreferences(
   );
   // Checked before the audit trail is read, so a stale revert reads nothing.
   assertExpectedVersion(key, expectedVersion);
+  assertExpectedFingerprint(key, expectedFingerprint);
 
   let revertTo: AlertPreferenceAuditEntry | undefined;
 
