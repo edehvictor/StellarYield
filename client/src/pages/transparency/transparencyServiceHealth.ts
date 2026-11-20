@@ -1,16 +1,15 @@
 /**
- * Pure transparency subsystem health summarization.
+ * Pure transparency subsystem health summarization and external data boundary validation.
  *
  * Normalizes indexer, relayer, registry, and smoke-test signals into a single
  * deterministic overall status for the transparency dashboard.
  *
- * Boundary-value handling (#1914): every numeric input is sanitized before
- * use. Non-finite, negative, or out-of-range values are treated as unknown
- * rather than healthy, successRate is clamped to [0, 100] and rounded only
- * after clamping, and failureCount is bounded to a finite non-negative
- * integer. Unknown/missing subsystem states are normalized to "unknown"
- * instead of being left as unchecked values, so a boundary payload can never
- * silently flip the overall status to healthy.
+ * Boundary-value & malformed external data handling (#1913, #1914): every
+ * untrusted field is validated at the boundary before state updates or
+ * arithmetic. Non-finite, negative, non-boolean, or out-of-range values are
+ * rejected or normalized to "unknown" / "degraded" rather than "healthy",
+ * successRate is clamped to [0, 100] and rounded only after clamping, and
+ * failureCount is bounded to a finite non-negative integer.
  */
 
 export type SubsystemState = "healthy" | "degraded" | "failed" | "unknown";
@@ -33,6 +32,50 @@ export interface TransparencyHealthSummary {
   summaryMessage: string;
 }
 
+export interface TransparencyHistoryPoint {
+  date: string;
+  revenue: number;
+  burned: number;
+}
+
+export interface TransparencySummaryPayload {
+  totalRevenueLumens: number;
+  totalBurnedTokens: number;
+  deflationaryRatio: number;
+  history: TransparencyHistoryPoint[];
+}
+
+export interface ValidatedFailoverIncident {
+  id: string;
+  protocolId: string;
+  protocolName: string;
+  trigger: string;
+  reasons: string[];
+  startedAt: string;
+  recoveredAt?: string;
+  durationMs?: number;
+  resolved: boolean;
+}
+
+export type TransparencyDataErrorCode =
+  | "MALFORMED_SUMMARY_PAYLOAD"
+  | "MALFORMED_HISTORY_ENTRY"
+  | "MALFORMED_INCIDENTS_PAYLOAD"
+  | "MALFORMED_INDEXER_PAYLOAD"
+  | "MALFORMED_RELAYER_PAYLOAD"
+  | "MALFORMED_REGISTRY_PAYLOAD"
+  | "MALFORMED_SMOKE_PAYLOAD";
+
+export class TransparencyExternalDataError extends Error {
+  readonly code: TransparencyDataErrorCode;
+
+  constructor(code: TransparencyDataErrorCode, message: string) {
+    super(message);
+    this.name = "TransparencyExternalDataError";
+    this.code = code;
+  }
+}
+
 const SEVERITY_RANK: Record<SubsystemState, number> = {
   healthy: 0,
   unknown: 1,
@@ -46,6 +89,18 @@ const SUBSYSTEM_LABELS: Record<keyof TransparencyHealthInput, string> = {
   registry: "Registry",
   smokeTest: "Smoke test",
 };
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isValidIsoCalendarDate(dateStr: string): boolean {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) {
+    return false;
+  }
+  const parsed = new Date(`${dateStr}T00:00:00.000Z`);
+  return Number.isFinite(parsed.getTime()) && parsed.toISOString().slice(0, 10) === dateStr;
+}
 
 function isValidState(state: unknown): state is SubsystemState {
   return state === "healthy" || state === "degraded" || state === "failed" || state === "unknown";
@@ -71,6 +126,9 @@ function toOverall(worst: SubsystemState): OverallHealthState {
 
 /** Map indexer checkpoint status to a normalized subsystem state. */
 export function mapIndexerStatus(status: string | undefined): SubsystemState {
+  if (typeof status !== "string") {
+    return "unknown";
+  }
   switch (status) {
     case "healthy":
       return "healthy";
@@ -83,27 +141,80 @@ export function mapIndexerStatus(status: string | undefined): SubsystemState {
   }
 }
 
+/**
+ * Validate and extract indexer status from an untrusted API response payload
+ * (supports both top-level `{ status }` and `{ success, data: { status } }` envelopes).
+ */
+export function parseIndexerStatusPayload(payload: unknown): SubsystemState {
+  if (!isPlainRecord(payload)) {
+    return "unknown";
+  }
+  if ("success" in payload && payload.success === false) {
+    return "unknown";
+  }
+  if (typeof payload.status === "string") {
+    return mapIndexerStatus(payload.status);
+  }
+  if (isPlainRecord(payload.data) && typeof payload.data.status === "string") {
+    return mapIndexerStatus(payload.data.status);
+  }
+  return "unknown";
+}
+
 /** Map relayer service signals to a normalized subsystem state. */
 export function mapRelayerStatus(input: {
   isOnline: boolean;
   failureCount: number;
   successRate: number;
 }): SubsystemState {
+  if (!isPlainRecord(input) || typeof input.isOnline !== "boolean") {
+    return "unknown";
+  }
   if (!input.isOnline) return "failed";
-  // Boundary values: NaN/Infinity/out-of-range numbers never count as healthy.
+  // Boundary values: NaN/Infinity/out-of-range/non-number fields never count as healthy.
   // Clamp successRate to [0, 100] and bound failureCount to a finite
   // non-negative integer before comparing against the 50% threshold.
-  const failureCount = Number.isFinite(input.failureCount)
-    ? Math.max(0, Math.floor(input.failureCount))
-    : 0;
-  const successRate = Number.isFinite(input.successRate)
-    ? Math.min(100, Math.max(0, input.successRate))
-    : 0;
-  const hasInvalid = failureCount !== input.failureCount || successRate !== input.successRate;
+  const rawFailureCount = (input as { failureCount?: unknown }).failureCount;
+  const rawSuccessRate = (input as { successRate?: unknown }).successRate;
+  const failureCount =
+    typeof rawFailureCount === "number" && Number.isFinite(rawFailureCount)
+      ? Math.max(0, Math.floor(rawFailureCount))
+      : 0;
+  const successRate =
+    typeof rawSuccessRate === "number" && Number.isFinite(rawSuccessRate)
+      ? Math.min(100, Math.max(0, rawSuccessRate))
+      : 0;
+  const hasInvalid =
+    typeof rawFailureCount !== "number" ||
+    typeof rawSuccessRate !== "number" ||
+    failureCount !== rawFailureCount ||
+    successRate !== rawSuccessRate;
   if (failureCount <= 0 && !hasInvalid) return "healthy";
   if (failureCount > 0 && successRate < 50) return "failed";
   if (failureCount > 0 || hasInvalid) return "degraded";
   return "healthy";
+}
+
+/**
+ * Validate and normalize an untrusted `/api/relayer/status` JSON payload without
+ * defaulting missing fields to healthy values.
+ */
+export function parseRelayerStatusPayload(payload: unknown): SubsystemState {
+  if (!isPlainRecord(payload)) {
+    return "unknown";
+  }
+  if ("success" in payload && payload.success === false) {
+    return "unknown";
+  }
+  const target = isPlainRecord(payload.data) ? payload.data : payload;
+  if (typeof target.isOnline !== "boolean") {
+    return "unknown";
+  }
+  return mapRelayerStatus({
+    isOnline: target.isOnline,
+    failureCount: target.failureCount as number,
+    successRate: target.successRate as number,
+  });
 }
 
 /** Map registry diff summary to a normalized subsystem state. */
@@ -112,6 +223,14 @@ export function mapRegistryHealth(input: {
   hasRemoved: boolean;
   hasChanged: boolean;
 }): SubsystemState {
+  if (
+    !isPlainRecord(input) ||
+    typeof input.hasMissing !== "boolean" ||
+    typeof input.hasRemoved !== "boolean" ||
+    typeof input.hasChanged !== "boolean"
+  ) {
+    return "unknown";
+  }
   if (input.hasRemoved) return "failed";
   if (input.hasMissing || input.hasChanged) return "degraded";
   return "healthy";
@@ -122,10 +241,173 @@ export function mapSmokeTestStatus(
   status: "pass" | "fail" | null,
   checks?: Array<{ status: "pass" | "fail" }>,
 ): SubsystemState {
-  if (status === null) return "unknown";
+  if (status === null || status === undefined) return "unknown";
   if (status === "fail") return "failed";
-  if (checks?.some((check) => check.status === "fail")) return "degraded";
+  if (status !== "pass") return "unknown";
+  if (checks !== undefined) {
+    if (!Array.isArray(checks)) return "unknown";
+    for (const check of checks) {
+      if (!isPlainRecord(check) || (check.status !== "pass" && check.status !== "fail")) {
+        return "unknown";
+      }
+    }
+    if (checks.some((check) => check.status === "fail")) return "degraded";
+  }
   return "healthy";
+}
+
+/**
+ * Validate an untrusted `/api/transparency/summary` payload at the boundary.
+ * Throws a typed `TransparencyExternalDataError` without mutating the payload
+ * when required totals or history points are missing or malformed.
+ */
+export function validateTransparencySummaryPayload(payload: unknown): TransparencySummaryPayload {
+  if (!isPlainRecord(payload)) {
+    throw new TransparencyExternalDataError(
+      "MALFORMED_SUMMARY_PAYLOAD",
+      "Transparency summary payload must be an object.",
+    );
+  }
+  const { totalRevenueLumens, totalBurnedTokens, deflationaryRatio, history } = payload;
+  if (
+    typeof totalRevenueLumens !== "number" ||
+    !Number.isFinite(totalRevenueLumens) ||
+    totalRevenueLumens < 0 ||
+    typeof totalBurnedTokens !== "number" ||
+    !Number.isFinite(totalBurnedTokens) ||
+    totalBurnedTokens < 0 ||
+    typeof deflationaryRatio !== "number" ||
+    !Number.isFinite(deflationaryRatio) ||
+    deflationaryRatio < 0 ||
+    deflationaryRatio > 100 ||
+    !Array.isArray(history)
+  ) {
+    throw new TransparencyExternalDataError(
+      "MALFORMED_SUMMARY_PAYLOAD",
+      "Transparency summary totals or history array are invalid.",
+    );
+  }
+
+  const validatedHistory: TransparencyHistoryPoint[] = history.map((entry) => {
+    if (!isPlainRecord(entry)) {
+      throw new TransparencyExternalDataError(
+        "MALFORMED_HISTORY_ENTRY",
+        "Transparency history entry must be an object.",
+      );
+    }
+    const rawDate = typeof entry.date === "string" ? entry.date.trim() : "";
+    const rawRevenue = entry.revenue;
+    const rawBurned = entry.burned;
+    if (
+      !isValidIsoCalendarDate(rawDate) ||
+      typeof rawRevenue !== "number" ||
+      !Number.isFinite(rawRevenue) ||
+      rawRevenue < 0 ||
+      typeof rawBurned !== "number" ||
+      !Number.isFinite(rawBurned) ||
+      rawBurned < 0
+    ) {
+      throw new TransparencyExternalDataError(
+        "MALFORMED_HISTORY_ENTRY",
+        "Transparency history entry contains malformed date, revenue, or burned fields.",
+      );
+    }
+    return {
+      date: rawDate,
+      revenue: rawRevenue,
+      burned: rawBurned,
+    };
+  });
+
+  return {
+    totalRevenueLumens,
+    totalBurnedTokens,
+    deflationaryRatio,
+    history: validatedHistory,
+  };
+}
+
+/**
+ * Validate a single untrusted failover incident record at the boundary.
+ * Returns a sanitized clone or `null` if malformed.
+ */
+export function validateFailoverIncident(entry: unknown): ValidatedFailoverIncident | null {
+  if (!isPlainRecord(entry)) return null;
+  if (
+    typeof entry.id !== "string" ||
+    !entry.id.trim() ||
+    typeof entry.protocolId !== "string" ||
+    !entry.protocolId.trim() ||
+    typeof entry.protocolName !== "string" ||
+    !entry.protocolName.trim() ||
+    typeof entry.trigger !== "string" ||
+    !entry.trigger.trim() ||
+    typeof entry.startedAt !== "string" ||
+    !entry.startedAt.trim() ||
+    !Number.isFinite(Date.parse(entry.startedAt)) ||
+    typeof entry.resolved !== "boolean" ||
+    !Array.isArray(entry.reasons) ||
+    entry.reasons.some((reason) => typeof reason !== "string" || !reason.trim())
+  ) {
+    return null;
+  }
+
+  if (
+    entry.recoveredAt !== undefined &&
+    (typeof entry.recoveredAt !== "string" ||
+      !entry.recoveredAt.trim() ||
+      !Number.isFinite(Date.parse(entry.recoveredAt)))
+  ) {
+    return null;
+  }
+
+  if (
+    entry.durationMs !== undefined &&
+    (typeof entry.durationMs !== "number" ||
+      !Number.isFinite(entry.durationMs) ||
+      entry.durationMs < 0)
+  ) {
+    return null;
+  }
+
+  return {
+    id: entry.id.trim(),
+    protocolId: entry.protocolId.trim(),
+    protocolName: entry.protocolName.trim(),
+    trigger: entry.trigger.trim(),
+    reasons: entry.reasons.map((reason: string) => reason.trim()),
+    startedAt: entry.startedAt.trim(),
+    ...(entry.recoveredAt !== undefined ? { recoveredAt: entry.recoveredAt.trim() } : {}),
+    ...(entry.durationMs !== undefined ? { durationMs: entry.durationMs } : {}),
+    resolved: entry.resolved,
+  };
+}
+
+/**
+ * Validate an untrusted `/api/transparency/failover-history` response payload.
+ * Throws `TransparencyExternalDataError` if the envelope is not `{ incidents: [...] }`
+ * or if every entry in a non-empty incident list is malformed.
+ */
+export function validateFailoverIncidentsPayload(payload: unknown): ValidatedFailoverIncident[] {
+  if (!isPlainRecord(payload) || !Array.isArray(payload.incidents)) {
+    throw new TransparencyExternalDataError(
+      "MALFORMED_INCIDENTS_PAYLOAD",
+      "Malformed failover history response",
+    );
+  }
+  if (payload.incidents.length === 0) {
+    return [];
+  }
+  const valid = payload.incidents
+    .map((entry) => validateFailoverIncident(entry))
+    .filter((entry): entry is ValidatedFailoverIncident => entry !== null);
+  if (valid.length === 0) {
+    throw new TransparencyExternalDataError(
+      "MALFORMED_INCIDENTS_PAYLOAD",
+      "Failover history contained no valid incident records",
+    );
+  }
+  return valid;
 }
 
 /**
@@ -135,11 +417,12 @@ export function mapSmokeTestStatus(
 export function summarizeTransparencyHealth(
   input: Partial<TransparencyHealthInput>,
 ): TransparencyHealthSummary {
+  const safeInput = isPlainRecord(input) ? input : {};
   const subsystems: TransparencyHealthInput = {
-    indexer: sanitizeSubsystemState(input.indexer),
-    relayer: sanitizeSubsystemState(input.relayer),
-    registry: sanitizeSubsystemState(input.registry),
-    smokeTest: sanitizeSubsystemState(input.smokeTest),
+    indexer: sanitizeSubsystemState(safeInput.indexer),
+    relayer: sanitizeSubsystemState(safeInput.relayer),
+    registry: sanitizeSubsystemState(safeInput.registry),
+    smokeTest: sanitizeSubsystemState(safeInput.smokeTest),
   };
 
   const states = Object.values(subsystems);
@@ -201,18 +484,48 @@ export function assessRegistryFromRecords(
   current: Record<string, Record<string, string>>,
   previous: Record<string, Record<string, string>>,
 ): SubsystemState {
+  if (!isPlainRecord(current) || !isPlainRecord(previous)) {
+    return "unknown";
+  }
+
+  const networkKeys = Array.from(
+    new Set([...Object.keys(previous), ...Object.keys(current)]),
+  ).filter((key) => !key.startsWith("_"));
+
+  if (networkKeys.length === 0) {
+    return "unknown";
+  }
+
   let hasMissing = false;
   let hasRemoved = false;
   let hasChanged = false;
 
-  for (const net of Object.keys(current)) {
-    const oldNet = previous[net] ?? {};
-    const newNet = current[net] ?? {};
+  for (const net of networkKeys) {
+    const rawOldNet = previous[net];
+    const rawNewNet = current[net];
+
+    if (
+      (rawOldNet !== undefined && !isPlainRecord(rawOldNet)) ||
+      (rawNewNet !== undefined && !isPlainRecord(rawNewNet))
+    ) {
+      return "unknown";
+    }
+
+    const oldNet = (rawOldNet ?? {}) as Record<string, unknown>;
+    const newNet = (rawNewNet ?? {}) as Record<string, unknown>;
     const names = new Set([...Object.keys(oldNet), ...Object.keys(newNet)]);
 
     for (const name of names) {
-      const oldAddr = oldNet[name] ?? "";
-      const newAddr = newNet[name] ?? "";
+      const rawOldAddr = oldNet[name];
+      const rawNewAddr = newNet[name];
+      if (
+        (rawOldAddr !== undefined && typeof rawOldAddr !== "string") ||
+        (rawNewAddr !== undefined && typeof rawNewAddr !== "string")
+      ) {
+        return "unknown";
+      }
+      const oldAddr = typeof rawOldAddr === "string" ? rawOldAddr.trim() : "";
+      const newAddr = typeof rawNewAddr === "string" ? rawNewAddr.trim() : "";
       if (newAddr === "" && oldAddr !== "") hasRemoved = true;
       else if (newAddr === "" && oldAddr === "") hasMissing = true;
       else if (oldAddr !== newAddr && oldAddr !== "" && newAddr !== "") hasChanged = true;
