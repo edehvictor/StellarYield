@@ -119,4 +119,39 @@ describe("UnifiedActivityTimeline", () => {
     );
     expect(await screen.findByText("Reward accrued from Yield Index")).toBeTruthy();
   });
+
+  it("shows a retry action on failure and re-fetches on click (#1151)", async () => {
+    mockFetch
+      .mockResolvedValueOnce({
+        ok: false,
+        status: 500,
+        json: async () => ({}),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          timeline: [
+            {
+              id: "event-1",
+              walletAddress: "GTESTWALLET",
+              type: "deposit",
+              title: "Deposited USDC into Blend Stable",
+              description: "Capital routed into Blend Stable for yield capture.",
+              timestamp: "2026-05-26T08:15:00.000Z",
+              source: "portfolio",
+            },
+          ],
+        }),
+      });
+
+    render(<UnifiedActivityTimeline walletAddress="GTESTWALLET" />);
+
+    const errorBox = await screen.findByTestId("activity-timeline-error");
+    expect(errorBox).toHaveTextContent("Failed to load account activity timeline");
+
+    fireEvent.click(screen.getByRole("button", { name: /Retry/ }));
+
+    expect(await screen.findByText("Deposited USDC into Blend Stable")).toBeTruthy();
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+  });
 });

@@ -16,6 +16,16 @@ export interface VaultWatchSnapshot {
 }
 
 const watchlistPreferenceStore = new Map<string, WatchlistDigestPreference>();
+const digestOperationStore = new Map<
+  string,
+  { fingerprint: string; result: WatchlistDigestPreference; createdAt: number }
+>();
+
+export const DIGEST_OPERATION_TTL_MS = 24 * 60 * 60 * 1000;
+
+export function clearWatchlistDigestOperationStore(): void {
+  digestOperationStore.clear();
+}
 
 export function getWatchlistDigestPreference(
   walletAddress: string,
@@ -36,17 +46,56 @@ export function getWatchlistDigestPreference(
 export function saveWatchlistDigestPreference(
   walletAddress: string,
   preference: WatchlistDigestPreference,
-): WatchlistDigestPreference {
+  operationIdentity?: string,
+): WatchlistDigestPreference & { __replayed?: boolean } {
   const normalized: WatchlistDigestPreference = {
     enabled: preference.enabled,
     scheduleMode: preference.scheduleMode,
     eventThreshold: Math.max(1, Math.min(20, preference.eventThreshold)),
-    watchedVaultIds: [...new Set(preference.watchedVaultIds)].filter(Boolean),
+    watchedVaultIds: [...new Set(preference.watchedVaultIds)].filter(Boolean).sort(),
     minApyDeltaPct: Math.max(0, preference.minApyDeltaPct),
     minRiskDelta: Math.max(0, preference.minRiskDelta),
     maxFreshnessHours: Math.max(1, preference.maxFreshnessHours),
   };
+
+  const currentFingerprint = JSON.stringify({
+    walletAddress: walletAddress.toLowerCase(),
+    enabled: normalized.enabled,
+    scheduleMode: normalized.scheduleMode,
+    eventThreshold: normalized.eventThreshold,
+    watchedVaultIds: normalized.watchedVaultIds,
+    minApyDeltaPct: normalized.minApyDeltaPct,
+    minRiskDelta: normalized.minRiskDelta,
+    maxFreshnessHours: normalized.maxFreshnessHours,
+  });
+
+  if (operationIdentity) {
+    const existing = digestOperationStore.get(operationIdentity);
+    if (existing) {
+      if (Date.now() - existing.createdAt > DIGEST_OPERATION_TTL_MS) {
+        digestOperationStore.delete(operationIdentity);
+      } else if (existing.fingerprint === currentFingerprint) {
+        return { ...existing.result, __replayed: true };
+      } else {
+        const error = new Error(
+          "Operation identity has already been used with different parameters.",
+        );
+        (error as any).code = "OPERATION_IDENTITY_CONFLICT";
+        throw error;
+      }
+    }
+  }
+
   watchlistPreferenceStore.set(walletAddress, normalized);
+
+  if (operationIdentity) {
+    digestOperationStore.set(operationIdentity, {
+      fingerprint: currentFingerprint,
+      result: normalized,
+      createdAt: Date.now(),
+    });
+  }
+
   return normalized;
 }
 

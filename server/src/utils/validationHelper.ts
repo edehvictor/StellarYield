@@ -63,6 +63,13 @@ export function validateDateRange(
 
   // Check date order
   if (startDate >= endDate) {
+    if (startDate.getTime() === endDate.getTime()) {
+      errors.push({
+        code: "ZERO_LENGTH_WINDOW",
+        message: `Date range cannot have zero length (start date equals end date: ${startDate.toISOString()})`,
+        details: { startDate, endDate },
+      });
+    }
     errors.push({
       code: "INVALID_DATE_ORDER",
       message: `Start date (${startDate.toISOString()}) must be before end date (${endDate.toISOString()})`,

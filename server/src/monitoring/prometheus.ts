@@ -11,13 +11,15 @@
  *  - stellaryield_http_request_duration_ms — API response time histogram
  *  - stellaryield_db_pool_status           — DB connection pool health (1=up, 0=down)
  *  - stellaryield_indexer_lag_ledgers      — Ledgers behind the chain tip
+ *  - stellaryield_failure_total{provider,network,route,failure_category} — Tagged failure counts
  *
  * Security: no wallet addresses or user-specific data is included.
  */
 
-import { Registry, Gauge, Histogram, collectDefaultMetrics } from "prom-client";
+import { Registry, Gauge, Histogram, Counter, collectDefaultMetrics } from "prom-client";
 import { getYieldData } from "../services/yieldService";
 import { metrics as httpMetrics } from "../middleware/metrics";
+import { sorobanRpcFailoverService } from "../services/sorobanRpcFailoverService";
 
 // ── Registry ────────────────────────────────────────────────────────────
 
@@ -69,6 +71,102 @@ const indexerLagGauge = new Gauge({
   registers: [prometheusRegistry],
 });
 
+// ── Soroban RPC Failover & Health metrics ───────────────────────────────
+
+export const sorobanRpcFailoverCounter = new Counter({
+  name: "stellaryield_soroban_rpc_failover_total",
+  help: "Total number of Soroban RPC failover transitions",
+  labelNames: ["from_endpoint", "to_endpoint", "reason"] as const,
+  registers: [prometheusRegistry],
+});
+
+export const sorobanRpcEndpointStatusGauge = new Gauge({
+  name: "stellaryield_soroban_rpc_endpoint_status",
+  help: "Health status of Soroban RPC endpoint (1 = healthy, 2 = degraded, 0 = down)",
+  labelNames: ["endpoint"] as const,
+  registers: [prometheusRegistry],
+});
+
+export const sorobanRpcRequestsCounter = new Counter({
+  name: "stellaryield_soroban_rpc_requests_total",
+  help: "Total number of Soroban RPC requests handled per endpoint",
+  labelNames: ["endpoint", "status"] as const,
+  registers: [prometheusRegistry],
+});
+
+export const sorobanRpcLatencyGauge = new Gauge({
+  name: "stellaryield_soroban_rpc_latency_ms",
+  help: "Observed latency in milliseconds for Soroban RPC endpoint",
+  labelNames: ["endpoint"] as const,
+  registers: [prometheusRegistry],
+});
+
+export const sorobanRpcActiveEndpointGauge = new Gauge({
+  name: "stellaryield_soroban_rpc_active",
+  help: "Currently active Soroban RPC endpoint (1 = active, 0 = standby)",
+  labelNames: ["endpoint"] as const,
+  registers: [prometheusRegistry],
+});
+
+// Hook into failover service events
+sorobanRpcFailoverService.registerMetricsListener({
+  onFailover: (from, to, reason) => {
+    sorobanRpcFailoverCounter.inc({
+      from_endpoint: from,
+      to_endpoint: to,
+      reason: reason.substring(0, 50),
+    });
+  },
+  onRequest: (endpoint, status, latencyMs) => {
+    sorobanRpcRequestsCounter.inc({ endpoint, status });
+    sorobanRpcLatencyGauge.set({ endpoint }, latencyMs);
+  },
+});
+// ── Failure metrics ─────────────────────────────────────────────────────
+
+const UNKNOWN = "unknown";
+
+const failureCounter = new Counter({
+  name: "stellaryield_failure_total",
+  help: "Count of server-side failures tagged by provider, network, route, and failure category",
+  labelNames: ["provider", "network", "route", "failure_category"] as const,
+  registers: [prometheusRegistry],
+});
+
+/**
+ * Records a tagged failure. Any omitted optional tag is recorded as the
+ * stable "unknown" value (matching this codebase's existing fallback
+ * convention, e.g. protocolFailoverService's status strings) so reliability
+ * reports can still group by the tags that were available.
+ */
+export function recordFailure(tags: {
+  provider?: string;
+  network?: string;
+  route?: string;
+  failure_category?: string;
+}): void {
+  failureCounter.inc({
+    provider: tags.provider || UNKNOWN,
+    network: tags.network || UNKNOWN,
+    route: tags.route || UNKNOWN,
+    failure_category: tags.failure_category || UNKNOWN,
+  });
+}
+
+/**
+ * Normalizes the several network-passphrase env vars used across this
+ * codebase into a stable label value for failure tagging.
+ */
+export function resolveNetworkLabel(): "testnet" | "mainnet" | "unknown" {
+  const raw =
+    process.env.NETWORK_PASSPHRASE ??
+    process.env.STELLAR_NETWORK_PASSPHRASE ??
+    process.env.STELLAR_NETWORK;
+  if (!raw) return UNKNOWN;
+  const upper = raw.toUpperCase();
+  return upper.includes("TESTNET") || upper.includes("TEST SDF") ? "testnet" : "mainnet";
+}
+
 // ── Metric collection ───────────────────────────────────────────────────
 
 /**
@@ -99,6 +197,16 @@ export function refreshInfraMetrics(opts: {
   dbPoolGauge.set(opts.dbUp ? 1 : 0);
   indexerLagGauge.set(opts.indexerLag);
   depositorsGauge.set(opts.depositorCount);
+
+  // Sync Soroban RPC endpoint gauges
+  const endpoints = sorobanRpcFailoverService.getEndpoints();
+  const activeUrl = sorobanRpcFailoverService.getActiveEndpoint();
+  for (const ep of endpoints) {
+    const statusVal = ep.status === "healthy" ? 1 : ep.status === "degraded" ? 2 : 0;
+    sorobanRpcEndpointStatusGauge.set({ endpoint: ep.url }, statusVal);
+    sorobanRpcActiveEndpointGauge.set({ endpoint: ep.url }, ep.url === activeUrl ? 1 : 0);
+    sorobanRpcLatencyGauge.set({ endpoint: ep.url }, ep.latencyMs);
+  }
 
   // Sync HTTP latencies from the in-memory metrics store
   const latencies = httpMetrics.requestLatencies;

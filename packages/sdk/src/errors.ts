@@ -20,6 +20,14 @@ export const VAULT_ERROR_MESSAGES: Record<number, string> = {
   11: "Storage key not found",
   2001: "Invalid donation basis points (must be 0-10,000)",
   2002: "Charity address is not on protocol whitelist",
+  2003: "Administrative operation has expired",
+  2004: "Administrative operation was already executed",
+  2005: "Cross-contract call is unauthorized or on the wrong network",
+  2006: "Fee recipient is invalid",
+  2007: "Donation amount is below the minimum",
+  2008: "Deposit exceeds the configured liquidity depth",
+  2009: "Storage is already at the requested version",
+  2010: "Storage schema version does not match the contract",
 };
 
 export abstract class SorobanSdkError extends Error {
@@ -74,6 +82,22 @@ export class WrongNetworkError extends SorobanSdkError {
   }
 }
 
+export class UnsupportedNetworkError extends SorobanSdkError {
+  public readonly code = "unsupported_network" as const;
+  public readonly network: string;
+  public readonly supportedNetworks: readonly string[];
+
+  constructor(network: string, supportedNetworks: readonly string[]) {
+    super(
+      `Unsupported network id: '${network}'. Supported networks are: ${supportedNetworks.join(", ")}.`,
+      "simulate",
+      false
+    );
+    this.network = network;
+    this.supportedNetworks = supportedNetworks;
+  }
+}
+
 export class SpecMismatchError extends SorobanSdkError {
   public readonly expectedHash: string;
   public readonly actualHash: string;
@@ -86,6 +110,22 @@ export class SpecMismatchError extends SorobanSdkError {
     );
     this.expectedHash = expectedHash;
     this.actualHash = actualHash;
+  }
+}
+
+/**
+ * Raised when a token amount cannot be represented exactly in base units,
+ * e.g. an unsafe JavaScript integer or a fractional number.
+ */
+export class InvalidAmountError extends SorobanSdkError {
+  public readonly code = "invalid_amount" as const;
+  public readonly field: string;
+  public readonly value: unknown;
+
+  constructor(field: string, value: unknown, reason: string) {
+    super(`Invalid ${field}: ${reason}`, "simulate", false);
+    this.field = field;
+    this.value = value;
   }
 }
 
@@ -163,6 +203,83 @@ export class ApiTimeoutError extends SorobanSdkError {
   }
 }
 
+/**
+ * Caller-initiated cancellation via AbortSignal (route change, input edit, unmount).
+ * Distinct from {@link ApiTimeoutError}; not retryable.
+ */
+export class ApiCancelledError extends SorobanSdkError {
+  public readonly path: string;
+  public readonly cancelled = true as const;
+
+  constructor(path: string, reason?: string) {
+    super(
+      reason
+        ? `API request to '${path}' was cancelled: ${reason}`
+        : `API request to '${path}' was cancelled`,
+      undefined,
+      false
+    );
+    this.path = path;
+  }
+}
+
+export class ProviderConnectionError extends SorobanSdkError {
+  constructor(public readonly providerName: string, reason?: string) {
+    super(
+      reason
+        ? `Failed to connect to '${providerName}': ${reason}`
+        : `Failed to connect to '${providerName}'`,
+      "sign",
+      false
+    );
+    this.providerName = providerName;
+  }
+}
+
+export class ProviderMethodError extends SorobanSdkError {
+  constructor(
+    public readonly providerName: string,
+    public readonly method: string,
+    reason?: string
+  ) {
+    super(
+      reason
+        ? `Provider '${providerName}' does not support method '${method}': ${reason}`
+        : `Provider '${providerName}' does not support method '${method}'`,
+      "sign",
+      false
+    );
+    this.providerName = providerName;
+    this.method = method;
+  }
+}
+
+export class ProviderPermissionError extends SorobanSdkError {
+  constructor(public readonly providerName: string, reason?: string) {
+    super(
+      reason
+        ? `Permission denied by '${providerName}': ${reason}`
+        : `Permission denied by '${providerName}'`,
+      "sign",
+      true
+    );
+    this.providerName = providerName;
+  }
+}
+
+/** True when an error represents intentional request cancellation (not a timeout). */
+export function isApiCancellation(error: unknown): boolean {
+  if (error instanceof ApiCancelledError) return true;
+  if (
+    typeof error === "object" &&
+    error !== null &&
+    (error as { cancelled?: boolean }).cancelled === true
+  ) {
+    return true;
+  }
+  return false;
+}
+
 /** Underlying network failure (DNS, connection reset, offline, etc.). */
 export class ApiNetworkError extends SorobanSdkError {
   public readonly path: string;
@@ -173,6 +290,20 @@ export class ApiNetworkError extends SorobanSdkError {
     super(`API network error at '${path}': ${detail}`, undefined, true);
     this.path = path;
     this.cause = cause;
+  }
+}
+
+/**
+ * A paginated response did not match the expected `{ items, nextCursor }`
+ * shape, or its cursor would loop. Not retryable: the same request would
+ * return the same malformed page.
+ */
+export class ApiPaginationError extends SorobanSdkError {
+  public readonly path: string;
+
+  constructor(path: string, reason: string) {
+    super(`Malformed paginated response at '${path}': ${reason}`, undefined, false);
+    this.path = path;
   }
 }
 
@@ -187,6 +318,23 @@ export class ApiHttpError extends SorobanSdkError {
     this.path = path;
     this.status = status;
     this.statusText = statusText;
+  }
+}
+
+/** HTTP 429 from the backend API; `retryAfterMs` mirrors the `Retry-After` header when present. */
+export class ApiRateLimitError extends ApiHttpError {
+  public readonly retryAfterMs?: number;
+
+  constructor(path: string, retryAfterMs?: number, statusText = "Too Many Requests") {
+    super(path, 429, statusText, true);
+    this.retryAfterMs = retryAfterMs;
+  }
+}
+
+/** HTTP 5xx from the backend API; treated as a transient, retryable failure. */
+export class ApiServerError extends ApiHttpError {
+  constructor(path: string, status: number, statusText: string) {
+    super(path, status, statusText, true);
   }
 }
 

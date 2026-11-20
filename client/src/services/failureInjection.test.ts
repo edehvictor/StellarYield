@@ -101,6 +101,8 @@ describe("Failure injection: RebalanceFeedService", () => {
 // ── WatchlistClientService ────────────────────────────────────────────────────
 
 describe("Failure injection: WatchlistClientService", () => {
+  const WALLET = "GWALLETTEST00000000000000000000000000000000000000000001";
+
   it("getWatchlist throws when server returns 503", async () => {
     vi.stubGlobal(
       "fetch",
@@ -111,7 +113,7 @@ describe("Failure injection: WatchlistClientService", () => {
       }),
     );
 
-    await expect(WatchlistClientService.getWatchlist()).rejects.toThrow(
+    await expect(WatchlistClientService.getWatchlist(WALLET)).rejects.toThrow(
       "Failed to fetch watchlist",
     );
   });
@@ -119,7 +121,7 @@ describe("Failure injection: WatchlistClientService", () => {
   it("getWatchlist throws on network outage", async () => {
     vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("ECONNREFUSED")));
 
-    await expect(WatchlistClientService.getWatchlist()).rejects.toThrow("ECONNREFUSED");
+    await expect(WatchlistClientService.getWatchlist(WALLET)).rejects.toThrow("ECONNREFUSED");
   });
 
   it("addToWatchlist throws when server returns 503", async () => {
@@ -133,7 +135,7 @@ describe("Failure injection: WatchlistClientService", () => {
     );
 
     await expect(
-      WatchlistClientService.addToWatchlist("opp-1", "protocol", "Blend", 8.5, 100000),
+      WatchlistClientService.addToWatchlist(WALLET, "opp-1", "protocol", "Blend", 8.5, 100000),
     ).rejects.toThrow("Failed to add to watchlist");
   });
 
@@ -141,7 +143,7 @@ describe("Failure injection: WatchlistClientService", () => {
     vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("Network error")));
 
     await expect(
-      WatchlistClientService.addToWatchlist("opp-1", "protocol", "Blend", 8.5, 100000),
+      WatchlistClientService.addToWatchlist(WALLET, "opp-1", "protocol", "Blend", 8.5, 100000),
     ).rejects.toThrow("Network error");
   });
 
@@ -155,8 +157,8 @@ describe("Failure injection: WatchlistClientService", () => {
       }),
     );
 
-    await expect(WatchlistClientService.removeFromWatchlist("item-1")).rejects.toThrow(
-      "Failed to remove from watchlist",
-    );
+    await expect(
+      WatchlistClientService.removeFromWatchlist(WALLET, "item-1"),
+    ).rejects.toThrow("Failed to remove from watchlist");
   });
 });

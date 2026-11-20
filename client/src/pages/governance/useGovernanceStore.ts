@@ -1,8 +1,22 @@
 import { useState, useCallback } from "react";
 import type { PendingTransaction, GovernanceConfig } from "./types";
+import type { TxPhase } from "../../services/transactionPhase";
+import {
+  completeExecutionAttempt,
+  failExecutionAttempt,
+  GovernanceExecutionError,
+  markExecutionSubmitted,
+  startExecutionAttempt,
+  type GovernanceExecutionState,
+} from "./governanceOperation";
+import {
+  createSignerRotationAuditRecord,
+  type SignerRotationAuditRecord,
+} from "./signerRotationAudit";
 
 const STORAGE_KEY = "stellar_yield_governance_txns";
 const CONFIG_KEY = "stellar_yield_governance_config";
+const SIGNER_ROTATION_AUDIT_KEY = "stellar_yield_signer_rotation_audit";
 
 function loadFromStorage<T>(key: string, fallback: T): T {
   try {
@@ -31,21 +45,48 @@ export function useGovernanceStore() {
   const [config, setConfig] = useState<GovernanceConfig>(() =>
     loadFromStorage(CONFIG_KEY, DEFAULT_CONFIG),
   );
+  const [signerRotationAudit, setSignerRotationAudit] = useState<
+    SignerRotationAuditRecord[]
+  >(() => loadFromStorage(SIGNER_ROTATION_AUDIT_KEY, []));
+
+  /**
+   * Persist first, then publish to React. A storage failure leaves the
+   * in-memory proposal and its signatures exactly as they were.
+   */
+  const commitTransactions = useCallback((next: PendingTransaction[]) => {
+    saveToStorage(STORAGE_KEY, next);
+    setTransactions(next);
+  }, []);
+
+  const updateTransaction = useCallback(
+    (
+      txId: string,
+      update: (transaction: PendingTransaction) => PendingTransaction,
+    ): PendingTransaction | null => {
+      const target = transactions.find((tx) => tx.id === txId);
+      if (!target) return null;
+
+      const updatedTarget = update(target);
+      if (updatedTarget === target) return target;
+
+      commitTransactions(
+        transactions.map((tx) => (tx.id === txId ? updatedTarget : tx)),
+      );
+      return updatedTarget;
+    },
+    [transactions, commitTransactions],
+  );
 
   const addTransaction = useCallback(
     (tx: PendingTransaction) => {
-      const updated = [...transactions, tx];
-      setTransactions(updated);
-      saveToStorage(STORAGE_KEY, updated);
+      commitTransactions([...transactions, tx]);
     },
-    [transactions],
+    [transactions, commitTransactions],
   );
 
   const addSignature = useCallback(
     (txId: string, publicKey: string) => {
-      const updated = transactions.map((tx) => {
-        if (tx.id !== txId) return tx;
-
+      return updateTransaction(txId, (tx) => {
         const alreadySigned = tx.signatures.some((s) => s.publicKey === publicKey);
         if (alreadySigned) return tx;
 
@@ -58,34 +99,149 @@ export function useGovernanceStore() {
 
         return { ...tx, signatures: newSignatures, status: newStatus } as PendingTransaction;
       });
-
-      setTransactions(updated);
-      saveToStorage(STORAGE_KEY, updated);
     },
-    [transactions],
+    [updateTransaction],
   );
 
-  const markExecuted = useCallback(
-    (txId: string) => {
-      const updated = transactions.map((tx) =>
-        tx.id === txId ? { ...tx, status: "executed" as const } : tx,
+  const beginExecution = useCallback(
+    (txId: string): GovernanceExecutionState | null => {
+      const target = transactions.find((tx) => tx.id === txId);
+      if (!target || target.status === "executed") return null;
+
+      if (target.signatures.length < target.threshold) {
+        throw new GovernanceExecutionError(
+          "PROPOSAL_NOT_READY",
+          "This proposal still needs more signatures before it can be executed.",
+        );
+      }
+
+      const operation = startExecutionAttempt(target.operation);
+      commitTransactions(
+        transactions.map((tx) =>
+          tx.id === txId ? { ...tx, operation } : tx,
+        ),
       );
-      setTransactions(updated);
-      saveToStorage(STORAGE_KEY, updated);
+      return operation;
     },
-    [transactions],
+    [transactions, commitTransactions],
   );
 
-  const updateConfig = useCallback((newConfig: GovernanceConfig) => {
-    setConfig(newConfig);
-    saveToStorage(CONFIG_KEY, newConfig);
-  }, []);
+  const recordExecutionSubmitted = useCallback(
+    (txId: string, txHash: string) => {
+      return updateTransaction(txId, (tx) => {
+        if (tx.status === "executed") return tx;
+        const operation = tx.operation ?? startExecutionAttempt(undefined);
+        return {
+          ...tx,
+          operation: markExecutionSubmitted(operation, txHash),
+        };
+      });
+    },
+    [updateTransaction],
+  );
+
+  const failExecution = useCallback(
+    (txId: string, error: string, failedAtPhase: TxPhase) => {
+      return updateTransaction(txId, (tx) => {
+        const operation = tx.operation ?? startExecutionAttempt(undefined);
+        return {
+          ...tx,
+          operation: failExecutionAttempt(operation, error, failedAtPhase),
+        };
+      });
+    },
+    [updateTransaction],
+  );
+
+  const completeExecution = useCallback(
+    (txId: string, txHash?: string) => {
+      return updateTransaction(txId, (tx) => {
+        if (tx.status === "executed") return tx;
+        return {
+          ...tx,
+          status: "executed" as const,
+          operation: completeExecutionAttempt(tx.operation, txHash),
+        };
+      });
+    },
+    [updateTransaction],
+  );
+
+  const rollbackExecution = useCallback(
+    (txId: string) => {
+      return updateTransaction(txId, (tx) => {
+        if (tx.operation?.status === "succeeded" || tx.status === "executed") {
+          throw new GovernanceExecutionError(
+            "RESUME_REQUIRED",
+            "This proposal already completed and cannot be rolled back.",
+          );
+        }
+        if (tx.operation?.txHash) {
+          throw new GovernanceExecutionError(
+            "RESUME_REQUIRED",
+            "A submitted transaction hash is saved for this proposal. Resume status polling instead of submitting it again.",
+          );
+        }
+
+        return { ...tx, operation: undefined };
+      });
+    },
+    [updateTransaction],
+  );
+
+  const markExecuted = completeExecution;
+
+  const updateConfig = useCallback(
+    (newConfig: GovernanceConfig, actor: string) => {
+      const record = createSignerRotationAuditRecord(
+        config,
+        newConfig,
+        actor,
+        new Date().toISOString(),
+      );
+      const updatedAudit = record
+        ? [...signerRotationAudit, record]
+        : signerRotationAudit;
+      let configPersisted = false;
+
+      try {
+        saveToStorage(CONFIG_KEY, newConfig);
+        configPersisted = true;
+        if (record) {
+          saveToStorage(SIGNER_ROTATION_AUDIT_KEY, updatedAudit);
+        }
+      } catch {
+        if (configPersisted) {
+          try {
+            saveToStorage(CONFIG_KEY, config);
+          } catch {
+            throw new Error(
+              "Unable to save the signer audit or restore the previous governance configuration. Reload and verify the saved configuration.",
+            );
+          }
+        }
+        throw new Error(
+          "Unable to save governance configuration and signer audit. Check browser storage availability and try again.",
+        );
+      }
+
+      setConfig(newConfig);
+      if (record) setSignerRotationAudit(updatedAudit);
+    },
+    [config, signerRotationAudit],
+  );
 
   return {
     transactions,
     config,
+    signerRotationAudit,
     addTransaction,
     addSignature,
+    beginExecution,
+    recordExecutionSubmitted,
+    failExecution,
+    completeExecution,
+    rollbackExecution,
     markExecuted,
     updateConfig,
   };

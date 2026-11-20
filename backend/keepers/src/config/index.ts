@@ -59,6 +59,13 @@ export const config = {
     liquidationConcurrency: optionalInt('LIQUIDATION_CONCURRENCY', 3),
     compoundConcurrency: optionalInt('COMPOUND_CONCURRENCY', 5),
     jobMaxAttempts: optionalInt('JOB_MAX_ATTEMPTS', 5),
+    /**
+     * #1534: Minimum net-yield (expected reward minus fees, in stroops) that a
+     * compound window must clear before a harvest is worth broadcasting.
+     * A compound action whose net yield is strictly below this threshold is
+     * skipped. Set to "0" (default) to disable the gate.
+     */
+    compoundMinNetYield: optionalEnv('COMPOUND_MIN_NET_YIELD', '0'),
     /** Comma-separated list of account addresses to manually monitor if no indexer is used */
     monitoredAddresses: optionalEnv('MONITORED_ADDRESSES', '').split(',').filter(Boolean),
   },

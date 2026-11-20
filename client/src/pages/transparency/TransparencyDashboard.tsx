@@ -12,7 +12,7 @@
  * Data is cached server-side; the page shows a loading skeleton while
  * the first fetch is in flight.
  */
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { Loader2, TrendingUp, Flame, BarChart2, AlertTriangle, CheckCircle, Clock } from "lucide-react";
 import {
     LineChart,
@@ -25,10 +25,30 @@ import {
     ResponsiveContainer,
 } from "recharts";
 import { getApiBaseUrl } from "../../lib/api";
-import { parseSmokeRunResult } from "./smokeResults";
+import { parseSmokeHistory, parseSmokeRunResult } from "./smokeResults";
 import VaultReliabilityPanel from "./VaultReliabilityPanel";
+import VaultSharePriceReconcilePanel from "../../features/vault_share_price/VaultSharePriceReconcilePanel";
 import AuditReplayReportPanel from "./AuditReplayReportPanel";
+import SorobanRpcFailoverPanel from "../../components/SorobanRpcFailoverPanel";
 import RegistryDiffPage from "./RegistryDiff";
+import DeploymentManifestVerifier from "../../components/DeploymentManifestVerifier";
+import registryJson from "../../../../contracts/registry.json";
+import prevRegistryJson from "../../../../contracts/registry.previous.json";
+import {
+    assessRegistryFromRecords,
+    getStateLabel,
+    getSubsystemLabel,
+    mapSmokeTestStatus,
+    parseIndexerStatusPayload,
+    parseRelayerStatusPayload,
+    summarizeTransparencyHealth,
+    validateFailoverIncidentsPayload,
+    validateTransparencySummaryPayload,
+    type SubsystemState,
+    type TransparencyHealthSummary,
+    type TransparencySummaryPayload,
+    type ValidatedFailoverIncident,
+} from "./transparencyServiceHealth";
 
 const getApiBase = () => {
   try {
@@ -40,45 +60,31 @@ const getApiBase = () => {
 
 // ── Types ─────────────────────────────────────────────────────────────────
 
-interface HistoryPoint {
-    date: string;
-    revenue: number;
-    burned: number;
-}
+type TransparencyData = TransparencySummaryPayload;
 
-interface TransparencyData {
-    totalRevenueLumens: number;
-    totalBurnedTokens: number;
-    deflationaryRatio: number;
-    history: HistoryPoint[];
-}
-
-interface FailoverIncident {
-    id: string;
-    protocolId: string;
-    protocolName: string;
-    trigger: string;
-    reasons: string[];
-    startedAt: string;
-    recoveredAt?: string;
-    durationMs?: number;
-    resolved: boolean;
-}
+type FailoverIncident = ValidatedFailoverIncident;
 
 // ── Helpers ───────────────────────────────────────────────────────────────
 
 function formatUSD(value: number): string {
+    if (!Number.isFinite(value)) return "$0";
     return new Intl.NumberFormat("en-US", {
         style: "currency",
         currency: "USD",
         maximumFractionDigits: 0,
-    }).format(value);
+    }).format(Math.max(0, value));
 }
 
 function formatTokens(value: number): string {
+    if (!Number.isFinite(value)) return "0";
     return new Intl.NumberFormat("en-US", { maximumFractionDigits: 2 }).format(
-        value,
+        Math.max(0, value),
     );
+}
+
+function formatRatio(value: number): string {
+    if (!Number.isFinite(value)) return "0.00%";
+    return `${Math.min(100, Math.max(0, value)).toFixed(2)}%`;
 }
 
 // ── Sub-components ────────────────────────────────────────────────────────
@@ -119,56 +125,134 @@ export default function TransparencyDashboard() {
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
     const [smokeStatus, setSmokeStatus] = useState<ReturnType<typeof parseSmokeRunResult>>(null);
-    const [smokeHistory, setSmokeHistory] = useState<Array<ReturnType<typeof parseSmokeRunResult>>>([]);
+    const [smokeHistory, setSmokeHistory] = useState<Array<NonNullable<ReturnType<typeof parseSmokeRunResult>>>>([]);
     const [failoverIncidents, setFailoverIncidents] = useState<FailoverIncident[]>([]);
+    const [healthSummary, setHealthSummary] = useState<TransparencyHealthSummary | null>(null);
+
+    const fetchData = useCallback(async () => {
+        setLoading((prev) => (data === null ? true : prev));
+        setError(null);
+        try {
+            const res = await fetch(`${getApiBase()}/api/transparency/summary`);
+            if (!res.ok) {
+                throw new Error(`Server returned ${res.status}`);
+            }
+            const rawJson: unknown = await res.json();
+            const validated = validateTransparencySummaryPayload(rawJson);
+            setData(validated);
+        } catch (err) {
+            // Preserve existing state and balances if a previous valid snapshot
+            // is already loaded; only surface error state when no snapshot exists
+            // or as a non-destructive refresh warning.
+            setError(
+                err instanceof Error
+                    ? err.message
+                    : "Unable to load transparency data.",
+            );
+        } finally {
+            setLoading(false);
+        }
+    }, [data]);
 
     useEffect(() => {
-        async function fetchData() {
-            setLoading(true);
-            setError(null);
-            try {
-                const res = await fetch(`${getApiBase()}/api/transparency/summary`);
-                if (!res.ok) {
-                    throw new Error(`Server returned ${res.status}`);
-                }
-                const json: TransparencyData = await res.json();
-                setData(json);
-            } catch (err) {
-                setError(
-                    err instanceof Error
-                        ? err.message
-                        : "Unable to load transparency data.",
-                );
-            } finally {
-                setLoading(false);
-            }
-        }
         void fetchData();
+        // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
 
     useEffect(() => {
         const raw = window.localStorage.getItem("stellar-yield.smoke-results");
         setSmokeStatus(raw ? parseSmokeRunResult(raw) : null);
         const rawHistory = window.localStorage.getItem("stellar-yield.smoke-history");
-        if (rawHistory) {
-            try {
-                const parsed = JSON.parse(rawHistory) as string[];
-                const normalized = parsed
-                    .map((entry) => parseSmokeRunResult(entry))
-                    .filter((entry): entry is NonNullable<typeof entry> => entry !== null);
-                setSmokeHistory(normalized);
-            } catch {
-                setSmokeHistory([]);
-            }
-        }
+        setSmokeHistory(parseSmokeHistory(rawHistory));
     }, []);
 
     useEffect(() => {
-        fetch(`${getApiBase()}/api/transparency/failover-history`)
-            .then((res) => (res.ok ? res.json() : Promise.resolve({ incidents: [] })))
-            .then((data: { incidents: FailoverIncident[] }) => setFailoverIncidents(data.incidents))
-            .catch(() => setFailoverIncidents([]));
+        let cancelled = false;
+        async function loadFailoverHistory() {
+            // Retry transient failures without replacing a previously loaded
+            // snapshot with an empty result. The API is read-only and safe to retry.
+            for (let attempt = 0; attempt < 3; attempt += 1) {
+                try {
+                    const response = await fetch(`${getApiBase()}/api/transparency/failover-history`);
+                    if (!response.ok) throw new Error(`Server returned ${response.status}`);
+                    const payload: unknown = await response.json();
+                    const validatedIncidents = validateFailoverIncidentsPayload(payload);
+                    if (!cancelled) setFailoverIncidents(validatedIncidents);
+                    return;
+                } catch {
+                    if (attempt < 2) {
+                        await new Promise((resolve) => window.setTimeout(resolve, 250 * (attempt + 1)));
+                    }
+                }
+            }
+        }
+        void loadFailoverHistory();
+        return () => { cancelled = true; };
     }, []);
+
+    useEffect(() => {
+        async function loadServiceHealth() {
+            const registryState = assessRegistryFromRecords(
+                registryJson as unknown as Record<string, Record<string, string>>,
+                prevRegistryJson as unknown as Record<string, Record<string, string>>,
+            );
+
+            let indexerState: SubsystemState = "unknown";
+            let relayerState: SubsystemState = "unknown";
+
+            const [indexerResult, relayerResult] = await Promise.allSettled([
+                fetch(`${getApiBase()}/api/indexer/status`),
+                fetch(`${getApiBase()}/api/relayer/status`),
+            ]);
+
+            if (indexerResult.status === "fulfilled" && indexerResult.value.ok) {
+                try {
+                    const indexerJson: unknown = await indexerResult.value.json();
+                    indexerState = parseIndexerStatusPayload(indexerJson);
+                } catch {
+                    indexerState = "unknown";
+                }
+            }
+
+            if (relayerResult.status === "fulfilled" && relayerResult.value.ok) {
+                try {
+                    const relayerJson: unknown = await relayerResult.value.json();
+                    relayerState = parseRelayerStatusPayload(relayerJson);
+                } catch {
+                    relayerState = "unknown";
+                }
+            }
+
+            const smokeState = mapSmokeTestStatus(
+                smokeStatus?.status ?? null,
+                smokeStatus?.checks,
+            );
+
+            setHealthSummary(
+                summarizeTransparencyHealth({
+                    indexer: indexerState,
+                    relayer: relayerState,
+                    registry: registryState,
+                    smokeTest: smokeState,
+                }),
+            );
+        }
+
+        void loadServiceHealth();
+    }, [smokeStatus]);
+
+    const healthBadgeClass = (state: SubsystemState) => {
+        switch (state) {
+            case "healthy":
+                return "text-green-300 bg-green-500/10 border-green-500/30";
+            case "degraded":
+                return "text-yellow-300 bg-yellow-500/10 border-yellow-500/30";
+            case "failed":
+                return "text-red-300 bg-red-500/10 border-red-500/30";
+            default:
+                return "text-gray-300 bg-gray-500/10 border-gray-500/30";
+        }
+    };
 
     // ── Truncate X-axis labels to MM/DD ───────────────────────────────────
     const chartData =
@@ -177,7 +261,7 @@ export default function TransparencyDashboard() {
             label: h.date.slice(5), // "MM-DD"
         })) ?? [];
 
-    if (loading) {
+    if (loading && !data) {
         return (
             <div className="flex flex-col items-center justify-center py-24">
                 <Loader2 size={40} className="text-indigo-400 animate-spin mb-4" />
@@ -186,12 +270,19 @@ export default function TransparencyDashboard() {
         );
     }
 
-    if (error || !data) {
+    if (!data) {
         return (
             <div className="flex flex-col items-center justify-center py-24 text-center">
                 <BarChart2 size={48} className="text-gray-500 mb-4" />
                 <h2 className="text-2xl font-bold mb-2">Unable to load data</h2>
-                <p className="text-gray-400">{error ?? "Unknown error"}</p>
+                <p className="text-gray-400 mb-4">{error ?? "Unknown error"}</p>
+                <button
+                    type="button"
+                    onClick={() => void fetchData()}
+                    className="px-4 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-medium transition-colors"
+                >
+                    Try Again
+                </button>
             </div>
         );
     }
@@ -199,13 +290,23 @@ export default function TransparencyDashboard() {
     return (
         <div className="space-y-8 animate-in fade-in slide-in-from-bottom-4 duration-700">
             {/* Header */}
-            <header>
-                <h2 className="text-3xl font-extrabold tracking-tight">
-                    Protocol Transparency
-                </h2>
-                <p className="text-gray-400 mt-1">
-                    Real-time protocol revenue, $YIELD burns, and the deflationary ratio.
-                </p>
+            <header className="flex flex-wrap items-center justify-between gap-4">
+                <div>
+                    <h2 className="text-3xl font-extrabold tracking-tight">
+                        Protocol Transparency
+                    </h2>
+                    <p className="text-gray-400 mt-1">
+                        Real-time protocol revenue, $YIELD burns, and the deflationary ratio.
+                    </p>
+                </div>
+                <button
+                    type="button"
+                    onClick={() => void fetchData()}
+                    aria-label="Refresh transparency data"
+                    className="px-3 py-1.5 rounded-xl border border-gray-700 hover:border-indigo-400 text-xs text-gray-300 transition-colors"
+                >
+                    Refresh
+                </button>
             </header>
 
             {/* Stat cards */}
@@ -227,7 +328,7 @@ export default function TransparencyDashboard() {
                 <StatCard
                     icon={<BarChart2 size={22} className="text-purple-400" />}
                     title="Deflationary Ratio"
-                    value={`${data.deflationaryRatio.toFixed(2)}%`}
+                    value={formatRatio(data.deflationaryRatio)}
                     subtitle="Burn rate vs. emission rate"
                     accent="purple"
                 />
@@ -296,6 +397,49 @@ export default function TransparencyDashboard() {
                     </LineChart>
                 </ResponsiveContainer>
             </div>
+
+            <SorobanRpcFailoverPanel />
+            {healthSummary && (
+                <div
+                    className="glass-panel rounded-2xl p-6"
+                    role="region"
+                    aria-label="Service health summary"
+                >
+                    <div className="flex items-center gap-2 mb-4">
+                        <AlertTriangle size={18} className="text-amber-400" />
+                        <h3 className="font-semibold text-white">Service Health Summary</h3>
+                    </div>
+                    <p
+                        className={`text-sm mb-4 ${
+                            healthSummary.overall === "healthy"
+                                ? "text-green-300"
+                                : healthSummary.overall === "failed"
+                                  ? "text-red-300"
+                                  : "text-yellow-300"
+                        }`}
+                    >
+                        {healthSummary.summaryMessage}
+                    </p>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+                        {(Object.keys(healthSummary.subsystems) as Array<
+                            keyof typeof healthSummary.subsystems
+                        >).map((key) => {
+                            const state = healthSummary.subsystems[key];
+                            return (
+                                <div
+                                    key={key}
+                                    className={`rounded-xl border px-3 py-2 ${healthBadgeClass(state)}`}
+                                >
+                                    <p className="text-xs uppercase tracking-wide opacity-80">
+                                        {getSubsystemLabel(key)}
+                                    </p>
+                                    <p className="text-sm font-semibold">{getStateLabel(state)}</p>
+                                </div>
+                            );
+                        })}
+                    </div>
+                </div>
+            )}
 
             <div className="glass-panel rounded-2xl p-6">
                 <div className="flex items-center gap-2 mb-4">
@@ -392,7 +536,9 @@ export default function TransparencyDashboard() {
 
             {/* Data Source Reliability */}
             <VaultReliabilityPanel />
+            <VaultSharePriceReconcilePanel />
             <AuditReplayReportPanel />
+            <DeploymentManifestVerifier />
             <RegistryDiffPage />
         </div>
     );

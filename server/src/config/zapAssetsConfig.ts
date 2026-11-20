@@ -18,6 +18,9 @@ export type ZapSupportedAssetsPayload = {
   vaultContractId: string;
 };
 
+/** Decimal scales above this are unsupported by the server's asset math. */
+export const MAX_SUPPORTED_ASSET_DECIMALS = 18;
+
 let cache: ZapSupportedAssetsPayload | null = null;
 
 function asNonEmptyString(v: unknown): v is string {
@@ -25,7 +28,13 @@ function asNonEmptyString(v: unknown): v is string {
 }
 
 function asFiniteNonNegInt(v: unknown): v is number {
-  return typeof v === "number" && Number.isFinite(v) && v >= 0 && Number.isInteger(v);
+  return (
+    typeof v === "number" &&
+    Number.isFinite(v) &&
+    v >= 0 &&
+    v <= MAX_SUPPORTED_ASSET_DECIMALS &&
+    Number.isInteger(v)
+  );
 }
 
 export function validateZapAssetsJsonEntry(
@@ -46,7 +55,9 @@ export function validateZapAssetsJsonEntry(
     throw new Error(`ZAP_ASSETS_JSON[${index}].contractId must be a non-empty string`);
   }
   if (!asFiniteNonNegInt(o.decimals)) {
-    throw new Error(`ZAP_ASSETS_JSON[${index}].decimals must be a non-negative integer`);
+    throw new Error(
+      `ZAP_ASSETS_JSON[${index}].decimals must be an integer between 0 and ${MAX_SUPPORTED_ASSET_DECIMALS}`,
+    );
   }
   if ("iconUrl" in o && o.iconUrl !== undefined && o.iconUrl !== null) {
     if (!asNonEmptyString(o.iconUrl)) {
@@ -108,11 +119,16 @@ export function loadZapSupportedAssetsPayload(
   const contractId = env.VAULT_TOKEN_CONTRACT_ID?.trim() ?? "";
   const decimalsRaw = env.VAULT_TOKEN_DECIMALS ?? "7";
   const decimals = Number(decimalsRaw);
+  if (!asFiniteNonNegInt(decimals)) {
+    throw new Error(
+      `VAULT_TOKEN_DECIMALS must be an integer between 0 and ${MAX_SUPPORTED_ASSET_DECIMALS}`,
+    );
+  }
   const vaultToken: ZapAssetPublic = {
     symbol: env.VAULT_TOKEN_SYMBOL?.trim() || "USDC",
     name: "Vault asset",
     contractId,
-    decimals: Number.isFinite(decimals) ? decimals : 7,
+    decimals,
   };
 
   const vaultContractId =

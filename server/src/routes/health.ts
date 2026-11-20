@@ -4,6 +4,7 @@ import { Horizon, rpc as SorobanRpc } from "@stellar/stellar-sdk";
 import { Queue } from "bullmq";
 import { Redis } from "ioredis";
 import { validateServerEnv } from "../config/env";
+import { rebalanceQueueService, type QueueHealthSnapshot } from "../services/rebalanceQueueService";
 import type {
   DependencyHealthStatus,
   HorizonHealthSnapshot,
@@ -11,7 +12,23 @@ import type {
   DatabaseHealthSnapshot,
   IndexerHealthSnapshot,
   ReadinessResponse as DeploymentReadinessResponse,
+  BootSummaryResponse,
 } from "../monitoring/healthSnapshots";
+import {
+  buildServiceDependencyGraph,
+  type ServiceDependencyGraph,
+  type ServiceDependencyNode,
+  type ServiceDependencyEdge,
+  type DependencyGraphSummary,
+  type ServiceId,
+} from "../monitoring/dependencyGraph";
+import { getWalletBootStatus } from "../utils/stellarAuth";
+import { getIndexerBootStatus } from "../indexer/indexerStatus";
+import {
+  getLatestIntegrationHealthDigest,
+  INTEGRATION_HEALTH_DIGEST_ERRORS,
+} from "../services/integrationHealthDigestService";
+import { sendError } from "../utils/errorResponse";
 
 const router = Router();
 const prisma = new PrismaClient();
@@ -28,6 +45,7 @@ const _INDEXER_LAG_WARN_THRESHOLD = Number(process.env.INDEXER_LAG_WARN_LEDGERS 
 const REDIS_URL = process.env.REDIS_URL ?? "redis://localhost:6379";
 const QUEUE_FAILED_THRESHOLD = Number(process.env.QUEUE_FAILED_THRESHOLD ?? "10");
 const QUEUE_DELAYED_THRESHOLD = Number(process.env.QUEUE_DELAYED_THRESHOLD ?? "50");
+const QUEUE_DEAD_LETTER_THRESHOLD = Number(process.env.QUEUE_DEAD_LETTER_THRESHOLD ?? "5");
 
 const ALL_QUEUE_NAMES = [
   "liquidation",
@@ -58,6 +76,15 @@ export interface QueueHealthEntry {
 
 export interface QueueHealthSummary {
   queues: QueueHealthEntry[];
+  /**
+   * Backlog health summary for the Prisma-backed rebalance queue (#1076),
+   * distinguishing waiting/delayed/retrying/active/failed/dead-lettered
+   * states — a job that's simply scheduled for later is not the same
+   * signal as one that already failed and is awaiting retry, and a
+   * terminal failure with retries still on paper is not the same as one
+   * that's exhausted every attempt.
+   */
+  rebalanceQueue: QueueHealthSnapshot;
   overallStatus: QueueStatus;
   timestamp: string;
 }
@@ -227,8 +254,42 @@ router.get("/queues", async (_req: Request, res: Response) => {
         ? "warning"
         : "healthy";
 
-    const body: QueueHealthSummary = { queues: entries, overallStatus, timestamp: new Date().toISOString() };
-    res.status(overallStatus === "error" ? 503 : 200).json(body);
+    // Rebalance queue backlog health (#1076) — fetched alongside the BullMQ
+    // job counts above so /health/queues stays a single, complete view of
+    // queue backlog health. A failure here degrades to a zeroed summary
+    // rather than failing the whole route, matching the per-queue
+    // try/catch behavior above.
+    let rebalanceQueue: QueueHealthSnapshot;
+    try {
+      rebalanceQueue = await rebalanceQueueService.getQueueHealthSummary();
+    } catch {
+      rebalanceQueue = {
+        active: 0,
+        waiting: 0,
+        delayed: 0,
+        retrying: 0,
+        failed: 0,
+        deadLettered: 0,
+        total: 0,
+        generatedAt: new Date().toISOString(),
+      };
+    }
+
+    const rebalanceQueueDegraded = rebalanceQueue.deadLettered > QUEUE_DEAD_LETTER_THRESHOLD;
+    const finalOverallStatus: QueueStatus =
+      overallStatus === "error"
+        ? "error"
+        : overallStatus === "warning" || rebalanceQueueDegraded
+          ? "warning"
+          : "healthy";
+
+    const body: QueueHealthSummary = {
+      queues: entries,
+      rebalanceQueue,
+      overallStatus: finalOverallStatus,
+      timestamp: new Date().toISOString(),
+    };
+    res.status(finalOverallStatus === "error" ? 503 : 200).json(body);
   } finally {
     await redis.quit().catch(() => {});
   }
@@ -271,9 +332,19 @@ export interface DependenciesResponse {
   sorobanRpc: SorobanRpcSnapshot;
   indexer: IndexerSnapshot;
   cache: CacheSnapshot;
+  graph: ServiceDependencyGraph;
   timestamp: string;
   overallStatus: DependencyStatus;
 }
+
+export {
+  buildServiceDependencyGraph,
+  type ServiceDependencyGraph,
+  type ServiceDependencyNode,
+  type ServiceDependencyEdge,
+  type DependencyGraphSummary,
+  type ServiceId,
+};
 
 /**
  * Readiness probe — a lightweight summary of the combined dependency health
@@ -292,7 +363,7 @@ export interface ReadinessResponse {
   checkedAt: string;
 }
 
-async function checkDatabaseWithLatency(): Promise<DatabaseSnapshot> {
+export async function checkDatabaseWithLatency(): Promise<DatabaseSnapshot> {
   const start = Date.now();
   const checkedAt = new Date().toISOString();
   try {
@@ -315,7 +386,7 @@ async function checkDatabaseWithLatency(): Promise<DatabaseSnapshot> {
   }
 }
 
-async function checkHorizonWithLatency(): Promise<HorizonSnapshot> {
+export async function checkHorizonWithLatency(): Promise<HorizonSnapshot> {
   const start = Date.now();
   const checkedAt = new Date().toISOString();
   try {
@@ -343,7 +414,7 @@ async function checkHorizonWithLatency(): Promise<HorizonSnapshot> {
   }
 }
 
-async function checkIndexerWithLatency(
+export async function checkIndexerWithLatency(
   latestLedger?: number,
 ): Promise<IndexerSnapshot> {
   const start = Date.now();
@@ -381,7 +452,7 @@ async function checkIndexerWithLatency(
   }
 }
 
-async function checkSorobanRpcWithLatency(): Promise<SorobanRpcSnapshot> {
+export async function checkSorobanRpcWithLatency(): Promise<SorobanRpcSnapshot> {
   const start = Date.now();
   const checkedAt = new Date().toISOString();
   try {
@@ -405,7 +476,7 @@ async function checkSorobanRpcWithLatency(): Promise<SorobanRpcSnapshot> {
   }
 }
 
-async function checkCacheWithLatency(): Promise<CacheSnapshot> {
+export async function checkCacheWithLatency(): Promise<CacheSnapshot> {
   const redis = new Redis(REDIS_URL, {
     maxRetriesPerRequest: null,
     enableReadyCheck: false,
@@ -469,17 +540,84 @@ router.get("/dependencies", async (_req: Request, res: Response) => {
       ? "warning"
       : "up";
 
+  const graph = buildServiceDependencyGraph({
+    database,
+    horizon,
+    sorobanRpc,
+    indexer,
+    cache,
+  });
+
   const body: DependenciesResponse = {
     database,
     horizon,
     sorobanRpc,
     indexer,
     cache,
+    graph,
     timestamp: new Date().toISOString(),
     overallStatus,
   };
 
   res.status(overallStatus === "down" ? 503 : 200).json(body);
+});
+
+/**
+ * GET /health/graph
+ *
+ * Returns the full service dependency graph with topological relationships,
+ * root-cause analysis, and blast radius mappings.
+ */
+router.get("/graph", async (_req: Request, res: Response) => {
+  const [database, horizon, sorobanRpc] = await Promise.all([
+    checkDatabaseWithLatency(),
+    checkHorizonWithLatency(),
+    checkSorobanRpcWithLatency(),
+  ]);
+
+  const [indexer, cache] = await Promise.all([
+    checkIndexerWithLatency(horizon.latestLedger),
+    checkCacheWithLatency(),
+  ]);
+
+  const graph = buildServiceDependencyGraph({
+    database,
+    horizon,
+    sorobanRpc,
+    indexer,
+    cache,
+  });
+
+  const isOutage = graph.summary.overallStatus === "outage";
+  res.status(isOutage ? 503 : 200).json({
+    graph,
+    ok: !isOutage,
+    timestamp: new Date().toISOString(),
+  });
+});
+
+/**
+ * GET /health/digest
+ *
+ * Returns the latest scheduled integration health digest (#1341): overall
+ * status, per-integration status with stable error codes, and counts. Until
+ * the first scheduled run completes it answers 404 `HEALTH_DIGEST_NOT_READY`.
+ */
+router.get("/digest", (_req: Request, res: Response) => {
+  const digest = getLatestIntegrationHealthDigest();
+  if (!digest) {
+    const notReady = INTEGRATION_HEALTH_DIGEST_ERRORS.HEALTH_DIGEST_NOT_READY;
+    return sendError(
+      res,
+      notReady.httpStatus,
+      notReady.code,
+      notReady.defaultMessage,
+      undefined,
+      undefined,
+      notReady.retryable,
+    );
+  }
+  res.json(digest);
 });
 
 // ── Typed snapshot helpers ────────────────────────────────────────────────
@@ -750,6 +888,537 @@ router.get("/startup", async (_req: Request, res: Response) => {
   };
 
   res.status(status === "failed" ? 503 : 200).json(body);
+});
+
+// ── Keeper Heartbeat & Degraded Recovery Guidance (#1034) ─────────────
+
+export type KeeperWorkerName = "rebalance" | "liquidation" | "reward" | "indexer";
+export type KeeperHealthState = "healthy" | "stale" | "missing";
+
+export interface KeeperWorkerHealth {
+  status: KeeperHealthState;
+  lastHeartbeat: string | null;
+  ageMs: number | null;
+  degradedBehavior: string;
+  recoveryGuidance: string;
+}
+
+export interface KeepersHealthResponse {
+  status: "healthy" | "degraded";
+  staleCount: number;
+  missingCount: number;
+  keepers: Record<KeeperWorkerName, KeeperWorkerHealth>;
+  timestamp: string;
+}
+
+export const KEEPER_NAMES: readonly KeeperWorkerName[] = [
+  "rebalance",
+  "liquidation",
+  "reward",
+  "indexer",
+] as const;
+
+export const KEEPER_HEALTH_THRESHOLDS = {
+  HEALTHY_MAX_AGE_MS: 60_000, // 1 minute
+  STALE_MAX_AGE_MS: 180_000,  // 3 minutes
+};
+
+export const KEEPER_DEGRADED_BEHAVIOR: Record<KeeperWorkerName, string> = {
+  rebalance:
+    "Portfolio drift uncorrected; vault asset allocations may diverge from target weights.",
+  liquidation:
+    "Undercollateralized positions are not liquidated; vault collateral ratio at risk of bad debt.",
+  reward:
+    "Yield harvesting paused; auto-compounding rewards and fee distributions are delayed.",
+  indexer:
+    "On-chain ledger events not indexed; dashboard transaction history and balances may lag.",
+};
+
+export const KEEPER_RECOVERY_GUIDANCE: Record<KeeperWorkerName, string> = {
+  rebalance:
+    "Check rebalance queue depth, verify Soroban RPC endpoint latency, and restart rebalance keeper: `docker compose restart keeper-rebalance`.",
+  liquidation:
+    "Verify oracle price feed freshness, check liquidation signer balance for gas, and restart liquidation keeper: `docker compose restart keeper-liquidation`.",
+  reward:
+    "Check gas balance on reward distribution key and restart compound worker: `docker compose restart keeper-compound`.",
+  indexer:
+    "Verify Horizon RPC connectivity, inspect database write latency, and restart indexer service: `docker compose restart indexer`.",
+};
+
+const keeperHeartbeats = new Map<KeeperWorkerName, number>();
+
+export function recordKeeperHeartbeat(
+  worker: KeeperWorkerName,
+  timestamp: number = Date.now(),
+): void {
+  keeperHeartbeats.set(worker, timestamp);
+}
+
+export function resetKeeperHeartbeats(): void {
+  keeperHeartbeats.clear();
+}
+
+export function getKeepersHealth(now: number = Date.now()): KeepersHealthResponse {
+  const keepers = {} as Record<KeeperWorkerName, KeeperWorkerHealth>;
+  let staleCount = 0;
+  let missingCount = 0;
+
+  for (const name of KEEPER_NAMES) {
+    const lastTimestamp = keeperHeartbeats.get(name) ?? null;
+    if (lastTimestamp === null) {
+      missingCount++;
+      keepers[name] = {
+        status: "missing",
+        lastHeartbeat: null,
+        ageMs: null,
+        degradedBehavior: KEEPER_DEGRADED_BEHAVIOR[name],
+        recoveryGuidance: KEEPER_RECOVERY_GUIDANCE[name],
+      };
+    } else {
+      const ageMs = Math.max(0, now - lastTimestamp);
+      const isHealthy = ageMs <= KEEPER_HEALTH_THRESHOLDS.HEALTHY_MAX_AGE_MS;
+      const status: KeeperHealthState = isHealthy ? "healthy" : "stale";
+      if (status === "stale") staleCount++;
+
+      keepers[name] = {
+        status,
+        lastHeartbeat: new Date(lastTimestamp).toISOString(),
+        ageMs,
+        degradedBehavior: KEEPER_DEGRADED_BEHAVIOR[name],
+        recoveryGuidance: KEEPER_RECOVERY_GUIDANCE[name],
+      };
+    }
+  }
+
+  const isDegraded = staleCount > 0 || missingCount > 0;
+
+  return {
+    status: isDegraded ? "degraded" : "healthy",
+    staleCount,
+    missingCount,
+    keepers,
+    timestamp: new Date(now).toISOString(),
+  };
+}
+
+/**
+ * GET /health/keepers (or /api/health/keepers)
+ *
+ * Exposes keeper heartbeat freshness, timeout states, and recovery guidance.
+ * Distinguishes stale keepers from backend API outages by returning 200 with degraded summary.
+ */
+router.get("/keepers", async (_req: Request, res: Response) => {
+  const summary = getKeepersHealth();
+  res.status(200).json(summary);
+});
+
+/**
+ * POST /health/keepers/heartbeat
+ *
+ * Records a heartbeat from a running keeper worker.
+ */
+router.post("/keepers/heartbeat", async (req: Request, res: Response) => {
+  const { worker } = req.body ?? {};
+  if (!worker || !KEEPER_NAMES.includes(worker)) {
+    res.status(400).json({ error: `Invalid worker name. Must be one of: ${KEEPER_NAMES.join(", ")}` });
+    return;
+  }
+
+  recordKeeperHeartbeat(worker as KeeperWorkerName);
+  res.status(200).json({ status: "ok", worker, timestamp: new Date().toISOString() });
+});
+
+// ── Weekly Report Generation Health Check ─────────────────────────────────
+
+import {
+  getWeeklyReportHealth,
+  getPeriodsNeedingCatchUp,
+  WeeklyReportHealthCheck,
+} from "../services/weeklyYieldReportService";
+
+export interface WeeklyReportsHealthResponse {
+  status: "healthy" | "degraded" | "unhealthy";
+  reportType: string;
+  currentPeriod: WeeklyReportHealthCheck["currentPeriod"];
+  previousPeriods: WeeklyReportHealthCheck["previousPeriods"];
+  summary: WeeklyReportHealthCheck["summary"];
+  catchUpPeriods: Array<{ periodStart: string; periodEnd: string; status: string }>;
+  timestamp: string;
+}
+
+/**
+ * GET /health/weekly-reports
+ *
+ * Returns health status for weekly report generation, distinguishing between:
+ * - SUCCESS: Generated on time
+ * - DELAYED: Generated but after expected time
+ * - MISSING: No generation occurred for the window
+ * - FAILED: Generation was attempted but errored out
+ *
+ * Also identifies periods needing catch-up generation.
+ */
+router.get("/weekly-reports", async (_req: Request, res: Response) => {
+  try {
+    const health = await getWeeklyReportHealth("weekly-yield-report", 4);
+    const catchUpPeriods = await getPeriodsNeedingCatchUp("weekly-yield-report", 4);
+
+    let overallStatus: WeeklyReportsHealthResponse["status"] = "healthy";
+    if (health.summary.failed > 0 || health.summary.missing > 0) {
+      overallStatus = "unhealthy";
+    } else if (health.summary.delayed > 0) {
+      overallStatus = "degraded";
+    }
+
+    const response: WeeklyReportsHealthResponse = {
+      status: overallStatus,
+      reportType: health.reportType,
+      currentPeriod: health.currentPeriod,
+      previousPeriods: health.previousPeriods,
+      summary: health.summary,
+      catchUpPeriods: catchUpPeriods.map((p) => ({
+        periodStart: p.periodStart.toISOString().split("T")[0],
+        periodEnd: p.periodEnd.toISOString().split("T")[0],
+        status: p.status,
+      })),
+      timestamp: new Date().toISOString(),
+    };
+
+    const statusCode = overallStatus === "unhealthy" ? 503 : overallStatus === "degraded" ? 200 : 200;
+    res.status(statusCode).json(response);
+  } catch (error) {
+    console.error("Weekly reports health check failed:", error);
+    res.status(500).json({
+      status: "error",
+      error: error instanceof Error ? error.message : "Health check failed",
+      timestamp: new Date().toISOString(),
+    });
+  }
+});
+
+/**
+ * POST /health/weekly-reports/catch-up
+ *
+ * Manually trigger catch-up generation for missed periods.
+ */
+router.post("/weekly-reports/catch-up", async (req: Request, res: Response) => {
+  try {
+    const { maxPeriods = 4 } = req.body ?? {};
+    const { generateCatchUpReports } = await import("../services/weeklyYieldReportService");
+
+    const results = await generateCatchUpReports("weekly-yield-report", maxPeriods);
+
+    res.json({
+      success: true,
+      triggeredAt: new Date().toISOString(),
+      maxPeriods,
+      results,
+    });
+  } catch (error) {
+    console.error("Catch-up generation failed:", error);
+    res.status(500).json({
+      success: false,
+      error: error instanceof Error ? error.message : "Catch-up generation failed",
+      timestamp: new Date().toISOString(),
+    });
+  }
+});
+
+// ── Boot Summary for Startup Diagnostics (#1117) ───────────────────────────
+
+/**
+ * GET /health/boot-summary
+ *
+ * Structured health summary for wallet, API, and indexer boot status.
+ * Designed for startup diagnostics, showing readiness at a glance.
+ *
+ * Returns:
+ * - "ready": All core components (wallet, API, indexer) are operational
+ * - "partial": Some components are degraded but system is functional
+ * - "failed": One or more components are unavailable, startup should be deferred
+ */
+router.get("/boot-summary", async (_req: Request, res: Response) => {
+  const checkedAt = new Date().toISOString();
+
+  // Collect boot status from all three core components in parallel
+  const [walletStatus, indexerStatus, apiStatusPromise] = await Promise.all([
+    Promise.resolve(getWalletBootStatus()),
+    getIndexerBootStatus(),
+    (async () => {
+      const [database, horizon, sorobanRpc] = await Promise.all([
+        checkDatabaseSnapshot(),
+        checkHorizonSnapshot(),
+        checkSorobanRpcSnapshot(),
+      ]);
+      return { database, horizon, sorobanRpc };
+    })(),
+  ]);
+
+  const apiStatus = await apiStatusPromise;
+
+  // Map health statuses to boot statuses
+  const mapHealthToBoot = (status: DependencyHealthStatus): "ready" | "degraded" | "unavailable" => {
+    if (status === "unavailable" || status === "misconfigured") return "unavailable";
+    if (status === "degraded") return "degraded";
+    return "ready";
+  };
+
+  // Determine API boot status based on dependencies
+  const apiBootStatus = {
+    status: (() => {
+      const statuses = [
+        apiStatus.database.status,
+        apiStatus.horizon.status,
+        apiStatus.sorobanRpc.status,
+      ];
+      if (statuses.some((s) => s === "unavailable" || s === "misconfigured")) return "unavailable" as const;
+      if (statuses.some((s) => s === "degraded")) return "degraded" as const;
+      return "ready" as const;
+    })(),
+    database: mapHealthToBoot(apiStatus.database.status),
+    horizon: mapHealthToBoot(apiStatus.horizon.status),
+    sorobanRpc: mapHealthToBoot(apiStatus.sorobanRpc.status),
+  };
+
+  // Collect component details
+  const allReady =
+    walletStatus.status === "ready" &&
+    apiBootStatus.status === "ready" &&
+    indexerStatus.status === "ready";
+
+  const anyUnavailable =
+    walletStatus.status === "unavailable" ||
+    apiBootStatus.status === "unavailable" ||
+    indexerStatus.status === "unavailable";
+
+  // Determine overall boot status
+  const overallStatus: BootSummaryResponse["status"] = anyUnavailable
+    ? "failed"
+    : allReady
+      ? "ready"
+      : "partial";
+
+  // Generate recommendations based on failures
+  const recommendations: string[] = [];
+
+  if (walletStatus.status === "unavailable") {
+    recommendations.push(
+      "Wallet authentication unavailable — verify authentication module and session configuration"
+    );
+  } else if (walletStatus.status === "degraded") {
+    recommendations.push("Wallet degraded — check authentication rate limits and session store");
+  }
+
+  if (apiBootStatus.database.status === "unavailable" || apiStatus.database.status === "unavailable") {
+    recommendations.push("Database unavailable — verify DATABASE_URL and Postgres connectivity");
+  } else if (apiBootStatus.database.status === "degraded" || apiStatus.database.status === "degraded") {
+    recommendations.push("Database slow — check query performance and connection pool");
+  }
+
+  if (apiBootStatus.horizon.status === "unavailable" || apiStatus.horizon.status === "unavailable") {
+    recommendations.push(
+      "Horizon RPC unreachable — verify STELLAR_HORIZON_URL and network connectivity"
+    );
+  } else if (apiBootStatus.horizon.status === "degraded" || apiStatus.horizon.status === "degraded") {
+    recommendations.push("Horizon RPC slow — consider alternative RPC endpoint or geographic proximity");
+  }
+
+  if (apiBootStatus.sorobanRpc.status === "unavailable" || apiStatus.sorobanRpc.status === "unavailable") {
+    recommendations.push("Soroban RPC unreachable — verify SOROBAN_RPC_URL and network connectivity");
+  } else if (
+    apiBootStatus.sorobanRpc.status === "degraded" ||
+    apiStatus.sorobanRpc.status === "degraded"
+  ) {
+    recommendations.push(
+      "Soroban RPC slow — consider alternative RPC endpoint or geographic proximity"
+    );
+  }
+
+  if (indexerStatus.status === "unavailable") {
+    recommendations.push("Indexer unavailable — verify indexer process is running and database is reachable");
+  } else if (indexerStatus.status === "degraded") {
+    recommendations.push(
+      "Indexer degraded — check for stalled replay process or network lag (review details for lag)"
+    );
+  }
+
+  // Build structured response
+  const body: BootSummaryResponse = {
+    status: overallStatus,
+    summary:
+      overallStatus === "ready"
+        ? "All core components are ready — system startup is complete"
+        : overallStatus === "partial"
+          ? "Some components are degraded — system is functional but may have reduced capability"
+          : "One or more components are unavailable — defer startup until all dependencies recover",
+    components: {
+      wallet: {
+        status: walletStatus.status,
+        ready: walletStatus.ready,
+        reason: walletStatus.reason,
+        capabilities: walletStatus.capabilities,
+      },
+      api: {
+        status: apiBootStatus.status,
+        ready: apiBootStatus.status === "ready",
+        reason:
+          apiBootStatus.status === "unavailable"
+            ? "One or more API dependencies unavailable"
+            : apiBootStatus.status === "degraded"
+              ? "One or more API dependencies degraded"
+              : undefined,
+        dependencies: {
+          database: apiBootStatus.database,
+          horizon: apiBootStatus.horizon,
+          sorobanRpc: apiBootStatus.sorobanRpc,
+        },
+      },
+      indexer: {
+        status: indexerStatus.status,
+        ready: indexerStatus.ready,
+        reason: indexerStatus.reason,
+        details: indexerStatus.details,
+      },
+    },
+    checkedAt,
+    recommendations,
+  };
+
+  res.status(overallStatus === "failed" ? 503 : 200).json(body);
+});
+
+// ── Health Summary: indexer and database latency (#1375) ──────────────────────
+
+/**
+ * Latency tier classification based on the configured health timeout.
+ *
+ * - "fast":     < 20 % of HEALTH_TIMEOUT_MS
+ * - "moderate": 20 %–60 % of HEALTH_TIMEOUT_MS
+ * - "slow":     > 60 % of HEALTH_TIMEOUT_MS (but responded)
+ * - "timeout":  did not respond within HEALTH_TIMEOUT_MS
+ */
+export type LatencyTier = "fast" | "moderate" | "slow" | "timeout";
+
+function classifyLatency(latencyMs: number | undefined): LatencyTier {
+  if (latencyMs === undefined) return "timeout";
+  if (latencyMs < HEALTH_TIMEOUT_MS * 0.2) return "fast";
+  if (latencyMs < HEALTH_TIMEOUT_MS * 0.6) return "moderate";
+  return "slow";
+}
+
+export interface ComponentLatencySummary {
+  status: string;
+  latencyMs: number | undefined;
+  latencyTier: LatencyTier;
+  checkedAt: string;
+  errorCode: string | null;
+  retryable: boolean;
+  hint?: string;
+}
+
+export interface IndexerLatencySummary extends ComponentLatencySummary {
+  syncedLedger?: number;
+  lagLedgers?: number;
+}
+
+export interface HealthSummaryResponse {
+  /** Overall health status derived from the two checked components. */
+  status: "healthy" | "degraded" | "unavailable";
+  database: ComponentLatencySummary;
+  indexer: IndexerLatencySummary;
+  checkedAt: string;
+}
+
+/**
+ * GET /health/summary
+ *
+ * Returns a focused health summary for the two most latency-sensitive
+ * backend components: the Postgres database and the on-chain indexer.
+ * Each entry includes:
+ *   - status          — healthy / degraded / unavailable
+ *   - latencyMs       — round-trip time for the health probe
+ *   - latencyTier     — "fast" / "moderate" / "slow" / "timeout"
+ *   - checkedAt       — ISO timestamp of the probe
+ *   - errorCode       — stable machine-readable code or null
+ *   - retryable       — whether the failure is likely transient
+ *
+ * The indexer entry additionally exposes syncedLedger and lagLedgers
+ * so operators can assess how far behind the indexer has fallen without
+ * needing to call /health/dependencies.
+ *
+ * Returns 200 when both components are healthy or degraded, 503 when
+ * either is unavailable.
+ */
+router.get("/summary", async (_req: Request, res: Response) => {
+  const checkedAt = new Date().toISOString();
+
+  // Fetch database and horizon snapshots in parallel; use horizon latestLedger
+  // to compute indexer lag accurately.
+  const [dbSnap, horizonSnap] = await Promise.all([
+    checkDatabaseSnapshot(),
+    checkHorizonSnapshot(),
+  ]);
+
+  const indexerSnap = await checkIndexerSnapshot(horizonSnap.latestLedger);
+
+  const mapStatus = (
+    s: string,
+  ): "healthy" | "degraded" | "unavailable" => {
+    if (s === "healthy") return "healthy";
+    if (s === "unavailable" || s === "misconfigured") return "unavailable";
+    return "degraded";
+  };
+
+  const database: ComponentLatencySummary = {
+    status: mapStatus(dbSnap.status),
+    latencyMs: dbSnap.latencyMs,
+    latencyTier: classifyLatency(dbSnap.latencyMs),
+    checkedAt: dbSnap.checkedAt,
+    errorCode: dbSnap.errorCode,
+    retryable: dbSnap.retryable,
+    hint:
+      dbSnap.status === "unavailable"
+        ? "Database unreachable — check DATABASE_URL and Postgres availability"
+        : dbSnap.status === "degraded"
+          ? "Database responding slowly — check connection pool and query performance"
+          : undefined,
+  };
+
+  const indexer: IndexerLatencySummary = {
+    status: mapStatus(indexerSnap.status),
+    latencyMs: indexerSnap.latencyMs,
+    latencyTier: classifyLatency(indexerSnap.latencyMs),
+    checkedAt: indexerSnap.checkedAt,
+    errorCode: indexerSnap.errorCode,
+    retryable: indexerSnap.retryable,
+    syncedLedger: indexerSnap.syncedLedger,
+    lagLedgers: indexerSnap.lagLedgers,
+    hint:
+      indexerSnap.errorCode === "INDEXER_LAG_EXCESSIVE"
+        ? `Indexer severely stalled (${indexerSnap.lagLedgers} ledgers behind) — restart indexer service`
+        : indexerSnap.errorCode === "INDEXER_LAG_ELEVATED"
+          ? `Indexer lagging (${indexerSnap.lagLedgers} ledgers behind) — may indicate slow replay`
+          : indexerSnap.status === "unavailable"
+            ? "Indexer state unavailable — check database connectivity and indexer process"
+            : undefined,
+  };
+
+  const componentStatuses = [database.status, indexer.status];
+  const overallStatus: HealthSummaryResponse["status"] = componentStatuses.includes(
+    "unavailable",
+  )
+    ? "unavailable"
+    : componentStatuses.includes("degraded")
+      ? "degraded"
+      : "healthy";
+
+  const body: HealthSummaryResponse = {
+    status: overallStatus,
+    database,
+    indexer,
+    checkedAt,
+  };
+
+  res.status(overallStatus === "unavailable" ? 503 : 200).json(body);
 });
 
 export default router;

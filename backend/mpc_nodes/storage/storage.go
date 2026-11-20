@@ -6,6 +6,7 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -36,15 +37,20 @@ type KeyShareStorage interface {
 
 // EncryptedKeyShare represents an encrypted key share for storage
 type EncryptedKeyShare struct {
-	SessionID       string    `bson:"session_id" json:"session_id"`
-	PartyID         string    `bson:"party_id" json:"party_id"`
-	EncryptedShare  string    `bson:"encrypted_share" json:"encrypted_share"`
-	EncryptedCommit string    `bson:"encrypted_commit" json:"encrypted_commit"`
-	IV              string    `bson:"iv" json:"iv"`
-	CreatedAt       time.Time `bson:"created_at" json:"created_at"`
-	ExpiresAt       time.Time `bson:"expires_at" json:"expires_at"`
-	AccessCount     int       `bson:"access_count" json:"access_count"`
-	LastAccessed    time.Time `bson:"last_accessed" json:"last_accessed"`
+	SessionID       string `bson:"session_id" json:"session_id"`
+	PartyID         string `bson:"party_id" json:"party_id"`
+	EncryptedShare  string `bson:"encrypted_share" json:"encrypted_share"`
+	EncryptedCommit string `bson:"encrypted_commit" json:"encrypted_commit"`
+	IV              string `bson:"iv" json:"iv"`
+	// Version is the at-rest encryption format version (see shareFormatVersion).
+	Version int `bson:"version" json:"version"`
+	// KeyID fingerprints the encryption key that sealed this record so a
+	// misconfigured key is reported clearly instead of as a generic failure.
+	KeyID        string    `bson:"key_id" json:"key_id"`
+	CreatedAt    time.Time `bson:"created_at" json:"created_at"`
+	ExpiresAt    time.Time `bson:"expires_at" json:"expires_at"`
+	AccessCount  int       `bson:"access_count" json:"access_count"`
+	LastAccessed time.Time `bson:"last_accessed" json:"last_accessed"`
 }
 
 // HSMConfig holds HSM configuration
@@ -69,7 +75,11 @@ type StorageConfig struct {
 	Database string
 	// Collection is the collection name
 	Collection string
-	// EncryptionKey is the AES-256 encryption key (32 bytes)
+	// Directory is where the "encrypted_file" backend persists sealed shares
+	Directory string
+	// EncryptionKey is the AES-256 encryption key (32 bytes). It must come
+	// from external configuration (see ResolveEncryptionKey); it is never
+	// generated or persisted by the node.
 	EncryptionKey []byte
 	// HSM is the HSM configuration
 	HSM *HSMConfig
@@ -84,6 +94,12 @@ func (c *StorageConfig) Validate() error {
 	}
 	if c.Type == "mongodb" && c.ConnectionString == "" {
 		return errors.New("mongodb connection string required")
+	}
+	if c.Type == "encrypted_file" && c.Directory == "" {
+		return errors.New("encrypted_file storage requires a directory")
+	}
+	if len(c.EncryptionKey) == 0 {
+		return ErrEncryptionKeyMissing
 	}
 	if len(c.EncryptionKey) != 32 {
 		return errors.New("encryption key must be 32 bytes (AES-256)")
@@ -147,80 +163,131 @@ func (s *MemoryStorage) ListKeyShares(ctx context.Context) ([]string, error) {
 	return ids, nil
 }
 
-// EncryptedStorage implements encrypted key share storage
-type EncryptedStorage struct {
-	config    *StorageConfig
-	cipher    cipher.Block
-	gcm       cipher.AEAD
-	db        *mongo.Database
-	collection *mongo.Collection
-	mu        sync.RWMutex
+// shareFormatVersion is the current at-rest format. Version 1 seals the share
+// with AES-256-GCM and binds it to its session and party via associated data.
+const shareFormatVersion = 1
+
+var (
+	// ErrEncryptionKeyMissing is returned when a persistent backend is
+	// configured without an external encryption key.
+	ErrEncryptionKeyMissing = errors.New("key share encryption key is not configured")
+	// ErrEncryptionKeyMismatch is returned when a stored share was sealed
+	// with a different key than the one currently configured.
+	ErrEncryptionKeyMismatch = errors.New("key share was encrypted with a different key")
+	// ErrShareIntegrity is returned when a stored share fails authentication
+	// (tampered ciphertext, nonce, or metadata).
+	ErrShareIntegrity = errors.New("key share failed integrity check")
+	// ErrKeyShareNotFound is returned when no share exists for a session.
+	ErrKeyShareNotFound = errors.New("key share not found")
+)
+
+// shareRecordStore persists sealed key share records. Implementations never
+// see plaintext share material.
+type shareRecordStore interface {
+	insert(ctx context.Context, rec *EncryptedKeyShare) error
+	find(ctx context.Context, sessionID string) (*EncryptedKeyShare, error)
+	remove(ctx context.Context, sessionID string) error
+	list(ctx context.Context) ([]string, error)
+	touch(ctx context.Context, sessionID string, at time.Time) error
 }
 
-// NewEncryptedStorage creates a new encrypted storage
+// EncryptedStorage implements encrypted key share storage
+type EncryptedStorage struct {
+	config *StorageConfig
+	gcm    cipher.AEAD
+	keyID  string
+	store  shareRecordStore
+	mu     sync.RWMutex
+}
+
+// NewEncryptedStorage creates a new encrypted storage. It fails when no
+// encryption key is configured so a node never persists shares in a form
+// it cannot later authenticate.
 func NewEncryptedStorage(config *StorageConfig) (*EncryptedStorage, error) {
 	if err := config.Validate(); err != nil {
 		return nil, errors.Wrap(err, "invalid storage config")
 	}
 
-	block, err := aes.NewCipher(config.EncryptionKey)
+	gcm, err := newShareAEAD(config.EncryptionKey)
+	if err != nil {
+		return nil, err
+	}
+
+	var store shareRecordStore
+	switch config.Type {
+	case "mongodb":
+		store, err = newMongoRecordStore(config)
+	case "encrypted_file":
+		store, err = newFileRecordStore(config.Directory)
+	default:
+		return nil, errors.Errorf("unsupported encrypted storage type %q", config.Type)
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	return &EncryptedStorage{
+		config: config,
+		gcm:    gcm,
+		keyID:  encryptionKeyID(config.EncryptionKey),
+		store:  store,
+	}, nil
+}
+
+func newShareAEAD(key []byte) (cipher.AEAD, error) {
+	block, err := aes.NewCipher(key)
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to create cipher")
 	}
-
 	gcm, err := cipher.NewGCM(block)
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to create GCM")
 	}
+	return gcm, nil
+}
 
-	storage := &EncryptedStorage{
-		config: config,
-		cipher: block,
-		gcm:    gcm,
-	}
+// encryptionKeyID derives a non-secret fingerprint of the key so records can
+// be matched to the key that sealed them.
+func encryptionKeyID(key []byte) string {
+	sum := sha256.Sum256(append([]byte("stellaryield/mpc-keyshare/key-id"), key...))
+	return hex.EncodeToString(sum[:8])
+}
 
-	if config.Type == "mongodb" {
-		client, err := mongo.Connect(context.TODO(), options.Client().ApplyURI(config.ConnectionString))
-		if err != nil {
-			return nil, errors.Wrap(err, "failed to connect to mongodb")
-		}
-
-		storage.db = client.Database(config.Database)
-		storage.collection = storage.db.Collection(config.Collection)
-
-		// Create index on session_id
-		indexModel := mongo.IndexModel{
-			Keys:    bson.D{{Key: "session_id", Value: 1}},
-			Options: options.Index().SetUnique(true),
-		}
-		_, err = storage.collection.Indexes().CreateOne(context.TODO(), indexModel)
-		if err != nil {
-			return nil, errors.Wrap(err, "failed to create index")
-		}
-	}
-
-	return storage, nil
+// shareAAD binds a ciphertext to the record it belongs to, so a sealed share
+// cannot be swapped between sessions or parties without detection.
+func shareAAD(version int, sessionID, partyID string) []byte {
+	return []byte(fmt.Sprintf("stellaryield/mpc-keyshare/v%d\x00%s\x00%s", version, sessionID, partyID))
 }
 
 // encrypt encrypts data using AES-GCM
-func (s *EncryptedStorage) encrypt(plaintext []byte) (ciphertext []byte, iv []byte, err error) {
+func (s *EncryptedStorage) encrypt(plaintext, aad []byte) (ciphertext []byte, iv []byte, err error) {
 	iv = make([]byte, s.gcm.NonceSize())
 	if _, err := io.ReadFull(rand.Reader, iv); err != nil {
 		return nil, nil, err
 	}
 
-	ciphertext = s.gcm.Seal(nil, iv, plaintext, nil)
+	ciphertext = s.gcm.Seal(nil, iv, plaintext, aad)
 	return ciphertext, iv, nil
 }
 
 // decrypt decrypts data using AES-GCM
-func (s *EncryptedStorage) decrypt(ciphertext []byte, iv []byte) (plaintext []byte, err error) {
-	plaintext, err = s.gcm.Open(nil, iv, ciphertext, nil)
-	return plaintext, err
+func (s *EncryptedStorage) decrypt(ciphertext, iv, aad []byte) (plaintext []byte, err error) {
+	if len(iv) != s.gcm.NonceSize() {
+		return nil, ErrShareIntegrity
+	}
+	plaintext, err = s.gcm.Open(nil, iv, ciphertext, aad)
+	if err != nil {
+		return nil, ErrShareIntegrity
+	}
+	return plaintext, nil
 }
 
 // StoreKeyShare stores an encrypted key share
 func (s *EncryptedStorage) StoreKeyShare(ctx context.Context, sessionID string, share *tss.LocalSecretShare) error {
+	if share == nil || share.SecretShare == nil || share.Commitment == nil {
+		return errors.New("key share is incomplete")
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -237,32 +304,28 @@ func (s *EncryptedStorage) StoreKeyShare(ctx context.Context, sessionID string, 
 	}
 
 	// Encrypt share
-	encryptedShare, iv, err := s.encrypt(shareJSON)
+	encryptedShare, iv, err := s.encrypt(shareJSON, shareAAD(shareFormatVersion, sessionID, share.PartyID))
 	if err != nil {
 		return errors.Wrap(err, "failed to encrypt share")
 	}
 
+	now := time.Now()
 	encrypted := &EncryptedKeyShare{
 		SessionID:      sessionID,
 		PartyID:        share.PartyID,
 		EncryptedShare: base64.StdEncoding.EncodeToString(encryptedShare),
 		IV:             base64.StdEncoding.EncodeToString(iv),
-		CreatedAt:      time.Now(),
-		LastAccessed:   time.Now(),
+		Version:        shareFormatVersion,
+		KeyID:          s.keyID,
+		CreatedAt:      now,
+		LastAccessed:   now,
 	}
 
 	if s.config.KeyTTL > 0 {
-		encrypted.ExpiresAt = time.Now().Add(s.config.KeyTTL)
+		encrypted.ExpiresAt = now.Add(s.config.KeyTTL)
 	}
 
-	if s.collection != nil {
-		_, err = s.collection.InsertOne(ctx, encrypted)
-		if err != nil {
-			return errors.Wrap(err, "failed to insert into database")
-		}
-	}
-
-	return nil
+	return s.store.insert(ctx, encrypted)
 }
 
 // GetKeyShare retrieves and decrypts a key share
@@ -270,15 +333,9 @@ func (s *EncryptedStorage) GetKeyShare(ctx context.Context, sessionID string) (*
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	var encrypted EncryptedKeyShare
-	var err error
-
-	if s.collection != nil {
-		err = s.collection.FindOne(ctx, bson.M{"session_id": sessionID}).Decode(&encrypted)
-	}
-
+	encrypted, err := s.store.find(ctx, sessionID)
 	if err != nil {
-		return nil, errors.Wrap(err, "key share not found")
+		return nil, err
 	}
 
 	// Check expiration
@@ -286,20 +343,30 @@ func (s *EncryptedStorage) GetKeyShare(ctx context.Context, sessionID string) (*
 		return nil, errors.New("key share expired")
 	}
 
+	if encrypted.Version != shareFormatVersion {
+		return nil, errors.Errorf("unsupported key share format version %d", encrypted.Version)
+	}
+	if encrypted.KeyID != s.keyID {
+		return nil, ErrEncryptionKeyMismatch
+	}
+	if encrypted.SessionID != sessionID {
+		return nil, ErrShareIntegrity
+	}
+
 	// Decrypt share
 	encryptedShare, err := base64.StdEncoding.DecodeString(encrypted.EncryptedShare)
 	if err != nil {
-		return nil, errors.Wrap(err, "failed to decode encrypted share")
+		return nil, ErrShareIntegrity
 	}
 
 	iv, err := base64.StdEncoding.DecodeString(encrypted.IV)
 	if err != nil {
-		return nil, errors.Wrap(err, "failed to decode IV")
+		return nil, ErrShareIntegrity
 	}
 
-	shareJSON, err := s.decrypt(encryptedShare, iv)
+	shareJSON, err := s.decrypt(encryptedShare, iv, shareAAD(encrypted.Version, sessionID, encrypted.PartyID))
 	if err != nil {
-		return nil, errors.Wrap(err, "failed to decrypt share")
+		return nil, err
 	}
 
 	var shareData map[string]string
@@ -311,25 +378,18 @@ func (s *EncryptedStorage) GetKeyShare(ctx context.Context, sessionID string) (*
 		PartyID: shareData["party_id"],
 	}
 
-	share.SecretShare = new(big.Int)
-	share.SecretShare.SetString(shareData["share"], 10)
+	var ok bool
+	if share.SecretShare, ok = new(big.Int).SetString(shareData["share"], 10); !ok {
+		return nil, ErrShareIntegrity
+	}
+	if share.Commitment, ok = new(big.Int).SetString(shareData["commit"], 10); !ok {
+		return nil, ErrShareIntegrity
+	}
 
-	share.Commitment = new(big.Int)
-	share.Commitment.SetString(shareData["commit"], 10)
-
-	// Update access count
-	if s.collection != nil {
-		_, err = s.collection.UpdateOne(ctx,
-			bson.M{"session_id": sessionID},
-			bson.M{
-				"$inc": bson.M{"access_count": 1},
-				"$set": bson.M{"last_accessed": time.Now()},
-			},
-		)
-		if err != nil {
-			// Log but don't fail the operation
-			fmt.Printf("failed to update access count: %v\n", err)
-		}
+	// Update access metadata
+	if err := s.store.touch(ctx, sessionID, time.Now()); err != nil {
+		// Log but don't fail the operation
+		fmt.Printf("failed to update access count: %v\n", err)
 	}
 
 	return share, nil
@@ -340,14 +400,7 @@ func (s *EncryptedStorage) DeleteKeyShare(ctx context.Context, sessionID string)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if s.collection != nil {
-		_, err := s.collection.DeleteOne(ctx, bson.M{"session_id": sessionID})
-		if err != nil {
-			return errors.Wrap(err, "failed to delete from database")
-		}
-	}
-
-	return nil
+	return s.store.remove(ctx, sessionID)
 }
 
 // ListKeyShares lists all stored key share session IDs
@@ -355,29 +408,91 @@ func (s *EncryptedStorage) ListKeyShares(ctx context.Context) ([]string, error) 
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	var ids []string
+	return s.store.list(ctx)
+}
 
-	if s.collection != nil {
-		cursor, err := s.collection.Find(ctx, bson.M{})
-		if err != nil {
-			return nil, errors.Wrap(err, "failed to query database")
-		}
-		defer cursor.Close(ctx)
+// mongoRecordStore persists sealed shares in a MongoDB collection.
+type mongoRecordStore struct {
+	collection *mongo.Collection
+}
 
-		for cursor.Next(ctx) {
-			var encrypted EncryptedKeyShare
-			if err := cursor.Decode(&encrypted); err != nil {
-				return nil, errors.Wrap(err, "failed to decode document")
-			}
-			ids = append(ids, encrypted.SessionID)
-		}
-
-		if err := cursor.Err(); err != nil {
-			return nil, errors.Wrap(err, "cursor error")
-		}
+func newMongoRecordStore(config *StorageConfig) (*mongoRecordStore, error) {
+	client, err := mongo.Connect(context.TODO(), options.Client().ApplyURI(config.ConnectionString))
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to connect to mongodb")
 	}
 
+	collection := client.Database(config.Database).Collection(config.Collection)
+
+	// Create index on session_id
+	indexModel := mongo.IndexModel{
+		Keys:    bson.D{{Key: "session_id", Value: 1}},
+		Options: options.Index().SetUnique(true),
+	}
+	if _, err := collection.Indexes().CreateOne(context.TODO(), indexModel); err != nil {
+		return nil, errors.Wrap(err, "failed to create index")
+	}
+
+	return &mongoRecordStore{collection: collection}, nil
+}
+
+func (m *mongoRecordStore) insert(ctx context.Context, rec *EncryptedKeyShare) error {
+	if _, err := m.collection.InsertOne(ctx, rec); err != nil {
+		return errors.Wrap(err, "failed to insert into database")
+	}
+	return nil
+}
+
+func (m *mongoRecordStore) find(ctx context.Context, sessionID string) (*EncryptedKeyShare, error) {
+	var rec EncryptedKeyShare
+	err := m.collection.FindOne(ctx, bson.M{"session_id": sessionID}).Decode(&rec)
+	if err == mongo.ErrNoDocuments {
+		return nil, ErrKeyShareNotFound
+	}
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to load key share")
+	}
+	return &rec, nil
+}
+
+func (m *mongoRecordStore) remove(ctx context.Context, sessionID string) error {
+	if _, err := m.collection.DeleteOne(ctx, bson.M{"session_id": sessionID}); err != nil {
+		return errors.Wrap(err, "failed to delete from database")
+	}
+	return nil
+}
+
+func (m *mongoRecordStore) list(ctx context.Context) ([]string, error) {
+	cursor, err := m.collection.Find(ctx, bson.M{})
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to query database")
+	}
+	defer cursor.Close(ctx)
+
+	var ids []string
+	for cursor.Next(ctx) {
+		var encrypted EncryptedKeyShare
+		if err := cursor.Decode(&encrypted); err != nil {
+			return nil, errors.Wrap(err, "failed to decode document")
+		}
+		ids = append(ids, encrypted.SessionID)
+	}
+
+	if err := cursor.Err(); err != nil {
+		return nil, errors.Wrap(err, "cursor error")
+	}
 	return ids, nil
+}
+
+func (m *mongoRecordStore) touch(ctx context.Context, sessionID string, at time.Time) error {
+	_, err := m.collection.UpdateOne(ctx,
+		bson.M{"session_id": sessionID},
+		bson.M{
+			"$inc": bson.M{"access_count": 1},
+			"$set": bson.M{"last_accessed": at},
+		},
+	)
+	return err
 }
 
 // VaultStorage implements HashiCorp Vault-backed storage
@@ -437,14 +552,14 @@ func (s *VaultStorage) ListKeyShares(ctx context.Context) ([]string, error) {
 
 // AuditLogEntry represents an audit log entry
 type AuditLogEntry struct {
-	Timestamp   time.Time `json:"timestamp"`
-	Action      string    `json:"action"`
-	SessionID   string    `json:"session_id"`
-	PartyID     string    `json:"party_id"`
-	IPAddress   string    `json:"ip_address"`
-	UserAgent   string    `json:"user_agent"`
-	Success     bool      `json:"success"`
-	ErrorMessage string   `json:"error_message,omitempty"`
+	Timestamp    time.Time `json:"timestamp"`
+	Action       string    `json:"action"`
+	SessionID    string    `json:"session_id"`
+	PartyID      string    `json:"party_id"`
+	IPAddress    string    `json:"ip_address"`
+	UserAgent    string    `json:"user_agent"`
+	Success      bool      `json:"success"`
+	ErrorMessage string    `json:"error_message,omitempty"`
 }
 
 // AuditLogger handles audit logging for key operations
@@ -500,10 +615,10 @@ func (m *KeyRotationManager) RotateKeyShare(ctx context.Context, oldSessionID, n
 	// Store new share
 	if err := m.storage.StoreKeyShare(ctx, newSessionID, newShare); err != nil {
 		m.audit.Log(&AuditLogEntry{
-			Timestamp:   time.Now(),
-			Action:      "ROTATE_KEY_FAILED",
-			SessionID:   newSessionID,
-			Success:     false,
+			Timestamp:    time.Now(),
+			Action:       "ROTATE_KEY_FAILED",
+			SessionID:    newSessionID,
+			Success:      false,
 			ErrorMessage: err.Error(),
 		})
 		return err
@@ -512,10 +627,10 @@ func (m *KeyRotationManager) RotateKeyShare(ctx context.Context, oldSessionID, n
 	// Delete old share
 	if err := m.storage.DeleteKeyShare(ctx, oldSessionID); err != nil {
 		m.audit.Log(&AuditLogEntry{
-			Timestamp:   time.Now(),
-			Action:      "DELETE_OLD_KEY_FAILED",
-			SessionID:   oldSessionID,
-			Success:     false,
+			Timestamp:    time.Now(),
+			Action:       "DELETE_OLD_KEY_FAILED",
+			SessionID:    oldSessionID,
+			Success:      false,
 			ErrorMessage: err.Error(),
 		})
 		// Don't fail the rotation, just log

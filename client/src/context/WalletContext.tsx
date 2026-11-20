@@ -3,11 +3,22 @@ import { isConnected } from "@stellar/freighter-api";
 import {
   clearStoredSession,
   connectWalletSession,
+  getWalletLifecycleDiagnostic,
+  getWalletLifecycleStageDiagnostic,
   loadStoredSession,
+  WalletLifecycleError,
+  isSessionExpired,
+  loadStoredSession,
+  recoverSession,
 } from "../auth/session";
 import { getAdapter } from "../auth/walletAdapters";
-import type { ConnectWalletOptions, ExtensionWalletProviderId, WalletSession } from "../auth/types";
+import type { ConnectWalletOptions, WalletSession } from "../auth/types";
 import { WalletContext } from "./WalletContextObject";
+
+import {
+  clearSensitiveWalletState,
+  clearPendingTransactionDrafts,
+} from "../services/transactionDraft";
 
 export function WalletProvider({ children }: { children: ReactNode }) {
   const [session, setSession] = useState<WalletSession | null>(null);
@@ -18,7 +29,23 @@ export function WalletProvider({ children }: { children: ReactNode }) {
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
   useEffect(() => {
-    setSession(loadStoredSession());
+    // On mount, attempt to recover any persisted session rather than loading
+    // the raw stored value directly. recoverSession() checks TTL, probes
+    // provider availability, and re-verifies smart wallet credentials so the
+    // context starts in an accurate state after a page reload.
+    let cancelled = false;
+
+    recoverSession().then((result) => {
+      if (cancelled) return;
+      if (result.session) {
+        setSession(result.session);
+      }
+    }).catch(() => {
+      // Fallback: load without recovery so the user is not silently logged out
+      if (!cancelled) setSession(loadStoredSession());
+    });
+
+    return () => { cancelled = true; };
   }, []);
 
   useEffect(() => {
@@ -32,8 +59,12 @@ export function WalletProvider({ children }: { children: ReactNode }) {
         }
 
         setIsFreighterInstalled(true);
-      } catch (error) {
-        console.error("Unable to inspect Freighter connection", error);
+      } catch {
+        const diagnostic = getWalletLifecycleStageDiagnostic("provider_availability");
+        console.warn("[wallet] lifecycle diagnostic", {
+          stage: diagnostic.stage,
+          remediation: diagnostic.remediation,
+        });
         setIsFreighterInstalled(false);
       }
     }
@@ -47,15 +78,19 @@ export function WalletProvider({ children }: { children: ReactNode }) {
 
     try {
       const nextSession = await connectWalletSession(options);
+      // Account switch detection: if connecting a different account, clear prior pending draft payloads
+      if (session?.walletAddress && session.walletAddress !== nextSession.walletAddress) {
+        clearPendingTransactionDrafts();
+      }
       setSession(nextSession);
       return true;
     } catch (error) {
-      console.error("Wallet connection failed", error);
-      setErrorMessage(
-        error instanceof Error
-          ? error.message
-          : "Wallet connection failed. Please try again.",
-      );
+      const diagnostic = getWalletLifecycleDiagnostic(error);
+      console.error("[wallet] lifecycle diagnostic", {
+        stage: diagnostic.stage,
+        remediation: diagnostic.remediation,
+      });
+      setErrorMessage(diagnostic.message);
       return false;
     } finally {
       setIsConnecting(false);
@@ -64,15 +99,12 @@ export function WalletProvider({ children }: { children: ReactNode }) {
 
   function disconnectWallet() {
     clearStoredSession();
+    clearSensitiveWalletState();
     setSession(null);
     setErrorMessage(null);
 
     // Clear wallet-specific cached data and session state
     try {
-      window.localStorage.removeItem('authToken');
-      window.localStorage.removeItem('stellar_yield_google_oauth');
-      window.localStorage.removeItem('stellar_yield_google_sheets');
-
       // Clear any in-flight pending transaction state or notifications
       // by resetting browser's fetch/cache for wallet-dependent endpoints
       if ('caches' in window) {
@@ -107,18 +139,24 @@ export function WalletProvider({ children }: { children: ReactNode }) {
 
   async function signTransaction(xdr: string, networkPassphrase: string): Promise<string> {
     if (!session) {
-      throw new Error("No wallet connected.");
+      throw new WalletLifecycleError("transaction_signing");
     }
-    const EXTENSION_PROVIDERS: ExtensionWalletProviderId[] = ["freighter", "xbull", "albedo"];
-    if ((EXTENSION_PROVIDERS as string[]).includes(session.providerId)) {
-      const adapter = getAdapter(session.providerId as ExtensionWalletProviderId);
+    if (
+      session.providerId === "freighter" ||
+      session.providerId === "xbull" ||
+      session.providerId === "albedo"
+    ) {
+      const adapter = getAdapter(session.providerId);
       if (!adapter) {
-        throw new Error(`No adapter for provider: ${session.providerId}`);
+        throw new WalletLifecycleError("transaction_signing");
       }
-      return adapter.signTransaction(xdr, networkPassphrase);
+      try {
+        return await adapter.signTransaction(xdr, networkPassphrase);
+      } catch {
+        throw new WalletLifecycleError("transaction_signing");
+      }
     }
-    // Smart wallet (email / google / github) sessions don't support direct signing
-    throw new Error("signTransaction is not supported for smart wallet sessions.");
+    throw new WalletLifecycleError("transaction_signing");
   }
 
   const value = useMemo(
@@ -133,6 +171,10 @@ export function WalletProvider({ children }: { children: ReactNode }) {
       connectedAt: session?.connectedAt ?? null,
       lastActivityAt: session?.lastActivityAt ?? null,
       isConnected: Boolean(session?.walletAddress),
+      // Issue #1152: exposed so protected flows (quote preview, tx submission)
+      // can check expiry synchronously before acting, rather than only
+      // discovering it when a signing/read call fails deep in a service.
+      isSessionExpired: session ? isSessionExpired(session) : false,
       isConnecting,
       isFreighterInstalled,
       errorMessage,

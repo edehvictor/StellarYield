@@ -1,3 +1,6 @@
+// TODO(#1322): add test coverage proving the propagation rules documented
+// below (inbound X-Correlation-ID honored when valid, fresh UUID otherwise,
+// X-Request-ID always regenerated per hop, both echoed in response headers).
 import { NextFunction, Request, Response } from "express";
 import crypto from "crypto";
 

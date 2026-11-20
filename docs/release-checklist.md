@@ -91,7 +91,18 @@ This checklist is for **maintainers** preparing a Wave submission or release for
 
 ### Smoke Tests
 
-- [ ] Run the automated smoke test:
+- [ ] Run the release gate before promoting a frontend/backend deploy:
+  ```bash
+  VITE_API_BASE_URL="https://api.example.com" \
+  FRONTEND_URL="https://stellaryield.vercel.app" \
+  BACKEND_URL="https://api.example.com" \
+  node scripts/smoke-test.js --release-gate
+  ```
+  This check must fail for any of these release blockers:
+  - missing `VITE_API_BASE_URL` / `VITE_API_URL` in the deployed client configuration,
+  - unreachable backend health endpoint,
+  - backend health or configured client API endpoint returning a non-200 status.
+- [ ] Run the automated smoke report:
   ```bash
   node scripts/smoke-test.js --report --markdown
   ```

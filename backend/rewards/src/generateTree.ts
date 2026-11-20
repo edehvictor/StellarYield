@@ -176,22 +176,58 @@ export function validateArtifactManifest(
 }
 
 /**
+ * Error thrown when a duplicate recipient address is provided in the input (#1506).
+ */
+export class DuplicateRecipientError extends Error {
+  constructor(public readonly address: string) {
+    super(`Duplicate recipient identity rejected: ${address}`);
+    this.name = "DuplicateRecipientError";
+  }
+}
+
+/**
+ * Normalizes user reward inputs by checking for duplicate identities and
+ * sorting deterministically by address (lexicographically) (#1506).
+ *
+ * @param users - Array of user share balances.
+ * @returns Sorted, duplicate-free array of UserRewardInput.
+ * @throws DuplicateRecipientError if any recipient address appears more than once.
+ */
+export function normalizeUserRewardInputs(users: UserRewardInput[]): UserRewardInput[] {
+  const seen = new Set<string>();
+  for (const user of users) {
+    if (seen.has(user.address)) {
+      throw new DuplicateRecipientError(user.address);
+    }
+    seen.add(user.address);
+  }
+
+  return [...users].sort((a, b) =>
+    a.address < b.address ? -1 : a.address > b.address ? 1 : 0,
+  );
+}
+
+/**
  * Calculate weekly rewards for a set of users based on their
  * proportional share of the vault.
+ *
+ * Recipient inputs are normalized and deduplicated before calculation (#1506).
  *
  * @param users             - Array of user share balances.
  * @param totalWeeklyReward - Total $YIELD tokens to distribute this week (in stroops).
  * @returns Array of reward entries with computed amounts.
+ * @throws DuplicateRecipientError if duplicate recipient addresses are provided.
  */
 export function calculateRewards(
   users: UserRewardInput[],
   totalWeeklyReward: string,
 ): RewardEntry[] {
+  const normalizedUsers = normalizeUserRewardInputs(users);
   const totalReward = BigInt(totalWeeklyReward);
   const entries: RewardEntry[] = [];
 
-  for (let i = 0; i < users.length; i++) {
-    const user = users[i];
+  for (let i = 0; i < normalizedUsers.length; i++) {
+    const user = normalizedUsers[i];
     const shares = BigInt(user.shares);
     const totalShares = BigInt(user.totalShares);
 

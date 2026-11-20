@@ -38,7 +38,7 @@
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
                 },
                 {
-                  "bytes": "eece3eb1ba3f00a15edc1f1c8a3a2672a68e61c25078505afd85f6077ca9e185"
+                  "bytes": "c18b3b55125830d037445025fcf7511b3d3560f445a92ec567af8e023154830e"
                 }
               ]
             }
@@ -276,6 +276,18 @@
                         "key": {
                           "vec": [
                             {
+                              "symbol": "Expiry"
+                            }
+                          ]
+                        },
+                        "val": {
+                          "u64": 0
+                        }
+                      },
+                      {
+                        "key": {
+                          "vec": [
+                            {
                               "symbol": "Initialized"
                             }
                           ]
@@ -293,7 +305,7 @@
                           ]
                         },
                         "val": {
-                          "bytes": "eece3eb1ba3f00a15edc1f1c8a3a2672a68e61c25078505afd85f6077ca9e185"
+                          "bytes": "c18b3b55125830d037445025fcf7511b3d3560f445a92ec567af8e023154830e"
                         }
                       },
                       {

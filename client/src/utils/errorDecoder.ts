@@ -8,6 +8,8 @@
  * @module errorDecoder
  */
 
+import type { DecodedContractPanic } from "../../../shared/types/contractPanic";
+
 // ── Error Dictionary ────────────────────────────────────────────────────
 
 /**
@@ -37,10 +39,17 @@ export const KNOWN_CONTRACT_ERROR_CODES = new Set([
     // Vesting
     1001, 1002, 1003,
     // Donations
-    2001, 2002,
+    2001, 2002, 2007, 2008, 2009, 2010,
+    // Administrative and cross-contract errors
+    2003, 2004, 2005, 2006,
     // Intent Swap
     3001, 3002,
+    // Zap
+    4001,
 ]);
+
+/** Zap contract: the ledger closed after the quote deadline. */
+export const ZAP_QUOTE_EXPIRED_ERROR_CODE = 4001;
 
 /** Maps known contract error codes to user-facing messages. */
 const CONTRACT_ERROR_MAP: Record<
@@ -130,6 +139,11 @@ const CONTRACT_ERROR_MAP: Record<
         message: "The selected charity address is not on the protocol's whitelist.",
         suggestion: "Choose a charity from the approved list in the Yield for Good panel.",
     },
+    2007: {
+        title: "Donation Below Minimum",
+        message: "Donation amount is below the minimum (dust).",
+        suggestion: "Increase the yield amount or donation split before submitting.",
+    },
     // ── Intent Swap ────────────────────────────────────────────────────
     3001: {
         title: "Insufficient Balance for Swap",
@@ -140,6 +154,13 @@ const CONTRACT_ERROR_MAP: Record<
         title: "Order Expired",
         message: "Your swap intent expired before it could be matched.",
         suggestion: "Submit a new swap order with an updated expiry.",
+    },
+
+    // ── Zap ─────────────────────────────────────────────────────────────
+    4001: {
+        title: "Quote Expired",
+        message: "The swap quote expired before your transaction reached the network, so nothing was swapped or deposited.",
+        suggestion: "Refresh the quote and submit again.",
     },
 };
 
@@ -200,11 +221,27 @@ export function extractErrorCode(raw: string): number | undefined {
  *
  * Always returns a non-throwing result regardless of input format.
  *
+ * When a `panic` decoded from the structured diagnostic events is available
+ * (see `TxResult.panic`), it is used instead of parsing `raw`, so the copy is
+ * deterministic and per-contract (#1339).
+ *
  * @param raw - The raw error string from Horizon or Soroban RPC.
+ * @param panic - Structured contract failure, when the caller has one.
  * @returns A `DecodedError` with user-friendly copy and the original raw string.
  */
-export function decodeTransactionError(raw: string): DecodedError {
+export function decodeTransactionError(raw: string, panic?: DecodedContractPanic): DecodedError {
     const safeRaw = typeof raw === "string" ? raw : JSON.stringify(raw);
+
+    if (panic && panic.code !== "UNDECODABLE") {
+        return {
+            title: panic.title,
+            message: panic.message,
+            suggestion: panic.remediation,
+            raw: safeRaw,
+            code: panic.contractCode,
+        };
+    }
+
     const code = extractErrorCode(safeRaw);
 
     if (code !== undefined && code in CONTRACT_ERROR_MAP) {
