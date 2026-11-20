@@ -191,6 +191,11 @@ export function clearAlertOperationStore(): void {
   alertOperationStore.clear();
 }
 
+export function deleteAlertPreferences(walletAddress: string, vaultId: string): boolean {
+  const key = toAlertKey(walletAddress, vaultId);
+  return alertPreferencesStore.delete(key);
+}
+
 export function clearAlertPreferencesStore(): void {
   alertPreferencesStore.clear();
   alertLastTriggeredStore.clear();
@@ -507,16 +512,7 @@ export function updateAlertPreferences(
   return { preferences: newPreferences, auditEntry };
 }
 
-/**
- * Retrieve the current alert preferences for a wallet+vault pair.
- */
-export function getAlertPreferences(
-  walletAddress: string,
-  vaultId: string,
-): AlertPreferences | undefined {
-  const key = toAlertKey(walletAddress, vaultId);
-  return alertPreferencesStore.get(key);
-}
+
 
 /**
  * Revert alert preferences to a previous audit entry's snapshot.

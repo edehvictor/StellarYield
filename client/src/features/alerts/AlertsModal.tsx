@@ -33,6 +33,14 @@ import {
   saveDigestPreference,
 } from "./alertsApi";
 import { useOptimisticUpdate } from "../../hooks/useOptimisticUpdate";
+import {
+  savePreferenceCheckpoint,
+  getPreferenceCheckpoint,
+  clearPreferenceCheckpoint,
+  canResumeCheckpoint,
+  canRollbackCheckpoint,
+  type ClientAlertPreferenceCheckpoint,
+} from "./alertPreferenceOperation";
 
 type ChannelOverride = "inherit" | "on" | "off";
 
@@ -330,6 +338,19 @@ export default function AlertsModal({
     }
     const operationIdentity = alertOperationIdRef.current;
 
+    const checkpoint: ClientAlertPreferenceCheckpoint = {
+      operationId: operationIdentity,
+      walletAddress,
+      vaultId: form.vaultId,
+      targetPreferences: preferences,
+      previousPreferences: null,
+      status: "submitting",
+      attemptCount: 1,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    };
+    savePreferenceCheckpoint(checkpoint);
+
     setSubmitting(true);
     try {
       const created = await createAlert({
@@ -343,6 +364,7 @@ export default function AlertsModal({
       });
 
       alertOperationIdRef.current = null;
+      clearPreferenceCheckpoint(walletAddress, form.vaultId);
 
       window.localStorage.setItem(
         PREFS_STORAGE_KEY,
@@ -358,6 +380,11 @@ export default function AlertsModal({
       setAlerts((prev) => (prev.some((a) => a.id === created.id) ? prev : [created, ...prev]));
       setForm(DEFAULT_FORM);
     } catch (err) {
+      checkpoint.status = "failed";
+      checkpoint.error = err instanceof Error ? err.message : "Failed to create alert";
+      checkpoint.updatedAt = Date.now();
+      savePreferenceCheckpoint(checkpoint);
+
       setFormError(
         err instanceof Error ? err.message : "Failed to create alert",
       );
@@ -419,49 +446,27 @@ export default function AlertsModal({
 
   const handleSaveDigestPreferences = async () => {
     if (digestSaving) return;
-    setDigestSaving(true);
-    setDigestError("");
+    clearDigestError();
 
     if (!digestOperationIdRef.current) {
       digestOperationIdRef.current = `op-digest-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
     }
     const operationIdentity = digestOperationIdRef.current;
 
-    try {
+    const preferencesWithOverrides: WatchlistDigestPreference = {
+      ...digestPreferences,
+      channelOverrides: channelOverrides.watchlist,
+      operationIdentity,
+    };
+
+    await optimisticDigestUpdate(preferencesWithOverrides, async () => {
       const saved = await saveDigestPreference(
         walletAddress,
-        digestPreferences,
+        preferencesWithOverrides,
         operationIdentity,
       );
       digestOperationIdRef.current = null;
-      setDigestPreferences(saved);
-    } catch (saveError) {
-      setDigestError(
-        saveError instanceof Error
-          ? saveError.message
-          : "Digest preferences could not be saved.",
-      );
-    } finally {
-      setDigestSaving(false);
-    }
-    const newPrefs: WatchlistDigestPreference = {
-      ...digestPreferences,
-      watchedVaultIds: digestPreferences.watchedVaultIds.includes(vaultId)
-        ? digestPreferences.watchedVaultIds.filter((value) => value !== vaultId)
-        : [...digestPreferences.watchedVaultIds, vaultId],
-    };
-    // Update optimistically - will be saved when user clicks Save
-    // No API call here, just local state update
-    setDigestPreferences(newPrefs);
-  };
-
-  const handleSaveDigestPreferences = async () => {
-    const preferencesWithOverrides = {
-      ...digestPreferences,
-      channelOverrides: channelOverrides.watchlist,
-    };
-    await optimisticDigestUpdate(preferencesWithOverrides, async () => {
-      return await saveDigestPreference(walletAddress, preferencesWithOverrides);
+      return saved;
     });
   };
 
@@ -501,12 +506,6 @@ export default function AlertsModal({
             <select
               value={form.vaultId}
               onChange={(event) => updateFormField("vaultId", event.target.value)}
-              onChange={(event) =>
-                setForm((current) => ({
-                  ...current,
-                  vaultId: event.target.value,
-                }))
-              }
               aria-label="Select vault"
               className="col-span-2 bg-white/10 text-white rounded-xl px-3 py-2 text-sm border border-white/10 focus:border-indigo-400 outline-none"
             >
@@ -538,12 +537,6 @@ export default function AlertsModal({
                 placeholder="10.0"
                 value={form.thresholdValue}
                 onChange={(event) => updateFormField("thresholdValue", event.target.value)}
-                onChange={(event) =>
-                  setForm((current) => ({
-                    ...current,
-                    thresholdValue: event.target.value,
-                  }))
-                }
                 aria-label="APY threshold"
                 className="flex-1 bg-white/10 text-white rounded-xl px-3 py-2 text-sm border border-white/10 focus:border-indigo-400 outline-none"
               />
@@ -555,12 +548,6 @@ export default function AlertsModal({
               placeholder="you@example.com"
               value={form.email}
               onChange={(event) => updateFormField("email", event.target.value)}
-              onChange={(event) =>
-                setForm((current) => ({
-                  ...current,
-                  email: event.target.value,
-                }))
-              }
               aria-label="Notification email"
               className="col-span-2 bg-white/10 text-white rounded-xl px-3 py-2 text-sm border border-white/10 focus:border-indigo-400 outline-none placeholder:text-gray-500"
             />
@@ -581,12 +568,6 @@ export default function AlertsModal({
               max={1440}
               value={form.cooldownMinutes}
               onChange={(event) => updateFormField("cooldownMinutes", event.target.value)}
-              onChange={(event) =>
-                setForm((current) => ({
-                  ...current,
-                  cooldownMinutes: event.target.value,
-                }))
-              }
               aria-label="Cooldown minutes"
               placeholder="Cooldown (minutes)"
               className="bg-white/10 text-white rounded-xl px-3 py-2 text-sm border border-white/10 focus:border-indigo-400 outline-none"
@@ -597,12 +578,6 @@ export default function AlertsModal({
               max={1000}
               value={form.severityThreshold}
               onChange={(event) => updateFormField("severityThreshold", event.target.value)}
-              onChange={(event) =>
-                setForm((current) => ({
-                  ...current,
-                  severityThreshold: event.target.value,
-                }))
-              }
               aria-label="Severity threshold"
               placeholder="Severity threshold"
               className="bg-white/10 text-white rounded-xl px-3 py-2 text-sm border border-white/10 focus:border-indigo-400 outline-none"
@@ -613,12 +588,6 @@ export default function AlertsModal({
               max={23}
               value={form.quietHoursStart}
               onChange={(event) => updateFormField("quietHoursStart", event.target.value)}
-              onChange={(event) =>
-                setForm((current) => ({
-                  ...current,
-                  quietHoursStart: event.target.value,
-                }))
-              }
               aria-label="Quiet hours start"
               placeholder="Quiet start UTC"
               className="bg-white/10 text-white rounded-xl px-3 py-2 text-sm border border-white/10 focus:border-indigo-400 outline-none"
@@ -629,12 +598,6 @@ export default function AlertsModal({
               max={23}
               value={form.quietHoursEnd}
               onChange={(event) => updateFormField("quietHoursEnd", event.target.value)}
-              onChange={(event) =>
-                setForm((current) => ({
-                  ...current,
-                  quietHoursEnd: event.target.value,
-                }))
-              }
               aria-label="Quiet hours end"
               placeholder="Quiet end UTC"
               className="bg-white/10 text-white rounded-xl px-3 py-2 text-sm border border-white/10 focus:border-indigo-400 outline-none"
