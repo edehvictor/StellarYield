@@ -5396,7 +5396,18 @@ components:
         description: Last observed transaction phase.
       attemptNumber:
         type: integer
-        description: 1-based attempt number for this proposal.
+        description: 1-based attempt number for this proposal. Unique per proposal.
+      version:
+        type: integer
+        minimum: 1
+        description: >-
+          Starts at 1 and increases by one with each committed change (#1895).
+          Also returned as the `ETag` header. Send it back as `If-Match` (or
+          `expectedVersion` in the body) to make a write conditional; a stale
+          version is answered with 409 EXECUTION_ATTEMPT_VERSION_CONFLICT and
+          nothing is written. `succeeded` and `rolled_back` attempts are final:
+          a report that would change one is 409 EXECUTION_STATE_CONFLICT or an
+          unchanged replay (`Idempotent-Replayed: true`).
       error:
         type: string
         description: Human-readable failure reason when status is failed.
