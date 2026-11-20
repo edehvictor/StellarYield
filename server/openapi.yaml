@@ -16,7 +16,15 @@ tags:
   - name: Health
     description: System health monitoring
   - name: Yields
-    description: Yield data and APY information
+    description: |
+      Yield data and APY information.
+
+      **Concurrency guarantee:** `GET /api/yields` coalesces concurrent requests
+      that arrive while the cache is cold into a single upstream network fetch.
+      All callers receive the same result; no duplicate protocol snapshots are
+      built. The `X-Config-Version` header carries the asset-configuration
+      fingerprint so clients can detect when a held quote was priced against a
+      now-stale configuration.
   - name: Portfolio
     description: User portfolio and PnL tracking
   - name: Leaderboard
@@ -5426,7 +5434,18 @@ components:
         description: Last observed transaction phase.
       attemptNumber:
         type: integer
-        description: 1-based attempt number for this proposal.
+        description: 1-based attempt number for this proposal. Unique per proposal.
+      version:
+        type: integer
+        minimum: 1
+        description: >-
+          Starts at 1 and increases by one with each committed change (#1895).
+          Also returned as the `ETag` header. Send it back as `If-Match` (or
+          `expectedVersion` in the body) to make a write conditional; a stale
+          version is answered with 409 EXECUTION_ATTEMPT_VERSION_CONFLICT and
+          nothing is written. `succeeded` and `rolled_back` attempts are final:
+          a report that would change one is 409 EXECUTION_STATE_CONFLICT or an
+          unchanged replay (`Idempotent-Replayed: true`).
       error:
         type: string
         description: Human-readable failure reason when status is failed.

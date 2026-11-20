@@ -70,18 +70,48 @@ export interface DryRunResult {
 }
 
 // ── In-process idempotency lock ────────────────────────────────────────────
+//
+// Each entry stores the generation number that holds the lock.  When `execute`
+// acquires the lock it atomically records its generation; `unlock` only clears
+// the entry when the generation still matches, so a stale unlock from a crashed
+// previous invocation cannot remove a freshly acquired lock.
+//
+// A new generation is obtained by calling `nextLockGeneration()`.  Callers that
+// want to re-enter after a previous crash increment the generation first (via
+// `forceUnlock`), which makes the old generation invalid and allows fresh entry.
 
-const inFlightLocks = new Set<string>();
+const inFlightLocks = new Map<string, number>();
+let _lockGeneration = 0;
+
+function nextLockGeneration(): number {
+  return ++_lockGeneration;
+}
 
 export function isLocked(entryId: string): boolean {
   return inFlightLocks.has(entryId);
 }
 
-function lock(entryId: string): void {
-  inFlightLocks.add(entryId);
+function lock(entryId: string): number {
+  const gen = nextLockGeneration();
+  inFlightLocks.set(entryId, gen);
+  return gen;
 }
 
-function unlock(entryId: string): void {
+function unlock(entryId: string, generation: number): void {
+  // Only release if this exact generation still holds the lock.
+  // Guards against a stale unlock from an earlier execution that crashed
+  // before its finally block ran.
+  if (inFlightLocks.get(entryId) === generation) {
+    inFlightLocks.delete(entryId);
+  }
+}
+
+/**
+ * Forcibly remove any in-process lock for `entryId`, regardless of generation.
+ * Use only after confirming the previous holder is no longer active (e.g. the
+ * saga's DB lock has expired and been stolen by this worker).
+ */
+export function forceUnlock(entryId: string): void {
   inFlightLocks.delete(entryId);
 }
 
@@ -214,7 +244,7 @@ export class RebalanceExecutorService {
       );
     }
 
-    lock(entry.id);
+    const lockGen = lock(entry.id);
 
     try {
       // ── 1. Dry-run ───────────────────────────────────────────────────────
@@ -266,7 +296,7 @@ export class RebalanceExecutorService {
         },
       };
     } finally {
-      unlock(entry.id);
+      unlock(entry.id, lockGen);
       attempt.completedAt = new Date();
     }
   }

@@ -187,42 +187,55 @@ export class RebalanceSagaService {
 
   /**
    * Acquire a distributed lock on a saga.
-   * Prevents concurrent workers from processing the same saga.
+   *
+   * Uses a single atomic `updateMany` with a conditional WHERE clause so the
+   * read and write happen in one database round-trip. Only the row that still
+   * has no live lock (lockedBy IS NULL or lockExpiresAt in the past) is
+   * updated. If two workers race, exactly one sees `count === 1`; the other
+   * sees `count === 0` and returns `acquired: false` without a second fetch.
    */
   async acquireLock(
     sagaId: string,
     workerId: string,
   ): Promise<SagaLockResult> {
     const now = new Date();
-    const saga = await prisma.rebalanceSaga.findUnique({
-      where: { id: sagaId },
-    });
+    const lockExpiresAt = new Date(now.getTime() + this.lockDurationMs);
 
-    if (!saga) {
-      return { acquired: false, saga: null, reason: 'Saga not found' };
-    }
-
-    // Check if already locked by another worker
-    if (saga.lockedBy && saga.lockedBy !== workerId) {
-      if (saga.lockExpiresAt && saga.lockExpiresAt > now) {
-        return {
-          acquired: false,
-          saga: this.mapSagaToDTO(saga),
-          reason: `Locked by ${saga.lockedBy} until ${saga.lockExpiresAt.toISOString()}`,
-        };
-      }
-      // Lock expired — steal it
-    }
-
-    const updated = await prisma.rebalanceSaga.update({
-      where: { id: sagaId },
+    // Atomic conditional update: only succeeds when the row has no live lock.
+    // "Live lock" = lockedBy is set AND lockExpiresAt is still in the future.
+    // An expired lock (lockExpiresAt <= now) is treated as absent — safe to steal.
+    const result = await prisma.rebalanceSaga.updateMany({
+      where: {
+        id: sagaId,
+        OR: [
+          { lockedBy: null },
+          { lockExpiresAt: { lte: now } },
+          // A worker that already holds the lock may renew it.
+          { lockedBy: workerId },
+        ],
+      },
       data: {
         lockedBy: workerId,
         lockedAt: now,
-        lockExpiresAt: new Date(now.getTime() + this.lockDurationMs),
+        lockExpiresAt,
       },
     });
 
+    if (result.count === 0) {
+      // Another worker holds a live lock — fetch only to surface a reason.
+      const saga = await prisma.rebalanceSaga.findUnique({ where: { id: sagaId } });
+      if (!saga) {
+        return { acquired: false, saga: null, reason: 'Saga not found' };
+      }
+      return {
+        acquired: false,
+        saga: this.mapSagaToDTO(saga),
+        reason: `Locked by ${saga.lockedBy} until ${saga.lockExpiresAt?.toISOString() ?? 'unknown'}`,
+      };
+    }
+
+    // Lock acquired — fetch the updated row to return current state.
+    const updated = await prisma.rebalanceSaga.findUniqueOrThrow({ where: { id: sagaId } });
     return { acquired: true, saga: this.mapSagaToDTO(updated) };
   }
 
