@@ -1,6 +1,7 @@
 import {
   calculatePnL,
   calculateTWR,
+  PortfolioValuationError,
   type UserTransaction,
   type SharePriceSnapshot,
 } from "../services/pnl_engine";
@@ -108,6 +109,122 @@ describe("calculateTWR", () => {
 // ── calculatePnL ────────────────────────────────────────────────────────
 
 describe("calculatePnL", () => {
+  it("calculates a complete valuation without mutating its durable inputs", () => {
+    const transactions: UserTransaction[] = [
+      {
+        action: "DEPOSIT",
+        amount: 1000,
+        shares: 1000,
+        sharePriceAtTx: 1,
+        timestamp: new Date("2025-01-01"),
+      },
+      {
+        action: "WITHDRAW",
+        amount: 250,
+        shares: 250,
+        sharePriceAtTx: 1,
+        timestamp: new Date("2025-01-02"),
+      },
+    ];
+    const prices: SharePriceSnapshot[] = [
+      { sharePrice: 1, snapshotAt: new Date("2025-01-01") },
+      { sharePrice: 1.1, snapshotAt: new Date("2025-01-02") },
+    ];
+    const transactionSnapshot = structuredClone(transactions);
+    const priceSnapshot = structuredClone(prices);
+
+    const result = calculatePnL(transactions, prices, 1.2);
+
+    expect(result.currentValue).toBe(900);
+    expect(transactions).toEqual(transactionSnapshot);
+    expect(prices).toEqual(priceSnapshot);
+  });
+
+  it("rejects incomplete transaction history without returning a partial valuation", () => {
+    const transactions: UserTransaction[] = [
+      {
+        action: "DEPOSIT",
+        amount: 100,
+        shares: 100,
+        sharePriceAtTx: 1,
+        timestamp: new Date("2025-01-01"),
+      },
+      {
+        action: "WITHDRAW",
+        amount: 150,
+        shares: 150,
+        sharePriceAtTx: 1,
+        timestamp: new Date("2025-01-02"),
+      },
+    ];
+    const unchangedTransactions = structuredClone(transactions);
+
+    try {
+      calculatePnL(transactions, [], 1.2);
+      throw new Error("Expected incomplete history to fail validation");
+    } catch (error) {
+      expect(error).toBeInstanceOf(PortfolioValuationError);
+      expect(error).toMatchObject({
+        stage: "transaction_replay",
+        recordIndex: 1,
+      });
+      expect((error as Error).message).not.toContain("2025");
+    }
+
+    expect(transactions).toEqual(unchangedTransactions);
+  });
+
+  it("safely retries from persisted history after the missing deposit is restored", () => {
+    const withdrawal: UserTransaction = {
+      action: "WITHDRAW",
+      amount: 250,
+      shares: 250,
+      sharePriceAtTx: 1,
+      timestamp: new Date("2025-01-02"),
+    };
+    const incompleteHistory = [withdrawal];
+
+    expect(() => calculatePnL(incompleteHistory, [], 1.2)).toThrow(
+      PortfolioValuationError,
+    );
+
+    const completeHistory: UserTransaction[] = [
+      {
+        action: "DEPOSIT",
+        amount: 1000,
+        shares: 1000,
+        sharePriceAtTx: 1,
+        timestamp: new Date("2025-01-01"),
+      },
+      ...incompleteHistory,
+    ];
+
+    expect(calculatePnL(completeHistory, [], 1.2).currentValue).toBe(900);
+    expect(incompleteHistory).toEqual([withdrawal]);
+  });
+
+  it("rejects invalid price data instead of reporting a partial value", () => {
+    expect(() =>
+      calculatePnL(
+        [
+          {
+            action: "DEPOSIT",
+            amount: 100,
+            shares: 100,
+            sharePriceAtTx: 1,
+            timestamp: new Date("2025-01-01"),
+          },
+        ],
+        [{ sharePrice: Number.NaN, snapshotAt: new Date("2025-01-01") }],
+        1,
+      ),
+    ).toThrow(
+      expect.objectContaining({
+        stage: "price_validation",
+      }),
+    );
+  });
+
   it("returns zeroes for empty transactions", () => {
     const result = calculatePnL([], [], 1.0);
     expect(result.totalDeposited).toBe(0);

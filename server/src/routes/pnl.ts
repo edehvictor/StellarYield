@@ -1,6 +1,7 @@
 import { Router, Request, Response } from "express";
 import {
   calculatePnL,
+  PortfolioValuationError,
   type UserTransaction,
   type SharePriceSnapshot,
 } from "../services/pnl_engine";
@@ -95,21 +96,55 @@ pnlRouter.get("/:address/pnl", validateWalletAddress, async (req: Request, res: 
       snapshotAt: new Date(p.snapshotAt),
     }));
 
-    // Get current price (latest snapshot or fallback to 1.0)
+    // Never invent a price when valuation data is incomplete.
     const latestSnapshot = await prisma.sharePriceSnapshot.findFirst({
       where: { vaultId: "primary-yield-vault" },
       orderBy: { snapshotAt: "desc" },
     });
-    const currentPrice = latestSnapshot?.sharePrice ?? 1.0;
+    if (!latestSnapshot && transactions.length > 0) {
+      sendError(
+        res,
+        503,
+        "PNL_PRICE_UNAVAILABLE",
+        "Portfolio valuation is unavailable until a current share price is recorded.",
+        { remediation: "Retry after the next share-price snapshot is available." },
+      );
+      return;
+    }
 
-    await prisma.$disconnect?.();
-
-    const pnl = calculatePnL(transactions, priceHistory, currentPrice);
+    const pnl = calculatePnL(
+      transactions,
+      priceHistory,
+      latestSnapshot?.sharePrice ?? 0,
+    );
     res.json(pnl);
   } catch (error) {
-    console.error(`[pnl] Failed to calculate PnL for ${address}`, error);
+    if (error instanceof PortfolioValuationError) {
+      sendError(
+        res,
+        422,
+        "PNL_VALUATION_INPUT_INVALID",
+        error.message,
+        {
+          stage: error.stage,
+          ...(error.recordIndex === undefined ? {} : { recordIndex: error.recordIndex }),
+          remediation:
+            "Correct or complete the persisted transaction and price history, then retry valuation.",
+        },
+      );
+      return;
+    }
+
+    console.error("[pnl] Portfolio valuation failed; persisted history was not modified");
+    sendError(
+      res,
+      500,
+      "PNL_CALCULATION_FAILED",
+      "Failed to calculate PnL.",
+      { remediation: "Retry the request; valuation replays the persisted history without changing balances." },
+    );
+  } finally {
     await prisma.$disconnect?.();
-    sendError(res, 500, "PNL_CALCULATION_FAILED", "Failed to calculate PnL.");
   }
 });
 

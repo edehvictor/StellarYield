@@ -330,6 +330,186 @@ export interface SharePriceSnapshot {
   snapshotAt: Date;
 }
 
+export type PortfolioValuationFailureStage =
+  | 'transaction_validation'
+  | 'transaction_replay'
+  | 'price_validation';
+
+/**
+ * A valuation failure identifies a safe retry point without exposing wallet or
+ * transaction data. Persisted transaction and price history remain unchanged.
+ */
+export class PortfolioValuationError extends Error {
+  constructor(
+    readonly stage: PortfolioValuationFailureStage,
+    readonly recordIndex?: number,
+  ) {
+    super(
+      stage === 'transaction_validation'
+        ? 'Portfolio valuation rejected an invalid transaction record.'
+        : stage === 'transaction_replay'
+          ? 'Portfolio valuation could not replay the complete transaction history.'
+          : 'Portfolio valuation rejected invalid price data.',
+    );
+    this.name = 'PortfolioValuationError';
+  }
+}
+
+function isValidAmount(value: unknown): boolean {
+  if (
+    typeof value !== 'number' &&
+    typeof value !== 'string' &&
+    typeof value !== 'bigint'
+  ) {
+    return false;
+  }
+  if (typeof value === 'string' && !value.trim()) return false;
+  return Number.isFinite(Number(value)) && Number(value) >= 0;
+}
+
+function getTransactionQuantity(tx: UserTransaction): number {
+  const quantity = Number(tx.shares ?? tx.quantity ?? tx.amount ?? 0);
+  return tx.action === 'WITHDRAW' || tx.action === 'SWAP' || tx.action === 'FEE'
+    ? Math.abs(quantity)
+    : quantity;
+}
+
+function getTransactionPrice(tx: UserTransaction): number {
+  return Number(tx.sharePriceAtTx ?? tx.priceAtTx);
+}
+
+function isValidTransactionQuantity(
+  action: UserTransaction['action'],
+  value: unknown,
+): boolean {
+  const isSignedOutbound =
+    action === 'WITHDRAW' || action === 'SWAP' || action === 'FEE';
+  if (
+    typeof value !== 'number' &&
+    typeof value !== 'string' &&
+    typeof value !== 'bigint'
+  ) {
+    return false;
+  }
+  if (typeof value === 'string' && !value.trim()) return false;
+  const quantity = Number(value);
+  return Number.isFinite(quantity) && (isSignedOutbound || quantity >= 0);
+}
+
+function getTimestampMs(value: unknown): number {
+  if (value instanceof Date) return value.getTime();
+  if (typeof value === 'string' || typeof value === 'number') {
+    return new Date(value).getTime();
+  }
+  return Number.NaN;
+}
+
+function exceedsAvailableQuantity(quantity: number, available: number): boolean {
+  const roundingTolerance =
+    Number.EPSILON * Math.max(1, quantity, available) * 4;
+  return quantity - available > roundingTolerance;
+}
+
+function validateValuationInputs(
+  transactions: UserTransaction[],
+  priceHistory: SharePriceSnapshot[],
+  currentPrice: unknown,
+): void {
+  if (!Array.isArray(transactions) || !Array.isArray(priceHistory)) {
+    throw new PortfolioValuationError('transaction_validation');
+  }
+
+  const validActions = new Set<UserTransaction['action']>([
+    'DEPOSIT',
+    'WITHDRAW',
+    'HARVEST',
+    'FEE',
+    'SWAP',
+    'REBASE',
+  ]);
+  const orderedTransactions = transactions
+    .map((tx, index) => ({ tx, index }))
+    .sort((a, b) => {
+      const difference =
+        getTimestampMs(a.tx?.timestamp) - getTimestampMs(b.tx?.timestamp);
+      return difference || a.index - b.index;
+    });
+
+  for (const { tx, index } of orderedTransactions) {
+    if (
+      !tx ||
+      typeof tx !== 'object' ||
+      !validActions.has(tx.action) ||
+      !Number.isFinite(getTimestampMs(tx.timestamp)) ||
+      !isValidTransactionQuantity(
+        tx.action,
+        tx.shares ?? tx.quantity ?? tx.amount ?? 0,
+      ) ||
+      !Number.isFinite(getTransactionPrice(tx)) ||
+      getTransactionPrice(tx) <= 0 ||
+      (tx.amount !== undefined && !isValidAmount(tx.amount)) ||
+      (tx.fee !== undefined && !isValidAmount(tx.fee)) ||
+      (tx.reward !== undefined && !isValidAmount(tx.reward))
+    ) {
+      throw new PortfolioValuationError('transaction_validation', index);
+    }
+  }
+
+  let availableQuantity = 0;
+  for (const { tx, index } of orderedTransactions) {
+    const quantity = getTransactionQuantity(tx);
+    switch (tx.action) {
+      case 'DEPOSIT':
+      case 'HARVEST':
+        availableQuantity += quantity;
+        break;
+      case 'WITHDRAW':
+      case 'SWAP':
+        if (exceedsAvailableQuantity(quantity, availableQuantity)) {
+          throw new PortfolioValuationError('transaction_replay', index);
+        }
+        availableQuantity = Math.max(0, availableQuantity - quantity);
+        break;
+      case 'FEE':
+        if (quantity > 0) {
+          if (exceedsAvailableQuantity(quantity, availableQuantity)) {
+            throw new PortfolioValuationError('transaction_replay', index);
+          }
+          availableQuantity = Math.max(0, availableQuantity - quantity);
+        }
+        break;
+      case 'REBASE':
+        availableQuantity = quantity;
+        break;
+    }
+    if (!Number.isFinite(availableQuantity)) {
+      throw new PortfolioValuationError('transaction_replay', index);
+    }
+  }
+
+  for (let index = 0; index < priceHistory.length; index += 1) {
+    const snapshot = priceHistory[index];
+    const price =
+      typeof snapshot?.sharePrice === 'bigint'
+        ? Number(snapshot.sharePrice) / 1e18
+        : Number(snapshot?.sharePrice);
+    if (
+      !snapshot ||
+      !Number.isFinite(getTimestampMs(snapshot.snapshotAt)) ||
+      !Number.isFinite(price) ||
+      price <= 0
+    ) {
+      throw new PortfolioValuationError('price_validation', index);
+    }
+  }
+
+  const normalizedCurrentPrice =
+    typeof currentPrice === 'bigint' ? Number(currentPrice) / 1e18 : Number(currentPrice);
+  if (!Number.isFinite(normalizedCurrentPrice) || normalizedCurrentPrice <= 0) {
+    throw new PortfolioValuationError('price_validation');
+  }
+}
+
 export function calculateTWR(
   transactions: any[],
   priceHistory: any[] = [],
@@ -350,7 +530,7 @@ export function calculateTWR(
   let previousValue = 0;
 
   for (const tx of sorted) {
-    const qty = Number(tx.shares ?? tx.quantity ?? tx.amount ?? 0);
+    const qty = getTransactionQuantity(tx);
     const price = Number(tx.sharePriceAtTx ?? tx.priceAtTx ?? 1.0);
 
     const valueBeforeTx = currentQuantity * price;
@@ -406,6 +586,8 @@ export function calculatePnL(
     };
   }
 
+  validateValuationInputs(transactions, priceHistory, currentPrice);
+
   const sorted = [...transactions].sort(
     (a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime(),
   );
@@ -425,7 +607,7 @@ export function calculatePnL(
   let lots: Array<{ qty: number; price: number; timestamp: Date }> = [];
 
   for (const tx of sorted) {
-    const qty = Number(tx.shares ?? tx.quantity ?? tx.amount ?? 0);
+    const qty = getTransactionQuantity(tx);
     const price = Number(tx.sharePriceAtTx ?? tx.priceAtTx ?? 1.0);
     const amount = Number(tx.amount ?? (qty * price));
 
@@ -516,7 +698,7 @@ export function calculatePnL(
 
       while (txIdx < sorted.length && new Date(sorted[txIdx].timestamp) <= pDate) {
         const tx = sorted[txIdx];
-        const q = Number(tx.shares ?? tx.quantity ?? tx.amount ?? 0);
+        const q = getTransactionQuantity(tx);
         const pr = Number(tx.sharePriceAtTx ?? tx.priceAtTx ?? 1.0);
         const amt = Number(tx.amount ?? (q * pr));
         if (tx.action === 'DEPOSIT') {
