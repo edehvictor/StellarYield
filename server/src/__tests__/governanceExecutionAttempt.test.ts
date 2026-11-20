@@ -7,6 +7,7 @@ import {
   markExecutionRolledBack,
   markExecutionSucceeded,
   recordExecutionAttempt,
+  recordExecutionAttemptOnce,
   type GovernanceExecutionAttempt,
   type ExecutionAttemptStatus,
 } from "../services/governanceExecutionAttemptService";
@@ -172,4 +173,94 @@ describe("governanceExecutionAttemptService (#1899)", () => {
       expect(markExecutionRolledBack("missing")).toBeUndefined();
     });
   });
+});
+
+describe("operation identity and in-place transitions (#1896)", () => {
+  const op = { proposalId: "proposal-1", operationId: "op-1" };
+
+  it("resolves a retry with the same operationId to the attempt it created", () => {
+    const first = recordExecutionAttemptOnce({ ...op });
+    const retry = recordExecutionAttemptOnce({ ...op });
+
+    expect(first.outcome).toBe("created");
+    expect(retry.outcome).toBe("updated");
+    expect(retry.attempt.attemptId).toBe(first.attempt.attemptId);
+    expect(retry.attempt.attemptNumber).toBe(1);
+    expect(countExecutionAttempts()).toBe(1);
+  });
+
+  it("scopes an operationId to its proposal", () => {
+    const a = recordExecutionAttemptOnce({ proposalId: "p-a", operationId: "op-1" });
+    const b = recordExecutionAttemptOnce({ proposalId: "p-b", operationId: "op-1" });
+
+    expect(a.attempt.attemptId).not.toBe(b.attempt.attemptId);
+    expect(countExecutionAttempts()).toBe(2);
+  });
+
+  it("different operationIds on one proposal are separate attempts", () => {
+    recordExecutionAttemptOnce({ proposalId: "p-a", operationId: "op-1" });
+    const second = recordExecutionAttemptOnce({ proposalId: "p-a", operationId: "op-2" });
+
+    expect(second.outcome).toBe("created");
+    expect(second.attempt.attemptNumber).toBe(2);
+  });
+
+  it("attaches the txHash to the attempt when the retry learns it", () => {
+    const first = recordExecutionAttemptOnce({ ...op });
+    const retry = recordExecutionAttemptOnce({ ...op, txHash: "abc123", status: "polling", phase: "polling" });
+
+    expect(retry.attempt.attemptId).toBe(first.attempt.attemptId);
+    expect(retry.attempt.txHash).toBe("abc123");
+    expect(retry.attempt.status).toBe("polling");
+    expect(countExecutionAttempts()).toBe(1);
+  });
+
+  it("reports a conflict, without writing, when the operationId reappears with another txHash", () => {
+    recordExecutionAttemptOnce({ ...op, txHash: "abc123", status: "polling", phase: "polling" });
+    const clash = recordExecutionAttemptOnce({ ...op, txHash: "zzz999", status: "failed", phase: "failure" });
+
+    expect(clash.outcome).toBe("conflict");
+    expect(clash.attempt.txHash).toBe("abc123");
+    expect(clash.attempt.status).toBe("polling");
+    expect(countExecutionAttempts()).toBe(1);
+  });
+
+  it("does not move a finished attempt back when a stale retry arrives", () => {
+    const created = recordExecutionAttemptOnce({ ...op, txHash: "abc123", status: "polling", phase: "polling" });
+    recordExecutionAttemptOnce({ ...op, txHash: "abc123", status: "succeeded", phase: "success" });
+    const stale = recordExecutionAttemptOnce({ ...op, txHash: "abc123", status: "polling", phase: "polling" });
+
+    expect(stale.outcome).toBe("replayed");
+    expect(stale.attempt.attemptId).toBe(created.attempt.attemptId);
+    expect(stale.attempt.status).toBe("succeeded");
+    expect(stale.attempt.phase).toBe("success");
+    expect(getExecutionAttempt(created.attempt.attemptId)?.status).toBe("succeeded");
+  });
+
+  it("keeps creating a fresh attempt per call when no operationId is given", () => {
+    recordExecutionAttemptOnce({ proposalId: "proposal-1" });
+    const second = recordExecutionAttemptOnce({ proposalId: "proposal-1" });
+
+    expect(second.outcome).toBe("created");
+    expect(second.attempt.attemptNumber).toBe(2);
+  });
+
+  it.each([
+    ["markExecutionSucceeded", (id: string) => markExecutionSucceeded(id), "succeeded"],
+    ["markExecutionFailed", (id: string) => markExecutionFailed(id, "boom", "submitting"), "failed"],
+    ["markExecutionRolledBack", (id: string) => markExecutionRolledBack(id), "rolled_back"],
+  ] as const)(
+    "%s updates an attempt that has no txHash in place instead of adding a second record",
+    (_name, transition, expected) => {
+      const created = recordExecutionAttempt({ proposalId: "proposal-1" });
+      const updated = transition(created.attemptId);
+
+      expect(updated?.attemptId).toBe(created.attemptId);
+      expect(updated?.status).toBe(expected);
+      expect(updated?.attemptNumber).toBe(1);
+      expect(countExecutionAttempts()).toBe(1);
+      expect(listExecutionAttemptsForProposal("proposal-1")).toHaveLength(1);
+      expect(getExecutionAttempt(created.attemptId)?.status).toBe(expected);
+    },
+  );
 });

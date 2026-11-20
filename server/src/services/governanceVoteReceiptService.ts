@@ -53,10 +53,27 @@ const FAILURE_THRESHOLD_MS = Number(
 
 const receiptStore = new Map<string, VoteReceipt>();
 
+/**
+ * Operation identity for a vote: one voter, one proposal. Maps to the receipt
+ * that currently owns that operation, so a retried submission finds it instead
+ * of recording the same vote twice. A receipt that ended "failed" releases its
+ * identity, because that vote never reached the chain and may be resubmitted.
+ */
+const activeByOperation = new Map<string, string>();
+
+/** Monotonic suffix so two submissions in the same millisecond never share an id. */
+let receiptSequence = 0;
+
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
 function generateReceiptId(proposalId: string, voter: string): string {
-  return `${proposalId}:${voter}:${Date.now()}`;
+  receiptSequence += 1;
+  return `${proposalId}:${voter}:${Date.now()}:${receiptSequence}`;
+}
+
+/** JSON-encoded so ids containing any delimiter cannot collide across fields. */
+function operationKey(proposalId: string, voter: string): string {
+  return JSON.stringify([proposalId, voter]);
 }
 
 function ageMs(isoTimestamp: string): number {
@@ -73,15 +90,46 @@ function deriveStatus(receipt: VoteReceipt): VoteReceiptStatus {
 
 // ── Public API ───────────────────────────────────────────────────────────────
 
+export type SubmitVoteOutcome = "created" | "replayed" | "conflict";
+
+export interface SubmitVoteResult {
+  outcome: SubmitVoteOutcome;
+  /** The new receipt, the receipt a retry resolved to, or the receipt that blocks a conflicting choice. */
+  receipt: VoteReceipt;
+}
+
 /**
- * Record a newly submitted vote and return a pending receipt.
- * Call this immediately after the user submits a vote transaction.
+ * Record a vote once per (proposal, voter).
+ *
+ * - First submission: a pending receipt is created (`created`).
+ * - Retry with the same choice while the vote is pending, delayed or recorded:
+ *   the existing receipt is returned and nothing is written (`replayed`).
+ * - Different choice for an operation that is already in flight or recorded:
+ *   nothing is written and the blocking receipt is returned (`conflict`).
+ * - Resubmission after the earlier receipt failed: a new receipt is created,
+ *   because that vote never reached the chain.
+ *
+ * The check and the write run in one synchronous step, so concurrent requests
+ * cannot both observe "no receipt yet".
  */
-export function submitVoteReceipt(
+export function submitVoteReceiptOnce(
   proposalId: string,
   voter: string,
   choice: string,
-): VoteReceipt {
+): SubmitVoteResult {
+  const key = operationKey(proposalId, voter);
+  const existingId = activeByOperation.get(key);
+  if (existingId !== undefined) {
+    const existing = getVoteReceipt(existingId);
+    if (existing && existing.status !== "failed") {
+      return {
+        outcome: existing.choice === choice ? "replayed" : "conflict",
+        receipt: existing,
+      };
+    }
+    activeByOperation.delete(key);
+  }
+
   const receiptId = generateReceiptId(proposalId, voter);
   const receipt: VoteReceipt = {
     receiptId,
@@ -93,7 +141,21 @@ export function submitVoteReceipt(
     reconciliationAttempts: 0,
   };
   receiptStore.set(receiptId, receipt);
-  return receipt;
+  activeByOperation.set(key, receiptId);
+  return { outcome: "created", receipt };
+}
+
+/**
+ * Record a newly submitted vote and return its receipt.
+ * Retries of the same vote return the existing receipt; see
+ * {@link submitVoteReceiptOnce} for the outcome and for conflicting choices.
+ */
+export function submitVoteReceipt(
+  proposalId: string,
+  voter: string,
+  choice: string,
+): VoteReceipt {
+  return submitVoteReceiptOnce(proposalId, voter, choice).receipt;
 }
 
 /**
@@ -179,4 +241,6 @@ export function listVoteReceipts(
 /** Clear all receipts — for testing only. */
 export function clearReceiptStore(): void {
   receiptStore.clear();
+  activeByOperation.clear();
+  receiptSequence = 0;
 }
