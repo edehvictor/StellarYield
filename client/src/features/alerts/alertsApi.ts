@@ -29,14 +29,98 @@ export interface NotificationPreferences {
   };
 }
 
-export async function fetchAlerts(walletAddress: string): Promise<UserAlert[]> {
-  const res = await fetch(`${ALERTS_BASE}/${encodeURIComponent(walletAddress)}`);
+/**
+ * Explicit network/ledger context for governance-adjacent reads and writes.
+ * When supplied, the context is sent as request headers and any response that
+ * reports a different network/ledger is rejected before callers observe it.
+ */
+export interface AlertContext {
+  network?: string;
+  ledger?: number | string;
+  version?: number | string;
+}
+
+/** Thrown when the server responds for a different context than requested. */
+export class AlertContextMismatchError extends Error {
+  readonly code = "ALERT_CONTEXT_MISMATCH";
+  constructor(
+    message: string,
+    readonly expected: AlertContext,
+    readonly actual: AlertContext,
+  ) {
+    super(message);
+    this.name = "AlertContextMismatchError";
+  }
+}
+
+function contextHeaders(context?: AlertContext): Record<string, string> {
+  if (!context) return {};
+  const headers: Record<string, string> = {};
+  if (context.network) headers["X-Network"] = context.network;
+  if (context.ledger !== undefined) headers["X-Ledger"] = String(context.ledger);
+  if (context.version !== undefined) headers["X-Context-Version"] = String(context.version);
+  return headers;
+}
+
+function responseContext(res: Response): AlertContext {
+  const network = res.headers.get("X-Network") ?? undefined;
+  const ledgerRaw = res.headers.get("X-Ledger");
+  const versionRaw = res.headers.get("X-Context-Version");
+  const ledger = ledgerRaw === null ? undefined : Number.isSafeInteger(Number(ledgerRaw)) ? Number(ledgerRaw) : ledgerRaw;
+  return {
+    network,
+    ledger,
+    version: versionRaw === null ? undefined : versionRaw,
+  };
+}
+
+/**
+ * Rejects a response whose context headers disagree with the requested context.
+ * Absent response headers are tolerated for backward compatibility; present ones
+ * must match exactly.
+ */
+function assertContext(res: Response, expected?: AlertContext): void {
+  if (!expected) return;
+  const actual = responseContext(res);
+  const mismatches: string[] = [];
+  if (expected.network !== undefined && actual.network !== undefined && actual.network !== expected.network) {
+    mismatches.push(`network ${String(actual.network)} != ${expected.network}`);
+  }
+  if (expected.ledger !== undefined && actual.ledger !== undefined && String(actual.ledger) !== String(expected.ledger)) {
+    mismatches.push(`ledger ${String(actual.ledger)} != ${String(expected.ledger)}`);
+  }
+  if (expected.version !== undefined && actual.version !== undefined && String(actual.version) !== String(expected.version)) {
+    mismatches.push(`version ${String(actual.version)} != ${String(expected.version)}`);
+  }
+  if (mismatches.length > 0) {
+    throw new AlertContextMismatchError(
+      `Alert response context mismatch: ${mismatches.join(", ")}`,
+      expected,
+      actual,
+    );
+  }
+}
+
+export async function fetchAlerts(
+  walletAddress: string,
+  context?: AlertContext,
+): Promise<UserAlert[]> {
+  const res = await fetch(`${ALERTS_BASE}/${encodeURIComponent(walletAddress)}`, {
+    headers: contextHeaders(context),
+  });
   if (!res.ok) throw new Error("Failed to fetch alerts");
+  assertContext(res, context);
   return res.json() as Promise<UserAlert[]>;
 }
 
-export async function createAlert(payload: CreateAlertPayload): Promise<UserAlert> {
-  const headers: Record<string, string> = { "Content-Type": "application/json" };
+export async function createAlert(
+  payload: CreateAlertPayload,
+  context?: AlertContext,
+): Promise<UserAlert> {
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    ...contextHeaders(context),
+  };
   if (payload.operationIdentity) {
     headers["X-Operation-Identity"] = payload.operationIdentity;
     headers["Idempotency-Key"] = payload.operationIdentity;
@@ -50,16 +134,22 @@ export async function createAlert(payload: CreateAlertPayload): Promise<UserAler
     const body = (await res.json().catch(() => ({}))) as { error?: string };
     throw new Error(body.error ?? "Failed to create alert");
   }
+  assertContext(res, context);
   return res.json() as Promise<UserAlert>;
 }
 
-export async function deleteAlert(id: string, walletAddress: string): Promise<void> {
+export async function deleteAlert(
+  id: string,
+  walletAddress: string,
+  context?: AlertContext,
+): Promise<void> {
   const res = await fetch(`${ALERTS_BASE}/${encodeURIComponent(id)}`, {
     method: "DELETE",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...contextHeaders(context) },
     body: JSON.stringify({ walletAddress }),
   });
   if (!res.ok && res.status !== 204) throw new Error("Failed to delete alert");
+  assertContext(res, context);
 }
 
 /** Alert preferences with the server's optimistic-concurrency version (#1903). */
@@ -85,7 +175,7 @@ export class AlertPreferencesConflictError extends Error {
   }
 }
 
-/** Reads the version from `X-Preferences-Version`, falling back to `ETag`. */
+/** Reads the version from `X-Preferences-Version`, falling back to `EDag`. */
 function readVersion(res: Response): number {
   const raw =
     res.headers.get("X-Preferences-Version") ??
@@ -97,12 +187,15 @@ function readVersion(res: Response): number {
 export async function fetchAlertPreferencesVersioned(
   walletAddress: string,
   vaultId: string,
+  context?: AlertContext,
 ): Promise<VersionedAlertPreferences | null> {
   const res = await fetch(
     `${ALERTS_BASE}/preferences/${encodeURIComponent(walletAddress)}/${encodeURIComponent(vaultId)}`,
+    { headers: contextHeaders(context) },
   );
   if (res.status === 404) return null;
   if (!res.ok) throw new Error("Failed to fetch alert preferences");
+  assertContext(res, context);
   const preferences = (await res.json()) as AlertPreferences;
   return { preferences, version: readVersion(res) };
 }
@@ -110,8 +203,9 @@ export async function fetchAlertPreferencesVersioned(
 export async function fetchAlertPreferences(
   walletAddress: string,
   vaultId: string,
+  context?: AlertContext,
 ): Promise<AlertPreferences | null> {
-  const versioned = await fetchAlertPreferencesVersioned(walletAddress, vaultId);
+  const versioned = await fetchAlertPreferencesVersioned(walletAddress, vaultId, context);
   return versioned ? versioned.preferences : null;
 }
 
@@ -124,10 +218,13 @@ export async function saveAlertPreferencesVersioned(
   walletAddress: string,
   vaultId: string,
   preferences: AlertPreferences,
-  options: { operationIdentity?: string; expectedVersion?: number } = {},
+  options: { operationIdentity?: string; expectedVersion?: number; context?: AlertContext } = {},
 ): Promise<VersionedAlertPreferences> {
-  const { operationIdentity, expectedVersion } = options;
-  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  const { operationIdentity, expectedVersion, context } = options;
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    ...contextHeaders(context),
+  };
   if (operationIdentity) {
     headers["X-Operation-Identity"] = operationIdentity;
     headers["Idempotency-Key"] = operationIdentity;
@@ -163,6 +260,7 @@ export async function saveAlertPreferencesVersioned(
     const body = (await res.json().catch(() => ({}))) as { error?: string };
     throw new Error(body.error ?? "Failed to save alert preferences");
   }
+  assertContext(res, context);
   const saved = (await res.json()) as AlertPreferences;
   return { preferences: saved, version: readVersion(res) };
 }
@@ -173,10 +271,12 @@ export async function saveAlertPreferences(
   preferences: AlertPreferences,
   operationIdentity?: string,
   expectedVersion?: number,
+  context?: AlertContext,
 ): Promise<AlertPreferences> {
   const saved = await saveAlertPreferencesVersioned(walletAddress, vaultId, preferences, {
     operationIdentity,
     expectedVersion,
+    context,
   });
   return saved.preferences;
 }
@@ -193,8 +293,9 @@ export async function updateAlertPreferencesSafely(
   vaultId: string,
   change: (current: AlertPreferences | null) => AlertPreferences,
   maxAttempts = 3,
+  context?: AlertContext,
 ): Promise<VersionedAlertPreferences> {
-  const current = await fetchAlertPreferencesVersioned(walletAddress, vaultId);
+  const current = await fetchAlertPreferencesVersioned(walletAddress, vaultId, context);
   let base: AlertPreferences | null = current?.preferences ?? null;
   let version = current?.version ?? 0;
   for (let attempt = 1; ; attempt++) {
@@ -202,6 +303,7 @@ export async function updateAlertPreferencesSafely(
       return await saveAlertPreferencesVersioned(walletAddress, vaultId, change(base), {
         expectedVersion: version,
         operationIdentity: `op-prefs-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`,
+        context,
       });
     } catch (error) {
       if (!(error instanceof AlertPreferencesConflictError) || attempt >= maxAttempts) throw error;
@@ -213,11 +315,14 @@ export async function updateAlertPreferencesSafely(
 
 export async function fetchDigestPreference(
   walletAddress: string,
+  context?: AlertContext,
 ): Promise<WatchlistDigestPreference> {
   const res = await fetch(
     `${NOTIFICATIONS_BASE}/digest/preferences/${encodeURIComponent(walletAddress)}`,
+    { headers: contextHeaders(context) },
   );
   if (!res.ok) throw new Error("Failed to fetch digest preferences");
+  assertContext(res, context);
   return res.json() as Promise<WatchlistDigestPreference>;
 }
 
@@ -225,9 +330,13 @@ export async function saveDigestPreference(
   walletAddress: string,
   payload: WatchlistDigestPreference,
   operationIdentity?: string,
+  context?: AlertContext,
 ): Promise<WatchlistDigestPreference> {
   const opId = operationIdentity ?? payload.operationIdentity;
-  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    ...contextHeaders(context),
+  };
   if (opId) {
     headers["X-Operation-Identity"] = opId;
     headers["Idempotency-Key"] = opId;
@@ -245,34 +354,6 @@ export async function saveDigestPreference(
     const body = (await res.json().catch(() => ({}))) as { error?: string };
     throw new Error(body.error ?? "Failed to save digest preferences");
   }
+  assertContext(res, context);
   return res.json() as Promise<WatchlistDigestPreference>;
-}
-
-export async function fetchNotificationPreferences(
-  walletAddress: string,
-): Promise<NotificationPreferences> {
-  const res = await fetch(
-    `${NOTIFICATIONS_BASE}/preferences/${encodeURIComponent(walletAddress)}`,
-  );
-  if (!res.ok) throw new Error("Failed to fetch notification preferences");
-  return res.json() as Promise<NotificationPreferences>;
-}
-
-export async function saveNotificationPreferences(
-  walletAddress: string,
-  payload: NotificationPreferences,
-): Promise<NotificationPreferences> {
-  const res = await fetch(
-    `${NOTIFICATIONS_BASE}/preferences/${encodeURIComponent(walletAddress)}`,
-    {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-    },
-  );
-  if (!res.ok) {
-    const body = (await res.json().catch(() => ({}))) as { error?: string };
-    throw new Error(body.error ?? "Failed to save notification preferences");
-  }
-  return res.json() as Promise<NotificationPreferences>;
 }

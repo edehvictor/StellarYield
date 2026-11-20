@@ -11,6 +11,7 @@ import type {
 } from "./types";
 import { getAdapter } from "./walletAdapters";
 import { getApiBaseUrl } from "../lib/api";
+import { getActiveNetworkPassphrase } from "../lib/network";
 
 const STORAGE_KEY = "stellar-yield.wallet-session";
 const BROADCAST_CHANNEL_NAME = "stellar-yield-wallet-session";
@@ -66,12 +67,14 @@ interface ChallengeResponse {
   challenge: string;
   walletAddressType: "account" | "contract";
   acceptedSignerTypes: string[];
+  networkPassphrase?: string;
 }
 
 interface VerifyResponse {
   verified: boolean;
   walletAddressType: "account" | "contract";
   acceptedSignerTypes: string[];
+  networkPassphrase?: string;
 }
 
 const providerLabels: Record<WalletProviderId, string> = {
@@ -115,6 +118,26 @@ export interface SessionRecoveryResult {
   session: WalletSession | null;
 }
 
+function assertNetworkContext(
+  expected: string | undefined,
+  actual: string | undefined,
+  context: string,
+): void {
+  if (!expected) {
+    return;
+  }
+  if (!actual) {
+    throw new Error(
+      `Missing network context during ${context}: expected ${expected}.`,
+    );
+  }
+  if (expected !== actual) {
+    throw new Error(
+      `Network mismatch during ${context}: expected ${expected}, received ${actual}.`,
+    );
+  }
+}
+
 /**
  * Attempt to recover a stored wallet session after a page reload.
  *
@@ -141,6 +164,13 @@ export async function recoverSession(): Promise<SessionRecoveryResult> {
   if (isSessionExpired(session)) {
     clearStoredSession();
     return { status: "expired", session: null };
+  }
+
+  const activeNetwork = getActiveNetworkPassphrase();
+  if (session.networkPassphrase && session.networkPassphrase !== activeNetwork) {
+    // Network transitioned since the session was created — do not silently
+    // reuse credentials bound to a different ledger context.
+    return { status: "degraded", session: { ...session, providerAvailable: false } };
   }
 
   const EXTENSION_PROVIDERS: ExtensionWalletProviderId[] = ["freighter", "xbull", "albedo"];
@@ -255,6 +285,7 @@ async function verifySmartWalletSession(
         sessionKeyAddress: session.sessionKeyAddress,
         providerId: session.providerId,
         loginHint: session.loginHint,
+        networkPassphrase: getActiveNetworkPassphrase(),
       }),
     });
 
@@ -264,6 +295,11 @@ async function verifySmartWalletSession(
 
     const challengePayload =
       (await challengeResponse.json()) as ChallengeResponse;
+    assertNetworkContext(
+      getActiveNetworkPassphrase(),
+      challengePayload.networkPassphrase,
+      "auth challenge",
+    );
     const signer = Keypair.fromSecret(session.sessionSecret);
     const signature = bytesToBase64(
       signer.sign(Buffer.from(challengePayload.challenge, "utf8")),
@@ -281,6 +317,7 @@ async function verifySmartWalletSession(
           sessionKeyAddress: session.sessionKeyAddress,
           challenge: challengePayload.challenge,
           signature,
+          networkPassphrase: getActiveNetworkPassphrase(),
         }),
       },
     );
@@ -291,6 +328,12 @@ async function verifySmartWalletSession(
 
     const verificationPayload =
       (await verificationResponse.json()) as VerifyResponse;
+
+    assertNetworkContext(
+      getActiveNetworkPassphrase(),
+      verificationPayload.networkPassphrase,
+      "auth verification",
+    );
 
     return verificationPayload.verified ? "verified" : "degraded";
   } catch (error) {
@@ -339,6 +382,7 @@ export async function connectWalletSession(
       permissions: [...DEFAULT_PERMISSIONS, "trade"],
       origin,
       providerAvailable: true,
+      networkPassphrase: getActiveNetworkPassphrase(),
     };
     saveSession(session);
     return session;
@@ -364,6 +408,7 @@ export async function connectWalletSession(
     permissions: [...DEFAULT_PERMISSIONS],
     origin,
     providerAvailable: true,
+    networkPassphrase: getActiveNetworkPassphrase(),
   };
 
   session.verificationStatus = await verifySmartWalletSession(session);

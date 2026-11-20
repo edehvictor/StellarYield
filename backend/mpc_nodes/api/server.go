@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -15,6 +16,10 @@ import (
 	"github.com/stellaryield/mpc_nodes/stellar"
 	"github.com/stellaryield/mpc_nodes/storage"
 )
+
+// ErrContextMismatch is returned when a request's declared network, ledger,
+// or version context does not match the node's configured context.
+var ErrContextMismatch = errors.New("request context does not match node context")
 
 // APIConfig holds API server configuration
 type APIConfig struct {
@@ -33,6 +38,15 @@ type APIConfig struct {
 	// MaxMessageAge bounds participant message timestamp skew
 	// (default DefaultMaxMessageAge).
 	MaxMessageAge time.Duration
+	// NetworkPassphrase is the network this node is bound to. Requests that
+	// declare a different network are rejected.
+	NetworkPassphrase string
+	// LedgerContext is the ledger/version context this node is bound to.
+	// Requests that declare a different ledger context are rejected.
+	LedgerContext string
+	// VersionContext is the API version context this node is bound to.
+	// Requests that declare a different version are rejected.
+	VersionContext string
 }
 
 // MPCService provides MPC treasury operations
@@ -59,11 +73,21 @@ type APIResponse struct {
 	Code    string      `json:"code,omitempty"`
 }
 
+// ContextRequest carries optional context binding fields that callers may
+// supply to assert the network, ledger, and version they intend to operate
+// against. Any provided value must match the node's configured context.
+type ContextRequest struct {
+	NetworkPassphrase string `json:"network_passphrase"`
+	LedgerContext     string `json:"ledger_context"`
+	VersionContext    string `json:"version_context"`
+}
+
 // KeyGenRequest represents a key generation request
 type KeyGenRequest struct {
 	PartyID      string `json:"party_id" binding:"required"`
 	Threshold    int    `json:"threshold" binding:"required,min=1"`
 	TotalParties int    `json:"total_parties" binding:"required,min=1"`
+	ContextRequest
 }
 
 // SigningRequest represents a signing request
@@ -71,6 +95,7 @@ type SigningRequest struct {
 	TransactionXDR string            `json:"transaction_xdr" binding:"required"`
 	OperationType  string            `json:"operation_type"`
 	Metadata       map[string]string `json:"metadata"`
+	ContextRequest
 }
 
 // TreasuryRequest represents a treasury operation request
@@ -80,6 +105,7 @@ type TreasuryRequest struct {
 	Destination string                        `json:"destination"`
 	Amount      string                        `json:"amount"`
 	Memo        string                        `json:"memo"`
+	ContextRequest
 }
 
 // NewServer creates a new API server
@@ -117,6 +143,9 @@ func (s *Server) setupRoutes() {
 	// Health check (liveness) and readiness probe
 	s.router.GET("/health", s.healthCheck)
 	s.router.GET("/ready", s.readinessCheck)
+
+	// Context introspection
+	s.router.GET("/context", s.getContext)
 
 	// Metrics
 	if s.config.EnableMetrics {
@@ -197,6 +226,65 @@ func (s *Server) healthCheck(c *gin.Context) {
 	})
 }
 
+// getContext returns the node's bound network, ledger, and version context so
+// clients can align their requests.
+func (s *Server) getContext(c *gin.Context) {
+	c.JSON(http.StatusOK, APIResponse{
+		Success: true,
+		Data: map[string]interface{}{
+			"network_passphrase": s.config.NetworkPassphrase,
+			"ledger_context":     s.config.LedgerContext,
+			"version_context":    s.config.VersionContext,
+		},
+	})
+}
+
+// validateContext checks that any context fields supplied by the caller match
+// the node's configured context. Empty fields are treated as "unspecified" and
+// are allowed. Returns ErrContextMismatch on the first mismatch.
+func (s *Server) validateContext(req ContextRequest) error {
+	if req.NetworkPassphrase != "" && req.NetworkPassphrase != s.config.NetworkPassphrase {
+		return fmt.Errorf("%w: network_passphrase", ErrContextMismatch)
+	}
+	if req.LedgerContext != "" && req.LedgerContext != s.config.LedgerContext {
+		return fmt.Errorf("%w: ledger_context", ErrContextMismatch)
+	}
+	if req.VersionContext != "" && req.VersionContext != s.config.VersionContext {
+		return fmt.Errorf("%w: version_context", ErrContextMismatch)
+	}
+	return nil
+}
+
+// rejectContextMismatch writes a 409 response for a context mismatch and logs
+// the rejection. It returns true when a mismatch was handled.
+func (s *Server) rejectContextMismatch(c *gin.Context, action string, err error) bool {
+	if !errors.Is(err, ErrContextMismatch) {
+		return false
+	}
+	if s.service != nil && s.service.audit != nil {
+		s.service.audit.Log(&storage.AuditLogEntry{
+			Timestamp:    time.Now(),
+			Action:       action,
+			Success:      false,
+			ErrorMessage: err.Error(),
+		})
+	}
+	c.JSON(http.StatusConflict, APIResponse{
+		Success: false,
+		Error:   err.Error(),
+		Code:    "CONTEXT_MISMATCH",
+	})
+	return true
+}
+
+// safeAudit logs an audit entry only when the service and logger are present,
+// so failure paths never panic and never mutate state.
+func (s *Server) safeAudit(entry *storage.AuditLogEntry) {
+	if s.service != nil && s.service.audit != nil {
+		s.service.audit.Log(entry)
+	}
+}
+
 // startKeyGenCeremony handles key generation ceremony initiation
 func (s *Server) startKeyGenCeremony(c *gin.Context) {
 	var req KeyGenRequest
@@ -206,6 +294,11 @@ func (s *Server) startKeyGenCeremony(c *gin.Context) {
 			Error:   err.Error(),
 			Code:    "INVALID_REQUEST",
 		})
+		return
+	}
+
+	if err := s.validateContext(req.ContextRequest); err != nil {
+		s.rejectContextMismatch(c, "KEYGEN_CEREMONY_REJECTED_CONTEXT_MISMATCH", err)
 		return
 	}
 
@@ -306,6 +399,11 @@ func (s *Server) startSigningCeremony(c *gin.Context) {
 			Error:   err.Error(),
 			Code:    "INVALID_REQUEST",
 		})
+		return
+	}
+
+	if err := s.validateContext(req.ContextRequest); err != nil {
+		s.rejectContextMismatch(c, "SIGNING_CEREMONY_REJECTED_CONTEXT_MISMATCH", err)
 		return
 	}
 
@@ -411,6 +509,11 @@ func (s *Server) createPayment(c *gin.Context) {
 		return
 	}
 
+	if err := s.validateContext(req.ContextRequest); err != nil {
+		s.rejectContextMismatch(c, "PAYMENT_REJECTED_CONTEXT_MISMATCH", err)
+		return
+	}
+
 	txXDR, err := s.service.treasuryClient.CreatePaymentTransaction(
 		c.Request.Context(),
 		req.Source,
@@ -455,6 +558,11 @@ func (s *Server) signTransaction(c *gin.Context) {
 		return
 	}
 
+	if err := s.validateContext(req.ContextRequest); err != nil {
+		s.rejectContextMismatch(c, "SIGN_REJECTED_CONTEXT_MISMATCH", err)
+		return
+	}
+
 	// In production, initiate TSS signing ceremony
 	// For now, return mock response
 
@@ -481,6 +589,11 @@ func (s *Server) submitTransaction(c *gin.Context) {
 			Error:   err.Error(),
 			Code:    "INVALID_REQUEST",
 		})
+		return
+	}
+
+	if err := s.validateContext(ContextRequest{NetworkPassphrase: req.NetworkPassphrase}); err != nil {
+		s.rejectContextMismatch(c, "TRANSACTION_REJECTED_CONTEXT_MISMATCH", err)
 		return
 	}
 
@@ -528,6 +641,18 @@ func (s *Server) submitTransaction(c *gin.Context) {
 func (s *Server) getTransactionStatus(c *gin.Context) {
 	hash := c.Param("hash")
 
+	// Bind reads to an explicit ledger context when the caller supplies one.
+	if ledger := c.Query("ledger_context"); ledger != "" && ledger != s.config.LedgerContext {
+		s.rejectContextMismatch(c, "TRANSACTION_STATUS_REJECTED_CONTEXT_MISMATCH",
+			fmt.Errorf("%w: ledger_context", ErrContextMismatch))
+		return
+	}
+	if network := c.Query("network_passphrase"); network != "" && network != s.config.NetworkPassphrase {
+		s.rejectContextMismatch(c, "TRANSACTION_STATUS_REJECTED_CONTEXT_MISMATCH",
+			fmt.Errorf("%w: network_passphrase", ErrContextMismatch))
+		return
+	}
+
 	c.JSON(http.StatusOK, APIResponse{
 		Success: true,
 		Data: map[string]interface{}{
@@ -540,6 +665,12 @@ func (s *Server) getTransactionStatus(c *gin.Context) {
 
 // listKeys handles key listing
 func (s *Server) listKeys(c *gin.Context) {
+	if version := c.Query("version_context"); version != "" && version != s.config.VersionContext {
+		s.rejectContextMismatch(c, "LIST_KEYS_REJECTED_CONTEXT_MISMATCH",
+			fmt.Errorf("%w: version_context", ErrContextMismatch))
+		return
+	}
+
 	keys, err := s.service.storage.ListKeyShares(c.Request.Context())
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, APIResponse{
@@ -562,6 +693,12 @@ func (s *Server) listKeys(c *gin.Context) {
 // deleteKey handles key deletion
 func (s *Server) deleteKey(c *gin.Context) {
 	sessionID := c.Param("session_id")
+
+	if version := c.Query("version_context"); version != "" && version != s.config.VersionContext {
+		s.rejectContextMismatch(c, "DELETE_KEY_REJECTED_CONTEXT_MISMATCH",
+			fmt.Errorf("%w: version_context", ErrContextMismatch))
+		return
+	}
 
 	if err := s.service.storage.DeleteKeyShare(c.Request.Context(), sessionID); err != nil {
 		c.JSON(http.StatusInternalServerError, APIResponse{
@@ -593,6 +730,7 @@ func (s *Server) rotateKey(c *gin.Context) {
 	var req struct {
 		OldSessionID string `json:"old_session_id" binding:"required"`
 		NewSessionID string `json:"new_session_id" binding:"required"`
+		ContextRequest
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, APIResponse{
@@ -600,6 +738,11 @@ func (s *Server) rotateKey(c *gin.Context) {
 			Error:   err.Error(),
 			Code:    "INVALID_REQUEST",
 		})
+		return
+	}
+
+	if err := s.validateContext(req.ContextRequest); err != nil {
+		s.rejectContextMismatch(c, "ROTATE_KEY_REJECTED_CONTEXT_MISMATCH", err)
 		return
 	}
 
@@ -617,6 +760,12 @@ func (s *Server) rotateKey(c *gin.Context) {
 
 // getPublicKey handles public key queries
 func (s *Server) getPublicKey(c *gin.Context) {
+	if version := c.Query("version_context"); version != "" && version != s.config.VersionContext {
+		s.rejectContextMismatch(c, "PUBLIC_KEY_REJECTED_CONTEXT_MISMATCH",
+			fmt.Errorf("%w: version_context", ErrContextMismatch))
+		return
+	}
+
 	// In production, return the aggregated MPC public key
 	c.JSON(http.StatusOK, APIResponse{
 		Success: true,
@@ -630,7 +779,20 @@ func (s *Server) getPublicKey(c *gin.Context) {
 // corsMiddleware provides CORS support
 func corsMiddleware(origins []string) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		c.Header("Access-Control-Allow-Origin", "*")
+		origin := c.GetHeader("Origin")
+		allowed := "*"
+		if len(origins) > 0 {
+			allowed = ""
+			for _, o := range origins {
+				if strings.EqualFold(o, origin) {
+					allowed = origin
+					break
+				}
+			}
+		}
+		if allowed != "" {
+			c.Header("Access-Control-Allow-Origin", allowed)
+		}
 		c.Header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
 		c.Header("Access-Control-Allow-Headers", "Origin, Content-Type, Authorization")
 

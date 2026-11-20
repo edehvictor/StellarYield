@@ -1,4 +1,4 @@
-import React, { useEffect, useCallback } from "react";
+import React, { useEffect, useCallback, useMemo } from "react";
 import {
   X,
   ArrowRight,
@@ -7,7 +7,7 @@ import {
   AlertTriangle,
   ExternalLink,
   Wallet,
-} from "lucide-react";
+} from "lucide";
 import { QuoteAssumptionFingerprintDisplay } from "./QuoteAssumptionFingerprintDisplay";
 import type { QuoteAssumptions } from "../../../../shared/types/quoteAssumptionFingerprint";
 
@@ -16,6 +16,16 @@ export interface TransactionReviewTokenDetail {
   amount: string;
   contractId?: string;
   decimals?: number;
+}
+
+/**
+ * Explicit context that a quote / transaction was computed against.
+ * Reads and writes are bound to this context and musmatches are rejected.
+ */
+export interface TransactionExecutionContext {
+  network?: string;
+  ledger?: number | string;
+  version?: string;
 }
 
 export interface TransactionReviewModalProps {
@@ -33,6 +43,82 @@ export interface TransactionReviewModalProps {
   isStale?: boolean;
   onRefreshQuote?: () => void;
   error?: string | null;
+  /** Context the quote was computed against (read). */
+  expectedContext?: TransactionExecutionContext | null;
+  /** Currently active context of the client / ledger (write). */
+  currentContext?: TransactionExecutionContext | null;
+  /** Optional override for the context mismatch message. */
+  contextMismatchMessage?: string;
+}
+
+export type TransactionContextMismatchReason =
+  | "network"
+  | "ledger"
+  | "version";
+
+export interface TransactionContextMismatch {
+  reason: TransactionContextMismatchReason;
+  expected: string;
+  actual: string;
+}
+
+function normalizeContextValue(value: unknown): string | null {
+  if (value === undefined || value === null) return null;
+  const asString = String(value).trim();
+  if (asString.length === 0) return null;
+  return asString;
+}
+
+/**
+ * Compare the context the quote was read against with the currently active
+ * context that would be written to. Returns the first mismatch, rejecting
+ * any context field that is present on one side but not the other.
+ */
+export function detectTransactionContextMismatch(
+  expected: TransactionExecutionContext | null | undefined,
+  current: TransactionExecutionContext | null | undefined,
+): TransactionContextMismatch | null {
+  if (!expected || !current) return null;
+
+  const fields: Array<[TransactionContextMismatchReason, keyof TransactionExecutionContext]> = [
+    ["network", "network"],
+    ["ledger", "ledger"],
+    ["version", "version"],
+  ];
+
+  for (const [reason, key] of fields) {
+    const expectedValue = normalizeContextValue(expected[key]);
+    const currentValue = normalizeContextValue(current[key]);
+
+    // Both sides absent: this dimension is not being enforced.
+    if (expectedValue === null && currentValue === null) continue;
+
+    // One side present, the other absent: treat as a mismatch rather than
+    // silently falling through to a write against an unbound context.
+    if (expectedValue === null || currentValue === null) {
+      return {
+        reason,
+        expected: expectedValue ?? "unknown",
+        actual: currentValue ?? "unknown",
+      };
+    }
+
+    if (expectedValue !== currentValue) {
+      return { reason, expected: expectedValue, actual: currentValue };
+    }
+  }
+
+  return null;
+}
+
+function formatMismatchMessage(mismatch: TransactionContextMismatch): string {
+  const label =
+    mismatch.reason === "network"
+      ? "Network"
+      : mismatch.reason === "ledger"
+        ? "Ledger"
+        : "Protocol version";
+  return `${label} changed since this quote was issued (expected ${mismatch.expected}, now ${mismatch.actual}).`
 }
 
 export function TransactionReviewModal({
@@ -50,6 +136,9 @@ export function TransactionReviewModal({
   isStale = false,
   onRefreshQuote,
   error = null,
+  expectedContext = null,
+  currentContext = null,
+  contextMismatchMessage,
 }: TransactionReviewModalProps) {
   // Close on Escape key
   const handleKeyDown = useCallback(
@@ -68,9 +157,28 @@ export function TransactionReviewModal({
     }
   }, [isOpen, handleKeyDown]);
 
+  const contextMismatch = useMemo(
+    () => detectTransactionContextMismatch(expectedContext, currentContext),
+    [expectedContext, currentContext],
+  );
+
   if (!isOpen) return null;
 
-  const canConfirm = !isSubmitting && !isStale && !error;
+  const effectiveError =
+    error ??
+    (contextMismatch
+      ? contextMismatchMessage ?? formatMismatchMessage(contextMismatch)
+      : null);
+
+  const canConfirm = !isSubmitting && !isStale && !effectiveError && !contextMismatch;
+
+  const handleConfirm = useCallback(() => {
+    // Reject writes that would land against a different network, ledger,
+    // or version than the one the quote was read against. This keeps the
+    // existing state and balances intact on failure.
+    if (!canConfirm) return;
+    void onConfirm();
+  }, [canConfirm, onConfirm]);
 
   return (
     <div
@@ -118,6 +226,30 @@ export function TransactionReviewModal({
             </span>
           </div>
 
+          {/* Explicit execution context binding */}
+          {(expectedContext || currentContext) && (
+            <div
+              data-testid="transaction-context"
+              className="rounded-xl bg-white/5 p-3 text-xs space-y-1"
+            >
+              <div className="flex items-center justify-between">
+                <span className="text-gray-400">Execution Context</span>
+                <span className="font-mono text-gray-200">
+                  {currentContext?.network ?? expectedContext?.network ?? "unknown"}
+                  {currentContext?.ledger != null
+                    ? ` ? ledger ${currentContext.ledger}`
+                    : ""}
+                  {currentContext?.version ? ` / v${currentContext.version}` : ""}
+                </span>
+              </div>
+              {contextMismatch && (
+                <p className="text-red-300">
+                  Quote was issued against a different context. Refresh the quote before signing.
+                </p>
+              )}
+            </div>
+          )}
+
           {/* Tokens and Amount Exchange Card */}
           <div className="rounded-xl border border-white/10 bg-white/5 p-4 space-y-3">
             <div className="flex items-center justify-between">
@@ -159,7 +291,7 @@ export function TransactionReviewModal({
           </div>
 
           {/* Error Message if Present */}
-          {error && (
+          {effectiveError && (
             <div
               className="flex items-start gap-2 rounded-xl border border-red-500/30 bg-red-500/10 p-3 text-xs text-red-200"
               role="alert"
@@ -167,7 +299,7 @@ export function TransactionReviewModal({
               <AlertTriangle className="h-4 w-4 shrink-0 text-red-400 mt-0.5" />
               <div>
                 <p className="font-semibold text-red-300">Submission blocked</p>
-                <p>{error}</p>
+                <p>{effectiveError}</p>
               </div>
             </div>
           )}
@@ -185,7 +317,7 @@ export function TransactionReviewModal({
           </button>
           <button
             type="button"
-            onClick={() => void onConfirm()}
+            onClick={handleConfirm}
             disabled={!canConfirm}
             data-testid="confirm-transaction-btn"
             className="inline-flex items-center gap-2 rounded-xl bg-gradient-to-r from-blue-500 to-purple-600 px-5 py-2.5 text-sm font-semibold text-white shadow-lg hover:from-blue-600 hover:to-purple-700 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
