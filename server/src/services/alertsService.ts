@@ -9,6 +9,8 @@
  *  - MAX_ALERTS_PER_USER caps active alerts to prevent DB bloat.
  *  - Triggered alerts are marked "triggered" and not re-evaluated (no spam).
  *  - No wallet addresses are included in outbound emails.
+ *  - Preference records are bound to a network/ledger context (#1908); reads
+ *    and writes naming another context are rejected without changing state.
  *
  * Resilience:
  *  - Email dispatch retries up to MAX_DELIVERY_ATTEMPTS times with exponential backoff.
@@ -27,6 +29,16 @@ import {
   type AlertPreferenceAuditEntry,
   type AuditSource,
 } from "./alertPreferenceAuditService";
+import {
+  type AlertContextInput,
+  type AlertPreferenceContext,
+  AlertPreferenceContextConflictError,
+  contextEquals,
+  getServerAlertContext,
+  parseAlertContext,
+  resolveContextForRead,
+  resolveContextForWrite,
+} from "./alertPreferenceContext";
 
 const prisma = new PrismaClient();
 
@@ -83,6 +95,8 @@ export interface CreateAlertInput {
   email: string;
   preferences?: AlertPreferences;
   operationIdentity?: string;
+  /** Ledger context bound to the initial preferences (#1908). */
+  context?: AlertContextInput;
 }
 
 export const ALERT_OPERATION_TTL_MS = 24 * 60 * 60 * 1000;
@@ -102,6 +116,11 @@ const alertOperationStore = new Map<string, AlertOperationRecord>();
  * 0 means "no preferences yet"; every committed write increments it by one.
  */
 const alertPreferencesVersionStore = new Map<string, number>();
+/**
+ * Network/ledger binding per wallet+vault preference record (#1908). Bound on
+ * the first write and preserved by later writes and reverts.
+ */
+const alertPreferenceContextStore = new Map<string, AlertPreferenceContext>();
 
 export const PREFERENCE_VERSION_CONFLICT = "PREFERENCE_VERSION_CONFLICT";
 
@@ -155,14 +174,18 @@ function commitPreferences(
   next: AlertPreferences,
   expectedVersion: number | undefined,
   sideEffect?: (before: AlertPreferences | null) => void,
+  context?: AlertPreferenceContext,
 ): number {
   assertExpectedVersion(key, expectedVersion);
   const hadBefore = alertPreferencesStore.has(key);
   const before = alertPreferencesStore.get(key) ?? null;
   const previousVersion = alertPreferencesVersionStore.get(key) ?? 0;
+  const hadContext = alertPreferenceContextStore.has(key);
+  const previousContext = alertPreferenceContextStore.get(key);
   const nextVersion = previousVersion + 1;
   alertPreferencesStore.set(key, next);
   alertPreferencesVersionStore.set(key, nextVersion);
+  if (context) alertPreferenceContextStore.set(key, context);
   try {
     sideEffect?.(before);
   } catch (error) {
@@ -170,6 +193,8 @@ function commitPreferences(
     else alertPreferencesStore.delete(key);
     if (previousVersion === 0) alertPreferencesVersionStore.delete(key);
     else alertPreferencesVersionStore.set(key, previousVersion);
+    if (hadContext && previousContext) alertPreferenceContextStore.set(key, previousContext);
+    else alertPreferenceContextStore.delete(key);
     throw error;
   }
   return nextVersion;
@@ -186,6 +211,7 @@ export function computeAlertFingerprint(input: {
   thresholdValue: number;
   email: string;
   preferences?: AlertPreferences;
+  context?: AlertContextInput;
 }): string {
   return JSON.stringify({
     walletAddress: input.walletAddress.trim().toLowerCase(),
@@ -193,6 +219,7 @@ export function computeAlertFingerprint(input: {
     condition: input.condition,
     thresholdValue: Number(input.thresholdValue),
     email: input.email.trim().toLowerCase(),
+    context: input.context ? parseAlertContext(input.context, input.vaultId) ?? null : null,
     preferences: input.preferences
       ? {
           channel: input.preferences.channel,
@@ -210,8 +237,40 @@ export function computeAlertFingerprint(input: {
 export function getAlertPreferences(
   walletAddress: string,
   vaultId: string,
+  context?: AlertContextInput,
 ): AlertPreferences | undefined {
-  return alertPreferencesStore.get(toAlertKey(walletAddress, vaultId));
+  const key = toAlertKey(walletAddress, vaultId);
+  if (context !== undefined) {
+    resolveContextForRead(
+      alertPreferenceContextStore.get(key),
+      parseAlertContext(context, vaultId),
+      vaultId,
+    );
+  }
+  return alertPreferencesStore.get(key);
+}
+
+/** Context describing the stored record, or the one a first write would bind. */
+export function getAlertPreferencesContext(
+  walletAddress: string,
+  vaultId: string,
+): AlertPreferenceContext {
+  const key = toAlertKey(walletAddress, vaultId);
+  return alertPreferenceContextStore.get(key) ?? getServerAlertContext(vaultId);
+}
+
+/** Validates a read against the caller's context; throws on a mismatch. */
+export function assertAlertPreferencesContext(
+  walletAddress: string,
+  vaultId: string,
+  context?: AlertContextInput,
+): AlertPreferenceContext {
+  const key = toAlertKey(walletAddress, vaultId);
+  return resolveContextForRead(
+    alertPreferenceContextStore.get(key),
+    parseAlertContext(context, vaultId),
+    vaultId,
+  );
 }
 
 export function setAlertPreferences(
@@ -220,8 +279,15 @@ export function setAlertPreferences(
   preferences: AlertPreferences,
   operationIdentity?: string,
   expectedVersion?: number,
+  context?: AlertContextInput,
 ): { preferences: AlertPreferences; replayed: boolean; version: number } {
   const key = toAlertKey(walletAddress, vaultId);
+  const requestedContext = parseAlertContext(context, vaultId);
+  const effectiveContext = resolveContextForWrite(
+    alertPreferenceContextStore.get(key),
+    requestedContext,
+    vaultId,
+  );
   const currentFingerprint = JSON.stringify({
     walletAddress: walletAddress.trim().toLowerCase(),
     vaultId: vaultId.trim().toLowerCase(),
@@ -232,6 +298,7 @@ export function setAlertPreferences(
       quietHoursStart: Number(preferences.quietHoursStart),
       quietHoursEnd: Number(preferences.quietHoursEnd),
     },
+    context: effectiveContext,
   });
 
   if (operationIdentity) {
@@ -254,9 +321,9 @@ export function setAlertPreferences(
     }
   }
 
-  // A version conflict throws before anything is written or recorded, so the
-  // same operation identity can be retried after the client reloads.
-  const version = commitPreferences(key, preferences, expectedVersion);
+  // A context or version conflict throws before anything is written or
+  // recorded, so the same operation identity can be retried after reload.
+  const version = commitPreferences(key, preferences, expectedVersion, undefined, effectiveContext);
 
   if (operationIdentity) {
     alertOperationStore.set(operationIdentity, {
@@ -277,6 +344,7 @@ export function clearAlertOperationStore(): void {
 export function clearAlertPreferencesStore(): void {
   alertPreferencesStore.clear();
   alertPreferencesVersionStore.clear();
+  alertPreferenceContextStore.clear();
   alertLastTriggeredStore.clear();
 }
 
@@ -287,7 +355,18 @@ export function clearAlertPreferencesStore(): void {
  * Throws if the user already has MAX_ALERTS_PER_USER active alerts.
  */
 export async function createAlert(input: CreateAlertInput) {
-  const currentFingerprint = computeAlertFingerprint(input);
+  const preferenceKey = toAlertKey(input.walletAddress, input.vaultId);
+  const bindingContext = input.preferences
+    ? resolveContextForWrite(
+        alertPreferenceContextStore.get(preferenceKey),
+        parseAlertContext(input.context, input.vaultId),
+        input.vaultId,
+      )
+    : undefined;
+  const currentFingerprint = computeAlertFingerprint({
+    ...input,
+    context: bindingContext,
+  });
 
   if (input.operationIdentity) {
     const existing = alertOperationStore.get(input.operationIdentity);
@@ -327,19 +406,24 @@ export async function createAlert(input: CreateAlertInput) {
     },
   });
   if (input.preferences) {
-    const key = toAlertKey(input.walletAddress, input.vaultId);
     const initial = input.preferences;
-    commitPreferences(key, initial, undefined, (before) => {
-      recordPreferenceChange({
-        walletAddress: input.walletAddress,
-        vaultId: input.vaultId,
-        actor: input.walletAddress,
-        source: "api",
-        before,
-        after: initial,
-        reason: "Initial preference set on alert creation",
-      });
-    });
+    commitPreferences(
+      preferenceKey,
+      initial,
+      undefined,
+      (before) => {
+        recordPreferenceChange({
+          walletAddress: input.walletAddress,
+          vaultId: input.vaultId,
+          actor: input.walletAddress,
+          source: "api",
+          before,
+          after: initial,
+          reason: "Initial preference set on alert creation",
+        });
+      },
+      bindingContext,
+    );
   }
 
   if (input.operationIdentity) {
@@ -510,6 +594,7 @@ async function dispatchAlertEmail(
 export function resetAlertPreferencesStore(): void {
   alertPreferencesStore.clear();
   alertPreferencesVersionStore.clear();
+  alertPreferenceContextStore.clear();
   alertLastTriggeredStore.clear();
 }
 
@@ -577,6 +662,8 @@ export function updateAlertPreferences(
     reason?: string;
     /** Optimistic concurrency (#1903): reject unless the stored version matches. */
     expectedVersion?: number;
+    /** Ledger context the caller read the record under (#1908). */
+    context?: AlertContextInput;
   },
 ): {
   preferences: AlertPreferences;
@@ -584,19 +671,30 @@ export function updateAlertPreferences(
   version: number;
 } {
   const key = toAlertKey(walletAddress, vaultId);
+  const effectiveContext = resolveContextForWrite(
+    alertPreferenceContextStore.get(key),
+    parseAlertContext(options?.context, vaultId),
+    vaultId,
+  );
   let auditEntry: AlertPreferenceAuditEntry | undefined;
 
-  const version = commitPreferences(key, newPreferences, options?.expectedVersion, (before) => {
-    auditEntry = recordPreferenceChange({
-      walletAddress,
-      vaultId,
-      actor: options?.actor ?? walletAddress,
-      source: options?.source ?? "api",
-      before,
-      after: newPreferences,
-      reason: options?.reason ?? "Preferences updated",
-    });
-  });
+  const version = commitPreferences(
+    key,
+    newPreferences,
+    options?.expectedVersion,
+    (before) => {
+      auditEntry = recordPreferenceChange({
+        walletAddress,
+        vaultId,
+        actor: options?.actor ?? walletAddress,
+        source: options?.source ?? "api",
+        before,
+        after: newPreferences,
+        reason: options?.reason ?? "Preferences updated",
+      });
+    },
+    effectiveContext,
+  );
 
   return { preferences: newPreferences, auditEntry: auditEntry!, version };
 }
@@ -610,12 +708,18 @@ export function revertAlertPreferences(
   vaultId: string,
   targetEntryId?: string,
   expectedVersion?: number,
+  context?: AlertContextInput,
 ): {
   preferences: AlertPreferences;
   auditEntry: AlertPreferenceAuditEntry;
   version: number;
 } {
   const key = toAlertKey(walletAddress, vaultId);
+  const effectiveContext = resolveContextForWrite(
+    alertPreferenceContextStore.get(key),
+    parseAlertContext(context, vaultId),
+    vaultId,
+  );
   // Checked before the audit trail is read, so a stale revert reads nothing.
   assertExpectedVersion(key, expectedVersion);
 
@@ -637,17 +741,102 @@ export function revertAlertPreferences(
   const target = revertTo;
   let auditEntry: AlertPreferenceAuditEntry | undefined;
 
-  const version = commitPreferences(key, revertedPrefs, expectedVersion, (before) => {
-    auditEntry = recordPreferenceChange({
-      walletAddress,
-      vaultId,
-      actor: walletAddress,
-      source: "revert",
-      before,
-      after: revertedPrefs,
-      reason: `Reverted to audit entry ${target.id}`,
-    });
-  });
+  const version = commitPreferences(
+    key,
+    revertedPrefs,
+    expectedVersion,
+    (before) => {
+      auditEntry = recordPreferenceChange({
+        walletAddress,
+        vaultId,
+        actor: walletAddress,
+        source: "revert",
+        before,
+        after: revertedPrefs,
+        reason: `Reverted to audit entry ${target.id}`,
+      });
+    },
+    effectiveContext,
+  );
 
   return { preferences: revertedPrefs, auditEntry: auditEntry!, version };
+}
+
+/**
+ * Explicitly rebind a record to this server's current network/schema context
+ * after a network transition or schema migration. Preferences are preserved;
+ * only the binding and the version change. Calling it twice is a safe retry.
+ */
+export function rebindAlertPreferenceContext(
+  walletAddress: string,
+  vaultId: string,
+  options?: {
+    expectedVersion?: number;
+    expectedContext?: AlertContextInput;
+    actor?: string;
+    reason?: string;
+  },
+): {
+  preferences: AlertPreferences;
+  auditEntry: AlertPreferenceAuditEntry | null;
+  version: number;
+  context: AlertPreferenceContext;
+  replayed: boolean;
+} {
+  const key = toAlertKey(walletAddress, vaultId);
+  const currentPreferences = alertPreferencesStore.get(key);
+  const storedContext = alertPreferenceContextStore.get(key);
+  if (!currentPreferences || !storedContext) {
+    throw new Error("No alert preferences found for this wallet and vault");
+  }
+
+  const expectedContext = parseAlertContext(options?.expectedContext, vaultId);
+  if (expectedContext && !contextEquals(storedContext, expectedContext)) {
+    throw new AlertPreferenceContextConflictError(
+      "STORED_CONTEXT_MISMATCH",
+      expectedContext,
+      storedContext,
+    );
+  }
+  assertExpectedVersion(key, options?.expectedVersion);
+
+  const nextContext = getServerAlertContext(vaultId);
+  if (contextEquals(storedContext, nextContext)) {
+    return {
+      preferences: currentPreferences,
+      auditEntry: null,
+      version: alertPreferencesVersionStore.get(key) ?? 1,
+      context: nextContext,
+      replayed: true,
+    };
+  }
+
+  let auditEntry: AlertPreferenceAuditEntry | undefined;
+  const version = commitPreferences(
+    key,
+    currentPreferences,
+    options?.expectedVersion,
+    (before) => {
+      auditEntry = recordPreferenceChange({
+        walletAddress,
+        vaultId,
+        actor: options?.actor ?? walletAddress,
+        source: "system",
+        before,
+        after: currentPreferences,
+        reason:
+          options?.reason ??
+          `Rebound alert preferences from network ${storedContext.networkId} to ${nextContext.networkId}`,
+      });
+    },
+    nextContext,
+  );
+
+  return {
+    preferences: currentPreferences,
+    auditEntry: auditEntry ?? null,
+    version,
+    context: nextContext,
+    replayed: false,
+  };
 }
