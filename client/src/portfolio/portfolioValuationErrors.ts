@@ -6,11 +6,15 @@
  * exceptions, and supports state-preserving recovery flows.
  */
 
+import { isValuationConfigError } from "../../../shared/types/portfolioValuationConfig";
+
 export type PortfolioValuationErrorCode =
   | "VALUATION_REFRESH_FAILED"
   | "PRICE_FEED_UNAVAILABLE"
   | "NETWORK_ERROR"
-  | "RATE_LIMITED";
+  | "RATE_LIMITED"
+  /** Configuration changed while a refresh was in flight; result discarded (#1862). */
+  | "VALUATION_CONFIG_STALE";
 
 export interface PortfolioValuationFailure {
   /** Stable machine-readable code. */
@@ -46,6 +50,8 @@ const KNOWN_ERROR_MESSAGES: Record<PortfolioValuationErrorCode, string> = {
     "Network connectivity lost. Retaining active portfolio view.",
   RATE_LIMITED:
     "Valuation provider rate limit reached. Please wait a moment before refreshing.",
+  VALUATION_CONFIG_STALE:
+    "Valuation settings changed during the refresh. Showing your last confirmed positions — retry to revalue with the current settings.",
 };
 
 /**
@@ -61,6 +67,19 @@ export function describeValuationFailure(error: unknown): PortfolioValuationFail
       message: error.message,
       retryable: error.retryable,
       timestamp: error.timestamp,
+    };
+  }
+
+  if (isValuationConfigError(error)) {
+    const stale = error.code === "VALUATION_CONFIG_STALE";
+    const code: PortfolioValuationErrorCode = stale
+      ? "VALUATION_CONFIG_STALE"
+      : "VALUATION_REFRESH_FAILED";
+    return {
+      code,
+      message: KNOWN_ERROR_MESSAGES[code],
+      retryable: stale,
+      timestamp,
     };
   }
 
