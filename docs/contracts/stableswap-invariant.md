@@ -55,9 +55,11 @@ sides is rejected with `InsufficientLiquidity`, preserving the LP balance.
 
 The pool's stored state is bound to the network it was created on and to a
 context version. `get_pool_context()` returns
-`{ network_id, contract, version }`, and `add_liquidity`, `remove_liquidity` and
-`swap` require that value as `expected_context`. `get_reserves()` applies the
-live-network check without needing a context.
+`{ network_id, contract, version, configuration_fingerprint }`, and
+`add_liquidity`, `remove_liquidity` and `swap` require that value as
+`expected_context`. The fingerprint covers the token pair, LP token,
+amplification coefficient and fee settings. `get_reserves()` validates the
+fingerprint and live network without needing a context.
 
 Validation is the first thing each entry point does after initialization, before
 any invariant math:
@@ -69,17 +71,23 @@ any invariant math:
 | Caller's `contract` ≠ this deployment | `WrongContract` (13) |
 | Stored version > `CURRENT_POOL_VERSION` (code downgrade) | `WrongVersion` (14) |
 | Caller's `version` ≠ stored version (e.g. before a `migrate`) | `WrongVersion` (14) |
+| Stored configuration or caller fingerprint ≠ immutable configuration | `ConfigurationMismatch` (16) |
 
 A pool initialized before this binding exists has no stored network or version.
 It adopts the live network and reports version `0`, so it keeps operating
 unchanged. Admin `migrate()` persists the binding and sets the version to
-`CURRENT_POOL_VERSION` = 1 without touching reserves, LP supply or balances; it
-is idempotent and returns `WrongNetwork` rather than re-binding state that
-already belongs to another network.
+`CURRENT_POOL_VERSION` = 2 and persists the configuration fingerprint without
+touching reserves, LP supply or balances; it is idempotent and returns
+`WrongNetwork` rather than re-binding state that already belongs to another
+network. Legacy pools derive a fingerprint from their current configuration
+until migration stores the immutable baseline.
 
 Because the context is validated before any state change, a caller whose
 captured context went stale (for example because the admin migrated the pool)
 can call `get_pool_context()` again and retry the same operation.
+If stored configuration differs from its persisted fingerprint, context reads
+and operations fail until the original configuration is restored; refreshing
+the context cannot authorize altered configuration.
 
 ## Failure atomicity and retries
 

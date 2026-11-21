@@ -59,12 +59,14 @@ const MAX_A: u32 = 1_000_000;
 const MAX_BASE_FEE_BPS: u32 = 1_000_000;
 /// Newton's method convergence iterations
 const NEWTON_ITERS: u32 = 255;
-/// Current pool context version. Version zero is a pool initialized before
-/// context binding existed; it keeps working and is bound by `migrate`.
-const CURRENT_POOL_VERSION: u32 = 1;
+/// Current pool context version. Versions zero and one predate configuration
+/// fingerprint binding; they keep working and are upgraded by `migrate`.
+const CURRENT_POOL_VERSION: u32 = 2;
 /// Domain separator for operation identities, so a key from another contract
 /// family can never collide with a StableSwap one.
 const OPERATION_DOMAIN: &[u8] = b"stellaryield_stableswap_op_v1";
+/// Domain separator for immutable pool configuration fingerprints.
+const CONFIGURATION_DOMAIN: &[u8] = b"stellaryield_stableswap_config_v1";
 /// Refresh an operation receipt once less than ~1 day of ledgers remains.
 const OPERATION_TTL_THRESHOLD: u32 = 17_280;
 /// Keep consumed operation identities for ~30 days of ledgers, so a delayed
@@ -102,6 +104,8 @@ enum DataKey {
     StorageVersion,
     /// Receipt for a consumed operation identity (see `operation_key`).
     Operation(BytesN<32>),
+    /// SHA-256 fingerprint of the immutable token and invariant configuration.
+    ConfigurationFingerprint,
 }
 
 // ── Errors ──────────────────────────────────────────────────────────────
@@ -131,6 +135,8 @@ pub enum StableSwapError {
     WrongVersion = 14,
     /// The operation identity was already consumed by a successful call.
     DuplicateOperation = 15,
+    /// The immutable configuration or caller's configuration snapshot changed.
+    ConfigurationMismatch = 16,
 }
 
 // ── Pool context ────────────────────────────────────────────────────────
@@ -140,7 +146,8 @@ pub enum StableSwapError {
 /// Callers capture this with `get_pool_context()` and pass it to
 /// `add_liquidity`, `remove_liquidity` and `swap`. An operation executes only
 /// if the live ledger network, the network the pool state was created on, the
-/// deployment address and the stored context version all match.
+/// deployment address, stored context version, and immutable configuration
+/// fingerprint all match.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PoolContext {
@@ -150,6 +157,8 @@ pub struct PoolContext {
     pub contract: Address,
     /// Pool context version of the stored state.
     pub version: u32,
+    /// Fingerprint of the pool's tokens, amplification coefficient and fees.
+    pub configuration_fingerprint: BytesN<32>,
 }
 
 // ── Diagnostics ─────────────────────────────────────────────────────────
@@ -236,7 +245,8 @@ fn default_remediation(error: StableSwapError) -> RemediationPath {
         StableSwapError::MathOverflow => RemediationPath::ReduceAmount,
         StableSwapError::WrongNetwork
         | StableSwapError::WrongContract
-        | StableSwapError::WrongVersion => RemediationPath::RefreshContext,
+        | StableSwapError::WrongVersion
+        | StableSwapError::ConfigurationMismatch => RemediationPath::RefreshContext,
         StableSwapError::DuplicateOperation => RemediationPath::CheckOperation,
         _ => RemediationPath::ContactAdmin,
     }
@@ -367,6 +377,11 @@ impl StableSwap {
         // context version so later network or layout transitions are detectable.
         s.set(&DataKey::NetworkId, &env.ledger().network_id());
         s.set(&DataKey::StorageVersion, &CURRENT_POOL_VERSION);
+        let configuration_fingerprint = Self::configuration_fingerprint(&env)?;
+        s.set(
+            &DataKey::ConfigurationFingerprint,
+            &configuration_fingerprint,
+        );
 
         env.events()
             .publish((symbol_short!("init"),), (admin, amp_coeff, base_fee));
@@ -390,6 +405,23 @@ impl StableSwap {
 
         let live_network = env.ledger().network_id();
         let stored_network: Option<BytesN<32>> = env.storage().instance().get(&DataKey::NetworkId);
+        let configuration_fingerprint = Self::configuration_fingerprint(&env)?;
+        let stored_fingerprint: Option<BytesN<32>> = env
+            .storage()
+            .instance()
+            .get(&DataKey::ConfigurationFingerprint);
+        if let Some(fingerprint) = stored_fingerprint.as_ref() {
+            if fingerprint != &configuration_fingerprint {
+                return Err(StableSwapError::ConfigurationMismatch);
+            }
+        }
+
+        let version = Self::read_version(&env);
+        // Code older than the stored layout must not interpret it.
+        if version > CURRENT_POOL_VERSION {
+            return Err(StableSwapError::WrongVersion);
+        }
+
         match stored_network {
             Some(bound) if bound != live_network => return Err(StableSwapError::WrongNetwork),
             Some(_) => {}
@@ -398,22 +430,23 @@ impl StableSwap {
                 .instance()
                 .set(&DataKey::NetworkId, &live_network),
         }
-
-        let version = Self::read_version(&env);
-        // Code older than the stored layout must not interpret it.
-        if version > CURRENT_POOL_VERSION {
-            return Err(StableSwapError::WrongVersion);
-        }
         if version < CURRENT_POOL_VERSION {
             env.storage()
                 .instance()
                 .set(&DataKey::StorageVersion, &CURRENT_POOL_VERSION);
+        }
+        if stored_fingerprint.is_none() {
+            env.storage().instance().set(
+                &DataKey::ConfigurationFingerprint,
+                &configuration_fingerprint,
+            );
         }
 
         let context = PoolContext {
             network_id: live_network.clone(),
             contract: env.current_contract_address(),
             version: CURRENT_POOL_VERSION,
+            configuration_fingerprint,
         };
         env.events().publish(
             (symbol_short!("migrate"),),
@@ -428,10 +461,12 @@ impl StableSwap {
     /// `swap`. Refresh it after `migrate`, which changes the version.
     pub fn get_pool_context(env: Env) -> Result<PoolContext, StableSwapError> {
         Self::assert_initialized(&env)?;
+        let configuration_fingerprint = Self::validated_configuration_fingerprint(&env)?;
         Ok(PoolContext {
             network_id: Self::bound_network(&env),
             contract: env.current_contract_address(),
             version: Self::read_version(&env),
+            configuration_fingerprint,
         })
     }
 
@@ -1113,6 +1148,7 @@ impl StableSwap {
     pub fn get_reserves(env: Env) -> Result<(i128, i128), StableSwapError> {
         Self::assert_initialized(&env)?;
         Self::require_live_network(&env)?;
+        Self::validated_configuration_fingerprint(&env)?;
         let r0: i128 = env.storage().instance().get(&DataKey::Reserve0).unwrap();
         let r1: i128 = env.storage().instance().get(&DataKey::Reserve1).unwrap();
         Ok((r0, r1))
@@ -1387,6 +1423,7 @@ impl StableSwap {
     /// version. Checked before any reserve math, transfer or storage write.
     fn require_context(env: &Env, expected: &PoolContext) -> Result<(), StableSwapError> {
         Self::require_live_network(env)?;
+        let configuration_fingerprint = Self::validated_configuration_fingerprint(env)?;
         if expected.network_id != Self::bound_network(env) {
             return Err(StableSwapError::WrongNetwork);
         }
@@ -1399,7 +1436,64 @@ impl StableSwap {
         if version > CURRENT_POOL_VERSION || expected.version != version {
             return Err(StableSwapError::WrongVersion);
         }
+        if expected.configuration_fingerprint != configuration_fingerprint {
+            return Err(StableSwapError::ConfigurationMismatch);
+        }
         Ok(())
+    }
+
+    /// Fingerprint all immutable fields that affect token identity or invariant
+    /// math. Any changed stored field invalidates operations until repaired.
+    fn configuration_fingerprint(env: &Env) -> Result<BytesN<32>, StableSwapError> {
+        let st = env.storage().instance();
+        let token0: Address = st
+            .get(&DataKey::Token0)
+            .ok_or(StableSwapError::ConfigurationMismatch)?;
+        let token1: Address = st
+            .get(&DataKey::Token1)
+            .ok_or(StableSwapError::ConfigurationMismatch)?;
+        let lp_token: Address = st
+            .get(&DataKey::LpToken)
+            .ok_or(StableSwapError::ConfigurationMismatch)?;
+        let amp_coeff: u32 = st
+            .get(&DataKey::AmpCoeff)
+            .ok_or(StableSwapError::ConfigurationMismatch)?;
+        let base_fee: u32 = st
+            .get(&DataKey::BaseFee)
+            .ok_or(StableSwapError::ConfigurationMismatch)?;
+        let fee_multiplier: u32 = st
+            .get(&DataKey::FeeMultiplier)
+            .ok_or(StableSwapError::ConfigurationMismatch)?;
+        let mut preimage = Bytes::from_slice(env, CONFIGURATION_DOMAIN);
+        preimage.append(
+            &(
+                token0,
+                token1,
+                lp_token,
+                amp_coeff,
+                base_fee,
+                fee_multiplier,
+            )
+                .to_xdr(env),
+        );
+        Ok(env.crypto().sha256(&preimage).to_bytes())
+    }
+
+    /// Return the current fingerprint only when it matches the persisted
+    /// initialization/migration fingerprint. Older pools without one derive a
+    /// snapshot fingerprint until `migrate()` persists the baseline.
+    fn validated_configuration_fingerprint(env: &Env) -> Result<BytesN<32>, StableSwapError> {
+        let current = Self::configuration_fingerprint(env)?;
+        let stored: Option<BytesN<32>> = env
+            .storage()
+            .instance()
+            .get(&DataKey::ConfigurationFingerprint);
+        if let Some(fingerprint) = stored.as_ref() {
+            if fingerprint != &current {
+                return Err(StableSwapError::ConfigurationMismatch);
+            }
+        }
+        Ok(current)
     }
 }
 
@@ -2272,6 +2366,9 @@ mod tests {
             env.as_contract(contract, || {
                 env.storage().instance().remove(&DataKey::NetworkId);
                 env.storage().instance().remove(&DataKey::StorageVersion);
+                env.storage()
+                    .instance()
+                    .remove(&DataKey::ConfigurationFingerprint);
             });
         }
 
@@ -2293,6 +2390,10 @@ mod tests {
             assert_eq!(context.network_id, BytesN::from_array(&env, &NET_A));
             assert_eq!(context.contract, client.address);
             assert_eq!(context.version, CURRENT_POOL_VERSION);
+            assert_ne!(
+                context.configuration_fingerprint,
+                BytesN::from_array(&env, &[0; 32])
+            );
 
             // Normal operation: every entry point accepts the captured context,
             // and pool activity does not change it.
@@ -2301,6 +2402,94 @@ mod tests {
             client.remove_liquidity(&user, &(mint / 2), &0, &0, &context, &op(&env));
             assert_eq!(client.get_pool_context(), context);
             assert_eq!(client.get_lp_balance(&user), mint - mint / 2);
+        }
+
+        #[test]
+        fn stale_configuration_is_rejected_without_state_change_and_can_retry() {
+            let env = Env::default();
+            let (client, user, token0, token1, _) = setup_pool_with_tokens(&env, 100);
+            let context = client.get_pool_context();
+            client.add_liquidity(&user, &1_000_000, &1_000_000, &0, &context, &op(&env));
+
+            let t0 = token::Client::new(&env, &token0);
+            let t1 = token::Client::new(&env, &token1);
+            let before = (
+                client.get_reserves(),
+                client.get_total_supply(),
+                client.get_lp_balance(&user),
+                t0.balance(&user),
+                t1.balance(&user),
+            );
+            let id = op(&env);
+            let mut stale = context.clone();
+            stale.configuration_fingerprint = BytesN::from_array(&env, &[0xCC; 32]);
+
+            let diagnostic = client.preview_swap(&user, &token0, &10_000, &0, &stale, &id);
+            assert_eq!(diagnostic.stage, FailureStage::Context);
+            assert_eq!(
+                diagnostic.error_code,
+                StableSwapError::ConfigurationMismatch as u32
+            );
+            assert_eq!(diagnostic.remediation, RemediationPath::RefreshContext);
+            assert_eq!(
+                client.try_swap(&user, &token0, &10_000, &0, &stale, &id),
+                Err(Ok(StableSwapError::ConfigurationMismatch))
+            );
+
+            // A changed stored fee parameter no longer matches the immutable
+            // fingerprint, so even a newly fetched context cannot authorize it.
+            env.as_contract(&client.address, || {
+                env.storage().instance().set(&DataKey::BaseFee, &40_000_u32);
+            });
+            assert_eq!(
+                client.try_get_pool_context(),
+                Err(Ok(StableSwapError::ConfigurationMismatch))
+            );
+            assert_eq!(
+                client.try_get_reserves(),
+                Err(Ok(StableSwapError::ConfigurationMismatch))
+            );
+            assert_eq!(
+                client.try_swap(&user, &token0, &10_000, &0, &context, &id),
+                Err(Ok(StableSwapError::ConfigurationMismatch))
+            );
+            assert_eq!(
+                (
+                    env.as_contract(&client.address, || {
+                        (
+                            env.storage()
+                                .instance()
+                                .get::<_, i128>(&DataKey::Reserve0)
+                                .unwrap(),
+                            env.storage()
+                                .instance()
+                                .get::<_, i128>(&DataKey::Reserve1)
+                                .unwrap(),
+                        )
+                    }),
+                    client.get_total_supply(),
+                    client.get_lp_balance(&user),
+                    t0.balance(&user),
+                    t1.balance(&user),
+                ),
+                before
+            );
+            assert!(!client.is_operation_consumed(&user, &symbol_short!("swap"), &id));
+
+            // Once the original immutable setting is restored, refresh and
+            // retry the same id; failed validation consumed nothing.
+            env.as_contract(&client.address, || {
+                env.storage().instance().set(&DataKey::BaseFee, &30_000_u32);
+            });
+            let refreshed = client.get_pool_context();
+            assert_eq!(
+                refreshed.configuration_fingerprint,
+                context.configuration_fingerprint
+            );
+            let out = client.swap(&user, &token0, &10_000, &0, &refreshed, &id);
+            assert!(out > 0);
+            assert_eq!(t0.balance(&user), before.3 - 10_000);
+            assert_eq!(t1.balance(&user), before.4 + out);
         }
 
         #[test]
@@ -2884,6 +3073,7 @@ mod tests {
             network_id: env.ledger().network_id(),
             contract: contract_id.clone(),
             version: CURRENT_POOL_VERSION,
+            configuration_fingerprint: BytesN::from_array(&env, &[0; 32]),
         };
         let id = op(&env);
 
