@@ -43,6 +43,21 @@
 //! network binding; they continue operating unchanged and can be migrated by
 //! the admin via `migrate()`, which pins the live network and version without
 //! changing any financial state.
+//!
+//! ## Partial completion and retry safety
+//!
+//! A liquidation is the market's settlement operation: it repays debt in one
+//! token and seizes collateral in another, and the close factor can make it
+//! partial by design. Each liquidation is keyed by `(borrower, liquidation_id)`.
+//! The contract commits the position changes and a `LiquidationState` receipt
+//! before moving tokens, and marks the id consumed only on success. If the
+//! outcome is unknown (timeout or dropped response), `get_liquidation_status`
+//! returns the recorded `repaid`/`seized` amounts, and `liquidate_checked`
+//! refuses to replay a settled id or a stale debt snapshot with
+//! `LiquidationStateChanged`. A fresh id resumes the settlement from the
+//! position the failed attempt left behind; a rejected attempt consumes no id
+//! and persists no receipt. Every token-moving entry point writes state before
+//! the token leg so a failed transfer reverts the whole invocation.
 
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, symbol_short, token, xdr::ToXdr, Address,
@@ -158,6 +173,30 @@ pub struct HealthFactor {
     pub config_fingerprint: BytesN<32>,
 }
 
+/// Lifecycle of a liquidation id. Since a failed Soroban invocation reverts all
+/// of its writes, the only observable committed outcome is `Settled`.
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LiquidationStatus {
+    /// The liquidation was applied, its outcome persisted and its id consumed.
+    Settled,
+}
+
+/// Persisted outcome of one liquidation. `get_liquidation_status` returns it so
+/// a caller that lost the response of an earlier attempt can see how much debt
+/// was repaid and how much collateral was seized, then resume with a new id.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LiquidationState {
+    pub status: LiquidationStatus,
+    /// Account that repaid the debt and received the collateral.
+    pub liquidator: Address,
+    /// Debt repaid to this market, in debt-token units.
+    pub repaid: i128,
+    /// Collateral seized from the borrower, in collateral-token units.
+    pub seized: i128,
+}
+
 #[contracttype]
 #[derive(Clone)]
 pub enum PairDataKey {
@@ -182,6 +221,8 @@ pub enum PairDataKey {
     PendingWithdrawal(Address),
     /// Marks a (borrower, liquidation id) pair as already settled.
     Liquidation(Address, u64),
+    /// Persisted outcome of a settled liquidation, keyed by (borrower, id).
+    LiquidationReceipt(Address, u64),
     /// Max share of a borrower's debt one liquidation may repay, in bps.
     CloseFactorBps,
     /// Global borrow index; debts are scaled by it (see `DebtIndex`).
@@ -233,6 +274,10 @@ pub enum IsolatedLendingError {
     WrongVersion = 18,
     /// The configured oracle supplied a quote with malformed boundary fields.
     InvalidOracleQuote = 19,
+    /// The liquidation id was already consumed, or the borrower's debt no longer
+    /// matches the snapshot a retry was built on. The earlier attempt landed;
+    /// call `get_liquidation_status` and resume with a fresh id instead.
+    LiquidationStateChanged = 20,
 }
 
 #[contract]
@@ -418,15 +463,17 @@ impl IsolatedLendingPair {
             .instance()
             .get(&PairDataKey::DebtToken)
             .unwrap();
+        // Commit state before the token leg; a failed transfer reverts the whole
+        // call, leaving the supplier's credit and the market total untouched.
+        env.storage().persistent().set(&key, &new_supply);
+        env.storage()
+            .instance()
+            .set(&PairDataKey::TotalSupplied, &new_total_supplied);
         token::Client::new(&env, &debt_token).transfer(
             &user,
             &env.current_contract_address(),
             &amount,
         );
-        env.storage().persistent().set(&key, &new_supply);
-        env.storage()
-            .instance()
-            .set(&PairDataKey::TotalSupplied, &new_total_supplied);
         Ok(())
     }
 
@@ -509,12 +556,14 @@ impl IsolatedLendingPair {
             .instance()
             .get(&PairDataKey::CollateralToken)
             .unwrap();
+        // Commit the credit before pulling tokens; a rejected transfer reverts
+        // it, so a retry cannot deposit twice without crediting collateral.
+        env.storage().persistent().set(&key, &new_collateral);
         token::Client::new(&env, &collateral_token).transfer(
             &user,
             &env.current_contract_address(),
             &amount,
         );
-        env.storage().persistent().set(&key, &new_collateral);
         Ok(())
     }
 
@@ -782,6 +831,49 @@ impl IsolatedLendingPair {
         Ok(())
     }
 
+    /// Retry-safe liquidation. Behaves like `liquidate` but only proceeds when
+    /// the id is still unused and the borrower's debt still equals
+    /// `expected_debt` (read from `get_position` before the first attempt). If
+    /// an earlier attempt already landed, the retry fails with
+    /// `LiquidationStateChanged` and moves nothing; read
+    /// `get_liquidation_status` for its outcome and resume with a fresh id.
+    /// The state check runs after context/config validation and before accrual.
+    pub fn liquidate_checked(
+        env: Env,
+        liquidator: Address,
+        borrower: Address,
+        liquidation_id: u64,
+        repay_amount: i128,
+        expected_context: LedgerContext,
+        expected_config_fingerprint: BytesN<32>,
+        expected_debt: i128,
+    ) -> Result<i128, IsolatedLendingError> {
+        Self::settle_liquidation(
+            env,
+            liquidator,
+            borrower,
+            liquidation_id,
+            repay_amount,
+            expected_context,
+            expected_config_fingerprint,
+            Some(expected_debt),
+        )
+    }
+
+    /// Outcome of `liquidation_id` for `borrower`, or `None` when it has not
+    /// been used (or was consumed by an older deployment that stored only the
+    /// consumed marker). Callers use it after a failed or timed-out liquidation
+    /// to decide whether to retry with a fresh id.
+    pub fn get_liquidation_status(
+        env: Env,
+        borrower: Address,
+        liquidation_id: u64,
+    ) -> Option<LiquidationState> {
+        env.storage()
+            .persistent()
+            .get(&PairDataKey::LiquidationReceipt(borrower, liquidation_id))
+    }
+
     /// Liquidate an unhealthy position. The liquidator repays up to
     /// `repay_amount` of the borrower's debt and receives collateral of equal
     /// value. `liquidation_id` identifies the liquidation: reusing it for the
@@ -790,7 +882,8 @@ impl IsolatedLendingPair {
     /// id. If the collateral runs out, the remaining debt is written off to bad debt.
     /// `expected_config_fingerprint` is validated before interest accrues, so a
     /// caller never liquidates on terms it did not preview. Returns the
-    /// collateral seized.
+    /// collateral seized. Use `liquidate_checked` when the outcome of an earlier
+    /// attempt is unknown.
     ///
     /// ## Market isolation (#1478)
     /// A pair is one market. Everything a liquidation touches belongs to that
@@ -813,6 +906,30 @@ impl IsolatedLendingPair {
         expected_context: LedgerContext,
         expected_config_fingerprint: BytesN<32>,
     ) -> Result<i128, IsolatedLendingError> {
+        Self::settle_liquidation(
+            env,
+            liquidator,
+            borrower,
+            liquidation_id,
+            repay_amount,
+            expected_context,
+            expected_config_fingerprint,
+            None,
+        )
+    }
+
+    /// Shared settlement body behind `liquidate` and `liquidate_checked`.
+    /// `expected_debt` is `Some` only for the checked entry point.
+    fn settle_liquidation(
+        env: Env,
+        liquidator: Address,
+        borrower: Address,
+        liquidation_id: u64,
+        repay_amount: i128,
+        expected_context: LedgerContext,
+        expected_config_fingerprint: BytesN<32>,
+        expected_debt: Option<i128>,
+    ) -> Result<i128, IsolatedLendingError> {
         liquidator.require_auth();
         if repay_amount <= 0 {
             return Err(IsolatedLendingError::InvalidAmount);
@@ -820,12 +937,25 @@ impl IsolatedLendingPair {
         Self::require_init(&env)?;
         Self::require_context(&env, &expected_context)?;
         Self::require_config(&env, &expected_config_fingerprint)?;
-        let index = Self::accrue(&env)?;
 
         let liquidation_key = PairDataKey::Liquidation(borrower.clone(), liquidation_id);
         if env.storage().persistent().has(&liquidation_key) {
+            // A checked retry must not silently no-op: tell the caller that the
+            // earlier attempt landed and it should read the persisted outcome.
+            if expected_debt.is_some() {
+                return Err(IsolatedLendingError::LiquidationStateChanged);
+            }
             return Err(IsolatedLendingError::AlreadyLiquidated);
         }
+        if let Some(expected) = expected_debt {
+            // Compare against the debt the caller previewed, at the ledger's
+            // pending index, before accruing or touching any storage.
+            let (_, pending_index, _) = Self::pending_interest(&env)?;
+            if Self::debt_at(&env, &borrower, pending_index)? != expected {
+                return Err(IsolatedLendingError::LiquidationStateChanged);
+            }
+        }
+        let index = Self::accrue(&env)?;
 
         let collateral_key = PairDataKey::Collateral(borrower.clone());
         let collateral: i128 = env.storage().persistent().get(&collateral_key).unwrap_or(0);
@@ -928,6 +1058,32 @@ impl IsolatedLendingPair {
             return Err(IsolatedLendingError::InsufficientCollateral);
         }
 
+        // Commit the whole settlement before moving tokens. A rejected transfer
+        // reverts every write, so no half-settled position, receipt or consumed
+        // id can survive a failed liquidation.
+        if let Some(bad_debt) = new_bad_debt {
+            env.storage()
+                .instance()
+                .set(&PairDataKey::BadDebt, &bad_debt);
+        }
+        env.storage()
+            .persistent()
+            .set(&collateral_key, &remaining_collateral);
+        Self::store_debt(&env, &borrower, remaining_debt, index);
+        Self::reduce_total_debt(&env, total_debt_reduction);
+        env.storage()
+            .persistent()
+            .set(
+                &PairDataKey::LiquidationReceipt(borrower.clone(), liquidation_id),
+                &LiquidationState {
+                    status: LiquidationStatus::Settled,
+                    liquidator: liquidator.clone(),
+                    repaid,
+                    seized,
+                },
+            );
+        env.storage().persistent().set(&liquidation_key, &true);
+
         token::Client::new(&env, &debt_token).transfer(
             &liquidator,
             &env.current_contract_address(),
@@ -939,17 +1095,10 @@ impl IsolatedLendingPair {
             &seized,
         );
 
-        if let Some(bad_debt) = new_bad_debt {
-            env.storage()
-                .instance()
-                .set(&PairDataKey::BadDebt, &bad_debt);
-        }
-        env.storage()
-            .persistent()
-            .set(&collateral_key, &remaining_collateral);
-        Self::store_debt(&env, &borrower, remaining_debt, index);
-        Self::reduce_total_debt(&env, total_debt_reduction);
-        env.storage().persistent().set(&liquidation_key, &true);
+        env.events().publish(
+            (symbol_short!("liquid"),),
+            (borrower, liquidation_id, repaid, seized),
+        );
         Ok(seized)
     }
 
@@ -1213,8 +1362,8 @@ impl IsolatedLendingPair {
     ///
     /// Clients capture this before constructing a transaction and pass it as
     /// `expected_context` to `supply`, `withdraw`, `post_collateral`, `borrow`,
-    /// `repay`, `repay_for`, `withdraw_collateral`, `queue_withdrawal` and
-    /// `liquidate`. An operation is rejected with `WrongNetwork`,
+    /// `repay`, `repay_for`, `withdraw_collateral`, `queue_withdrawal`,
+    /// `liquidate` and `liquidate_checked`. An operation is rejected with `WrongNetwork`,
     /// `WrongContract`, or `WrongVersion` if the context has changed.
     ///
     /// A legacy pair (initialized before context binding was added) has no
@@ -1442,14 +1591,15 @@ impl IsolatedLendingPair {
             .instance()
             .get(&PairDataKey::DebtToken)
             .unwrap();
+        // Commit debt and total before pulling the repayment; a failed transfer
+        // reverts both, so a retry cannot repay twice for one recorded change.
+        Self::store_debt(env, borrower, old_debt - amount, index);
+        Self::reduce_total_debt(env, amount);
         token::Client::new(env, &debt_token).transfer(
             payer,
             &env.current_contract_address(),
             &amount,
         );
-
-        Self::store_debt(env, borrower, old_debt - amount, index);
-        Self::reduce_total_debt(env, amount);
         Ok(())
     }
 
@@ -1978,6 +2128,196 @@ mod test {
         assert_eq!(s.pair.get_bad_debt(), 30);
         assert_eq!(s.pair.get_totals(), (1_000, 0));
         assert_eq!(balance(&s.env, &s.debt_token, &s.lender), 0);
+    }
+
+    // ── Partial completion and retry (#1757) ────────────────────────
+
+    #[test]
+    fn liquidation_status_records_the_outcome_of_a_normal_settlement() {
+        let s = setup();
+        s.pair.set_collateral_factor(&s.admin, &4_000);
+        let liquidator = Address::generate(&s.env);
+        mint(&s.env, &s.debt_token, &liquidator, 80);
+        assert_eq!(s.pair.get_liquidation_status(&s.borrower, &7), None);
+
+        let seized = s.pair.liquidate_checked(
+            &liquidator,
+            &s.borrower,
+            &7,
+            &80,
+            &s.ctx(),
+            &s.fp(),
+            &80,
+        );
+
+        assert_eq!(seized, 80);
+        assert_eq!(
+            s.pair.get_liquidation_status(&s.borrower, &7),
+            Some(LiquidationState {
+                status: LiquidationStatus::Settled,
+                liquidator: liquidator.clone(),
+                repaid: 80,
+                seized: 80,
+            })
+        );
+        assert_eq!(s.pair.get_position(&s.borrower), (20, 0));
+        assert_eq!(balance(&s.env, &s.collateral_token, &liquidator), 80);
+    }
+
+    #[test]
+    fn rejected_liquidation_persists_no_receipt_and_can_be_retried() {
+        let s = setup();
+        s.pair.set_collateral_factor(&s.admin, &4_000);
+        let liquidator = Address::generate(&s.env);
+        let position = s.pair.get_position(&s.borrower);
+        let totals = s.pair.get_totals();
+
+        // No debt tokens to repay: the transfer is rejected after all state
+        // writes were staged, so the whole invocation must roll back.
+        assert!(s
+            .pair
+            .try_liquidate_checked(
+                &liquidator,
+                &s.borrower,
+                &3,
+                &40,
+                &s.ctx(),
+                &s.fp(),
+                &80,
+            )
+            .is_err());
+        assert_eq!(s.pair.get_liquidation_status(&s.borrower, &3), None);
+        assert_eq!(s.pair.get_position(&s.borrower), position);
+        assert_eq!(s.pair.get_totals(), totals);
+        assert_eq!(s.pair.get_bad_debt(), 0);
+
+        // The id was not consumed; a retry with the same id succeeds.
+        mint(&s.env, &s.debt_token, &liquidator, 80);
+        assert_eq!(
+            s.pair.liquidate_checked(
+                &liquidator,
+                &s.borrower,
+                &3,
+                &40,
+                &s.ctx(),
+                &s.fp(),
+                &80,
+            ),
+            40
+        );
+        assert_eq!(
+            s.pair.get_liquidation_status(&s.borrower, &3),
+            Some(LiquidationState {
+                status: LiquidationStatus::Settled,
+                liquidator: liquidator.clone(),
+                repaid: 40,
+                seized: 40,
+            })
+        );
+        assert_eq!(s.pair.get_position(&s.borrower), (60, 40));
+    }
+
+    #[test]
+    fn checked_liquidation_refuses_to_replay_a_settled_id() {
+        let s = setup();
+        let liquidator = unhealthy_with_close_factor(&s);
+
+        // Partial settlement: only half the debt may be repaid at once.
+        assert_eq!(
+            s.pair.liquidate(&liquidator, &s.borrower, &7, &80, &s.ctx(), &s.fp()),
+            40
+        );
+        let receipt = s.pair.get_liquidation_status(&s.borrower, &7).unwrap();
+        let position = s.pair.get_position(&s.borrower);
+        let liquidator_debt = balance(&s.env, &s.debt_token, &liquidator);
+        let liquidator_collateral = balance(&s.env, &s.collateral_token, &liquidator);
+
+        // The response of the first call was lost: replaying it must fail typed
+        // and move nothing, rather than seizing collateral a second time.
+        assert_eq!(
+            s.pair.try_liquidate_checked(
+                &liquidator,
+                &s.borrower,
+                &7,
+                &80,
+                &s.ctx(),
+                &s.fp(),
+                &80,
+            ),
+            Err(Ok(IsolatedLendingError::LiquidationStateChanged))
+        );
+        assert_eq!(s.pair.get_liquidation_status(&s.borrower, &7), Some(receipt));
+        assert_eq!(s.pair.get_position(&s.borrower), position);
+        assert_eq!(balance(&s.env, &s.debt_token, &liquidator), liquidator_debt);
+        assert_eq!(
+            balance(&s.env, &s.collateral_token, &liquidator),
+            liquidator_collateral
+        );
+
+        // Resume from the recorded position with a fresh id. The 50% close
+        // factor again caps this leg at half of the remaining 40 of debt.
+        assert_eq!(
+            s.pair.liquidate_checked(
+                &liquidator,
+                &s.borrower,
+                &8,
+                &40,
+                &s.ctx(),
+                &s.fp(),
+                &40,
+            ),
+            20
+        );
+        assert_eq!(s.pair.get_position(&s.borrower), (40, 20));
+        assert_eq!(
+            s.pair.get_liquidation_status(&s.borrower, &8),
+            Some(LiquidationState {
+                status: LiquidationStatus::Settled,
+                liquidator: liquidator.clone(),
+                repaid: 20,
+                seized: 20,
+            })
+        );
+    }
+
+    #[test]
+    fn checked_liquidation_rejects_a_stale_debt_snapshot() {
+        let s = setup();
+        let liquidator = unhealthy_with_close_factor(&s);
+        s.pair.repay(&s.borrower, &10, &s.ctx());
+        let totals = s.pair.get_totals();
+        let liquidator_debt = balance(&s.env, &s.debt_token, &liquidator);
+
+        // Snapshot captured before the repayment: 80 instead of 70.
+        assert_eq!(
+            s.pair.try_liquidate_checked(
+                &liquidator,
+                &s.borrower,
+                &9,
+                &40,
+                &s.ctx(),
+                &s.fp(),
+                &80,
+            ),
+            Err(Ok(IsolatedLendingError::LiquidationStateChanged))
+        );
+        assert_eq!(s.pair.get_liquidation_status(&s.borrower, &9), None);
+        assert_eq!(s.pair.get_totals(), totals);
+        assert_eq!(balance(&s.env, &s.debt_token, &liquidator), liquidator_debt);
+
+        // Refreshing the snapshot lets the operation proceed.
+        assert_eq!(
+            s.pair.liquidate_checked(
+                &liquidator,
+                &s.borrower,
+                &9,
+                &40,
+                &s.ctx(),
+                &s.fp(),
+                &70,
+            ),
+            40
+        );
     }
 
     fn set_ledger(env: &Env, sequence: u32) {
@@ -3601,5 +3941,7 @@ mod test {
         assert_eq!(IsolatedLendingError::WrongNetwork as u32, 16);
         assert_eq!(IsolatedLendingError::WrongContract as u32, 17);
         assert_eq!(IsolatedLendingError::WrongVersion as u32, 18);
+        assert_eq!(IsolatedLendingError::InvalidOracleQuote as u32, 19);
+        assert_eq!(IsolatedLendingError::LiquidationStateChanged as u32, 20);
     }
 }
