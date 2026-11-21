@@ -23,7 +23,11 @@ import {
   Maximize2,
 } from "lucide-react";
 import { apiUrl } from "../../lib/api";
-import { BackendUnavailable } from "../BackendUnavailable";
+import {
+  resolveYieldDiagnostic,
+  type ResolvedYieldDiagnostic,
+} from "../../../../shared/types/yieldDiagnostics";
+import { YieldDiagnosticNotice } from "./YieldDiagnosticNotice";
 import { stableSort } from "../../lib/stableSort";
 import EmptyState from "../common/EmptyState";
 import { EMPTY_STATE_APY } from "../../utils/emptyStateCopy";
@@ -180,10 +184,6 @@ function normalizeApyEntry(entry: ApiApyEntry): ApyEntry {
   };
 }
 
-function getErrorMessage(error: unknown): string {
-  return "Unable to fetch live APY data right now. The backend service may be disconnected.";
-}
-
 function getSortButtonLabel(
   field: SortField,
   activeField: SortField,
@@ -289,7 +289,7 @@ export default function ApyDashboard() {
   const [isFeeModalOpen, setIsFeeModalOpen] = useState(false);
   const [apyData, setApyData] = useState<ApyEntry[]>([]);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const [diagnostic, setDiagnostic] = useState<ResolvedYieldDiagnostic | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
   const [sortField, setSortField] = useState<SortField>("apy");
   const [sortDirection, setSortDirection] = useState<SortDirection>("desc");
@@ -310,46 +310,56 @@ export default function ApyDashboard() {
     }
 
     try {
-      setError(null);
       const result = await cachedFetch<unknown>(apiUrl("/api/yields"));
       if (!isCurrent(token)) return;
       if (result.data == null) {
-        setError(
-          result.error
-            ? getErrorMessage(new Error(result.error))
-            : "Unable to fetch live APY data right now",
+        // Diagnose from whatever the failure carried. The rates already on
+        // screen are kept: a failed refresh must not wipe valid data.
+        setDiagnostic(
+          resolveYieldDiagnostic(result.errorBody, {
+            httpStatus: result.status,
+            networkFailure: result.status === undefined,
+            requestId: result.requestId,
+          }),
         );
-        setApyData([]);
-        setCacheIndicator(null);
-        setCacheFetchedAt(null);
-      } else {
-        const rows = Array.isArray(result.data) ? result.data : [];
-        const augmented: ApyEntry[] = rows.map((row) => {
-          const entry = normalizeApyEntry(row as ApiApyEntry);
-          const fetchedTime = entry.fetchedAt
-            ? Date.parse(entry.fetchedAt)
-            : Date.now();
-          const freshness = computeDecayedFreshnessConfidence(
-            Date.now() - fetchedTime,
-          );
-          return {
-            ...entry,
-            freshnessConfidence: freshness.confidence,
-            unusableDueToStale: freshness.unusable,
-          };
-        });
-        setApyData(augmented);
-        setCacheIndicator(
-          result.offline ? "offline" : result.fromCache ? "cached" : null,
-        );
-        setCacheFetchedAt(result.fetchedAt);
-        setError(null);
+        return;
       }
-    } catch (err) {
+      if (!Array.isArray(result.data)) {
+        // A 2xx body that is not a list is a failure, not "no protocols".
+        setDiagnostic(
+          resolveYieldDiagnostic(null, {
+            malformedSuccess: true,
+            httpStatus: result.status,
+            requestId: result.requestId,
+          }),
+        );
+        return;
+      }
+      const augmented: ApyEntry[] = result.data.map((row) => {
+        const entry = normalizeApyEntry(row as ApiApyEntry);
+        const fetchedTime = entry.fetchedAt
+          ? Date.parse(entry.fetchedAt)
+          : Date.now();
+        const freshness = computeDecayedFreshnessConfidence(
+          Date.now() - fetchedTime,
+        );
+        return {
+          ...entry,
+          freshnessConfidence: freshness.confidence,
+          unusableDueToStale: freshness.unusable,
+        };
+      });
+      setApyData(augmented);
+      setCacheIndicator(
+        result.offline ? "offline" : result.fromCache ? "cached" : null,
+      );
+      setCacheFetchedAt(result.fetchedAt);
+      setDiagnostic(null);
+    } catch {
+      // Processing the received rows failed on the client. Keep the rates
+      // already on screen and report it as a response-parsing failure.
       if (!isCurrent(token)) return;
-      setError(getErrorMessage(err));
-      setApyData([]);
-      setCacheIndicator(null);
+      setDiagnostic(resolveYieldDiagnostic(null, { malformedSuccess: true }));
     } finally {
       if (isCurrent(token)) {
         setLoading(false);
@@ -464,7 +474,7 @@ export default function ApyDashboard() {
 
   // ── Error state ───────────────────────────────────────────────────
 
-  if (error && !apyData.length) {
+  if (diagnostic && !apyData.length) {
     return (
       <div
         className={`space-y-8 ${reducedMotion ? "" : "animate-in fade-in slide-in-from-bottom-4 duration-700"}`}
@@ -477,10 +487,10 @@ export default function ApyDashboard() {
             Compare yields across Stellar DeFi protocols
           </p>
         </header>
-        <BackendUnavailable
-          featureName="APY Data"
-          reason="The backend service is currently disconnected or unavailable. Please try again later."
+        <YieldDiagnosticNotice
+          diagnostic={diagnostic}
           onRetry={handleRefresh}
+          retrying={refreshing}
         />
       </div>
     );
@@ -533,28 +543,13 @@ export default function ApyDashboard() {
         />
       )}
 
-      {error && (
-        <div
-          className="glass-panel border border-amber-500/30 bg-amber-500/10 p-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3"
-          role="status"
-        >
-          <div className="flex items-start gap-2 text-amber-200">
-            <AlertTriangle size={16} className="mt-0.5" />
-            <p className="text-sm">
-              Live APY refresh failed. Showing the last available rates.
-            </p>
-          </div>
-          <button
-            onClick={handleRefresh}
-            className="btn-secondary inline-flex items-center gap-2 text-sm self-start sm:self-auto"
-          >
-            <RefreshCw
-              size={14}
-              className={refreshing && !reducedMotion ? "animate-spin" : ""}
-            />
-            Retry
-          </button>
-        </div>
+      {diagnostic && (
+        <YieldDiagnosticNotice
+          diagnostic={diagnostic}
+          onRetry={handleRefresh}
+          retrying={refreshing}
+          showingLastRates
+        />
       )}
 
       {/* Summary Stats */}

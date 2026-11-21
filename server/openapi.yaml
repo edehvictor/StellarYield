@@ -528,7 +528,7 @@ paths:
             minimum: 0
             maximum: 10000
       responses:
-        '200':
+        \'200\':
           description: Successful response with yields data
           headers:
             X-Cache-Status:
@@ -539,23 +539,37 @@ paths:
             X-Config-Version:
               schema:
                 type: string
-                pattern: '^[a-f0-9]{64}$'
+                pattern: \'^[a-f0-9]{64}$\'
               description: |
                 Immutable SHA-256 fingerprint of the current asset configuration
                 snapshot. Clients use this to detect when a held quote was
                 computed against a now-stale configuration; re-quote before
-                signing when this value differs from the quote's
+                signing when this value differs from the quote\'s
                 `assetConfigVersion`.
           content:
             application/json:
               schema:
                 type: array
                 items:
-                  $ref: '#/components/schemas/YieldData'
-        '400':
-          description: An assumption is outside 0-10000 bps (`INVALID_ASSUMPTION`); `details.fields` names each one. No yield data is read.
-        '500':
-          description: Failed to fetch yield data (`YIELD_FETCH_FAILED`, `recoverable` true). Safe to retry.
+                  $ref: \'#/components/schemas/YieldData\'
+        \'400\':
+          description: >-
+            A fee assumption parameter was present but invalid. Carries a
+            `YieldDiagnostic` with stage `input_validation` (see
+            docs/yield-diagnostics.md).
+          content:
+            application/json:
+              schema:
+                $ref: \'#/components/schemas/YieldErrorResponse\'
+        \'500\':
+          description: >-
+            Failed to fetch yield data. `diagnostic.stage` names the failed
+            processing stage, or `unknown` when it cannot be determined (see
+            docs/yield-diagnostics.md).
+          content:
+            application/json:
+              schema:
+                $ref: \'#/components/schemas/YieldErrorResponse\'
 
   /api/strategies/config-snapshot:
     get:
@@ -564,7 +578,7 @@ paths:
       tags:
         - Strategies
       responses:
-        '200':
+        \'200\':
           description: Strategy comparison configuration snapshot
           headers:
             X-Strategy-Config-Fingerprint:
@@ -574,7 +588,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/StrategyComparisonConfigSnapshotResponse'
+                $ref: \'#/components/schemas/StrategyComparisonConfigSnapshotResponse\'
 
   /api/strategies/compare:
     post:
@@ -583,48 +597,26 @@ paths:
       tags:
         - Strategies
       requestBody:
-        required: false
+        required: true
         content:
           application/json:
             schema:
-              type: object
-              properties:
-                expectedConfigFingerprint:
-                  type: string
-                  description: Expected SHA-256 configuration snapshot fingerprint
-                strategyIds:
-                  type: array
-                  items:
-                    type: string
-                  description: Optional list of strategy identifiers to compare
+              $ref: \'#/components/schemas/StrategyComparisonRequest\'
       responses:
-        '200':
-          description: Comparison completed successfully
-          headers:
-            X-Strategy-Config-Fingerprint:
-              schema:
-                type: string
-              description: Active configuration fingerprint
+        \'200\':
+          description: Strategy comparison completed
           content:
             application/json:
               schema:
-                type: object
-                properties:
-                  strategies:
-                    type: array
-                    items:
-                      type: object
-                  configFingerprint:
-                    type: string
-                  comparedAt:
-                    type: string
-        '409':
-          description: Stale strategy configuration snapshot detected
+                $ref: \'#/components/schemas/StrategyComparisonResponse\'
+        \'409\':
+          description: Strategy comparison configuration fingerprint mismatch
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/StrategyComparisonStaleErrorResponse'
-
+                $ref: \'#/components/schemas/StrategyComparisonConfigMismatchResponse\'
+        \'500\':
+          description: Internal server error
   /api/yields/history:
     get:
       summary: Get historical APY data
@@ -5975,6 +5967,68 @@ components:
           type: string
         currentConfig:
           type: object
+    YieldDiagnostic:
+      type: object
+      description: Privacy-safe failure diagnostic for the yield data flow (#1877).
+      required: [code, stage, stageKnown, summary, remediation, retryable]
+      properties:
+        code:
+          type: string
+          enum:
+            - YIELD_INPUT_INVALID
+            - YIELD_SOURCE_UNAVAILABLE
+            - YIELD_RELIABILITY_UNAVAILABLE
+            - YIELD_ENRICHMENT_FAILED
+            - YIELD_SERIALIZATION_FAILED
+            - YIELD_NETWORK_UNREACHABLE
+            - YIELD_RESPONSE_MALFORMED
+            - YIELD_STAGE_UNKNOWN
+        stage:
+          type: string
+          enum:
+            - input_validation
+            - source_retrieval
+            - reliability_scoring
+            - yield_enrichment
+            - response_serialization
+            - network
+            - response_parsing
+            - unknown
+        stageKnown:
+          type: boolean
+        summary:
+          type: string
+        remediation:
+          type: string
+          nullable: true
+          description: Null when there is not enough evidence to suggest a fix.
+        retryable:
+          type: boolean
+        requestId:
+          type: string
+          pattern: '^[A-Za-z0-9._:-]{1,64}$'
+    YieldErrorResponse:
+      type: object
+      required: [error, message, diagnostic]
+      properties:
+        error:
+          type: string
+          example: YIELD_FETCH_FAILED
+        message:
+          type: string
+        requestId:
+          type: string
+        recoverable:
+          type: boolean
+        details:
+          type: object
+          properties:
+            invalidParameters:
+              type: array
+              items: { type: string }
+        diagnostic:
+          $ref: '#/components/schemas/YieldDiagnostic'
+
     ExposureHeatmapAxisEntry:
       type: object
       properties:

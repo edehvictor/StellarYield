@@ -90,6 +90,20 @@ export interface CachedFetchResult<T> {
   offline: boolean;
   /** Failure reason when no data could be served; null on success. */
   error: string | null;
+  /**
+   * HTTP status of the network response, when one was received. Set on both
+   * success and HTTP-error results; absent for network failures and offline
+   * cache reads.
+   */
+  status?: number;
+  /**
+   * Parsed JSON body of a non-2xx response (or `null` when it was not JSON),
+   * so callers can read structured error diagnostics. Only set on HTTP
+   * error results.
+   */
+  errorBody?: unknown;
+  /** `X-Request-Id` header of the network response, when present. */
+  requestId?: string;
 }
 
 export interface CachedFetchOptions {
@@ -132,6 +146,24 @@ function readFreshEntry<T>(
 
 function browserReportsOffline(): boolean {
   return typeof navigator !== "undefined" && navigator.onLine === false;
+}
+
+function readResponseMeta(response: Response): { status?: number; requestId?: string } {
+  const meta: { status?: number; requestId?: string } = {};
+  if (typeof response.status === "number") meta.status = response.status;
+  const requestId =
+    typeof response.headers?.get === "function" ? response.headers.get("x-request-id") : null;
+  if (requestId) meta.requestId = requestId;
+  return meta;
+}
+
+/** Best-effort JSON parse of an error body; never throws. */
+async function readErrorBody(response: Response): Promise<unknown> {
+  try {
+    return typeof response.json === "function" ? await response.json() : null;
+  } catch {
+    return null;
+  }
 }
 
 function serveCache<T>(
@@ -182,6 +214,7 @@ export async function cachedFetch<T>(
         signal: options.signal,
       });
 
+      const responseMeta = readResponseMeta(response);
       if (response.ok) {
         const json = (await response.json()) as T;
         const fetchedAt = Date.now();
@@ -196,10 +229,15 @@ export async function cachedFetch<T>(
           fromCache: false,
           offline: false,
           error: null,
+          ...responseMeta,
         };
       }
 
-      return serveCache(cached, false, `HTTP ${response.status}`);
+      return {
+        ...serveCache(cached, false, `HTTP ${response.status}`),
+        ...responseMeta,
+        errorBody: await readErrorBody(response),
+      };
     } catch (err) {
       if (options.signal?.aborted) {
         return {
