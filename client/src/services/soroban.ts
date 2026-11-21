@@ -35,7 +35,7 @@ import {
 
 // ── Configuration ───────────────────────────────────────────────────────
 
-export const RPC_URL = import.meta.env.VITE_SOROBAN_RPC_URL ?? "https://soroban-testnet.stellar.org";
+export const RPC_URL = getRpcUrl();
 export const RPC_FALLBACK_URLS: string[] = (
   (import.meta.env.VITE_SOROBAN_RPC_FALLBACK_URLS as string | undefined) ?? ""
 )
@@ -58,9 +58,6 @@ export function rotateToFallbackRpc(): string {
   return getActiveRpcUrl();
 }
 
-export const NETWORK_PASSPHRASE =
-  import.meta.env.VITE_NETWORK_PASSPHRASE ?? "Test SDF Network ; September 2015";
-export const RPC_URL = getRpcUrl();
 export const NETWORK_PASSPHRASE = getNetworkPassphrase();
 
 const POLL_INTERVAL_MS = 2_000;
@@ -519,6 +516,12 @@ export interface ZapDepositParams {
   /** Accept output below `expectedAmountOut` as long as it meets `minAmountOut`. */
   allowPartial: boolean;
   /**
+   * Stable `u64` operation identity from the transaction review. Reusing it on
+   * a retry lets the zap contract reject an already-settled effect or resume a
+   * pending one instead of applying the deposit twice.
+   */
+  opId: bigint;
+  /**
    * Quote `expiresAt` as a Unix timestamp in seconds. The contract rejects the
    * transaction with `QuoteExpired` (4001) if the ledger closes after it.
    */
@@ -545,6 +548,7 @@ export async function zapDeposit(
       StellarSdk.nativeToScVal(params.minSharesOut, { type: "i128" }),
       StellarSdk.nativeToScVal(params.expectedAmountOut, { type: "i128" }),
       StellarSdk.nativeToScVal(params.allowPartial, { type: "bool" }),
+      StellarSdk.nativeToScVal(params.opId, { type: "u64" }),
       StellarSdk.nativeToScVal(params.deadlineUnixSeconds, { type: "u64" }),
     ],
     onPhase,

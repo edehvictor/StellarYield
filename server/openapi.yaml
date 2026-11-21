@@ -890,6 +890,8 @@ paths:
         calling `POST /api/zap/verify` to confirm the quote is still valid before executing.
       tags:
         - Zap
+      parameters:
+        - $ref: '#/components/parameters/ReviewOperationIdentity'
       requestBody:
         required: true
         content:
@@ -990,6 +992,8 @@ paths:
         when the quote passes all checks, or an error code explaining why it should be rejected.
       tags:
         - Zap
+      parameters:
+        - $ref: '#/components/parameters/ReviewOperationIdentity'
       requestBody:
         required: true
         content:
@@ -5105,6 +5109,21 @@ components:
       schema:
         type: string
         pattern: '^[A-Za-z0-9._:-]{1,255}$'
+    ReviewOperationIdentity:
+      name: X-Operation-Identity
+      in: header
+      required: false
+      description: >
+        Stable identity of the logical transaction review (8–128 characters of
+        `A-Za-z0-9_-`). The client reuses it for quote verification and for the
+        zap contract's `op_id`, so a safe retry cannot apply the deposit twice.
+        Malformed values are rejected with `INVALID_OPERATION_IDENTITY` (400).
+        Valid values are echoed in the response header and included in error
+        bodies for log correlation.
+      schema:
+        type: string
+        pattern: '^[A-Za-z0-9_-]{8,128}$'
+      example: txrev_5b7f1c2a9e
   schemas:
     ExposureHeatmapAxisEntry:
       type: object
@@ -5975,6 +5994,12 @@ Incident:
           type: string
           description: Correlation ID for tracing (present when the server assigns one)
           example: "req-abc123"
+        operationId:
+          type: string
+          description: >
+            Validated `X-Operation-Identity` echoed for log correlation (#1888).
+            Present only when the client supplied a well-formed identity.
+          example: "txrev_5b7f1c2a9e"
         details:
           type: object
           description: Optional structured error details

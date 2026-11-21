@@ -2,6 +2,8 @@ export interface ErrorResponse {
   error: string;
   message: string;
   requestId?: string;
+  /** Validated review operation id echoed from `X-Operation-Identity` (#1888). */
+  operationId?: string;
   details?: unknown;
   /** Whether the client may offer recovery actions (explorer/support/retry). */
   recoverable?: boolean;
