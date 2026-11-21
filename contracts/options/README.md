@@ -11,8 +11,8 @@
 - `exercise(exerciser, option_id, expected_config_fingerprint)` exercises all remaining collateral
 - `exercise_partial(exerciser, option_id, amount, expected_config_fingerprint)` exercises part of the collateral
 - `exercise_partial_checked(exerciser, option_id, amount, expected_exercised, expected_config_fingerprint)` retry-safe partial exercise (see Settlement Safety)
-- `get_settlement_state(option_id)` settlement progress: status, exercised amount, remaining amount
-- `get_config_snapshot()` / `get_config_fingerprint()` expose the configuration settlement is validated against
+- `get_settlement_state(option_id, expected_config_fingerprint)` reads settlement progress only under the captured deployment context
+- `get_config_snapshot()` / `get_config_fingerprint()` expose the deployment context and configuration settlement is validated against
 - `cancel(minter, option_id)` cancels an unexpired option and returns its unexercised collateral
 - `expire(option_id)`
 - `deposit(owner, asset, amount)` / `withdraw(owner, asset, amount)`
@@ -44,25 +44,35 @@ fingerprint immediately.
 
 ## Errors
 
-`OptionsError` covers initialization, authorization, invalid option state, expiry windows, amount/price validation, and `SettlementStateChanged` (22) for a retried checked settlement whose progress no longer matches.
+`OptionsError` covers initialization, authorization, invalid option state, expiry windows, amount/price validation, `SettlementStateChanged` (22) for a retried checked settlement whose progress no longer matches, `WrongNetwork` (23), and `WrongVersion` (24).
 
 ## Configuration Fingerprint
 
 Settlement executes under the contract configuration the caller observed.
-`get_config_snapshot()` returns the admin-controlled configuration settlement
-depends on — `admin`, `oracle`, `oracle_max_age` and the active
-`storage_version` — and `get_config_fingerprint()` returns its SHA-256
-fingerprint (domain-separated). The fingerprint is a pure function of those
-values: it does not change when options are minted, exercised, cancelled or
-expired, and it changes exactly when an admin changes the configuration.
+`get_config_snapshot()` returns the deployment context and admin-controlled
+configuration settlement depends on — `network_id`, `contract`,
+`storage_version`, `admin`, `oracle` and `oracle_max_age` — and
+`get_config_fingerprint()` returns its domain-separated SHA-256 fingerprint.
+The fingerprint is a pure function of those values: it does not change when
+options are minted, exercised, cancelled or expired, and it changes when the
+network, deployment, layout version, or admin configuration changes.
 
 Clients capture the fingerprint before preparing a settlement and pass it to
-`exercise` / `exercise_partial`. The fingerprint is validated first, before the
-position is read again and before any collateral moves; a mismatch (for example
-after the admin enables the oracle guard or migrates storage) fails with
-`StaleConfig`. A rejected settlement leaves balances, reserves, exercised
-amounts and the position record untouched, so the caller can refresh the
-fingerprint with `get_config_fingerprint()` and retry the same operation safely.
+`exercise`, `exercise_partial`, `exercise_partial_checked`, and
+`get_settlement_state`. The fingerprint is validated before position state is
+read and before collateral moves. A network mismatch fails with `WrongNetwork`,
+an unsupported layout fails with `WrongVersion`, and a stale caller snapshot
+(for example after an admin config change or migration) fails with
+`StaleConfig`. The state query is bound to the same fingerprint so its progress
+cannot be confused with a different network or deployment. Rejected settlement
+leaves balances, reserves, exercised amounts and the position record untouched.
+
+New deployments record their network id and storage version at initialization.
+An existing deployment without a network binding should be migrated by its
+admin; migration pins it to the live network, advances the storage version,
+and does not rewrite option records. It refuses to rebind an already bound
+deployment to another network. `cancel` and `expire` also verify the stored
+network and supported storage version before reading or changing option state.
 
 ## Collateral Accounting
 
@@ -114,7 +124,8 @@ response) should not resubmit blindly: `exercise_partial` would pay out again.
 Use `exercise_partial_checked(exerciser, option_id, amount, expected_exercised)`
 with the `exercised_amount` observed before the first attempt. If that attempt
 already landed, the retry fails with `SettlementStateChanged` and moves nothing;
-read `get_settlement_state` and resume from the new `exercised_amount`.
+read `get_settlement_state` with the current fingerprint and resume from the new
+`exercised_amount`.
 `exercise_partial_checked` also validates the configuration fingerprint exactly
 like `exercise_partial`, and the state check runs after it. `exercise_partial`
 and `exercise` keep their existing behavior.

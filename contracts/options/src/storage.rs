@@ -5,6 +5,8 @@ use soroban_sdk::{contracttype, Address, Env};
 pub enum DataKey {
     Admin,
     Oracle,
+    /// SHA-256 of the network passphrase this options state is bound to.
+    NetworkId,
     OptionCounter,
     Option(u32),
     StorageVersion,
@@ -26,9 +28,9 @@ pub enum DataKey {
     PositionCollateral(u32, u32),
 }
 
-/// The current options storage layout version. Version zero is the legacy
-/// layout where this key is absent and positions are stored under `Option(id)`.
-pub const CURRENT_STORAGE_VERSION: u32 = 1;
+/// The current options storage context version. Legacy versions keep positions
+/// under the same `Option(id)` keys and are upgraded without rewriting records.
+pub const CURRENT_STORAGE_VERSION: u32 = 2;
 
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -111,6 +113,15 @@ pub fn write_storage_version(e: &Env, version: u32) {
     e.storage()
         .instance()
         .set(&DataKey::StorageVersion, &version);
+    extend_instance_ttl_default(e);
+}
+
+pub fn read_network_id(e: &Env) -> Option<soroban_sdk::BytesN<32>> {
+    e.storage().instance().get(&DataKey::NetworkId)
+}
+
+pub fn write_network_id(e: &Env, network_id: &soroban_sdk::BytesN<32>) {
+    e.storage().instance().set(&DataKey::NetworkId, network_id);
     extend_instance_ttl_default(e);
 }
 
