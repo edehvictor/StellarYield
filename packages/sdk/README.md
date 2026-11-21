@@ -133,6 +133,14 @@ const vaultData = await api.getVaultData('vault-contract-id');
   - `getTVL()`: Get Total Value Locked
   - `getHistoricalData()`: Get APY/TVL history
   - `getVaultData()`: Get complete vault data
+  - `simulateDeposit()`: Preview deposit allocation, shares, and fee estimates
+  - `simulateWithConfig()`: Execute simulation under immutable configuration snapshot
+
+- **Simulation Configuration & Fingerprint Hardening**:
+  - `captureSimulationConfig(config)`: Captures a deep-frozen, immutable snapshot of simulation parameters and derives a deterministic `simcfg1:<hex>` fingerprint.
+  - `assertSimulationConfigCurrent(expected, current)`: Rejects stale configuration snapshots with typed, retryable `StaleSimulationConfigError`.
+  - `runWithSimulationConfig(options)`: Runs simulation against an immutable snapshot, detects configuration drift, and either rejects (`onStale: "reject"`) or transparently re-runs (`onStale: "refresh"`).
+  - State & Balance Preservation: Validation and execution failures never modify existing balances or state; every failure maintains `statePreserved: true`.
 
 ## Deposit simulation fixtures
 
