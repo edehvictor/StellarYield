@@ -52,4 +52,21 @@ describe("YieldSourceFeeHistoryPanel (#1147)", () => {
     );
     expect(screen.getByTestId("fee-history-empty-state")).toBeInTheDocument();
   });
+
+  it("renders a safe unavailable fee display for non-finite boundary fee values", () => {
+    render(
+      <YieldSourceFeeHistoryPanel
+        protocolName="Blend"
+        feeHistory={[
+          { feeBps: Number.NaN, changedAt: "2026-01-03T00:00:00.000Z" },
+          { feeBps: Number.POSITIVE_INFINITY, changedAt: "2026-01-01T00:00:00.000Z" },
+        ]}
+      />,
+    );
+
+    const list = screen.getByTestId("fee-history-list");
+    expect(list).toHaveTextContent("—%");
+    expect(list).not.toHaveTextContent("NaN");
+    expect(list).not.toHaveTextContent("Infinity");
+  });
 });
