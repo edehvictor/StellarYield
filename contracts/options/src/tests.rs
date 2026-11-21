@@ -282,6 +282,51 @@ fn test_repeated_exercise_rejected() {
     assert_eq!(result, Err(Ok(crate::OptionsError::AlreadyExercised)));
 }
 
+#[test]
+fn test_settlement_sequence_rejects_stale_state_and_allows_retry() {
+    let (env, client, _, _, underlying, quote) = setup_env();
+    let (option_id, _) = mint_call_option(&env, &client, &underlying, &quote);
+    let exerciser = Address::generate(&env);
+    mint_tokens(&env, &quote, &exerciser, 200_000_000);
+    env.ledger().set_timestamp(750);
+
+    assert_eq!(client.get_settlement_sequence(&option_id), 1);
+    client.exercise_partial_with_sequence(
+        &exerciser,
+        &option_id,
+        &4_000_000,
+        &1,
+        &client.get_config_fingerprint(),
+    );
+    assert_eq!(client.get_settlement_sequence(&option_id), 2);
+
+    let underlying_client = soroban_sdk::token::Client::new(&env, &underlying);
+    let balance_before_retry = underlying_client.balance(&exerciser);
+    let stale = client.try_exercise_partial_with_sequence(
+        &exerciser,
+        &option_id,
+        &1_000_000,
+        &1,
+        &client.get_config_fingerprint(),
+    );
+    assert_eq!(stale, Err(Ok(crate::OptionsError::ConcurrentModification)));
+    assert_eq!(underlying_client.balance(&exerciser), balance_before_retry);
+    assert_eq!(client.get_settlement_sequence(&option_id), 2);
+
+    client.exercise_partial_with_sequence(
+        &exerciser,
+        &option_id,
+        &1_000_000,
+        &2,
+        &client.get_config_fingerprint(),
+    );
+    assert_eq!(
+        underlying_client.balance(&exerciser),
+        balance_before_retry + 1_000_000
+    );
+    assert_eq!(client.get_settlement_sequence(&option_id), 3);
+}
+
 // ── Expire ────────────────────────────────────────────────────────────────
 
 #[test]
@@ -2162,6 +2207,7 @@ mod settlement_retry {
             &option_id,
             &4_000_000,
             &0,
+            &1,
             &client.get_config_fingerprint(),
         );
 
@@ -2172,6 +2218,7 @@ mod settlement_retry {
                 &option_id,
                 &4_000_000,
                 &0,
+                &1,
                 &client.get_config_fingerprint()
             ),
             Err(Ok(OptionsError::SettlementStateChanged))
@@ -2193,6 +2240,7 @@ mod settlement_retry {
             &option_id,
             &6_000_000,
             &4_000_000,
+            &2,
             &client.get_config_fingerprint(),
         );
         assert_eq!(
@@ -2216,6 +2264,7 @@ mod settlement_retry {
             &option_id,
             &10_000_000,
             &0,
+            &1,
             &client.get_config_fingerprint(),
         );
         assert_eq!(
@@ -2224,6 +2273,7 @@ mod settlement_retry {
                 &option_id,
                 &10_000_000,
                 &0,
+                &1,
                 &client.get_config_fingerprint()
             ),
             Err(Ok(OptionsError::SettlementStateChanged))
@@ -2244,6 +2294,7 @@ mod settlement_retry {
                 &option_id,
                 &10_000_001,
                 &0,
+                &1,
                 &client.get_config_fingerprint()
             ),
             Err(Ok(OptionsError::ExceedsCollateral))
@@ -2255,6 +2306,7 @@ mod settlement_retry {
                 &option_id,
                 &1,
                 &0,
+                &1,
                 &client.get_config_fingerprint()
             ),
             Err(Ok(OptionsError::AlreadyCancelled))
