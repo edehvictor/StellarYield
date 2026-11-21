@@ -242,6 +242,13 @@ export function verifyAuthChallenge(input: {
   if (!Number.isFinite(expiryMs) || Date.now() > expiryMs) {
     throw new Error("Challenge has expired.");
   }
+  // Boundary: a challenge is valid through its expiry instant (inclusive) and
+  // may not claim an expiry further out than the issuing TTL. Without this cap
+  // a long-lived challenge could outlive its replay-cache entry (which is only
+  // retained for CHALLENGE_TTL_MS) and be replayed.
+  if (expiryMs - Date.now() > CHALLENGE_TTL_MS) {
+    throw new Error("Challenge expiry is outside the allowed window.");
+  }
 
   // ── Replay check ─────────────────────────────────────────────────────────
   if (isChallengeReplayed(input.challenge)) {

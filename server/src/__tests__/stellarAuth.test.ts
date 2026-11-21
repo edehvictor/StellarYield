@@ -212,6 +212,69 @@ describe("verifyAuthChallenge — expiry", () => {
   });
 });
 
+describe("verifyAuthChallenge — expiry boundary values (#1882)", () => {
+  beforeEach(() => _resetReplayCacheForTesting());
+  afterEach(() => jest.useRealTimers());
+
+  function setup(expiresAtMs: number) {
+    const sessionKey = Keypair.random();
+    const wallet = makeContractAddress(9);
+    const challenge = buildFingerprintBoundChallenge({
+      walletAddress: wallet,
+      sessionKeyAddress: sessionKey.publicKey(),
+      authConfigFingerprint: getWalletAuthConfigFingerprint(),
+      expiresAt: new Date(expiresAtMs).toISOString(),
+    });
+    return {
+      input: {
+        walletAddress: wallet,
+        sessionKeyAddress: sessionKey.publicKey(),
+        challenge,
+        signature: signChallenge(sessionKey, challenge),
+      },
+    };
+  }
+
+  it("accepts a challenge at exactly its expiry instant", () => {
+    jest.useFakeTimers().setSystemTime(new Date("2026-01-01T00:00:00.000Z"));
+    const { input } = setup(Date.now());
+    expect(verifyAuthChallenge(input).verified).toBe(true);
+  });
+
+  it("rejects a challenge 1ms past its expiry and leaves it unconsumed", () => {
+    jest.useFakeTimers().setSystemTime(new Date("2026-01-01T00:00:00.000Z"));
+    const { input } = setup(Date.now() - 1);
+    expect(() => verifyAuthChallenge(input)).toThrow("Challenge has expired.");
+    // Retry still fails identically (no state change from the failed attempt).
+    expect(() => verifyAuthChallenge(input)).toThrow("Challenge has expired.");
+  });
+
+  it("accepts an expiry at exactly the 5 minute TTL window", () => {
+    jest.useFakeTimers().setSystemTime(new Date("2026-01-01T00:00:00.000Z"));
+    const { input } = setup(Date.now() + 5 * 60 * 1000);
+    expect(verifyAuthChallenge(input).verified).toBe(true);
+  });
+
+  it("rejects an expiry 1ms beyond the TTL window without consuming the challenge", () => {
+    jest.useFakeTimers().setSystemTime(new Date("2026-01-01T00:00:00.000Z"));
+    const { input } = setup(Date.now() + 5 * 60 * 1000 + 1);
+    expect(() => verifyAuthChallenge(input)).toThrow(
+      "Challenge expiry is outside the allowed window.",
+    );
+    expect(() => verifyAuthChallenge(input)).toThrow(
+      "Challenge expiry is outside the allowed window.",
+    );
+  });
+
+  it("rejects a non-finite expiry", () => {
+    const { input } = setup(Date.now());
+    const bad = input.challenge.replace(/:[^:]*$/, ":garbage");
+    expect(() =>
+      verifyAuthChallenge({ ...input, challenge: bad }),
+    ).toThrow();
+  });
+});
+
 describe("verifyAuthChallenge — stale configuration snapshots (#1878)", () => {
   beforeEach(() => _resetReplayCacheForTesting());
 
