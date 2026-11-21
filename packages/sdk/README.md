@@ -117,6 +117,17 @@ const history = await api.getHistoricalData('vault-contract-id', 30);
 const vaultData = await api.getVaultData('vault-contract-id');
 ```
 
+For a state-changing request that is safe to retry, provide both `retrySafe: true`
+and a stable `operationId`. The SDK sends that value as `Idempotency-Key` on
+every attempt so the server can recognize a retry and apply the operation once:
+
+```typescript
+await api.claimReferral(walletAddress, {
+  retrySafe: true,
+  operationId: `claim-${walletAddress}-${requestId}`,
+});
+```
+
 ## Features
 
 - **VaultClient**: Interact with YieldVault Soroban contract
