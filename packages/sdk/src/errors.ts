@@ -58,11 +58,28 @@ export abstract class SorobanSdkError extends Error {
   }
 }
 
+export interface DiagnosticContext {
+  stage: SdkErrorPhase;
+  remediation: string;
+}
+
+export function diagnosticContext(phase: SdkErrorPhase, retryable: boolean): DiagnosticContext {
+  const remediation = retryable
+    ? "retry after refreshing the current network and account state"
+    : phase === "simulate"
+      ? "review the request and contract configuration"
+      : phase === "sign"
+        ? "verify the wallet account and network"
+        : "inspect the transaction status before retrying";
+  return { stage: phase, remediation };
+}
+
 export class ContractExecutionError extends SorobanSdkError {
   public readonly errorCode: number;
   public readonly errorName: string;
   public readonly rawResultXdr?: string;
   public readonly diagnosticEvents?: string[];
+  public readonly diagnosticContext: DiagnosticContext;
 
   constructor(
     errorCode: number,
@@ -77,6 +94,7 @@ export class ContractExecutionError extends SorobanSdkError {
     this.errorName = errorName;
     this.rawResultXdr = rawResultXdr;
     this.diagnosticEvents = diagnosticEvents;
+    this.diagnosticContext = diagnosticContext(phase, false);
   }
 }
 
@@ -265,8 +283,19 @@ export class InvalidAmountError extends SorobanSdkError {
 export class StaleSimulationError extends SorobanSdkError {
   public readonly currentLedger: number;
   public readonly validUntilLedger: number;
+  public readonly expectedFingerprint?: string | null;
+  public readonly actualFingerprint?: string | null;
+  public readonly statePreserved: boolean;
 
-  constructor(currentLedger: number, validUntilLedger: number) {
+  constructor(
+    currentLedger: number,
+    validUntilLedger: number,
+    details: {
+      expectedFingerprint?: string | null;
+      actualFingerprint?: string | null;
+      statePreserved?: boolean;
+    } = {}
+  ) {
     super(
       `Simulation snapshot is stale (valid until ledger ${validUntilLedger}, current ledger ${currentLedger})`,
       "simulate",
@@ -274,7 +303,46 @@ export class StaleSimulationError extends SorobanSdkError {
     );
     this.currentLedger = currentLedger;
     this.validUntilLedger = validUntilLedger;
+    this.expectedFingerprint = details.expectedFingerprint ?? null;
+    this.actualFingerprint = details.actualFingerprint ?? null;
+    this.statePreserved = details.statePreserved ?? true;
   }
+}
+
+export class StaleSimulationConfigError extends SorobanSdkError {
+  public readonly code = "SIMULATION_CONFIG_STALE" as const;
+  public readonly expectedFingerprint: string | null;
+  public readonly actualFingerprint: string | null;
+  public readonly statePreserved: boolean;
+  public readonly preservedState?: unknown;
+
+  constructor(
+    message: string,
+    details: {
+      expectedFingerprint?: string | null;
+      actualFingerprint?: string | null;
+      statePreserved?: boolean;
+      preservedState?: unknown;
+    } = {}
+  ) {
+    super(message, "simulate", true);
+    this.name = "StaleSimulationConfigError";
+    this.expectedFingerprint = details.expectedFingerprint ?? null;
+    this.actualFingerprint = details.actualFingerprint ?? null;
+    this.statePreserved = details.statePreserved ?? true;
+    this.preservedState = details.preservedState;
+  }
+}
+
+export function isStaleSimulationConfigError(
+  error: unknown
+): error is StaleSimulationConfigError {
+  return (
+    error instanceof StaleSimulationConfigError ||
+    (typeof error === "object" &&
+      error !== null &&
+      (error as { code?: unknown }).code === "SIMULATION_CONFIG_STALE")
+  );
 }
 
 export class SubmissionTimeoutError extends SorobanSdkError {
