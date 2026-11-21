@@ -1,4 +1,4 @@
-//! # Position Module — NFT-Style Liquidity Position Management
+//! # Position Module - NFT-Style Liquidity Position Management
 //!
 //! Tracks individual user positions with custom tick ranges and accumulated fees.
 //!
