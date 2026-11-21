@@ -55,12 +55,26 @@ export interface ProjectionPoint {
  * @param config Configuration for the calculation
  * @returns Array of monthly projection points
  */
+function toSafeFinite(value: number, fallback = 0): number {
+  if (!Number.isFinite(value)) return fallback;
+  // Clamp to a finite display-safe range to avoid Infinity/overflow artifacts.
+  return Math.max(-Number.MAX_SAFE_INTEGER, Math.min(Number.MAX_SAFE_INTEGER, value));
+}
+
 export function calculateCompoundProjection(config: CompoundConfig): ProjectionPoint[] {
-  const { principal, apy, monthlyContribution, years } = config;
-  
+  const errors = validateConfig(config);
+  if (errors.length > 0) {
+    return [];
+  }
+
+  const principal = config.principal;
+  const apy = config.apy;
+  const monthlyContribution = config.monthlyContribution;
+  const years = Math.floor(config.years);
+
   // Convert APY percentage to decimal
   const annualRate = apy / 100;
-  
+
   // Daily compounding
   const compoundsPerYear = 365;
   const dailyRate = annualRate / compoundsPerYear;
@@ -68,37 +82,37 @@ export function calculateCompoundProjection(config: CompoundConfig): ProjectionP
   const projections: ProjectionPoint[] = [];
   let currentPrincipal = principal;
   let totalContributions = principal;
-  
+
   // Calculate projection for each month
   for (let month = 0; month <= years * 12; month++) {
     const year = Math.floor(month / 12);
     const day = month * 30.44; // Average days per month
-    
+
     // Compound interest calculation with daily compounding
-    const compoundFactor = Math.pow(1 + dailyRate, day);
-    
+    const compoundFactor = toSafeFinite(Math.pow(1 + dailyRate, day), 1);
+
     // Calculate compound value with contributions
-    let compoundValue = principal * compoundFactor;
-    
+    let compoundValue = toSafeFinite(principal * compoundFactor);
+
     // Add monthly contributions with their respective compounding
     if (monthlyContribution > 0 && month > 0) {
       for (let contribMonth = 1; contribMonth <= month; contribMonth++) {
         const contribDays = (month - contribMonth) * 30.44;
-        const contribCompoundFactor = Math.pow(1 + dailyRate, contribDays);
-        compoundValue += monthlyContribution * contribCompoundFactor;
+        const contribCompoundFactor = toSafeFinite(Math.pow(1 + dailyRate, contribDays), 1);
+        compoundValue = toSafeFinite(compoundValue + monthlyContribution * contribCompoundFactor);
       }
     }
-    
+
     // Calculate simple interest (no compounding)
-    const simpleInterest = currentPrincipal * annualRate * (month / 12);
-    const simpleValue = currentPrincipal + simpleInterest;
-    
+    const simpleInterest = toSafeFinite(currentPrincipal * annualRate * (month / 12));
+    const simpleValue = toSafeFinite(currentPrincipal + simpleInterest);
+
     // Calculate principal only (no interest)
-    const principalOnly = totalContributions;
-    
+    const principalOnly = toSafeFinite(totalContributions);
+
     // Calculate total interest earned
-    const totalInterest = compoundValue - totalContributions;
-    
+    const totalInterest = toSafeFinite(compoundValue - totalContributions);
+
     projections.push({
       period: month,
       year,
@@ -108,14 +122,14 @@ export function calculateCompoundProjection(config: CompoundConfig): ProjectionP
       totalContributions,
       totalInterest,
     });
-    
+
     // Update for next iteration
     if (month < years * 12) {
-      totalContributions += monthlyContribution;
-      currentPrincipal += monthlyContribution;
+      totalContributions = toSafeFinite(totalContributions + monthlyContribution);
+      currentPrincipal = toSafeFinite(currentPrincipal + monthlyContribution);
     }
   }
-  
+
   return projections;
 }
 
@@ -132,24 +146,30 @@ export function calculateProjectionMetrics(projections: ProjectionPoint[]) {
       annualizedReturn: 0,
     };
   }
-  
+
   const final = projections[projections.length - 1];
   const years = final.year + (final.period % 12) / 12;
-  
-  const totalReturnPercent = final.totalContributions > 0 
-    ? (final.totalInterest / final.totalContributions) * 100 
-    : 0;
-  
-  // Annualized return calculation
-  const annualizedReturn = years > 0 && final.totalContributions > 0
-    ? (Math.pow(final.compoundValue / final.totalContributions, 1 / years) - 1) * 100
-    : 0;
-  
+
+  const finalValue = Number.isFinite(final.compoundValue) ? final.compoundValue : 0;
+  const totalContributions = Number.isFinite(final.totalContributions) ? final.totalContributions : 0;
+  const totalInterest = Number.isFinite(final.totalInterest) ? final.totalInterest : 0;
+
+  const totalReturnPercent =
+    totalContributions > 0 ? (totalInterest / totalContributions) * 100 : 0;
+
+  // Annualized return calculation (checked arithmetic)
+  let annualizedReturn = 0;
+  if (years > 0 && totalContributions > 0 && finalValue >= 0) {
+    const ratio = finalValue / totalContributions;
+    const computed = ratio > 0 ? (Math.pow(ratio, 1 / years) - 1) * 100 : -100;
+    annualizedReturn = Number.isFinite(computed) ? computed : 0;
+  }
+
   return {
-    finalValue: final.compoundValue,
-    totalContributions: final.totalContributions,
-    totalInterest: final.totalInterest,
-    totalReturnPercent,
+    finalValue,
+    totalContributions,
+    totalInterest,
+    totalReturnPercent: Number.isFinite(totalReturnPercent) ? totalReturnPercent : 0,
     annualizedReturn,
   };
 }
@@ -158,6 +178,9 @@ export function calculateProjectionMetrics(projections: ProjectionPoint[]) {
  * Format currency value with proper formatting
  */
 export function formatCurrency(value: number): string {
+  if (!Number.isFinite(value)) {
+    return "—";
+  }
   return new Intl.NumberFormat('en-US', {
     style: 'currency',
     currency: 'USD',
@@ -170,6 +193,9 @@ export function formatCurrency(value: number): string {
  * Format percentage value
  */
 export function formatPercentage(value: number, decimals: number = 2): string {
+  if (!Number.isFinite(value)) {
+    return "—%";
+  }
   return `${value.toFixed(decimals)}%`;
 }
 
@@ -178,38 +204,38 @@ export function formatPercentage(value: number, decimals: number = 2): string {
  */
 export function validateConfig(config: CompoundConfig): string[] {
   const errors: string[] = [];
-  
-  if (config.principal < 0) {
+
+  if (!Number.isFinite(config.principal)) {
+    errors.push('Initial deposit must be a finite number');
+  } else if (config.principal < 0) {
     errors.push('Initial deposit cannot be negative');
-  }
-  
-  if (config.principal > 1000000000) {
+  } else if (config.principal > 1000000000) {
     errors.push('Initial deposit exceeds maximum limit');
   }
-  
-  if (config.apy < 0) {
+
+  if (!Number.isFinite(config.apy)) {
+    errors.push('APY must be a finite number');
+  } else if (config.apy < 0) {
     errors.push('APY cannot be negative');
-  }
-  
-  if (config.apy > 1000) {
+  } else if (config.apy > 1000) {
     errors.push('APY exceeds reasonable maximum');
   }
-  
-  if (config.monthlyContribution < 0) {
+
+  if (!Number.isFinite(config.monthlyContribution)) {
+    errors.push('Monthly contribution must be a finite number');
+  } else if (config.monthlyContribution < 0) {
     errors.push('Monthly contribution cannot be negative');
-  }
-  
-  if (config.monthlyContribution > 1000000) {
+  } else if (config.monthlyContribution > 1000000) {
     errors.push('Monthly contribution exceeds maximum limit');
   }
-  
-  if (config.years < 1) {
+
+  if (!Number.isFinite(config.years)) {
+    errors.push('Time horizon must be a finite number');
+  } else if (config.years < 1) {
     errors.push('Time horizon must be at least 1 year');
-  }
-  
-  if (config.years > 50) {
+  } else if (config.years > 50) {
     errors.push('Time horizon exceeds maximum limit');
   }
-  
+
   return errors;
 }
