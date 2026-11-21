@@ -4,6 +4,7 @@ import {
   buildSdkFailureDiagnostics,
   redactDiagnosticText,
 } from "./diagnostics";
+import {
   buildSimulationFailureDiagnostics,
   classifySimulationFailure,
   type SimulationDiagnostic,
@@ -47,15 +48,15 @@ export abstract class SorobanSdkError extends Error {
   public readonly phase?: SdkErrorPhase;
   /** Whether retrying the operation that produced this error may succeed. */
   public readonly retryable: boolean;
-  /** Privacy-safe diagnostics attached to the error. */
-  public readonly diagnostics?: readonly SdkDiagnostic[];
   /** Literal marker certifying that diagnostics contain no sensitive values. */
   public readonly privacySafe: boolean;
   /**
    * Privacy-safe diagnostics naming the failed stage and remediation path.
    * Present on simulation-path errors; never contains raw error payloads.
+   * Endpoint/lifecycle errors carry `SdkDiagnostic`s, simulation-path errors
+   * carry `SimulationDiagnostic`s.
    */
-  public diagnostics?: SimulationDiagnostic[];
+  public diagnostics?: readonly SdkDiagnostic[] | readonly SimulationDiagnostic[];
 
   constructor(
     message: string,
@@ -90,6 +91,8 @@ export class SdkEndpointError extends SorobanSdkError {
     this.name = "SdkEndpointError";
     this.validationErrors = validationErrors;
   }
+}
+
 export interface DiagnosticContext {
   stage: SdkErrorPhase;
   remediation: string;
@@ -205,9 +208,10 @@ export function attachSimulationDiagnostics<T extends SorobanSdkError>(
   error: T,
   diagnostics: SimulationDiagnostic[]
 ): T {
-  if (!error.diagnostics || error.diagnostics.length === 0) {
-    error.diagnostics = diagnostics;
-  }
+  // Simulation diagnostics supersede any endpoint-shaped defaults the error was
+  // constructed with (for example an InvalidAmountError's validation
+  // diagnostics), so callers always see the simulation stage that failed.
+  error.diagnostics = diagnostics;
   return error;
 }
 

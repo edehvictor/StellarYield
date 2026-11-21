@@ -1,5 +1,6 @@
 /**
  * #730 — Wallet session challenge verification: replay and expiry hardening.
+ * #1878 — Wallet lifecycle hardening against stale configuration snapshots.
  */
 import { Keypair, StrKey } from "@stellar/stellar-sdk";
 import request from "supertest";
@@ -7,6 +8,7 @@ import { createApp } from "../app";
 import {
   createAuthChallenge,
   getWalletAddressType,
+  getWalletAuthConfigFingerprint,
   verifyAuthChallenge,
   _resetReplayCacheForTesting,
 } from "../utils/stellarAuth";
@@ -19,6 +21,25 @@ function makeContractAddress(seed = 3): string {
 
 function signChallenge(sessionKey: Keypair, challenge: string): string {
   return sessionKey.sign(Buffer.from(challenge, "utf8")).toString("base64");
+}
+
+function buildFingerprintBoundChallenge(input: {
+  walletAddress: string;
+  sessionKeyAddress: string;
+  authConfigFingerprint: string;
+  expiresAt: string;
+  providerId?: string;
+  loginHint?: string;
+}): string {
+  return [
+    "stellar-yield-auth",
+    input.providerId ?? "freighter",
+    input.loginHint ?? "anonymous",
+    input.walletAddress,
+    input.sessionKeyAddress,
+    input.authConfigFingerprint,
+    input.expiresAt,
+  ].join(":");
 }
 
 // ── Unit tests ───────────────────────────────────────────────────────────────
@@ -38,10 +59,10 @@ describe("getWalletAddressType", () => {
 });
 
 describe("createAuthChallenge", () => {
-  it("embeds walletAddress, sessionKeyAddress, and expiresAt in the challenge string", () => {
+  it("embeds walletAddress, sessionKeyAddress, expiresAt, and immutable config fingerprint", () => {
     const sessionKey = Keypair.random();
     const wallet = makeContractAddress(1);
-    const { challenge, expiresAt } = createAuthChallenge({
+    const { challenge, expiresAt, authConfigFingerprint } = createAuthChallenge({
       walletAddress: wallet,
       sessionKeyAddress: sessionKey.publicKey(),
     });
@@ -49,6 +70,9 @@ describe("createAuthChallenge", () => {
     expect(challenge).toContain(wallet);
     expect(challenge).toContain(sessionKey.publicKey());
     expect(challenge).toContain(expiresAt);
+    expect(authConfigFingerprint).toMatch(/^[a-f0-9]{64}$/i);
+    expect(challenge).toContain(authConfigFingerprint);
+    expect(authConfigFingerprint).toBe(getWalletAuthConfigFingerprint());
   });
 
   it("expiresAt is in the future", () => {
@@ -100,6 +124,7 @@ describe("verifyAuthChallenge — positive path", () => {
 
     expect(result.verified).toBe(true);
     expect(result.walletAddressType).toBe("contract");
+    expect(result.authConfigFingerprint).toBe(getWalletAuthConfigFingerprint());
   });
 });
 
@@ -167,17 +192,13 @@ describe("verifyAuthChallenge — expiry", () => {
     const sessionKey = Keypair.random();
     const wallet = makeContractAddress(8);
 
-    // Build a challenge whose expiry is in the past
-    const expiredExpiresAt = new Date(Date.now() - 1000).toISOString();
-    const staleParts = [
-      "stellar-yield-auth",
-      "freighter",
-      "anonymous",
-      wallet,
-      sessionKey.publicKey(),
-      expiredExpiresAt,
-    ];
-    const staleChallenge = staleParts.join(":");
+    // Build a challenge whose expiry is in the past but config snapshot is current.
+    const staleChallenge = buildFingerprintBoundChallenge({
+      walletAddress: wallet,
+      sessionKeyAddress: sessionKey.publicKey(),
+      authConfigFingerprint: getWalletAuthConfigFingerprint(),
+      expiresAt: new Date(Date.now() - 1000).toISOString(),
+    });
     const signature = signChallenge(sessionKey, staleChallenge);
 
     expect(() =>
@@ -188,6 +209,83 @@ describe("verifyAuthChallenge — expiry", () => {
         signature,
       }),
     ).toThrow("Challenge has expired.");
+  });
+});
+
+describe("verifyAuthChallenge — stale configuration snapshots (#1878)", () => {
+  beforeEach(() => _resetReplayCacheForTesting());
+
+  it("rejects a legacy challenge missing an immutable config fingerprint without consuming replay state", () => {
+    const sessionKey = Keypair.random();
+    const wallet = makeContractAddress(80);
+    const legacyChallenge = [
+      "stellar-yield-auth",
+      "freighter",
+      "anonymous",
+      wallet,
+      sessionKey.publicKey(),
+      new Date(Date.now() + 60_000).toISOString(),
+    ].join(":");
+    const signature = signChallenge(sessionKey, legacyChallenge);
+
+    expect(() =>
+      verifyAuthChallenge({
+        walletAddress: wallet,
+        sessionKeyAddress: sessionKey.publicKey(),
+        challenge: legacyChallenge,
+        signature,
+      }),
+    ).toThrow(expect.objectContaining({ code: "STALE_WALLET_AUTH_CONFIG" }));
+
+    // Safe retry: a fresh challenge bound to the current config snapshot can still verify.
+    const { challenge: freshChallenge } = createAuthChallenge({
+      walletAddress: wallet,
+      sessionKeyAddress: sessionKey.publicKey(),
+    });
+    const freshSignature = signChallenge(sessionKey, freshChallenge);
+    expect(
+      verifyAuthChallenge({
+        walletAddress: wallet,
+        sessionKeyAddress: sessionKey.publicKey(),
+        challenge: freshChallenge,
+        signature: freshSignature,
+      }).verified,
+    ).toBe(true);
+  });
+
+  it("rejects a challenge with a mismatched config fingerprint without consuming replay state", () => {
+    const sessionKey = Keypair.random();
+    const wallet = makeContractAddress(81);
+    const staleChallenge = buildFingerprintBoundChallenge({
+      walletAddress: wallet,
+      sessionKeyAddress: sessionKey.publicKey(),
+      authConfigFingerprint: "0".repeat(64),
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    });
+    const staleSignature = signChallenge(sessionKey, staleChallenge);
+
+    expect(() =>
+      verifyAuthChallenge({
+        walletAddress: wallet,
+        sessionKeyAddress: sessionKey.publicKey(),
+        challenge: staleChallenge,
+        signature: staleSignature,
+      }),
+    ).toThrow(expect.objectContaining({ code: "STALE_WALLET_AUTH_CONFIG" }));
+
+    const { challenge: freshChallenge } = createAuthChallenge({
+      walletAddress: wallet,
+      sessionKeyAddress: sessionKey.publicKey(),
+    });
+    const freshSignature = signChallenge(sessionKey, freshChallenge);
+    expect(
+      verifyAuthChallenge({
+        walletAddress: wallet,
+        sessionKeyAddress: sessionKey.publicKey(),
+        challenge: freshChallenge,
+        signature: freshSignature,
+      }).verified,
+    ).toBe(true);
   });
 });
 
@@ -295,7 +393,12 @@ describe("POST /api/auth/challenge + /api/auth/verify — HTTP integration", () 
       .post("/api/auth/challenge")
       .send({ walletAddress: wallet, sessionKeyAddress: sessionKey.publicKey() });
     expect(challengeRes.status).toBe(200);
-    const { challenge } = challengeRes.body as { challenge: string };
+    const { challenge, authConfigFingerprint } = challengeRes.body as {
+      challenge: string;
+      authConfigFingerprint: string;
+    };
+    expect(authConfigFingerprint).toBe(getWalletAuthConfigFingerprint());
+    expect(challenge).toContain(authConfigFingerprint);
 
     const signature = signChallenge(sessionKey, challenge);
     const verifyRes = await request(app)
@@ -303,6 +406,7 @@ describe("POST /api/auth/challenge + /api/auth/verify — HTTP integration", () 
       .send({ walletAddress: wallet, sessionKeyAddress: sessionKey.publicKey(), challenge, signature });
     expect(verifyRes.status).toBe(200);
     expect(verifyRes.body.verified).toBe(true);
+    expect(verifyRes.body.authConfigFingerprint).toBe(getWalletAuthConfigFingerprint());
   });
 
   it("returns 400 for invalid wallet address", async () => {
@@ -334,16 +438,48 @@ describe("POST /api/auth/challenge + /api/auth/verify — HTTP integration", () 
   it("returns 400 for an expired challenge via HTTP", async () => {
     const sessionKey = Keypair.random();
     const wallet = makeContractAddress(22);
-    const expiredExpiresAt = new Date(Date.now() - 1000).toISOString();
-    const staleChallenge = [
-      "stellar-yield-auth", "freighter", "anonymous",
-      wallet, sessionKey.publicKey(), expiredExpiresAt,
-    ].join(":");
+    const staleChallenge = buildFingerprintBoundChallenge({
+      walletAddress: wallet,
+      sessionKeyAddress: sessionKey.publicKey(),
+      authConfigFingerprint: getWalletAuthConfigFingerprint(),
+      expiresAt: new Date(Date.now() - 1000).toISOString(),
+    });
     const signature = signChallenge(sessionKey, staleChallenge);
 
     const res = await request(app)
       .post("/api/auth/verify")
       .send({ walletAddress: wallet, sessionKeyAddress: sessionKey.publicKey(), challenge: staleChallenge, signature });
     expect(res.status).toBe(400);
+  });
+
+  it("returns 409 with refreshable config fingerprint for stale configuration snapshots via HTTP", async () => {
+    const sessionKey = Keypair.random();
+    const wallet = makeContractAddress(23);
+    const staleChallenge = buildFingerprintBoundChallenge({
+      walletAddress: wallet,
+      sessionKeyAddress: sessionKey.publicKey(),
+      authConfigFingerprint: "f".repeat(64),
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    });
+    const signature = signChallenge(sessionKey, staleChallenge);
+
+    const staleRes = await request(app)
+      .post("/api/auth/verify")
+      .send({ walletAddress: wallet, sessionKeyAddress: sessionKey.publicKey(), challenge: staleChallenge, signature });
+    expect(staleRes.status).toBe(409);
+    expect(staleRes.body.code).toBe("STALE_WALLET_AUTH_CONFIG");
+    expect(staleRes.body.currentAuthConfigFingerprint).toBe(getWalletAuthConfigFingerprint());
+
+    // Safe retry: refresh challenge and verify with current config snapshot.
+    const challengeRes = await request(app)
+      .post("/api/auth/challenge")
+      .send({ walletAddress: wallet, sessionKeyAddress: sessionKey.publicKey() });
+    const { challenge } = challengeRes.body as { challenge: string };
+    const freshSignature = signChallenge(sessionKey, challenge);
+    const verifyRes = await request(app)
+      .post("/api/auth/verify")
+      .send({ walletAddress: wallet, sessionKeyAddress: sessionKey.publicKey(), challenge, signature: freshSignature });
+    expect(verifyRes.status).toBe(200);
+    expect(verifyRes.body.verified).toBe(true);
   });
 });

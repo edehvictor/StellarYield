@@ -241,11 +241,18 @@ export default function PortfolioDashboard({
   );
   const heatmapPositions = useMemo(
     () =>
-      positions.map((p) => ({
-        asset: p.asset,
-        protocol: p.protocol,
-        valueUsd: p.currentValue,
-      })),
+      // Unpriced positions have no USD value to plot; they stay in the table
+      // and exposure summary but cannot contribute to the heatmap.
+      positions
+        .filter(
+          (p): p is VaultPosition & { currentValue: number } =>
+            typeof p.currentValue === "number",
+        )
+        .map((p) => ({
+          asset: p.asset,
+          protocol: p.protocol,
+          valueUsd: p.currentValue,
+        })),
     [positions],
   );
 

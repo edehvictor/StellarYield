@@ -48,6 +48,41 @@ const withdrawn = await (await withdrawal.submit(vault.rpcUrl)).wait();
 
 If a simulation reports expired ledger entries, it throws `RestoreRequiredError` (`error.restorePreamble`) — pass that into the exported `restoreAndRetry()` helper, then retry `prepare()`. See `src/examples/basic.ts` for a full worked example including the restore path.
 
+### Safe retries and duplicate submissions
+
+Every prepared operation carries an `operationId` in `prepared.meta` (and `prepared.operationId`). Pass an `idempotencyKey` to make that identity deterministic: the same key plus the same operation arguments always produces the same id, even when a retry rebuilds and re-signs the transaction with a new sequence number. The key is never placed on-chain.
+
+```typescript
+const prepared = await vault.deposit.prepare({
+  from,
+  amount: 1_000_000_000n,
+  idempotencyKey: `deposit-${walletAddress}-${requestId}`,
+});
+
+const signed = await prepared.sign(signer);
+const submitted = await signed.submit(vault.rpcUrl);
+
+// Safe retry: the SDK reuses the original transaction hash instead of
+// submitting the same effect a second time.
+const retry = await signed.submit(vault.rpcUrl);
+console.log(retry.deduplicated); // true
+console.log(retry.hash === submitted.hash); // true
+```
+
+Submit-time behavior:
+
+| Situation | SDK behavior |
+| --- | --- |
+| Same signed transaction submitted twice | `sendTransaction` runs once; the second call returns the original hash with `deduplicated: true`. |
+| Rebuilt transaction with the same `idempotencyKey` and arguments | Reuses the first submitted hash; no second effect. |
+| Concurrent `submit()` calls on one signed transaction | Share a single network request. |
+| Transport failure or RPC `ERROR` before acceptance | The identity is **not** remembered; retrying is safe and submits normally. |
+| `wait()` reports `FAILED` | The identity is forgotten because nothing landed; a corrected retry may submit again. |
+| `wait()` times out with the transaction possibly pending | The identity is kept, so retrying returns the pending hash rather than submitting again. Use `recoverTransaction(hash)` to keep polling. |
+| Invalid amount or argument validation failure | No transaction is built, signed, or submitted; no identity is registered. |
+
+`prepare()` and `submit()` never mutate vault balances or existing transactions on failure. The duplicate guard is an in-process, bounded registry (and is scoped to the SDK instance's process); for idempotency across processes or restarts, persist `idempotencyKey` yourself and reuse it on retry. `resetSubmittedOperations()` clears the guard explicitly, and `lookupSubmittedOperation(id)` exposes the remembered hash for observability.
+
 ### Simulation failure diagnostics
 
 `prepare()` is read-only: it builds and simulates a transaction but never signs, submits, or mutates vault balances. When argument validation or simulation fails, it throws without returning a partial `PreparedTransaction`, so no state or balance is changed. Errors carry privacy-safe `diagnostics` that name the failed stage and the next action:
@@ -126,7 +161,7 @@ const vaultData = await api.getVaultData('vault-contract-id');
   - `getAdmin()`, `getToken()`, `getFlashLoanFee()`: Read-only contract state
   - `recoverTransaction(hash)`: Resume polling a previously submitted transaction
 
-- **Lifecycle helpers**: `PreparedTransaction` -> `.sign()` -> `SignedTransaction` -> `.submit()` -> `SubmittedTransaction` -> `.wait()` -> `ConfirmedTransaction`, plus `restoreAndRetry()`/`needsRestore()` for the Soroban footprint-restore path. Errors carry a `phase` (`simulate`/`sign`/`submit`/`poll`/`restore`) and `retryable` flag.
+- **Lifecycle helpers**: `PreparedTransaction` -> `.sign()` -> `SignedTransaction` -> `.submit()` -> `SubmittedTransaction` -> `.wait()` -> `ConfirmedTransaction`, plus `restoreAndRetry()`/`needsRestore()` for the Soroban footprint-restore path. Errors carry a `phase` (`simulate`/`sign`/`submit`/`poll`/`restore`) and `retryable` flag. Prepared operations carry an `operationId`; pass an `idempotencyKey` to make retries duplicate-safe.
 
 - **ApiClient**: Fetch vault metrics from backend
   - `getCurrentAPY()`: Get current APY
