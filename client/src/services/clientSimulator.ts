@@ -14,6 +14,7 @@ const PROTOCOLS: ProtocolDef[] = [
   { protocolName: "Blend", protocolType: "blend", baseApyBps: 645 },
   { protocolName: "Soroswap", protocolType: "soroswap", baseApyBps: 1120 },
 ];
+const MAX_SAFE_SIMULATION_AMOUNT = Number.MAX_SAFE_INTEGER;
 export interface SimulationParams {
   strategyId: string;
   amount: number;
@@ -69,8 +70,12 @@ export function simulateDeposit(params: SimulationParams): SimulationResult {
     warnings: [],
   };
 
-  if (amount <= 0) {
+  if (!Number.isFinite(amount) || amount <= 0) {
     result.warnings.push("Amount must be greater than zero.");
+    return result;
+  }
+  if (amount > MAX_SAFE_SIMULATION_AMOUNT) {
+    result.warnings.push("Amount is too large to calculate safely.");
     return result;
   }
 
@@ -168,15 +173,26 @@ export function validateSimulatorResult(result: SimulationResult): {
     warnings.push("Result not marked as simulation-only");
   }
 
-  // Ensure expected shares is less than net amount (due to slippage)
-  if (result.expectedShares >= result.expectedShares) {
+  // Allocations sum to the net amount. Expected shares must be lower after
+  // slippage, and both values must remain finite for downstream display.
+  const allocatedAmount = result.allocations.reduce(
+    (sum, allocation) => sum + allocation.amount,
+    0,
+  );
+  if (
+    !Number.isFinite(allocatedAmount) ||
+    !Number.isFinite(result.expectedShares) ||
+    result.expectedShares < 0 ||
+    result.expectedShares >= allocatedAmount
+  ) {
     warnings.push("Expected shares should be less than net amount due to slippage");
   }
 
-  // Ensure allocations sum to approximately net amount
-  const allocSum = result.allocations.reduce((sum, a) => sum + a.amount, 0);
-  if (Math.abs(allocSum - (result.expectedShares + 0.05)) > 0.1) {
-    warnings.push("Allocations do not sum correctly");
+  if (
+    !Number.isFinite(result.routing.expectedOutput) ||
+    result.routing.expectedOutput !== result.expectedShares
+  ) {
+    warnings.push("Routing output does not match expected shares");
   }
 
   return {
