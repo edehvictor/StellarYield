@@ -11,6 +11,11 @@
  * successRate is clamped to [0, 100] and rounded only after clamping, and
  * failureCount is bounded to a finite non-negative integer.
  */
+import {
+  buildTransparencyDiagnostic,
+  type TransparencyDiagnostic,
+  type TransparencyStage,
+} from "../../../../shared/types/transparencyDiagnostic";
 
 export type SubsystemState = "healthy" | "degraded" | "failed" | "unknown";
 
@@ -30,6 +35,12 @@ export interface TransparencyHealthSummary {
   /** Subsystems that are not healthy, ordered by severity then name. */
   attentionSubsystems: Array<keyof TransparencyHealthInput>;
   summaryMessage: string;
+  /** True when enough independent signals were present to trust the rollup. */
+  contextSufficient: boolean;
+  /** Subsystems whose last known-good value was reused because the signal was missing. */
+  reusedSubsystems: Array<keyof TransparencyHealthInput>;
+  /** Privacy-safe diagnostics naming the failed stage and remediation path. */
+  diagnostics: TransparencyDiagnostic[];
 }
 
 export interface TransparencyHistoryPoint {
@@ -413,9 +424,14 @@ export function validateFailoverIncidentsPayload(payload: unknown): ValidatedFai
 /**
  * Summarize mixed subsystem health with deterministic prioritization:
  * failed > degraded > unknown > healthy.
+ *
+ * Pass the previous rollup input as `previous` to preserve last known-good
+ * values when a retry comes back with a missing signal. This never invents a
+ * value for a subsystem that was never observed.
  */
 export function summarizeTransparencyHealth(
   input: Partial<TransparencyHealthInput>,
+  previous?: Partial<TransparencyHealthInput>,
 ): TransparencyHealthSummary {
   const safeInput = isPlainRecord(input) ? input : {};
   const subsystems: TransparencyHealthInput = {
@@ -427,7 +443,13 @@ export function summarizeTransparencyHealth(
 
   const states = Object.values(subsystems);
   const worst = worstState(states);
-  const overall = toOverall(worst);
+  const knownSubsystems = SUBSYSTEM_KEYS.filter((key) => subsystems[key] !== "unknown");
+  const contextSufficient = knownSubsystems.length >= MIN_KNOWN_SUBSYSTEMS;
+  const overall: OverallHealthState = contextSufficient
+    ? toOverall(worst)
+    : worst === "failed"
+      ? "failed"
+      : "degraded";
 
   const attentionSubsystems = (
     Object.entries(subsystems) as Array<[keyof TransparencyHealthInput, SubsystemState]>
@@ -442,8 +464,19 @@ export function summarizeTransparencyHealth(
 
   const needsAttention = attentionSubsystems.length > 0;
 
+  const diagnostics = buildHealthDiagnostics(subsystems, {
+    contextSufficient,
+    unknownSubsystems: SUBSYSTEM_KEYS.filter((key) => subsystems[key] === "unknown"),
+    reusedSubsystems,
+  });
+
   let summaryMessage = "All transparency subsystems are healthy.";
-  if (overall === "failed") {
+  if (!contextSufficient) {
+    summaryMessage =
+      `Degraded: insufficient diagnostic context — ${knownSubsystems.length} of ` +
+      `${SUBSYSTEM_KEYS.length} transparency subsystems reported a status. ` +
+      "Last known values were retained where available; retry once the missing signals report.";
+  } else if (overall === "failed") {
     summaryMessage = `Critical: ${attentionSubsystems
       .map((key) => SUBSYSTEM_LABELS[key])
       .join(", ")} need immediate attention.`;
@@ -459,7 +492,80 @@ export function summarizeTransparencyHealth(
     needsAttention,
     attentionSubsystems,
     summaryMessage,
+    contextSufficient,
+    reusedSubsystems,
+    diagnostics,
   };
+}
+
+interface DiagnosticContext {
+  contextSufficient: boolean;
+  unknownSubsystems: Array<keyof TransparencyHealthInput>;
+  reusedSubsystems: Array<keyof TransparencyHealthInput>;
+}
+
+/**
+ * Build diagnostics in a fixed order: context, failed, degraded, unknown,
+ * stale. Only subsystem keys and stage labels are emitted — never raw error
+ * text — so the result is safe to render to any viewer.
+ */
+function buildHealthDiagnostics(
+  subsystems: TransparencyHealthInput,
+  context: DiagnosticContext,
+): TransparencyDiagnostic[] {
+  const diagnostics: TransparencyDiagnostic[] = [];
+
+  if (!context.contextSufficient) {
+    diagnostics.push(
+      buildTransparencyDiagnostic("CONTEXT_INSUFFICIENT", {
+        stage: "context-validation",
+        affectedStages: context.unknownSubsystems.map((key) => SUBSYSTEM_STAGES[key]),
+      }),
+    );
+  }
+
+  const failed = SUBSYSTEM_KEYS.filter((key) => subsystems[key] === "failed");
+  if (failed.length > 0) {
+    diagnostics.push(
+      buildTransparencyDiagnostic("SUBSYSTEM_UNAVAILABLE", {
+        stage: SUBSYSTEM_STAGES[failed[0]],
+        severity: "critical",
+        affectedStages: failed.map((key) => SUBSYSTEM_STAGES[key]),
+      }),
+    );
+  }
+
+  const degraded = SUBSYSTEM_KEYS.filter((key) => subsystems[key] === "degraded");
+  if (degraded.length > 0) {
+    diagnostics.push(
+      buildTransparencyDiagnostic("SUBSYSTEM_UNAVAILABLE", {
+        stage: SUBSYSTEM_STAGES[degraded[0]],
+        severity: "warning",
+        affectedStages: degraded.map((key) => SUBSYSTEM_STAGES[key]),
+      }),
+    );
+  }
+
+  if (context.contextSufficient && context.unknownSubsystems.length > 0) {
+    diagnostics.push(
+      buildTransparencyDiagnostic("SUBSYSTEM_UNAVAILABLE", {
+        stage: SUBSYSTEM_STAGES[context.unknownSubsystems[0]],
+        severity: "warning",
+        affectedStages: context.unknownSubsystems.map((key) => SUBSYSTEM_STAGES[key]),
+      }),
+    );
+  }
+
+  if (context.reusedSubsystems.length > 0) {
+    diagnostics.push(
+      buildTransparencyDiagnostic("STALE_LAST_KNOWN", {
+        stage: "cache",
+        affectedStages: context.reusedSubsystems.map((key) => SUBSYSTEM_STAGES[key]),
+      }),
+    );
+  }
+
+  return diagnostics;
 }
 
 export function getSubsystemLabel(key: keyof TransparencyHealthInput): string {

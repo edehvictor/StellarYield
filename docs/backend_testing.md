@@ -374,7 +374,7 @@ The following table maps each route file in `server/src/routes/` to its primary 
 | `rewards.ts` | `/` - Accumulated token rewards tracking and normalization | `rewardScheduleRegistry.ts`, `rewardScheduleHealth.ts` | `rewardNormalization.test.ts` |
 | `simulator.ts` | `/` - Simulates strategy rotations or re-allocation dry runs | `simulationService.ts` | `simulationService.test.ts` |
 | `strategies.ts` | `/` - Manage multi-protocol strategies, regime shifts, and manual/auto rebalancing | `strategyRotationService.ts`, `strategyRotationDryRun.ts`, `strategySnapshotVersioningService.ts` | `strategyRotationService.test.ts`, `strategyRotationDryRun.test.ts`, `strategySnapshotVersioning.test.ts` |
-| `transparency.ts` | `/` - cryptographic yield attribution verification | `provenance.service.ts` | `transparency.test.ts`, `services/provenance.test.ts` |
+| `transparency.ts` | `GET /summary`, `GET/POST /failover-history`, `POST /failover-history/:protocolId/resolve` - revenue/burn metrics and provider failover history, with privacy-safe diagnostics on failure | `failoverIncidentHistoryService.ts` | `transparency.test.ts` |
 | `treasury.ts` | `/` - DAO Treasury allocation backtesting and simulation | `treasurySimulationService.ts` | `treasurySimulation.test.ts` |
 | `weeklyReports.ts` | `/` - Consolidates weekly yields reports | `weeklyYieldReportService.ts` | `weeklyYieldReport.test.ts` |
 | `yields.ts` | `GET /` - Fetches baseline protocol APYs with custom fee drag calculators | `yieldService.ts`, `netYieldEngine.ts` | `netYieldEngine.test.ts`, `yieldNormalization.test.ts`, `yieldRegime.test.ts` |
@@ -388,3 +388,57 @@ Alert preferences and APY threshold creation are hardened against duplicate subm
 - **Safe Retries**: When an identical operation identity and parameter fingerprint is re-submitted, the server replays the existing state with an `X-Idempotent-Replayed: true` header without creating duplicate alerts or re-applying effects.
 - **Conflict Prevention**: Reusing an active operation identity with conflicting parameters returns a `409 Conflict` (`OPERATION_IDENTITY_CONFLICT`).
 - **State & Balance Preservation**: If validation fails or downstream storage errors occur, the transaction aborts before mutation. Existing alerts, user preferences, and quotas are strictly preserved.
+
+## 8. Transparency status diagnostics (#1917)
+
+`GET /api/transparency/summary` now reports how much diagnostic context it had, so
+consumers can tell a healthy snapshot from a degraded fallback.
+
+### Response contract
+
+| Field | Meaning |
+| :--- | :--- |
+| `status` | `"healthy"` when a fresh, validated snapshot was served; `"degraded"` when the last known-good snapshot was served because aggregation failed. A 503 response uses `"unavailable"`. |
+| `diagnostics` | Privacy-safe `TransparencyDiagnostic[]` (defined in `shared/types/transparencyDiagnostic.ts`). Empty on a fully healthy read. |
+| `totalRevenueLumens`, `totalBurnedTokens`, `deflationaryRatio`, `history` | Unchanged metric fields. `cachedAt` remains internal and is never returned. |
+
+Failure behaviour:
+
+1. A freshly aggregated snapshot is validated (`validateTransparencyData`) before it
+   replaces the cache. Missing history, non-finite values, or totals that disagree
+   with the history are rejected rather than cached.
+2. On aggregation or validation failure, the previous known-good snapshot is kept
+   and returned with `status: "degraded"` plus `AGGREGATION_FAILED` and
+   `STALE_LAST_KNOWN` diagnostics. No metric is overwritten by a failed read.
+3. When no snapshot has ever succeeded the route returns HTTP 503 with status
+   `"unavailable"` and a `NO_DATA_AVAILABLE` diagnostic.
+4. Retrying the same read is always safe: transparency is read-only, and a
+   successful retry rebuilds and re-validates a complete snapshot.
+
+### Privacy guarantee
+
+Diagnostics only carry a stable `code`, the failed `stage`, fixed summary and
+remediation text, a `retryable` flag, and the literal `privacySafe: true` marker.
+Logs use `redactDiagnosticText`, which removes URLs, emails, Stellar addresses,
+hashes, filesystem paths, and stack frames before anything is written or returned.
+
+### Client rollup rules
+
+`client/src/pages/transparency/transparencyServiceHealth.ts` treats the dashboard
+rollup as sufficient only when at least `MIN_KNOWN_SUBSYSTEMS` (2 of 4) signals are
+known. Below that threshold the rollup is `"degraded"` (never `"healthy"`) and emits
+a `CONTEXT_INSUFFICIENT` diagnostic naming the missing stages. When a retry comes
+back missing, callers pass the previous rollup input as the optional second
+argument; observed values are reused and a `STALE_LAST_KNOWN` diagnostic is added,
+so the dashboard keeps showing the last known state instead of blanking out.
+
+### Tests
+
+- `server/src/__tests__/transparency.test.ts` — normal read, aggregation failure
+  with no snapshot, last-known-good preservation, invalid snapshot rejection, and
+  safe retry after recovery.
+- `client/src/pages/transparency/transparencyServiceHealth.test.ts` — sufficient
+  context, insufficient context, failed stage naming, and retry state preservation.
+- `client/src/pages/transparency/TransparencyDashboard.test.tsx` — diagnostics
+  rendering and keeping the last snapshot visible when a refresh fails.
+- `shared/types/transparencyDiagnostic.test.ts` — redaction and privacy guarantees.

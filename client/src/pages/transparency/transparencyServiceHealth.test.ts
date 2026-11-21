@@ -14,6 +14,7 @@ import {
   validateFailoverIncidentsPayload,
   validateTransparencySummaryPayload,
 } from "./transparencyServiceHealth";
+import { areDiagnosticsPrivacySafe } from "../../../../shared/types/transparencyDiagnostic";
 
 describe("transparencyServiceHealth mappers", () => {
   it("maps indexer statuses", () => {
