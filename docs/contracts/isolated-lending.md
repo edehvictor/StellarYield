@@ -40,7 +40,8 @@ network and upgrade to version 1.
 
 All state-modifying entry points now require `expected_context: LedgerContext`:
 `supply`, `withdraw`, `post_collateral`, `repay`, `repay_for`,
-`queue_withdrawal`, `borrow`, `withdraw_collateral`, and `liquidate`.
+`queue_withdrawal`, `borrow`, `withdraw_collateral`, `liquidate`, and
+`liquidate_checked`.
 
 Read-only entry points do not require one.
 
@@ -109,6 +110,7 @@ fingerprint = SHA-256("stellaryield_il_config_v1" || XDR(ConfigSnapshot))
 | `borrow(user, amount, expected_config_fingerprint)` | Collateral factor, reserve, interest accrual and oracle policy determine the borrow limit and cost |
 | `withdraw_collateral(user, amount, expected_config_fingerprint)` | Collateral factor and accrual determine how much may leave |
 | `liquidate(liquidator, borrower, liquidation_id, repay_amount, expected_config_fingerprint)` | Collateral factor, collateral price, close factor and accrual determine whether and how much may be seized |
+| `liquidate_checked(liquidator, borrower, liquidation_id, repay_amount, expected_config_fingerprint, expected_debt)` | Same terms as `liquidate`, plus the debt snapshot a safe retry was built on |
 
 Entry points that do **not** require one are bound by balances rather than
 configuration and cannot be executed on terms the caller did not see:
@@ -134,6 +136,7 @@ Every successful configuration change publishes:
 | Topic | Data | When |
 |---|---|---|
 | `("config",)` | `(admin, fingerprint)` | After `set_reserve_bps`, `set_collateral_factor`, `set_collateral_price`, `set_close_factor`, `set_interest_rate`, `set_protocol_fee_bps`, `set_oracle` and `set_oracle_policy` |
+| `("liquid",)` | `(borrower, liquidation_id, repaid, seized)` | After a liquidation is fully committed (both token legs succeeded), for both `liquidate` and `liquidate_checked` |
 
 Indexers can treat the latest `config` event as the current fingerprint and
 invalidate cached previews.
@@ -145,9 +148,12 @@ invalidate cached previews.
 | `CollateralFactorBps`, `ReserveBps`, `CloseFactorBps`, `CollateralPriceBps`, `InterestRatePerLedger`, `ProtocolFeeBps`, `Oracle`, `OraclePolicy` | instance | Configuration read by the snapshot |
 | `BorrowIndex`, `LastAccrualLedger`, `ProtocolFees`, `TotalSupplied`, `TotalDebt` | instance | Market totals/accrual, not part of the snapshot |
 | `Supply(user)`, `Collateral(user)`, `Debt(user)`, `DebtIndex(user)`, `PendingWithdrawal(user)`, `Liquidation(borrower, id)` | persistent | Per-user state |
+| `LiquidationReceipt(borrower, id)` | persistent | Outcome of a settled liquidation (`LiquidationState`) |
 
-No new storage key is introduced: the snapshot and fingerprint are derived from
-existing configuration. See [storage-ttl-strategy.md](./storage-ttl-strategy.md).
+The configuration snapshot and fingerprint are derived from existing
+configuration and introduce no storage key; `LiquidationReceipt` is the one
+key added for retry safety. See
+[storage-ttl-strategy.md](./storage-ttl-strategy.md).
 
 ## Breaking API changes
 
@@ -155,6 +161,10 @@ The trailing `expected_config_fingerprint: BytesN<32>` parameter is a breaking
 change for `borrow`, `withdraw_collateral` and `liquidate`, and
 `HealthFactor` gains a `config_fingerprint` field. Clients must update their
 invocations and decode the new `HealthFactor` shape.
+
+The retry API is additive: `liquidate`, `get_liquidation_status` and
+`liquidate_checked` coexist, and `LiquidationReceipt` is a new persistent key.
+Clients that never use the checked variant keep their existing behavior.
 
 ## Error codes
 
@@ -166,6 +176,7 @@ invocations and decode the new `HealthFactor` shape.
 | 17 | `WrongContract` | Context names a different deployment address |
 | 18 | `WrongVersion` | Context storage version does not match the stored version |
 | 19 | `InvalidOracleQuote` | Oracle quote has an invalid price, confidence or future ledger |
+| 20 | `LiquidationStateChanged` | Checked liquidation's id was already used, or the borrower's debt no longer matches the captured snapshot |
 
 See `contracts/ERROR_CODES.md` for the full table.
 
@@ -208,3 +219,37 @@ current ledger. A malformed stored quote fails with `InvalidOracleQuote` before
 borrow accrual or transfers; the oracle can publish a corrected quote and the
 borrow can be retried safely. The push entry point rejects invalid price or
 confidence with `InvalidConfig` and leaves the previous quote intact.
+
+## Partial completion and retry safety
+
+A liquidation is the market's settlement operation and is often partial: the
+close factor caps how much debt one call may repay, so fully closing a position
+takes several liquidations with distinct ids. Each liquidation is identified by
+`(borrower, liquidation_id)`. The contract now persists its outcome so a caller
+whose transaction timed out or whose response was dropped can recover instead
+of guessing.
+
+- **Committed outcome.** On success the pair writes the new collateral, debt,
+  total debt and any bad debt, then stores a `LiquidationState` receipt under
+  `LiquidationReceipt(borrower, id)` and consumes the id. All of these writes
+  happen **before** the two token transfers (repay debt in, seize collateral
+  out), and a `("liquid",)` event with `(borrower, liquidation_id, repaid, seized)`
+  is emitted after both legs succeed.
+- **Failure leaves no trace.** If any validation or transfer fails, the whole
+  invocation reverts: no position change, no receipt, no consumed id and no
+  balance change. The same id can be submitted again after fixing the cause
+  (for example funding the liquidator). The same state-before-transfer order is
+  used by `supply`, `post_collateral`, `withdraw`, `borrow`,
+  `withdraw_collateral`, `repay`/`repay_for` and `claim_protocol_fees`.
+- **Inspect before retrying.** `get_liquidation_status(borrower, id) ->
+  Option<LiquidationState>` returns `{ status, liquidator, repaid, seized }`
+  once a liquidation is settled. A legacy id that stored only the consumed
+  marker returns `None`, but a replay still fails safely with `AlreadyLiquidated`.
+- **Checked retry.** `liquidate_checked(..., expected_debt)` first validates the
+  context and configuration fingerprint, then rejects a consumed id or a
+  borrower debt that differs from `expected_debt` with `LiquidationStateChanged`
+  (20) before accruing interest or moving funds. Capture `expected_debt` from
+  `get_position` before the first attempt. If a retry returns this error, read
+  `get_liquidation_status` for the earlier outcome, take a fresh debt snapshot
+  and continue with a **new** id. Plain `liquidate` keeps its existing
+  `AlreadyLiquidated` behavior.
