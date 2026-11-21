@@ -180,6 +180,7 @@ describe("verifyZapQuote expiry invalidation", () => {
     expect(RECOVERABLE_VERIFY_ERROR_CODES.has("ROUTE_MISMATCH")).toBe(true);
     expect(RECOVERABLE_VERIFY_ERROR_CODES.has("UNSUPPORTED_ASSET")).toBe(true);
     expect(RECOVERABLE_VERIFY_ERROR_CODES.has("ASSUMPTION_DRIFT")).toBe(true);
+    expect(RECOVERABLE_VERIFY_ERROR_CODES.has("INVALID_FINGERPRINT")).toBe(true);
     expect(RECOVERABLE_VERIFY_ERROR_CODES.has("SLIPPAGE_EXCEEDED")).toBe(false);
     expect(RECOVERABLE_VERIFY_ERROR_CODES.has("INVALID_QUOTE")).toBe(false);
   });

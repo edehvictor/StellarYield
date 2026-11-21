@@ -20,9 +20,11 @@ export function aggregateApy(readings: ProviderReading[], protocol: string = 'de
     };
   }
 
-  // Step 1: normalize weights and filter missing
+  // Step 1: normalize weights and filter missing/non-finite readings
   const available = readings.map((r) => ({ ...r }));
-  const present = available.filter((r) => typeof r.apy === 'number' && !Number.isNaN(r.apy));
+  const present = available.filter(
+    (r) => typeof r.apy === 'number' && Number.isFinite(r.apy),
+  );
   if (present.length === 0) {
     reasons.push('missing_all_apy');
     return {
@@ -32,21 +34,36 @@ export function aggregateApy(readings: ProviderReading[], protocol: string = 'de
     };
   }
 
-  const totalRaw = present.reduce((s, p) => s + (p.weight ?? 1), 0);
-  present.forEach((p) => (p.weight = (p.weight ?? 1) / Math.max(1e-12, totalRaw)));
+  // Checked weight normalization: ignore non-finite/non-positive raw weights.
+  present.forEach((p) => {
+    const raw = typeof p.weight === 'number' && Number.isFinite(p.weight) && p.weight > 0 ? p.weight : 1;
+    p.weight = raw;
+  });
+  const totalRaw = present.reduce((s, p) => s + (p.weight ?? 0), 0);
+  if (!Number.isFinite(totalRaw) || totalRaw <= 0) {
+    const uniform = 1 / present.length;
+    present.forEach((p) => {
+      p.weight = uniform;
+    });
+  } else {
+    present.forEach((p) => {
+      p.weight = (p.weight ?? 0) / totalRaw;
+    });
+  }
 
   // Step 2: detect outliers using median absolute deviation (robust)
-  const apys = present.map((p) => p.apy!);
-  const median = apys.slice().sort((a, b) => a - b)[Math.floor(apys.length / 2)];
-  const deviations = apys.map((a) => Math.abs(a - median));
-  const mad = deviations.slice().sort((a, b) => a - b)[Math.floor(deviations.length / 2)] || 0;
+  const apys = present.map((p) => p.apy as number);
+  const sortedApys = apys.slice().sort((a, b) => a - b);
+  const median = sortedApys[Math.floor(sortedApys.length / 2)];
+  const deviations = apys.map((a) => Math.abs(a - median)).sort((a, b) => a - b);
+  const mad = deviations[Math.floor(deviations.length / 2)] || 0;
 
-  const outlierThreshold = mad * 3 || 0.001; // fallback small threshold
+  const outlierThreshold = Number.isFinite(mad) && mad > 0 ? mad * 3 : 0.001; // fallback small threshold
   const downweightFactor = 0.2;
   let outliersRemoved = false;
 
   present.forEach((p) => {
-    if (Math.abs((p.apy! - median)) > outlierThreshold) {
+    if (Math.abs((p.apy as number) - median) > outlierThreshold) {
       // downweight outliers instead of dropping
       p.weight = (p.weight ?? 0) * downweightFactor;
       outliersRemoved = true;
@@ -54,16 +71,32 @@ export function aggregateApy(readings: ProviderReading[], protocol: string = 'de
   });
 
   // renormalize weights
-  const total = present.reduce((s, p) => s + (p.weight ?? 0), 0) || 1;
-  present.forEach((p) => (p.weight = (p.weight ?? 0) / total));
+  const total = present.reduce((s, p) => s + (p.weight ?? 0), 0);
+  if (!Number.isFinite(total) || total <= 0) {
+    const uniform = 1 / present.length;
+    present.forEach((p) => {
+      p.weight = uniform;
+    });
+  } else {
+    present.forEach((p) => {
+      p.weight = (p.weight ?? 0) / total;
+    });
+  }
 
   // Step 3: compute weighted mean
-  const consensusApy = present.reduce((s, p) => s + (p.apy! * (p.weight ?? 0)), 0);
+  const consensusApyRaw = present.reduce(
+    (s, p) => s + (p.apy as number) * (p.weight ?? 0),
+    0,
+  );
+  const consensusApy = Number.isFinite(consensusApyRaw) ? consensusApyRaw : null;
+  if (consensusApy === null) {
+    reasons.push('invalid_consensus');
+  }
 
   if (outliersRemoved) reasons.push('outliers_downweighted');
   if (present.length < 2) reasons.push('single_provider');
 
-  const confidence = computeConfidence(readings, consensusApy);
+  const confidence = computeConfidence(readings, consensusApy ?? 0);
 
   // Step 4: Enforce Quorum Policy - degrade confidence if quorum is not met
   if (!quorumStatus.isMet) {
@@ -72,7 +105,11 @@ export function aggregateApy(readings: ProviderReading[], protocol: string = 'de
     confidence.score = Math.max(0, Math.round(confidence.score * 0.5 - 15));
   }
 
-  confidence.reasons = Array.from(new Set([...reasons, ...confidence.reasons]));
+  const normalizedScore = Number.isFinite(confidence.score)
+    ? Math.max(0, Math.min(100, Math.round(confidence.score)))
+    : 0;
+  confidence.score = normalizedScore;
+  confidence.reasons = Array.from(new Set([...reasons, ...(confidence.reasons || [])]));
 
   return { consensusApy, confidence, quorumStatus };
 }
@@ -320,7 +357,7 @@ export function buildPortfolioYieldSummary(
 ): PortfolioYieldSummary {
   const feedByProtocol = new Map(feed.map((entry) => [entry.protocolName, entry]));
 
-  const matched: Array<{ position: PortfolioPositionInput; entry: NormalizedYield }> = [];
+  const matched: Array<{ position: PortfolioPositionInput; entry: NormalizedYield; safeValueUsd: number }> = [];
   const unpricedProtocols: string[] = [];
 
   for (const position of positions) {
@@ -329,17 +366,19 @@ export function buildPortfolioYieldSummary(
       unpricedProtocols.push(position.protocol);
       continue;
     }
-    matched.push({ position, entry });
+    const safeValueUsd =
+      Number.isFinite(position.valueUsd) && position.valueUsd > 0 ? position.valueUsd : 0;
+    matched.push({ position, entry, safeValueUsd });
   }
 
   const totalValueUsdPrecise = matched.reduce(
-    (sum, { position }) => sum + Math.max(0, position.valueUsd),
+    (sum, { safeValueUsd }) => sum + safeValueUsd,
     0,
   );
 
-  const summaryPositions: PortfolioYieldSummaryPosition[] = matched.map(({ position, entry }) => {
-    const weight = Math.max(0, position.valueUsd);
-    const weightFraction = totalValueUsdPrecise > 0 ? weight / totalValueUsdPrecise : 0;
+  const summaryPositions: PortfolioYieldSummaryPosition[] = matched.map(({ entry, safeValueUsd }) => {
+    const weightFraction = totalValueUsdPrecise > 0 ? safeValueUsd / totalValueUsdPrecise : 0;
+    const safeTotalApy = Number.isFinite(entry.totalApy) ? entry.totalApy : 0;
 
     return {
       protocol: entry.protocolName,
@@ -348,17 +387,17 @@ export function buildPortfolioYieldSummary(
       totalApy: entry.totalApy,
       netApy: entry.netApy,
       tvl: entry.tvl,
-      valueUsd: normalizeUsd(position.valueUsd),
+      valueUsd: normalizeUsd(safeValueUsd),
       weightPct: roundTo(weightFraction * 100, 2),
-      contributionApy: roundTo(entry.totalApy * weightFraction, 2),
+      contributionApy: roundTo(safeTotalApy * weightFraction, 2),
     };
   });
 
   const weighted = (field: "apy" | "rewardApy" | "totalApy" | "netApy") =>
     blendApyPercent(
-      matched.map(({ position, entry }) => ({
+      matched.map(({ entry, safeValueUsd }) => ({
         apyPercent: entry[field],
-        weight: Math.max(0, position.valueUsd),
+        weight: safeValueUsd,
       })),
     );
 

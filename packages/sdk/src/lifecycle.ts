@@ -1,4 +1,5 @@
-import { rpc, TransactionBuilder, Operation, Account } from "@stellar/stellar-sdk";
+import { rpc, TransactionBuilder, Operation, Account, hash } from "@stellar/stellar-sdk";
+import { Buffer } from "buffer";
 import type { SignerAdapter } from "./signers";
 import {
   SpecMismatchError,
@@ -18,6 +19,98 @@ export type TransactionState =
   | "FAILED"
   | "EXPIRED";
 
+/**
+ * Identity for one logical vault operation, shared by every retry of that
+ * operation. When a caller supplies an `idempotencyKey`, the same key and the
+ * same arguments produce the same `operationId`, so a retried prepare/sign/
+ * submit cycle is recognized as the same effect instead of a second one.
+ */
+export interface OperationIdentity {
+  operationId: string;
+  idempotencyKey?: string;
+}
+
+export interface OperationIdentityInput {
+  contractId: string;
+  networkPassphrase: string;
+  method: string;
+  argsHash: string;
+  /** Stable caller-supplied key; retries with the same key reuse the identity. */
+  idempotencyKey?: string;
+  /** Explicit identity for advanced callers; takes precedence over derivation. */
+  operationId?: string;
+}
+
+/**
+ * Derive the operation identity included in prepared-transaction metadata.
+ *
+ * With an `idempotencyKey`, the id is a deterministic SHA-256 of the contract,
+ * network, method, argument hash, and key. Without one, a unique nonce keeps
+ * otherwise-identical operations distinct. Either way the id does not appear
+ * in the transaction envelope, so it adds no on-chain data.
+ */
+export function createOperationId(input: OperationIdentityInput): string {
+  if (input.operationId) return input.operationId;
+
+  const idempotencyKey = input.idempotencyKey?.trim();
+  const nonce = idempotencyKey || createOperationNonce();
+  const payload = JSON.stringify([
+    input.contractId,
+    input.networkPassphrase,
+    input.method,
+    input.argsHash,
+    nonce,
+  ]);
+  return hash(Buffer.from(payload, "utf8")).toString("hex");
+}
+
+function createOperationNonce(): string {
+  const cryptoObj = (
+    globalThis as {
+      crypto?: { randomUUID?: () => string };
+    }
+  ).crypto;
+  if (cryptoObj?.randomUUID) return cryptoObj.randomUUID();
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+}
+
+/**
+ * Upper bound on remembered submission identities. The registry is an
+ * in-process duplicate guard, not a durable store; callers that need
+ * cross-process idempotency must persist and reuse `idempotencyKey`.
+ */
+const MAX_TRACKED_OPERATIONS = 1000;
+const submittedOperations = new Map<string, string>();
+
+/** Submitted transaction hash for an operation id, when already seen. */
+export function lookupSubmittedOperation(operationId: string): string | undefined {
+  return submittedOperations.get(operationId);
+}
+
+/** Remember a successful submission so a retry reuses its transaction hash. */
+export function rememberSubmittedOperation(operationId: string, txHash: string): void {
+  submittedOperations.delete(operationId);
+  submittedOperations.set(operationId, txHash);
+  while (submittedOperations.size > MAX_TRACKED_OPERATIONS) {
+    const oldest = submittedOperations.keys().next().value;
+    if (oldest === undefined) break;
+    submittedOperations.delete(oldest);
+  }
+}
+
+/**
+ * Forget an operation identity so a corrected retry may submit again. Called
+ * automatically when a submitted transaction reports FAILED (no effect landed).
+ */
+export function forgetSubmittedOperation(operationId: string): void {
+  submittedOperations.delete(operationId);
+}
+
+/** Clear the in-process duplicate-submission guard (tests or explicit recovery). */
+export function resetSubmittedOperations(): void {
+  submittedOperations.clear();
+}
+
 export interface PreparedTransactionMeta<T> {
   simulationResult: T;
   footprint: string;
@@ -30,6 +123,10 @@ export interface PreparedTransactionMeta<T> {
   networkPassphrase: string;
   method: string;
   argsHash: string;
+  /** Stable identity for this logical operation; reused across safe retries. */
+  operationId?: string;
+  /** Caller-supplied idempotency key that produced `operationId`. */
+  idempotencyKey?: string;
   specHash?: string;
   configFingerprint?: string;
 }
@@ -48,6 +145,11 @@ export class PreparedTransaction<T = unknown> {
 
   public toXDR(): string {
     return this.xdr;
+  }
+
+  /** Stable operation identity carried into submit-time duplicate checks. */
+  public get operationId(): string | undefined {
+    return this.meta.operationId;
   }
 
   public static fromXDR<T>(
@@ -76,6 +178,8 @@ export class PreparedTransaction<T = unknown> {
 
 export class SignedTransaction<T = unknown> {
   public readonly state: TransactionState = "SIGNED";
+  /** Concurrent calls to submit() share one network request. */
+  private inFlightSubmission?: Promise<SubmittedTransaction<T>>;
 
   constructor(
     public readonly signedXdr: string,
@@ -121,8 +225,73 @@ export class SignedTransaction<T = unknown> {
     return new SignedTransaction<T>(signedXdr, meta);
   }
 
+  /**
+   * Submit once per operation identity.
+   *
+   * A retry that presents an already-submitted `operationId` (for example a
+   * caller reusing an `idempotencyKey`, or a second `.submit()` on the same
+   * prepared transaction) returns the original transaction hash without
+   * calling `sendTransaction` again. Concurrent calls share one request. A
+   * submission that never reached the network is not remembered, so retrying
+   * after a transport failure still works.
+   */
   public async submit(
     serverOrUrl: rpc.Server | { rpcUrl: string } | string
+  ): Promise<SubmittedTransaction<T>> {
+    const operationId = this.resolveOperationId();
+    const existingHash = lookupSubmittedOperation(operationId);
+    if (existingHash) {
+      return new SubmittedTransaction<T>(
+        existingHash,
+        this.buildSubmittedOpts(serverOrUrl),
+        true
+      );
+    }
+
+    if (this.inFlightSubmission) return this.inFlightSubmission;
+
+    this.inFlightSubmission = this.performSubmit(serverOrUrl, operationId).finally(() => {
+      this.inFlightSubmission = undefined;
+    });
+    return this.inFlightSubmission;
+  }
+
+  private resolveOperationId(): string {
+    if (this.meta.operationId) return this.meta.operationId;
+    // No prepared identity: the signed transaction hash itself is unique, so
+    // duplicate submits of this exact envelope are still suppressed.
+    const tx = TransactionBuilder.fromXDR(this.signedXdr, this.meta.networkPassphrase);
+    return `tx:${tx.hash().toString("hex")}`;
+  }
+
+  private buildSubmittedOpts(
+    serverOrUrl: rpc.Server | { rpcUrl: string } | string,
+    server?: rpc.Server
+  ): SubmittedOpts<T> {
+    const serverInstance =
+      server ??
+      (typeof serverOrUrl !== "string" && !("rpcUrl" in serverOrUrl)
+        ? serverOrUrl
+        : undefined);
+
+    const rpcUrl =
+      typeof serverOrUrl === "string"
+        ? serverOrUrl
+        : "rpcUrl" in serverOrUrl
+        ? serverOrUrl.rpcUrl
+        : (serverInstance as any)?.serverURL?.toString() || "http://localhost:8000";
+
+    return {
+      rpcUrl,
+      rpcServer: serverInstance,
+      networkPassphrase: this.meta.networkPassphrase,
+      preparedMeta: this.meta,
+    };
+  }
+
+  private async performSubmit(
+    serverOrUrl: rpc.Server | { rpcUrl: string } | string,
+    operationId: string
   ): Promise<SubmittedTransaction<T>> {
     const server =
       typeof serverOrUrl === "string"
@@ -130,13 +299,6 @@ export class SignedTransaction<T = unknown> {
         : "rpcUrl" in serverOrUrl
         ? new rpc.Server(serverOrUrl.rpcUrl)
         : serverOrUrl;
-
-    const rpcUrl =
-      typeof serverOrUrl === "string"
-        ? serverOrUrl
-        : "rpcUrl" in serverOrUrl
-        ? serverOrUrl.rpcUrl
-        : (server as any).serverURL?.toString() || "http://localhost:8000";
 
     const tx = TransactionBuilder.fromXDR(this.signedXdr, this.meta.networkPassphrase);
     const response = await server.sendTransaction(tx);
@@ -151,14 +313,10 @@ export class SignedTransaction<T = unknown> {
       );
     }
 
+    rememberSubmittedOperation(operationId, response.hash);
     return new SubmittedTransaction<T>(
       response.hash,
-      {
-        rpcUrl,
-        rpcServer: typeof serverOrUrl !== "string" && !("rpcUrl" in serverOrUrl) ? server : undefined,
-        networkPassphrase: this.meta.networkPassphrase,
-        preparedMeta: this.meta,
-      }
+      this.buildSubmittedOpts(serverOrUrl, server)
     );
   }
 }
@@ -176,11 +334,18 @@ export class SubmittedTransaction<T = unknown> {
 
   constructor(
     public readonly hash: string,
-    public readonly opts: SubmittedOpts<T>
+    public readonly opts: SubmittedOpts<T>,
+    /** True when this result reused an earlier submission of the same operation. */
+    public readonly deduplicated = false
   ) {}
 
   public toHash(): string {
     return this.hash;
+  }
+
+  /** Operation identity shared with the prepared transaction, when present. */
+  public get operationId(): string | undefined {
+    return this.opts.preparedMeta?.operationId;
   }
 
   public static fromHash<T>(
@@ -220,6 +385,11 @@ export class SubmittedTransaction<T = unknown> {
       }
 
       if (txStatus.status === rpc.Api.GetTransactionStatus.FAILED) {
+        // The network reports no effect for a FAILED transaction, so allow a
+        // corrected retry to use the same operation identity again.
+        const operationId = this.operationId;
+        if (operationId) forgetSubmittedOperation(operationId);
+
         const resultXdr = txStatus.resultXdr?.toXDR("base64");
         throw parseContractError(
           new Error(`Transaction failed on ledger ${txStatus.ledger}`),

@@ -26,8 +26,7 @@ import {
   normalizeEndpointUrl,
   resolveSafeDiagnostics,
 } from "../endpoint";
-  StaleSimulationConfigError,
-} from "../errors";
+import { StaleSimulationConfigError } from "../errors";
 import {
   captureSimulationConfig,
   computeSimulationConfigFingerprint,
@@ -254,6 +253,8 @@ export class ApiClient {
 
   public getConfig(): Readonly<ApiConfig> {
     return { ...this.config };
+  }
+
   public setSimulationConfig(config: SimulationConfig): SimulationConfigSnapshot {
     this.simulationConfigSnapshot = captureSimulationConfig(config);
     return this.simulationConfigSnapshot;

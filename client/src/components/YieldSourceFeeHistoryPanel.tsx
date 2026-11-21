@@ -22,6 +22,9 @@ export interface YieldSourceFeeHistoryPanelProps {
 }
 
 function formatFeeBps(feeBps: number): string {
+  if (!Number.isFinite(feeBps)) {
+    return "—%";
+  }
   return `${(feeBps / 100).toFixed(2)}%`;
 }
 
