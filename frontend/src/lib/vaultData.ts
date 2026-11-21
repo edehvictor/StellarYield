@@ -33,6 +33,29 @@ interface YieldsApiEntry {
   risk: string;
 }
 
+/** A boundary error that callers can distinguish from a missing vault. */
+export class InvalidYieldDataError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "InvalidYieldDataError";
+  }
+}
+
+function isValidYieldEntry(value: unknown): value is YieldsApiEntry {
+  if (!value || typeof value !== "object") return false;
+  const entry = value as Partial<YieldsApiEntry>;
+  return (
+    typeof entry.protocol === "string" &&
+    typeof entry.asset === "string" &&
+    typeof entry.apy === "number" &&
+    Number.isFinite(entry.apy) &&
+    entry.apy >= 0 &&
+    typeof entry.tvl === "number" &&
+    Number.isFinite(entry.tvl) &&
+    entry.tvl >= 0
+  );
+}
+
 /**
  * Fetches vault stats for the given slug.
  *
@@ -57,7 +80,11 @@ export async function fetchVaultStats(
 
     if (!res.ok) throw new Error(`yields API ${res.status}`);
 
-    const data: YieldsApiEntry[] = await res.json();
+    const raw: unknown = await res.json();
+    if (!Array.isArray(raw) || !raw.every(isValidYieldEntry)) {
+      throw new InvalidYieldDataError("yields API returned malformed entries");
+    }
+    const data = raw;
     const entry = data.find(
       (d) =>
         d.protocol.toLowerCase() === meta.protocol.toLowerCase() &&
