@@ -10,6 +10,10 @@ import {
 } from "../lifecycle";
 import {
   SpecMismatchError,
+  parseContractError,
+  RestoreRequiredError,
+  SdkEndpointError,
+} from "../errors";
   SimulationDiagnosticsError,
   parseContractError,
   RestoreRequiredError,
@@ -22,6 +26,8 @@ import {
 import { rpc } from "@stellar/stellar-sdk";
 import { toTokenUnits } from "../types";
 import type { TokenAmount, VaultConfig } from "../types";
+import { validateEndpointUrl, normalizeEndpointUrl } from "../endpoint";
+import { buildSdkFailureDiagnostics } from "../diagnostics";
 
 export interface PreparedMethod<TArgs, TResult> {
   (args: TArgs): Promise<PreparedTransaction<TResult>>;
@@ -64,9 +70,26 @@ export class VaultClient {
   public readonly configFingerprint?: string;
 
   constructor(config: VaultConfig) {
+    const rpcValidation = validateEndpointUrl(config.rpcUrl);
+    if (!rpcValidation.valid) {
+      const diagnostics = buildSdkFailureDiagnostics("VALIDATION_FAILED", {
+        stage: "endpoint-configuration",
+        summary: `RPC endpoint configuration invalid: ${rpcValidation.error}`,
+        remediation: "Provide a valid Soroban RPC endpoint URL; existing state was preserved.",
+        retryable: false,
+      });
+      throw new SdkEndpointError(
+        `Invalid RPC endpoint URL: ${rpcValidation.error}`,
+        diagnostics,
+        [rpcValidation.error ?? "Invalid rpcUrl"],
+        "simulate",
+        false
+      );
+    }
+
     this.contractId = config.contractId;
     this.networkPassphrase = config.networkPassphrase;
-    this.rpcUrl = config.rpcUrl;
+    this.rpcUrl = normalizeEndpointUrl(config.rpcUrl);
     this.specHash = config.specHash || YIELD_VAULT_SPEC_HASH;
     this.configFingerprint = config.configFingerprint;
 
@@ -81,6 +104,30 @@ export class VaultClient {
     });
 
     this.initMethods();
+  }
+
+  /**
+   * Reconfigures the RPC endpoint URL safely.
+   * If validation fails, throws SdkEndpointError and preserves existing configuration.
+   */
+  public configureEndpoint(rpcUrl: string): void {
+    const rpcValidation = validateEndpointUrl(rpcUrl);
+    if (!rpcValidation.valid) {
+      const diagnostics = buildSdkFailureDiagnostics("VALIDATION_FAILED", {
+        stage: "endpoint-configuration",
+        summary: `RPC endpoint configuration invalid: ${rpcValidation.error}`,
+        remediation: "Provide a valid Soroban RPC endpoint URL; existing state was preserved.",
+        retryable: false,
+      });
+      throw new SdkEndpointError(
+        `Invalid RPC endpoint URL: ${rpcValidation.error}`,
+        diagnostics,
+        [rpcValidation.error ?? "Invalid rpcUrl"],
+        "simulate",
+        false
+      );
+    }
+    (this as any).rpcUrl = normalizeEndpointUrl(rpcUrl);
   }
 
   private initMethods() {

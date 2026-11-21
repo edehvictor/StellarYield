@@ -1,5 +1,9 @@
 import { VaultError } from "./generated/yield_vault";
 import {
+  type SdkDiagnostic,
+  buildSdkFailureDiagnostics,
+  redactDiagnosticText,
+} from "./diagnostics";
   buildSimulationFailureDiagnostics,
   classifySimulationFailure,
   type SimulationDiagnostic,
@@ -43,21 +47,49 @@ export abstract class SorobanSdkError extends Error {
   public readonly phase?: SdkErrorPhase;
   /** Whether retrying the operation that produced this error may succeed. */
   public readonly retryable: boolean;
+  /** Privacy-safe diagnostics attached to the error. */
+  public readonly diagnostics?: readonly SdkDiagnostic[];
+  /** Literal marker certifying that diagnostics contain no sensitive values. */
+  public readonly privacySafe: boolean;
   /**
    * Privacy-safe diagnostics naming the failed stage and remediation path.
    * Present on simulation-path errors; never contains raw error payloads.
    */
   public diagnostics?: SimulationDiagnostic[];
 
-  constructor(message: string, phase?: SdkErrorPhase, retryable = false) {
+  constructor(
+    message: string,
+    phase?: SdkErrorPhase,
+    retryable = false,
+    diagnostics?: readonly SdkDiagnostic[]
+  ) {
     super(message);
     this.name = this.constructor.name;
     this.phase = phase;
     this.retryable = retryable;
+    this.diagnostics = diagnostics;
+    this.privacySafe = true;
     Object.setPrototypeOf(this, new.target.prototype);
   }
 }
 
+/**
+ * Thrown when SDK endpoint configuration is missing or invalid.
+ */
+export class SdkEndpointError extends SorobanSdkError {
+  public readonly validationErrors?: readonly string[];
+
+  constructor(
+    message: string,
+    diagnostics: readonly SdkDiagnostic[],
+    validationErrors?: readonly string[],
+    phase: SdkErrorPhase = "simulate",
+    retryable = false
+  ) {
+    super(message, phase, retryable, diagnostics);
+    this.name = "SdkEndpointError";
+    this.validationErrors = validationErrors;
+  }
 export interface DiagnosticContext {
   stage: SdkErrorPhase;
   remediation: string;
@@ -87,9 +119,33 @@ export class ContractExecutionError extends SorobanSdkError {
     message: string,
     rawResultXdr?: string,
     diagnosticEvents?: string[],
-    phase: SdkErrorPhase = "submit"
+    phase: SdkErrorPhase = "submit",
+    diagnostics?: readonly SdkDiagnostic[]
   ) {
-    super(`Contract Execution Error [${errorCode} ${errorName}]: ${message}`, phase, false);
+    const hasDiagContext = Array.isArray(diagnosticEvents) && diagnosticEvents.length > 0;
+    const resolvedDiagnostics =
+      diagnostics ??
+      buildSdkFailureDiagnostics(
+        hasDiagContext ? "VALIDATION_FAILED" : "CONTEXT_INSUFFICIENT",
+        {
+          stage: phase,
+          summary: hasDiagContext
+            ? `Contract execution failed [${errorCode} ${errorName}].`
+            : "Contract execution failed without diagnostic events.",
+          remediation: hasDiagContext
+            ? "Inspect contract parameters and simulate again; existing balances and state are unchanged."
+            : "Enable verbose RPC diagnostic events or verify endpoint connectivity; existing state was preserved.",
+          retryable: false,
+          preserveState: true,
+        }
+      );
+
+    super(
+      `Contract Execution Error [${errorCode} ${errorName}]: ${message}`,
+      phase,
+      false,
+      resolvedDiagnostics
+    );
     this.errorCode = errorCode;
     this.errorName = errorName;
     this.rawResultXdr = rawResultXdr;
@@ -274,7 +330,13 @@ export class InvalidAmountError extends SorobanSdkError {
   public readonly value: unknown;
 
   constructor(field: string, value: unknown, reason: string) {
-    super(`Invalid ${field}: ${reason}`, "simulate", false);
+    const diagnostics = buildSdkFailureDiagnostics("VALIDATION_FAILED", {
+      stage: "request-validation",
+      summary: `Amount validation failed for field '${field}'.`,
+      remediation: "Provide a non-negative integer amount within safe integer bounds; existing balances are unchanged.",
+      retryable: false,
+    });
+    super(`Invalid ${field}: ${reason}`, "simulate", false, diagnostics);
     this.field = field;
     this.value = value;
   }
@@ -397,8 +459,16 @@ export class ApiTimeoutError extends SorobanSdkError {
   public readonly timeoutMs: number;
   public readonly path: string;
 
-  constructor(path: string, timeoutMs: number) {
-    super(`API request to '${path}' timed out after ${timeoutMs}ms`, undefined, true);
+  constructor(path: string, timeoutMs: number, diagnostics?: readonly SdkDiagnostic[]) {
+    const resolvedDiagnostics =
+      diagnostics ??
+      buildSdkFailureDiagnostics("ENDPOINT_UNAVAILABLE", {
+        stage: "network-dispatch",
+        summary: `API request to endpoint timed out after ${timeoutMs}ms.`,
+        remediation: "Check endpoint latency or retry with backoff; existing state was preserved.",
+        retryable: true,
+      });
+    super(`API request to '${path}' timed out after ${timeoutMs}ms`, undefined, true, resolvedDiagnostics);
     this.path = path;
     this.timeoutMs = timeoutMs;
   }
@@ -486,9 +556,17 @@ export class ApiNetworkError extends SorobanSdkError {
   public readonly path: string;
   public readonly cause?: unknown;
 
-  constructor(path: string, cause?: unknown) {
+  constructor(path: string, cause?: unknown, diagnostics?: readonly SdkDiagnostic[]) {
     const detail = cause instanceof Error ? cause.message : cause != null ? String(cause) : "unknown";
-    super(`API network error at '${path}': ${detail}`, undefined, true);
+    const resolvedDiagnostics =
+      diagnostics ??
+      buildSdkFailureDiagnostics("ENDPOINT_UNAVAILABLE", {
+        stage: "network-dispatch",
+        summary: "API network connection to endpoint failed.",
+        remediation: "Verify endpoint URL and network connectivity; existing state was preserved.",
+        retryable: true,
+      });
+    super(`API network error at '${path}': ${detail}`, undefined, true, resolvedDiagnostics);
     this.path = path;
     this.cause = cause;
   }
@@ -502,8 +580,16 @@ export class ApiNetworkError extends SorobanSdkError {
 export class ApiPaginationError extends SorobanSdkError {
   public readonly path: string;
 
-  constructor(path: string, reason: string) {
-    super(`Malformed paginated response at '${path}': ${reason}`, undefined, false);
+  constructor(path: string, reason: string, diagnostics?: readonly SdkDiagnostic[]) {
+    const resolvedDiagnostics =
+      diagnostics ??
+      buildSdkFailureDiagnostics("VALIDATION_FAILED", {
+        stage: "response-decoding",
+        summary: "Paginated endpoint response schema validation failed.",
+        remediation: "Check endpoint response schema or pagination parameters; existing state was preserved.",
+        retryable: false,
+      });
+    super(`Malformed paginated response at '${path}': ${reason}`, undefined, false, resolvedDiagnostics);
     this.path = path;
   }
 }
@@ -514,8 +600,29 @@ export class ApiHttpError extends SorobanSdkError {
   public readonly status: number;
   public readonly statusText: string;
 
-  constructor(path: string, status: number, statusText: string, retryable: boolean) {
-    super(`API error (${status} ${statusText}) at ${path}`, undefined, retryable);
+  constructor(
+    path: string,
+    status: number,
+    statusText: string,
+    retryable: boolean,
+    diagnostics?: readonly SdkDiagnostic[]
+  ) {
+    const isValidation = status >= 400 && status < 500 && status !== 408 && status !== 429;
+    const defaultCode = isValidation ? "VALIDATION_FAILED" : "ENDPOINT_UNAVAILABLE";
+    const defaultStage = isValidation ? "request-validation" : "network-dispatch";
+
+    const resolvedDiagnostics =
+      diagnostics ??
+      buildSdkFailureDiagnostics(defaultCode, {
+        stage: defaultStage,
+        summary: `Endpoint returned HTTP status ${status}.`,
+        remediation: isValidation
+          ? "Check request parameters and resubmit; existing state and balances are unchanged."
+          : "Retry the request with backoff; existing state was preserved.",
+        retryable,
+      });
+
+    super(`API error (${status} ${statusText}) at ${path}`, undefined, retryable, resolvedDiagnostics);
     this.path = path;
     this.status = status;
     this.statusText = statusText;
@@ -526,16 +633,26 @@ export class ApiHttpError extends SorobanSdkError {
 export class ApiRateLimitError extends ApiHttpError {
   public readonly retryAfterMs?: number;
 
-  constructor(path: string, retryAfterMs?: number, statusText = "Too Many Requests") {
-    super(path, 429, statusText, true);
+  constructor(
+    path: string,
+    retryAfterMs?: number,
+    statusText = "Too Many Requests",
+    diagnostics?: readonly SdkDiagnostic[]
+  ) {
+    super(path, 429, statusText, true, diagnostics);
     this.retryAfterMs = retryAfterMs;
   }
 }
 
 /** HTTP 5xx from the backend API; treated as a transient, retryable failure. */
 export class ApiServerError extends ApiHttpError {
-  constructor(path: string, status: number, statusText: string) {
-    super(path, status, statusText, true);
+  constructor(
+    path: string,
+    status: number,
+    statusText: string,
+    diagnostics?: readonly SdkDiagnostic[]
+  ) {
+    super(path, status, statusText, true, diagnostics);
   }
 }
 
