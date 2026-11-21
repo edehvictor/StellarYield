@@ -61,9 +61,13 @@ export type YieldNormalizationContract = typeof YIELD_NORMALIZATION_CONTRACT;
  * 2. `1.005 * 100` is `100.49999999999999` in binary floating point, which
  *    rounds *down*. Re-reading the scaled value at 15 significant digits
  *    discards that representation error before the tie is decided.
+ *
+ * Non-finite inputs (NaN, ±Infinity) are checked arithmetic failures for a
+ * bounded APY/USD quantity and are emitted as 0 so downstream display and
+ * aggregation never observe NaN/Infinity.
  */
 export function roundTo(value: number, decimals: number): number {
-  if (!Number.isFinite(value)) return value;
+  if (!Number.isFinite(value)) return 0;
 
   const factor = 10 ** decimals;
   const scaled = Number((value * factor).toPrecision(15));
@@ -92,15 +96,22 @@ export function normalizeUsd(value: number): number {
  * Weighted-average APY across positions, rounded once at the end.
  *
  * `weight` may be any non-negative measure (USD value, share count); weights
- * are normalized internally. Returns 0 when the weights sum to 0.
+ * are normalized internally. Returns 0 when the weights sum to 0. Non-finite
+ * or non-positive weights are ignored and non-finite APY inputs are treated as
+ * 0 so checked arithmetic never produces NaN/Infinity for display.
  */
 export function blendApyPercent(
   parts: ReadonlyArray<{ apyPercent: number; weight: number }>,
 ): number {
-  const totalWeight = parts.reduce((sum, p) => sum + (p.weight > 0 ? p.weight : 0), 0);
+  const safeParts = parts.map((p) => {
+    const weight = Number.isFinite(p.weight) && p.weight > 0 ? p.weight : 0;
+    const apyPercent = Number.isFinite(p.apyPercent) ? p.apyPercent : 0;
+    return { apyPercent, weight };
+  });
+  const totalWeight = safeParts.reduce((sum, p) => sum + p.weight, 0);
   if (totalWeight <= 0) return 0;
 
-  const blended = parts.reduce(
+  const blended = safeParts.reduce(
     (sum, p) => (p.weight > 0 ? sum + (p.apyPercent * p.weight) / totalWeight : sum),
     0,
   );

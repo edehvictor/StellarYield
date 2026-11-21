@@ -84,9 +84,12 @@ yieldsRouter.get("/", async (_req, res) => {
       const ageSeconds = Number.isFinite(lastFetchMs)
         ? Math.max(0, Math.round((Date.now() - lastFetchMs) / 1000))
         : Number.POSITIVE_INFINITY;
+      const freshness = Number.isFinite(score.metrics.freshness)
+        ? score.metrics.freshness
+        : 0;
 
       // 30 minutes stale window
-      if (ageSeconds > 30 * 60 || score.metrics.freshness < 0.5) {
+      if (ageSeconds > 30 * 60 || freshness < 0.5) {
         isStale = true;
       }
 

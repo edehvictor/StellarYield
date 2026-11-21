@@ -491,7 +491,9 @@ export type ZapQuoteVerification =
 
 /**
  * Codes a client can recover from by requesting a fresh quote (as opposed to
- * changing inputs or an unrecoverable internal failure).
+ * changing inputs or an unrecoverable internal failure). Stale or untrusted
+ * transaction review configuration/assumption snapshots are refreshable because
+ * verification is read-only and preserves existing state/balances.
  */
 export const RECOVERABLE_VERIFY_ERROR_CODES: ReadonlySet<ZapQuoteVerificationErrorCode> =
   new Set<ZapQuoteVerificationErrorCode>([
@@ -500,6 +502,7 @@ export const RECOVERABLE_VERIFY_ERROR_CODES: ReadonlySet<ZapQuoteVerificationErr
     "ROUTE_MISMATCH",
     "UNSUPPORTED_ASSET",
     "ASSUMPTION_DRIFT",
+    "INVALID_FINGERPRINT",
   ]);
 
 /**

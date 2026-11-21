@@ -63,7 +63,16 @@ differs from a bare `Math.round(v * 100) / 100` in two ways that matter:
 **Round once.** Intermediate arithmetic stays at full precision; rounding is the
 last thing that happens before a value is emitted. Rounding an already-rounded
 value is what makes two paths that "do the same thing" disagree in the second
-decimal:
+decimal.
+
+**Checked arithmetic at emit.** `roundTo()` / `normalizeApyPercent()` /
+`normalizeUsd()` treat non-finite inputs (`NaN`, `±Infinity`) as invalid
+boundary calculations and emit `0` so displayed yield data stays finite.
+`blendApyPercent()` ignores non-finite or non-positive weights and treats
+non-finite APY inputs as `0` before weighting. Raw ingestion
+(`normalizeYield`) rejects malformed or out-of-range boundary inputs and
+returns a finite safe default without mutating existing state, and it clamps
+accepted numeric inputs to documented safe ranges before emitting.
 
 ```ts
 // WRONG — the parts are rounded, then the rounded parts are summed and rounded
