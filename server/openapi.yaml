@@ -2756,7 +2756,9 @@ paths:
   /api/auth/challenge:
     post:
       summary: Request authentication challenge
-      description: Generates a challenge for wallet signing
+      description: >-
+        Generates a wallet authentication challenge bound to the current immutable
+        wallet auth configuration snapshot fingerprint.
       tags:
         - Auth
       requestBody:
@@ -2769,6 +2771,13 @@ paths:
                 walletAddress:
                   type: string
                   description: User's Stellar wallet address
+                sessionKeyAddress:
+                  type: string
+                  description: Ephemeral session signer public key
+                providerId:
+                  type: string
+                loginHint:
+                  type: string
       responses:
         '200':
           description: Challenge generated successfully
@@ -2779,9 +2788,84 @@ paths:
                 properties:
                   challenge:
                     type: string
+                  expiresAt:
+                    type: string
+                    format: date-time
+                  authConfigFingerprint:
+                    type: string
+                    description: Immutable wallet auth configuration snapshot fingerprint
                   walletAddressType:
                     type: string
                     enum: [account, contract]
+                  acceptedSignerTypes:
+                    type: array
+                    items:
+                      type: string
+        '400':
+          description: Invalid auth challenge request
+
+  /api/auth/verify:
+    post:
+      summary: Verify authentication challenge
+      description: >-
+        Verifies a signed wallet authentication challenge. Challenges bound to a
+        stale or missing wallet auth configuration snapshot are rejected so the
+        client can refresh and retry safely without consuming replay state.
+      tags:
+        - Auth
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [walletAddress, sessionKeyAddress, challenge, signature]
+              properties:
+                walletAddress:
+                  type: string
+                sessionKeyAddress:
+                  type: string
+                challenge:
+                  type: string
+                signature:
+                  type: string
+      responses:
+        '200':
+          description: Verification completed
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  verified:
+                    type: boolean
+                  walletAddressType:
+                    type: string
+                    enum: [account, contract]
+                  authConfigFingerprint:
+                    type: string
+                  acceptedSignerTypes:
+                    type: array
+                    items:
+                      type: string
+        '400':
+          description: Invalid, expired, replayed, or malformed verification request
+        '409':
+          description: Stale wallet auth configuration snapshot; refresh challenge and retry
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string
+                  code:
+                    type: string
+                    enum: [STALE_WALLET_AUTH_CONFIG]
+                  currentAuthConfigFingerprint:
+                    type: string
+                  requestId:
+                    type: string
 
     /metrics:
       get:

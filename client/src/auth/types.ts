@@ -37,6 +37,8 @@ export interface WalletSession {
   origin?: SessionOrigin;
   /** Whether the provider is confirmed available in this browser */
   providerAvailable?: boolean;
+  /** Immutable wallet auth configuration fingerprint bound to this session snapshot. */
+  authConfigFingerprint?: string;
 }
 
 export interface ConnectWalletOptions {
