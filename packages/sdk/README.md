@@ -141,6 +141,14 @@ const vaultData = await api.getVaultData('vault-contract-id');
   - Secrets and credentials (passwords, tokens, secret seeds, addresses, internal paths) are automatically redacted with `privacySafe: true`.
   - State & balance preservation: Failed validations or execution outages never mutate state; every failure diagnostic includes a `STATE_PRESERVED` entry (`stage: "state-persistence"`).
   - Insufficient diagnostic context: When an endpoint returns empty, non-JSON, or missing diagnostic details, the SDK safely returns `CONTEXT_INSUFFICIENT` and indicates whether safe retry is possible.
+  - `simulateDeposit()`: Preview deposit allocation, shares, and fee estimates
+  - `simulateWithConfig()`: Execute simulation under immutable configuration snapshot
+
+- **Simulation Configuration & Fingerprint Hardening**:
+  - `captureSimulationConfig(config)`: Captures a deep-frozen, immutable snapshot of simulation parameters and derives a deterministic `simcfg1:<hex>` fingerprint.
+  - `assertSimulationConfigCurrent(expected, current)`: Rejects stale configuration snapshots with typed, retryable `StaleSimulationConfigError`.
+  - `runWithSimulationConfig(options)`: Runs simulation against an immutable snapshot, detects configuration drift, and either rejects (`onStale: "reject"`) or transparently re-runs (`onStale: "refresh"`).
+  - State & Balance Preservation: Validation and execution failures never modify existing balances or state; every failure maintains `statePreserved: true`.
 
 ## Deposit simulation fixtures
 

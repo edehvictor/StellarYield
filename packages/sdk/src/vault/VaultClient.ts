@@ -67,6 +67,7 @@ export class VaultClient {
   public readonly networkPassphrase: string;
   public readonly rpcUrl: string;
   public readonly specHash: string;
+  public readonly configFingerprint?: string;
 
   constructor(config: VaultConfig) {
     const rpcValidation = validateEndpointUrl(config.rpcUrl);
@@ -90,6 +91,7 @@ export class VaultClient {
     this.networkPassphrase = config.networkPassphrase;
     this.rpcUrl = normalizeEndpointUrl(config.rpcUrl);
     this.specHash = config.specHash || YIELD_VAULT_SPEC_HASH;
+    this.configFingerprint = config.configFingerprint;
 
     if (config.specHash && config.specHash !== YIELD_VAULT_SPEC_HASH) {
       throw new SpecMismatchError(YIELD_VAULT_SPEC_HASH, config.specHash);
@@ -270,6 +272,7 @@ export class VaultClient {
           typeof value === "bigint" ? value.toString() : value
         ),
         specHash: this.specHash,
+        configFingerprint: this.configFingerprint,
       };
 
       return new PreparedTransaction<TResult>(rawXdr, meta);
@@ -279,6 +282,10 @@ export class VaultClient {
       // SimulationDiagnosticsError instead of echoing raw upstream text.
       throw toSimulationError(error, { method: methodName });
     }
+  }
+
+  public getConfigFingerprint(): string | undefined {
+    return this.configFingerprint;
   }
 
   // Read-only view methods

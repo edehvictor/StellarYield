@@ -20,6 +20,12 @@ export interface VaultConfig {
   /** Optional diagnostic context. */
   diagnosticContext?: EndpointDiagnosticContext;
   specHash?: string;
+  /**
+   * Expected configuration fingerprint for contract and market terms.
+   * Simulations prepared under an older snapshot will be rejected if the live
+   * contract or client configuration fingerprint drifts.
+   */
+  configFingerprint?: string;
 }
 
 /**
