@@ -31,6 +31,7 @@ export interface PreparedTransactionMeta<T> {
   method: string;
   argsHash: string;
   specHash?: string;
+  configFingerprint?: string;
 }
 
 export class PreparedTransaction<T = unknown> {
