@@ -56,9 +56,9 @@ tags:
       | `UNSUPPORTED_ASSET` | 400 / 422 | One or more assets in the quote path are no longer in the supported asset set. |
       | `SLIPPAGE_EXCEEDED` | 400 / 422 | The applied slippage exceeds the maximum allowed threshold (15%). |
       | `ROUTE_MISMATCH` | 400 | The route hash in the quote does not match the current computed path. |
-      | `CONFIG_DRIFT` | 400 | The asset configuration version has changed since the quote was issued. |
-      | `ASSUMPTION_DRIFT` | 400 | The cryptographic fingerprint no longer matches the quote assumptions — assumptions were modified after quoting. Re-quote to proceed. Responses carry `recoverable: true`. |
-      | `INVALID_FINGERPRINT` | 400 | The assumption fingerprint is missing or malformed. |
+      | `CONFIG_DRIFT` | 400 | The immutable asset-configuration snapshot fingerprint (`assetConfigVersion`) is missing or no longer matches the current snapshot. Rejected without mutating state; refresh/re-quote and retry. Responses carry `recoverable: true`. |
+      | `ASSUMPTION_DRIFT` | 400 | The cryptographic assumption fingerprint no longer matches the quoted review snapshot/assumptions. Rejected without mutating state; refresh/re-quote and retry. Responses carry `recoverable: true`. |
+      | `INVALID_FINGERPRINT` | 400 | The assumption fingerprint is missing or malformed, so the review snapshot cannot be trusted. Rejected without mutating state; refresh/re-quote and retry. Responses carry `recoverable: true`. |
       | `QUOTE_FAILED` | 500 | Quote generation failed due to an internal error. |
       | `VERIFY_FAILED` | 500 | Quote verification failed due to an internal error. |
       | `CONFIG_UNAVAILABLE` | 503 | The supported assets configuration could not be loaded. |
@@ -6066,9 +6066,10 @@ Incident:
           type: boolean
           description: >
             When true, the client can recover by requesting a fresh quote or
-            retrying (e.g. STALE_QUOTE, CONFIG_DRIFT, ROUTE_MISMATCH,
-            UNSUPPORTED_ASSET, transient QUOTE_FAILED). Absent or false for
-            validation failures that require changing inputs.
+            retrying (e.g. STALE_QUOTE, CONFIG_DRIFT, ASSUMPTION_DRIFT,
+            INVALID_FINGERPRINT, ROUTE_MISMATCH, UNSUPPORTED_ASSET, transient
+            QUOTE_FAILED). Absent or false for validation failures that require
+            changing inputs.
         diagnostics:
           type: array
           description: >
