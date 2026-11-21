@@ -27,7 +27,7 @@ Init, intent lifecycle, solver lifecycle, and fee update events.
 
 ## Errors
 
-`SwapError` covers initialization, auth, solver registration/stake, intent lifecycle, and fee-bound checks, plus `NonceUsed` (16), `FeeCapExceeded` (17), `DomainMismatch` (18), `QuoteExpired` (19) and `QuoteFromFuture` (20).
+`SwapError` covers initialization, auth, solver registration/stake, intent lifecycle, and fee-bound checks, plus `NonceUsed` (16), `FeeCapExceeded` (17), `DomainMismatch` (18), `QuoteExpired` (19), `QuoteFromFuture` (20), and `FeeRounding` (21). `ZeroAmount` (3) is returned for a zero gross buy amount.
 
 ## Storage Model
 
@@ -44,6 +44,7 @@ cargo test -p intent_swap
 ## Integration Notes
 
 - Protocol fee is bounded in basis points and charged on buy-side output before user delivery.
+- A non-final partial fill is rejected with `FeeRounding` when its protocol fee is fractional in the buy token's smallest unit; exact fee-unit boundaries are accepted. A fill that completes the intent may floor its fee once, as a single complete settlement does. Rejected fills leave token balances and intent state unchanged.
 - Protocol fee + solver fee must not exceed the owner-signed `max_fee` (pro-rated for partial fills); this is checked before any transfer.
 - `min_buy_amount` binds the owner's net output after all fees, summed over every fill: after each fill the owner has received at least `ceil(min_buy_amount × filled_sell / sell_amount)`, and exactly `min_buy_amount` or more once fully filled.
 - `domain` must equal `get_domain()`: `network_id` is SHA-256 of the network passphrase and `verifying_contract` is this deployment, so a signed intent cannot be replayed on another network or deployment.

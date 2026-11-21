@@ -151,6 +151,7 @@ pub enum SwapError {
     DomainMismatch = 18,
     QuoteExpired = 19,
     QuoteFromFuture = 20,
+    FeeRounding = 21,
 }
 
 const MAX_PROTOCOL_FEE_BPS: u32 = 100;
@@ -386,6 +387,10 @@ impl IntentSwap {
     /// `max_fee` (pro-rated for partial fills) before any transfer. The
     /// owner's net output, summed over every fill of the intent, must reach
     /// `min_buy_amount` pro-rated to the sell amount filled so far.
+    /// A non-final partial fill with a fractional protocol-fee unit is
+    /// rejected with `FeeRounding`; finish the intent in a single fill or use
+    /// an amount whose protocol fee is an integer number of token units.
+    /// Zero buy-token amounts are rejected with `ZeroAmount`.
     ///
     /// The quote is settleable while `quoted_at <= now <= quoted_at +
     /// max_quote_age`, where `now` is the ledger close time.
@@ -457,6 +462,13 @@ impl IntentSwap {
             remaining_sell
         };
 
+        if buy_amount == 0 {
+            return Err(SwapError::ZeroAmount);
+        }
+        if buy_amount < 0 {
+            return Err(SwapError::InsufficientOutput);
+        }
+
         // Verify actual fees against the owner-signed cap before any transfer
         if solver_fee < 0 {
             return Err(SwapError::InvalidFee);
@@ -466,7 +478,16 @@ impl IntentSwap {
             .instance()
             .get(&DataKey::ProtocolFeeBps)
             .unwrap_or(0);
-        let protocol_fee = (buy_amount * fee_bps as i128) / 10_000;
+        let fee_rate = fee_bps as i128;
+        let fee_remainder_numerator = (buy_amount % 10_000) * fee_rate;
+        let protocol_fee =
+            (buy_amount / 10_000) * fee_rate + fee_remainder_numerator / 10_000;
+        if intent.partial_fill
+            && fill_sell < remaining_sell
+            && fee_remainder_numerator % 10_000 != 0
+        {
+            return Err(SwapError::FeeRounding);
+        }
         // Subtraction form: a solver-supplied `solver_fee` cannot overflow the sum
         if solver_fee > Self::fill_share(&intent, intent.max_fee, fill_sell) - protocol_fee {
             return Err(SwapError::FeeCapExceeded);
@@ -1832,6 +1853,60 @@ mod tests {
         assert_eq!(intent.status, IntentStatus::Filled);
         assert_eq!(intent.filled_buy, 9_500);
         assert_eq!(token::Client::new(&env, &token_b).balance(&owner), 9_500);
+    }
+
+    #[test]
+    fn test_fractional_fee_partial_fills_reject_without_changing_balances() {
+        let (env, client, _, fee_recipient, token_a, token_b, contract_id) = setup_env();
+        let solver = funded_solver(&env, &client, &token_a, &token_b, 30_000);
+        let (partial_owner, partial_id) =
+            open_intent(&env, &client, &token_a, &token_b, 100, true);
+        let (complete_owner, complete_id) =
+            open_intent(&env, &client, &token_a, &token_b, 100, false);
+
+        // At 50 bps these fills accrue fractional fee units (0.005 and 0.995).
+        for (buy_amount, sell_amount) in [(1, 1), (199, 100)] {
+            assert_eq!(
+                client.try_fill_intent(
+                    &solver,
+                    &partial_id,
+                    &buy_amount,
+                    &sell_amount,
+                    &0,
+                    &100
+                ),
+                Err(Ok(SwapError::FeeRounding))
+            );
+        }
+        assert_eq!(
+            client.try_fill_intent(&solver, &partial_id, &0, &1, &0, &100),
+            Err(Ok(SwapError::ZeroAmount))
+        );
+
+        let unchanged = client.get_intent(&partial_id);
+        assert_eq!(unchanged.filled_sell, 0);
+        assert_eq!(unchanged.filled_buy, 0);
+        assert_eq!(unchanged.fill_count, 0);
+        assert_eq!(token::Client::new(&env, &token_b).balance(&partial_owner), 0);
+        assert_eq!(token::Client::new(&env, &token_b).balance(&solver), 30_000);
+        assert_eq!(token::Client::new(&env, &token_b).balance(&fee_recipient), 0);
+        assert_eq!(token::Client::new(&env, &token_a).balance(&partial_owner), 0);
+        assert_eq!(token::Client::new(&env, &token_a).balance(&contract_id), 21_000);
+        assert_eq!(receipts(&env).len(), 0);
+
+        // One exact-boundary partial fee unit is valid; completion then has an
+        // exact fee too. The result matches settling the same gross amount at once.
+        client.fill_intent(&solver, &partial_id, &200, &100, &0, &100);
+        assert_eq!(receipts(&env).get_unchecked(0).protocol_fee, 1);
+        client.fill_intent(&solver, &partial_id, &10_000, &9_900, &0, &100);
+        client.fill_intent(&solver, &complete_id, &10_200, &10_000, &0, &100);
+
+        let buy = token::Client::new(&env, &token_b);
+        assert_eq!(buy.balance(&partial_owner), 10_149);
+        assert_eq!(buy.balance(&complete_owner), 10_149);
+        assert_eq!(client.get_intent(&partial_id).filled_buy, 10_149);
+        assert_eq!(client.get_intent(&complete_id).filled_buy, 10_149);
+        assert_eq!(buy.balance(&fee_recipient), 102);
     }
 
     /// A buy token that accepts any transfer, as a non-SAC token may.
