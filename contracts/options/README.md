@@ -44,6 +44,7 @@ fingerprint immediately.
 
 ## Errors
 
+`OptionsError` covers initialization, authorization, invalid option state, expiry windows, and amount/price validation. `InvalidStrike` rejects a zero or negative strike at mint; `MathOverflow` signals checked settlement arithmetic that cannot be represented in `i128` or a `u32` option id.
 `OptionsError` covers initialization, authorization, invalid option state, expiry windows, amount/price validation, and `SettlementStateChanged` (22) for a retried checked settlement whose progress no longer matches.
 
 ## Configuration Fingerprint
@@ -95,6 +96,31 @@ returns only the collateral not already paid out by partial exercises and
 releases the same amount from the reserved balance. After expiration, the
 existing permissionless `expire` path handles the return.
 
+## Boundary Handling
+
+Settlement arithmetic is checked at zero, minimum, maximum and near-limit
+values:
+
+- The collateral still backing a position is computed with `checked_sub`. If a
+  stored cumulative exercised amount exceeds the collateral, `exercise`,
+  `exercise_partial`, `cancel` and `expire` fail with `MathOverflow` before any
+  token transfer, reserve release or position update.
+- The new cumulative exercised amount is computed with `checked_add` before the
+  settlement transfer, so a near-`i128::MAX` total is rejected while the
+  transaction is still side-effect free.
+- `mint` computes the next `u32` option id with `checked_add` before escrowing
+  collateral. At `u32::MAX` it fails with `MathOverflow`, consuming no funds and
+  no id. A non-positive strike is rejected with `InvalidStrike` for the same
+  reason.
+- `get_premium` keeps its documented floor rounding; `i128::MIN`, zero and
+  near-`i128::MAX` inputs are handled without wrapping.
+- `get_option_collateral_health` is a view and cannot fail, so it clamps the
+  remaining obligation to zero for inconsistent stored values instead of
+  aborting.
+
+Every rejection is atomic: balances, free and reserved collateral, exercised
+amounts and position records remain unchanged, so a caller can refresh its
+inputs or fingerprint and safely retry the same settlement.
 ## Settlement Safety
 
 `exercise`, `exercise_partial`, `cancel`, and `expire` validate every input and
