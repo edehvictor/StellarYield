@@ -4,6 +4,13 @@ import {
   buildSdkFailureDiagnostics,
   redactDiagnosticText,
 } from "./diagnostics";
+  buildSimulationFailureDiagnostics,
+  classifySimulationFailure,
+  type SimulationDiagnostic,
+  type SimulationDiagnosticContext,
+  type SimulationFailureCode,
+  type SimulationStage,
+} from "./simulationDiagnostics";
 
 /**
  * Lifecycle phase in which an SDK error originated. Lets callers branch on
@@ -44,6 +51,11 @@ export abstract class SorobanSdkError extends Error {
   public readonly diagnostics?: readonly SdkDiagnostic[];
   /** Literal marker certifying that diagnostics contain no sensitive values. */
   public readonly privacySafe: boolean;
+  /**
+   * Privacy-safe diagnostics naming the failed stage and remediation path.
+   * Present on simulation-path errors; never contains raw error payloads.
+   */
+  public diagnostics?: SimulationDiagnostic[];
 
   constructor(
     message: string,
@@ -124,6 +136,126 @@ export class ContractExecutionError extends SorobanSdkError {
     this.rawResultXdr = rawResultXdr;
     this.diagnosticEvents = diagnosticEvents;
   }
+}
+
+/**
+ * A simulation-path failure that carries privacy-safe diagnostics.
+ *
+ * Raised when the simulation fails without a decodable contract error code or
+ * any diagnostic events (insufficient diagnostic context), and for other
+ * simulation-stage failures that should not leak raw upstream error text.
+ */
+export class SimulationDiagnosticsError extends SorobanSdkError {
+  /** Stable code of the primary diagnostic. */
+  public readonly code: SimulationFailureCode;
+  /** Stage that was reached but not completed. */
+  public readonly stage: SimulationStage;
+  /** Privacy-safe diagnostics: primary failure first, state preservation last. */
+  public readonly diagnostics: SimulationDiagnostic[];
+  /** Next action, mirroring `diagnostics[0].remediation`. */
+  public readonly remediation: string;
+  /** Contract method whose prepare call failed (a fixed SDK identifier). */
+  public readonly method?: string;
+  /** Privacy-safe failure context: event count and decoded code only. */
+  public readonly context: SimulationDiagnosticContext;
+
+  constructor(
+    diagnostics: SimulationDiagnostic[],
+    options: {
+      method?: string;
+      context?: SimulationDiagnosticContext;
+    } = {}
+  ) {
+    const primary = diagnostics[0];
+    super(
+      `Simulation failed [${primary.code} at ${primary.stage}]: ${primary.summary}`,
+      "simulate",
+      primary.retryable
+    );
+    this.code = primary.code as SimulationFailureCode;
+    this.stage = primary.stage;
+    this.diagnostics = diagnostics;
+    this.remediation = primary.remediation;
+    this.method = options.method;
+    this.context = options.context ?? {
+      diagnosticEventCount: 0,
+      hasErrorMessage: false,
+    };
+  }
+}
+
+/** Attach diagnostics to an existing typed error without changing its type. */
+export function attachSimulationDiagnostics<T extends SorobanSdkError>(
+  error: T,
+  diagnostics: SimulationDiagnostic[]
+): T {
+  if (!error.diagnostics || error.diagnostics.length === 0) {
+    error.diagnostics = diagnostics;
+  }
+  return error;
+}
+
+export interface ToSimulationErrorOptions {
+  /** Contract method whose prepare call failed. */
+  method?: string;
+  /** Explicit context from an inspected simulation response. */
+  context?: Partial<SimulationDiagnosticContext>;
+}
+
+/**
+ * Normalize any caught simulate-stage value into a typed SDK error that
+ * carries privacy-safe diagnostics.
+ *
+ * Known typed errors (`InvalidAmountError`, `RestoreRequiredError`, and
+ * contract errors with a real VaultError code) keep their class and gain
+ * `diagnostics`, so existing `instanceof` handling keeps working. Failures
+ * without a decodable code or diagnostic events become a
+ * {@link SimulationDiagnosticsError} with `CONTEXT_INSUFFICIENT`, and the raw
+ * upstream message is deliberately not propagated.
+ */
+export function toSimulationError(
+  error: unknown,
+  options: ToSimulationErrorOptions = {}
+): SorobanSdkError {
+  if (error instanceof SimulationDiagnosticsError) return error;
+
+  if (error instanceof RestoreRequiredError) {
+    return attachSimulationDiagnostics(
+      error,
+      buildSimulationFailureDiagnostics("RESTORE_REQUIRED", { stage: "restore" })
+    );
+  }
+
+  if (error instanceof InvalidAmountError) {
+    return attachSimulationDiagnostics(
+      error,
+      buildSimulationFailureDiagnostics("VALIDATION_FAILED", {
+        stage: "input-validation",
+      })
+    );
+  }
+
+  const parsed =
+    error instanceof SorobanSdkError
+      ? error
+      : parseContractError(error, undefined, undefined, "simulate");
+
+  if (parsed instanceof ContractExecutionError && parsed.errorCode !== 999) {
+    return attachSimulationDiagnostics(
+      parsed,
+      buildSimulationFailureDiagnostics("SIMULATION_FAILED", { stage: "simulation" })
+    );
+  }
+
+  const classified = classifySimulationFailure({ error, context: options.context });
+  const diagnostics = buildSimulationFailureDiagnostics(classified.code, {
+    stage: classified.stage,
+  });
+
+  return new SimulationDiagnosticsError(diagnostics, {
+    method: options.method,
+    context: classified.context,
+  });
 }
 
 export class WrongNetworkError extends SorobanSdkError {

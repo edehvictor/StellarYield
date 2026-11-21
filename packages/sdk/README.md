@@ -48,6 +48,40 @@ const withdrawn = await (await withdrawal.submit(vault.rpcUrl)).wait();
 
 If a simulation reports expired ledger entries, it throws `RestoreRequiredError` (`error.restorePreamble`) — pass that into the exported `restoreAndRetry()` helper, then retry `prepare()`. See `src/examples/basic.ts` for a full worked example including the restore path.
 
+### Simulation failure diagnostics
+
+`prepare()` is read-only: it builds and simulates a transaction but never signs, submits, or mutates vault balances. When argument validation or simulation fails, it throws without returning a partial `PreparedTransaction`, so no state or balance is changed. Errors carry privacy-safe `diagnostics` that name the failed stage and the next action:
+
+```typescript
+import {
+  SimulationDiagnosticsError,
+  areSimulationDiagnosticsPrivacySafe,
+} from '@stellaryield/sdk';
+
+try {
+  await vault.deposit.prepare({ from, amount: 1_000_000n });
+} catch (error) {
+  if (error instanceof SimulationDiagnosticsError) {
+    for (const diagnostic of error.diagnostics) {
+      console.error(diagnostic.code, diagnostic.stage, diagnostic.remediation);
+    }
+    console.error('retryable:', error.retryable);
+    console.assert(areSimulationDiagnosticsPrivacySafe(error.diagnostics));
+  }
+}
+```
+
+| Code | Stage | Meaning and remediation |
+| --- | --- | --- |
+| `VALIDATION_FAILED` | `input-validation` | An amount or argument was rejected before any RPC call. Correct it and retry; nothing was built or submitted. |
+| `CONTEXT_INSUFFICIENT` | `simulation` | Simulation failed without a decodable contract code or diagnostic events. Retry once; if it persists, check the RPC endpoint and source-account sequence number. |
+| `SIMULATION_FAILED` | `simulation` | The contract rejected the simulation with a decodable `VaultError` code. Resolve that contract error and retry. |
+| `RESULT_DECODE_FAILED` | `result-decoding` | Simulation succeeded but the pinned bindings could not decode the result. Confirm `specHash` matches the deployed contract. |
+| `RESTORE_REQUIRED` | `restore` | Footprint entries expired. Use `restoreAndRetry()` and then retry `prepare()`. |
+| `STATE_PRESERVED` | `state-persistence` | Always appended to a failure: existing vault state and balances were untouched. |
+
+Known typed errors keep their class: `InvalidAmountError` and `ContractExecutionError` gain a `diagnostics` array rather than being wrapped. A failure with insufficient context becomes `SimulationDiagnosticsError`. Diagnostics contain fixed template text only — never raw RPC URLs, wallet addresses, XDR, transaction hashes, or stack traces. `toSimulationError()` is exported for callers that wrap their own simulation adapter and want the same normalization.
+
 ### Token amounts
 
 Amount arguments (`amount`, `shares`, `min_shares_out`, `min_amount_out`) take a `bigint`, a base-unit integer string, or a `number` that is a safe integer. Fractional numbers and integers above `Number.MAX_SAFE_INTEGER` throw `InvalidAmountError` before any transaction is built, because they cannot be represented exactly.
