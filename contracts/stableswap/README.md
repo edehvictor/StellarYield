@@ -13,6 +13,10 @@
 - `remove_liquidity(sender, lp_amount, min_amount0, min_amount1, expected_context, operation_id)`
 - `swap(sender, token_in, amount_in, min_out, expected_context, operation_id)`
 - `is_operation_consumed(sender, kind, operation_id)` (`kind` is `add_liq`, `rem_liq` or `swap`)
+- `get_operation_state(sender, kind, operation_id) -> OperationState { committed, state_seq }`
+- `get_pool_state() -> PoolState { reserve0, reserve1, total_supply, state_seq }`
+- `add_liquidity_checked(..., operation_id, expected_state_seq)`, `remove_liquidity_checked(..., operation_id, expected_state_seq)`, `swap_checked(..., operation_id, expected_state_seq)` — retry-safe variants
+- `preview_add_liquidity_checked`, `preview_remove_liquidity_checked`, `preview_swap_checked` (read-only dry runs of the checked variants)
 - pool views and pricing helpers
 - `preview_swap(sender, token_in, amount_in, min_out, expected_context, operation_id) -> Diagnostic` (read-only dry run)
 - `preview_add_liquidity(sender, amount0, amount1, min_mint_amount, expected_context, operation_id) -> Diagnostic` (read-only dry run)
@@ -42,6 +46,7 @@ Diagnostic { ok: bool, stage: FailureStage, error_code: u32, remediation: Remedi
 | `FeeComputation`  | Dynamic fee computation failed                       |
 | `Invariant`       | D / y or share math failed or overflowed             |
 | `Slippage`        | Result below the caller's minimum                    |
+| `StateChanged`    | Pool checkpoint moved since the caller captured it   |
 
 | `RemediationPath` | Suggested action                                     |
 | ----------------- | ---------------------------------------------------- |
@@ -54,6 +59,7 @@ Diagnostic { ok: bool, stage: FailureStage, error_code: u32, remediation: Remedi
 | `ContactAdmin`    | Not caller-fixable                                   |
 | `RefreshContext`  | Re-read `get_pool_context()` and retry               |
 | `CheckOperation`  | Check `is_operation_consumed` before resubmitting    |
+| `RefreshState`    | Re-read `get_pool_state()` and retry with its `state_seq` |
 
 Diagnostics are privacy-safe: they contain only these enums and the numeric
 `StableSwapError` code - never addresses, amounts, reserves or balances.
@@ -85,6 +91,7 @@ Existing init, liquidity and swap event shapes are unchanged.
 - `WrongContract` (13): The caller's context names a different pool deployment.
 - `WrongVersion` (14): Stored state or the caller's context is not at the supported pool context version.
 - `DuplicateOperation` (15): `operation_id` was already consumed by a successful call of the same kind from the same sender.
+- `StateChanged` (16): A `*_checked` call was planned against a pool checkpoint that has since advanced; re-read `get_pool_state()` before retrying.
 
 ## Pool Context Binding
 
@@ -121,12 +128,45 @@ bound to another network.
 A rejected call changes nothing, so a caller that captured a context before a
 migration can refresh it with `get_pool_context()` and retry the same operation.
 
+## Partial completion and retry
+
+Every successful mutation commits its reserves, LP accounting, operation receipt
+and a monotonically increasing `StateSeq` **before** the token transfers. A
+failing transfer reverts the whole invocation, so no half-applied state is ever
+observable and the operation id stays unused.
+
+`get_pool_state()` returns the resumable checkpoint
+`{ reserve0, reserve1, total_supply, state_seq }`. `get_operation_state(sender,
+kind, operation_id)` returns `{ committed, state_seq }`: whether that specific
+submission landed and the checkpoint it reached. A legacy pool upgraded to this
+version reports `state_seq = 0` until its first mutation.
+
+For a submission whose outcome is unknown (timeout, dropped response), capture
+`get_pool_state().state_seq` before sending and use the `*_checked` variants on
+retry. They require that checkpoint to still be current:
+
+| Situation | Checked retry result |
+|---|---|
+| First attempt never landed | state unchanged → retry applies once with the same op id |
+| First attempt landed | checkpoint advanced → `StateChanged`, nothing moves |
+| Same op id, refreshed checkpoint | `DuplicateOperation`, nothing moves |
+| Fresh op id, stale checkpoint | `StateChanged`, so a blind resubmit cannot trade twice |
+
+`StateChanged` is checked before the operation-receipt check, so the caller
+first learns that it must re-read the pool (`get_pool_state()` /
+`get_operation_state()`) rather than assuming the submission failed. The
+ordinary `add_liquidity`, `remove_liquidity` and `swap` entry points and all
+event shapes are unchanged; the checked variants are additive.
+
+The `op` event payload remains `(sender, kind, operation_id)`. Indexers that
+need the sequence can read it from `get_pool_state()` after the transaction.
+
 ## Safety & Invariant Guarantees
 
 - **Boundary Validation**: Untrusted fields (`token0`, `token1`, `lp_token`, `amp_coeff`, `base_fee`, `fee_multiplier`, amounts, and slippage bounds) are validated at contract entry points before state or balance mutation.
-- **State & Balance Preservation**: Token transfers and storage mutations occur only after all validations, reserve math, and slippage checks succeed. When validation or execution fails, existing state, pool reserves, and user balances remain strictly untouched.
-- **Safe Retry**: Because failures leave state and balances unmodified, callers may safely retry operations immediately with adjusted slippage bounds or valid parameters without risk of fund lockup or state corruption.
-- **Operation Identity**: `add_liquidity`, `remove_liquidity` and `swap` take a caller-generated `operation_id: BytesN<32>`. The contract stores a receipt keyed by `sha256("stellaryield_stableswap_op_v1" || xdr(contract, sender, kind, operation_id))` only after the call's effect is applied, so:
+- **State & Balance Preservation**: All validations, reserve math and slippage checks run before any storage write or token transfer. The checkpoint is then committed before the transfers; when validation or execution fails, existing state, pool reserves, and user balances remain strictly untouched.
+- **Safe Retry**: Failures leave state and balances unmodified, so callers may retry with adjusted parameters. When the outcome is unknown, the `*_checked` entry points bind the retry to the captured `state_seq`, preventing accidental double execution even if the client generates a new operation id.
+- **Operation Identity**: `add_liquidity`, `remove_liquidity` and `swap` take a caller-generated `operation_id: BytesN<32>`. The contract stores a receipt keyed by `sha256("stellaryield_stableswap_op_v1" || xdr(contract, sender, kind, operation_id))` atomically with the call's effect, so:
   - resubmitting a call that already succeeded (for example after a lost response or a wallet double-submit) fails with `DuplicateOperation` and moves nothing;
   - a call that failed (including a context mismatch) never consumes its id, so the same id can be retried with fixed parameters or a refreshed context;
   - ids are scoped per deployment, sender and operation kind, so one caller cannot burn another's id.
@@ -135,8 +175,8 @@ migration can refresh it with `get_pool_context()` and retry the same operation.
 
 ## Storage Model
 
-- Instance: admin, tokens, amp, reserves, fee parameters, LP accounting metadata, bound network id and context version.
-- Persistent: LP/user position state where applicable, and `Operation(key)` receipts for consumed operation ids.
+- Instance: admin, tokens, amp, reserves, fee parameters, LP accounting metadata, bound network id, context version and `StateSeq`.
+- Persistent: LP/user position state where applicable, `Operation(key)` receipts for consumed operation ids and `OperationSeq(key)` checkpoints recording the sequence each one committed at.
 
 ## Local Test
 
