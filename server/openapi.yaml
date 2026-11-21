@@ -56,9 +56,9 @@ tags:
       | `UNSUPPORTED_ASSET` | 400 / 422 | One or more assets in the quote path are no longer in the supported asset set. |
       | `SLIPPAGE_EXCEEDED` | 400 / 422 | The applied slippage exceeds the maximum allowed threshold (15%). |
       | `ROUTE_MISMATCH` | 400 | The route hash in the quote does not match the current computed path. |
-      | `CONFIG_DRIFT` | 400 | The asset configuration version has changed since the quote was issued. |
-      | `ASSUMPTION_DRIFT` | 400 | The cryptographic fingerprint no longer matches the quote assumptions — assumptions were modified after quoting. Re-quote to proceed. Responses carry `recoverable: true`. |
-      | `INVALID_FINGERPRINT` | 400 | The assumption fingerprint is missing or malformed. |
+      | `CONFIG_DRIFT` | 400 | The immutable asset-configuration snapshot fingerprint (`assetConfigVersion`) is missing or no longer matches the current snapshot. Rejected without mutating state; refresh/re-quote and retry. Responses carry `recoverable: true`. |
+      | `ASSUMPTION_DRIFT` | 400 | The cryptographic assumption fingerprint no longer matches the quoted review snapshot/assumptions. Rejected without mutating state; refresh/re-quote and retry. Responses carry `recoverable: true`. |
+      | `INVALID_FINGERPRINT` | 400 | The assumption fingerprint is missing or malformed, so the review snapshot cannot be trusted. Rejected without mutating state; refresh/re-quote and retry. Responses carry `recoverable: true`. |
       | `QUOTE_FAILED` | 500 | Quote generation failed due to an internal error. |
       | `VERIFY_FAILED` | 500 | Quote verification failed due to an internal error. |
       | `CONFIG_UNAVAILABLE` | 503 | The supported assets configuration could not be loaded. |
@@ -2756,7 +2756,9 @@ paths:
   /api/auth/challenge:
     post:
       summary: Request authentication challenge
-      description: Generates a challenge for wallet signing
+      description: >-
+        Generates a wallet authentication challenge bound to the current immutable
+        wallet auth configuration snapshot fingerprint.
       tags:
         - Auth
       requestBody:
@@ -2769,6 +2771,13 @@ paths:
                 walletAddress:
                   type: string
                   description: User's Stellar wallet address
+                sessionKeyAddress:
+                  type: string
+                  description: Ephemeral session signer public key
+                providerId:
+                  type: string
+                loginHint:
+                  type: string
       responses:
         '200':
           description: Challenge generated successfully
@@ -2779,9 +2788,84 @@ paths:
                 properties:
                   challenge:
                     type: string
+                  expiresAt:
+                    type: string
+                    format: date-time
+                  authConfigFingerprint:
+                    type: string
+                    description: Immutable wallet auth configuration snapshot fingerprint
                   walletAddressType:
                     type: string
                     enum: [account, contract]
+                  acceptedSignerTypes:
+                    type: array
+                    items:
+                      type: string
+        '400':
+          description: Invalid auth challenge request
+
+  /api/auth/verify:
+    post:
+      summary: Verify authentication challenge
+      description: >-
+        Verifies a signed wallet authentication challenge. Challenges bound to a
+        stale or missing wallet auth configuration snapshot are rejected so the
+        client can refresh and retry safely without consuming replay state.
+      tags:
+        - Auth
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [walletAddress, sessionKeyAddress, challenge, signature]
+              properties:
+                walletAddress:
+                  type: string
+                sessionKeyAddress:
+                  type: string
+                challenge:
+                  type: string
+                signature:
+                  type: string
+      responses:
+        '200':
+          description: Verification completed
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  verified:
+                    type: boolean
+                  walletAddressType:
+                    type: string
+                    enum: [account, contract]
+                  authConfigFingerprint:
+                    type: string
+                  acceptedSignerTypes:
+                    type: array
+                    items:
+                      type: string
+        '400':
+          description: Invalid, expired, replayed, or malformed verification request
+        '409':
+          description: Stale wallet auth configuration snapshot; refresh challenge and retry
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string
+                  code:
+                    type: string
+                    enum: [STALE_WALLET_AUTH_CONFIG]
+                  currentAuthConfigFingerprint:
+                    type: string
+                  requestId:
+                    type: string
 
     /metrics:
       get:
@@ -5982,9 +6066,10 @@ Incident:
           type: boolean
           description: >
             When true, the client can recover by requesting a fresh quote or
-            retrying (e.g. STALE_QUOTE, CONFIG_DRIFT, ROUTE_MISMATCH,
-            UNSUPPORTED_ASSET, transient QUOTE_FAILED). Absent or false for
-            validation failures that require changing inputs.
+            retrying (e.g. STALE_QUOTE, CONFIG_DRIFT, ASSUMPTION_DRIFT,
+            INVALID_FINGERPRINT, ROUTE_MISMATCH, UNSUPPORTED_ASSET, transient
+            QUOTE_FAILED). Absent or false for validation failures that require
+            changing inputs.
         diagnostics:
           type: array
           description: >
