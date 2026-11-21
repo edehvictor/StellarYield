@@ -128,6 +128,7 @@ export interface PreparedTransactionMeta<T> {
   /** Caller-supplied idempotency key that produced `operationId`. */
   idempotencyKey?: string;
   specHash?: string;
+  configFingerprint?: string;
 }
 
 export class PreparedTransaction<T = unknown> {

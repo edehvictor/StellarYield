@@ -21,6 +21,12 @@ import {
   buildExecutionDiagnostics,
   buildWalletSigningDiagnostics,
 } from "./governanceDiagnostics";
+import {
+  canRollbackExecution,
+  executionPhaseFor,
+  isExecutionInterrupted,
+  type GovernanceExecutionState,
+} from "./governanceOperation";
 import type { GovernanceDiagnostic } from "../../../../shared/types/governanceDiagnostic";
 
 const NETWORK_PASSPHRASE = getNetworkPassphrase();
@@ -68,15 +74,11 @@ export default function PendingTransactionCard({
   const [execHash, setExecHash] = useState<string | null>(
     () => persistedOperation?.txHash ?? null,
   );
+  const [execDiagnostics, setExecDiagnostics] = useState<GovernanceDiagnostic[]>([]);
   const lastExecPhaseRef = useRef<TxPhase>(
     persistedOperation?.failedAtPhase ??
       (persistedOperation?.txHash ? "polling" : "submitting"),
   );
-  const [execPhase, setExecPhase] = useState<TxPhase>("idle");
-  const [execError, setExecError] = useState<string | null>(null);
-  const [execDiagnostics, setExecDiagnostics] = useState<GovernanceDiagnostic[]>([]);
-  const [execHash, setExecHash] = useState<string | null>(null);
-  const lastExecPhaseRef = useRef<TxPhase>("idle");
 
   const hasSigned = transaction.signatures.some(
     (s) => s.publicKey === walletAddress,
@@ -173,29 +175,27 @@ export default function PendingTransactionCard({
         onExecute(transaction.id, result.hash);
       } else {
         const msg = result.error ?? "Transaction failed";
-        const failedAtPhase = lastExecPhaseRef.current === "idle"
-          ? "submitting"
-          : lastExecPhaseRef.current;
+        const recordedPhase = lastExecPhaseRef.current as TxPhase;
+        const failedAtPhase = recordedPhase === "idle" ? "submitting" : recordedPhase;
         setExecError(msg);
         setError(msg);
         onExecutionFailed(transaction.id, msg, failedAtPhase);
         setExecDiagnostics(
           buildExecutionDiagnostics(
-            lastExecPhaseRef.current === "submitting" ? "submitting" : "polling",
+            recordedPhase === "submitting" ? "submitting" : "polling",
           ),
         );
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      const failedAtPhase = lastExecPhaseRef.current === "idle"
-        ? "submitting"
-        : lastExecPhaseRef.current;
+      const recordedPhase = lastExecPhaseRef.current as TxPhase;
+      const failedAtPhase = recordedPhase === "idle" ? "submitting" : recordedPhase;
       setExecError(msg);
       setError(msg);
       onExecutionFailed(transaction.id, msg, failedAtPhase);
       setExecDiagnostics(
         buildExecutionDiagnostics(
-          lastExecPhaseRef.current === "submitting" ? "submitting" : "polling",
+          recordedPhase === "submitting" ? "submitting" : "polling",
         ),
       );
     } finally {
