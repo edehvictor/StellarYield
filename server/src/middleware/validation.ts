@@ -1,6 +1,7 @@
 import { Request, Response, NextFunction } from "express";
 import { StrKey } from "@stellar/stellar-sdk";
 import { sendError } from "../utils/errorResponse";
+import { parseStroopsAmount, StroopsMathError } from "../services/stroopsMath";
 
 export function validateWalletAddress(req: Request, res: Response, next: NextFunction): void {
   const address = req.params.address || req.params.walletAddress;
@@ -31,8 +32,26 @@ export function validateZapQuote(req: Request, res: Response, next: NextFunction
     sendError(res, 400, "MISSING_FIELDS", "inputTokenContract, vaultTokenContract, and amountInStroops are required.");
     return;
   }
-  if (typeof amountInStroops !== "string" || !/^-?\d+$/.test(amountInStroops)) {
-    sendError(res, 400, "INVALID_AMOUNT", "amountInStroops must be an integer string.");
+  // Strict, checked parse: rejects negatives, zero, decimals, and values above i128 max.
+  try {
+    parseStroopsAmount(amountInStroops);
+  } catch (e) {
+    if (e instanceof StroopsMathError) {
+      sendError(res, 400, "INVALID_AMOUNT", e.message);
+      return;
+    }
+    throw e;
+  }
+  const { slippageTolerance } = req.body;
+  if (
+    slippageTolerance !== undefined &&
+    !(
+      (typeof slippageTolerance === "number" ||
+        (typeof slippageTolerance === "string" && slippageTolerance.trim() !== "")) &&
+      Number.isFinite(Number(slippageTolerance))
+    )
+  ) {
+    sendError(res, 400, "INVALID_SLIPPAGE", "slippageTolerance must be a finite number.");
     return;
   }
   next();
