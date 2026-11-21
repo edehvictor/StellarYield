@@ -84,18 +84,43 @@ can call `get_pool_context()` again and retry the same operation.
 ## Failure atomicity and retries
 
 `add_liquidity`, `remove_liquidity` and `swap` validate arguments, compute the
-invariant and check slippage **before** transferring tokens or writing reserves,
-LP supply, or LP balances. Because the whole invocation reverts on a typed
-error, a failed call leaves:
+invariant and check slippage **before** any state change. They then commit the
+reserves, LP supply, LP balance and operation receipt, advance `StateSeq`, and
+only afterwards move tokens. A failing transfer reverts the whole invocation,
+so a failed call leaves:
 
 - token balances unchanged;
 - `Reserve0`/`Reserve1` unchanged;
-- `TotalSupply` and the caller's `LpBalance` unchanged.
+- `TotalSupply` and the caller's `LpBalance` unchanged;
+- `StateSeq` and the operation receipt unchanged.
 
 The same call can therefore be retried once the cause is fixed (smaller amount,
-looser-bound but valid minimum, corrected token, or a refreshed pool context). There are no operation
-identity receipts in this contract: retries are safe because the failed call
-never partially applied.
+looser-bound but valid minimum, corrected token, or a refreshed pool context).
+
+### Operation checkpoints
+
+Each successful mutation increments the instance key `StateSeq` and stores the
+new value under `OperationSeq(operation_key)`. `get_pool_state()` returns
+`{ reserve0, reserve1, total_supply, state_seq }` and `get_operation_state()`
+returns `{ committed, state_seq }` for a given sender/kind/operation id. A pool
+initialized before this counter existed reads it as zero, so upgrades are
+backwards compatible.
+
+The `*_checked` entry points add `expected_state_seq` to their arguments. The
+planner checks it immediately after the `PoolContext` validation and before the
+replay check:
+
+| Outcome of the first attempt | Checked retry |
+|---|---|
+| Rejected (no commit) | sequence unchanged → the same id can be reused |
+| Committed, response lost | sequence advanced → `StateChanged` (16) |
+| Committed, retry with current sequence | `DuplicateOperation` (15) |
+
+This makes a blind resubmit safe even when the client generates a fresh
+operation id: without the checkpoint it would be indistinguishable from a new
+intent and would apply the trade twice. `preview_*_checked` reports the same
+condition as `FailureStage::StateChanged` with remediation `RefreshState`,
+without mutating state.
 
 ## Related
 
