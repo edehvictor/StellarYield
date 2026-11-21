@@ -1,6 +1,13 @@
 import { Request, Response, NextFunction } from "express";
 import { StrKey } from "@stellar/stellar-sdk";
 import { sendError } from "../utils/errorResponse";
+import { buildTransactionReviewFailureDiagnostics } from "../../../shared/types/transactionReviewDiagnostic";
+
+function zapValidationDiagnostics() {
+  return buildTransactionReviewFailureDiagnostics("VALIDATION_FAILED", {
+    stage: "request-validation",
+  });
+}
 import { parseStroopsAmount, StroopsMathError } from "../services/stroopsMath";
 
 export function validateWalletAddress(req: Request, res: Response, next: NextFunction): void {
@@ -29,7 +36,7 @@ export function validatePagination(req: Request, res: Response, next: NextFuncti
 export function validateZapQuote(req: Request, res: Response, next: NextFunction): void {
   const { inputTokenContract, vaultTokenContract, amountInStroops } = req.body;
   if (!inputTokenContract || !vaultTokenContract || amountInStroops === undefined) {
-    sendError(res, 400, "MISSING_FIELDS", "inputTokenContract, vaultTokenContract, and amountInStroops are required.");
+    sendError(res, 400, "MISSING_FIELDS", "inputTokenContract, vaultTokenContract, and amountInStroops are required.", undefined, undefined, undefined, zapValidationDiagnostics());
     return;
   }
   // Strict, checked parse: rejects negatives, zero, decimals, and values above i128 max.
@@ -37,7 +44,7 @@ export function validateZapQuote(req: Request, res: Response, next: NextFunction
     parseStroopsAmount(amountInStroops);
   } catch (e) {
     if (e instanceof StroopsMathError) {
-      sendError(res, 400, "INVALID_AMOUNT", e.message);
+      sendError(res, 400, "INVALID_AMOUNT", e.message, undefined, undefined, undefined, zapValidationDiagnostics());
       return;
     }
     throw e;
@@ -51,7 +58,7 @@ export function validateZapQuote(req: Request, res: Response, next: NextFunction
       Number.isFinite(Number(slippageTolerance))
     )
   ) {
-    sendError(res, 400, "INVALID_SLIPPAGE", "slippageTolerance must be a finite number.");
+    sendError(res, 400, "INVALID_SLIPPAGE", "slippageTolerance must be a finite number.", undefined, undefined, undefined, zapValidationDiagnostics());
     return;
   }
   next();
