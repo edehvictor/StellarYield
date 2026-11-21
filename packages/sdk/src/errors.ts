@@ -90,6 +90,20 @@ export class SdkEndpointError extends SorobanSdkError {
     this.name = "SdkEndpointError";
     this.validationErrors = validationErrors;
   }
+export interface DiagnosticContext {
+  stage: SdkErrorPhase;
+  remediation: string;
+}
+
+export function diagnosticContext(phase: SdkErrorPhase, retryable: boolean): DiagnosticContext {
+  const remediation = retryable
+    ? "retry after refreshing the current network and account state"
+    : phase === "simulate"
+      ? "review the request and contract configuration"
+      : phase === "sign"
+        ? "verify the wallet account and network"
+        : "inspect the transaction status before retrying";
+  return { stage: phase, remediation };
 }
 
 export class ContractExecutionError extends SorobanSdkError {
@@ -97,6 +111,7 @@ export class ContractExecutionError extends SorobanSdkError {
   public readonly errorName: string;
   public readonly rawResultXdr?: string;
   public readonly diagnosticEvents?: string[];
+  public readonly diagnosticContext: DiagnosticContext;
 
   constructor(
     errorCode: number,
@@ -135,6 +150,7 @@ export class ContractExecutionError extends SorobanSdkError {
     this.errorName = errorName;
     this.rawResultXdr = rawResultXdr;
     this.diagnosticEvents = diagnosticEvents;
+    this.diagnosticContext = diagnosticContext(phase, false);
   }
 }
 
