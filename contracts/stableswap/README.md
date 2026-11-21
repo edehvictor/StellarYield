@@ -7,7 +7,7 @@
 ## Public API (selected)
 
 - `initialize(admin, token0, token1, lp_token, amp_coeff, base_fee, fee_multiplier)`
-- `get_pool_context()` returns the pool's network, deployment and version context
+- `get_pool_context()` returns the pool's network, deployment, version, and immutable configuration fingerprint
 - `migrate()` (admin only) binds a legacy pool to the live network and current context version
 - `add_liquidity(sender, amount0, amount1, min_mint_amount, expected_context, operation_id)`
 - `remove_liquidity(sender, lp_amount, min_amount0, min_amount1, expected_context, operation_id)`
@@ -85,13 +85,15 @@ Existing init, liquidity and swap event shapes are unchanged.
 - `WrongContract` (13): The caller's context names a different pool deployment.
 - `WrongVersion` (14): Stored state or the caller's context is not at the supported pool context version.
 - `DuplicateOperation` (15): `operation_id` was already consumed by a successful call of the same kind from the same sender.
+- `ConfigurationMismatch` (16): Stored configuration no longer matches its immutable fingerprint, or the caller's snapshot is stale.
 
 ## Pool Context Binding
 
 A pool's state is bound to an explicit context: the network it was created on
-(`SHA-256` of the network passphrase), its deployment address, and a context
-version. `get_pool_context()` returns it; pass that value to every state-mutating
-call (`add_liquidity`, `remove_liquidity`, `swap`).
+(`SHA-256` of the network passphrase), its deployment address, a context
+version, and a fingerprint of its immutable token pair, LP token, amplification,
+and fee settings. `get_pool_context()` returns it; pass that value to every
+state-mutating call (`add_liquidity`, `remove_liquidity`, `swap`).
 
 Validation runs before any reserve math, token transfer or storage write:
 
@@ -103,23 +105,30 @@ Validation runs before any reserve math, token transfer or storage write:
 4. the stored and caller's `version` must both match the supported
    `CURRENT_POOL_VERSION` (`WrongVersion`), so code running against an unknown
    (newer or downgraded) storage layout refuses to interpret it.
+5. the actual configuration must match the fingerprint persisted at
+   initialization or migration, and the caller's fingerprint must match that
+   configuration (`ConfigurationMismatch`).
 
-`get_reserves()` applies the same live-network check, because it is the read
-used to price swaps.
+`get_reserves()` also checks the live network and persisted configuration
+fingerprint, because it is the read used to price swaps.
 
 ### Legacy pools and `migrate`
 
 Pools initialized before context binding have no stored network or version. They
 continue to operate unchanged: the pool adopts the live network and reports
-version `0`. An admin can call `migrate()` to persist that binding and set the
-version to `CURRENT_POOL_VERSION`; migration is idempotent, changes no reserves,
-LP supply or balances, and refuses (`WrongNetwork`) to re-bind a pool already
-bound to another network.
+version `0`. Until migration, their configuration fingerprint is derived from
+the current stored configuration. An admin can call `migrate()` to persist that
+fingerprint and set the version to `CURRENT_POOL_VERSION`; migration is
+idempotent, changes no reserves, LP supply or balances, and refuses
+(`WrongNetwork`) to re-bind a pool already bound to another network.
 
 ### Retries
 
 A rejected call changes nothing, so a caller that captured a context before a
 migration can refresh it with `get_pool_context()` and retry the same operation.
+If stored configuration no longer matches its persisted fingerprint, operations
+and pool-context reads are rejected until the original configuration is
+restored; refreshing alone cannot bless changed configuration.
 
 ## Safety & Invariant Guarantees
 
@@ -135,7 +144,7 @@ migration can refresh it with `get_pool_context()` and retry the same operation.
 
 ## Storage Model
 
-- Instance: admin, tokens, amp, reserves, fee parameters, LP accounting metadata, bound network id and context version.
+- Instance: admin, tokens, amp, reserves, fee parameters, LP accounting metadata, bound network id, context version and immutable configuration fingerprint.
 - Persistent: LP/user position state where applicable, and `Operation(key)` receipts for consumed operation ids.
 
 ## Local Test
