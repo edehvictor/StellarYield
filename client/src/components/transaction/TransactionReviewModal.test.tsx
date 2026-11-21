@@ -143,4 +143,74 @@ describe("TransactionReviewModal", () => {
     fireEvent.click(screen.getByLabelText(/close review dialog/i));
     expect(onClose).toHaveBeenCalledTimes(2);
   });
+
+  describe("boundary-value amounts (#1890)", () => {
+    const renderWith = (
+      inputAmount: string,
+      vault: { amount: string; minAmount?: string },
+      slippage = 0.5,
+      onConfirm = vi.fn(),
+    ) => {
+      render(
+        <TransactionReviewModal
+          isOpen={true}
+          onClose={vi.fn()}
+          onConfirm={onConfirm}
+          walletAddress="GBWM7FAKESTELLARWALLETADDRESS123456"
+          inputToken={{ symbol: "USDC", amount: inputAmount }}
+          vaultToken={{ symbol: "yUSDC", ...vault }}
+          slippageTolerance={slippage}
+          assumptions={mockAssumptions}
+          fingerprint={mockFingerprint}
+        />,
+      );
+      return onConfirm;
+    };
+
+    it("blocks confirmation and never signs when the deposit amount is zero", () => {
+      const onConfirm = renderWith("0", { amount: "0" });
+      const btn = screen.getByTestId("confirm-transaction-btn");
+      expect(btn).toBeDisabled();
+      expect(screen.getByRole("alert")).toHaveTextContent(/greater than zero/i);
+      fireEvent.click(btn);
+      expect(onConfirm).not.toHaveBeenCalled();
+    });
+
+    it("blocks confirmation when the guaranteed minimum exceeds the estimate", () => {
+      renderWith("100", { amount: "99.5", minAmount: "99.5000001" });
+      expect(screen.getByTestId("confirm-transaction-btn")).toBeDisabled();
+      expect(screen.getByRole("alert")).toHaveTextContent(/exceeds the estimated output/i);
+    });
+
+    it("blocks confirmation for non-finite slippage", () => {
+      renderWith("100", { amount: "99.5" }, Number.NaN);
+      expect(screen.getByTestId("confirm-transaction-btn")).toBeDisabled();
+    });
+
+    it("allows the smallest valid amount (1 stroop) with a zero minimum, and is safely retryable", () => {
+      const onConfirm = renderWith("0.0000001", { amount: "0.0000001", minAmount: "0" });
+      const btn = screen.getByTestId("confirm-transaction-btn");
+      expect(btn).not.toBeDisabled();
+      fireEvent.click(btn);
+      fireEvent.click(btn); // retry after a failed attempt: still enabled, no state corruption
+      expect(onConfirm).toHaveBeenCalledTimes(2);
+    });
+
+    it("keeps a caller-supplied error ahead of amount validation", () => {
+      render(
+        <TransactionReviewModal
+          isOpen={true}
+          onClose={vi.fn()}
+          onConfirm={vi.fn()}
+          walletAddress="GABC"
+          inputToken={{ symbol: "USDC", amount: "100" }}
+          vaultToken={{ symbol: "yUSDC", amount: "99.5" }}
+          slippageTolerance={0.5}
+          error="Reserve too low"
+        />,
+      );
+      expect(screen.getByRole("alert")).toHaveTextContent("Reserve too low");
+      expect(screen.getByText("GABC")).toBeInTheDocument();
+    });
+  });
 });
