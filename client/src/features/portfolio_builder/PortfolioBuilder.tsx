@@ -176,6 +176,17 @@ export default function PortfolioBuilder({
     }
   }, [allocations, dustValidation]);
 
+  const recovery = useSignatureRecovery({
+    action: "portfolio_deposit",
+    provider: providerId,
+    walletAddress,
+    onRetry: () => executeDeposits(failedIndexRef.current),
+    getProgress: () => ({
+      completed: completedCount,
+      total: activeAllocationsRef.current.length,
+    }),
+  });
+
   /**
    * Execute the current allocation batch, starting at `startIndex`.
    * A rejected signature is classified into the typed recovery flow; retrying
@@ -279,17 +290,6 @@ export default function PortfolioBuilder({
       }
     }
   }
-
-  const recovery = useSignatureRecovery({
-    action: "portfolio_deposit",
-    provider: providerId,
-    walletAddress,
-    onRetry: () => executeDeposits(failedIndexRef.current),
-    getProgress: () => ({
-      completed: completedCount,
-      total: activeAllocationsRef.current.length,
-    }),
-  });
 
   // Plain function (not useCallback): it must read the current render's
   // amount, allocations, and execute toggle each time it is clicked.

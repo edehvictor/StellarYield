@@ -418,12 +418,27 @@ export default function AlertsModal({
   };
 
   const handleSaveDigestPreferences = async () => {
+    if (digestSaving) return;
+
+    // Stable per-attempt identity so an interrupted save is not applied twice
+    // when the user retries from the optimistic-update retry path.
+    if (!digestOperationIdRef.current) {
+      digestOperationIdRef.current = `op-digest-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+    }
+    const operationIdentity = digestOperationIdRef.current;
+
     const preferencesWithOverrides = {
       ...digestPreferences,
       channelOverrides: channelOverrides.watchlist,
     };
     await optimisticDigestUpdate(preferencesWithOverrides, async () => {
-      return await saveDigestPreference(walletAddress, preferencesWithOverrides);
+      const saved = await saveDigestPreference(
+        walletAddress,
+        preferencesWithOverrides,
+        operationIdentity,
+      );
+      digestOperationIdRef.current = null;
+      return saved;
     });
   };
 

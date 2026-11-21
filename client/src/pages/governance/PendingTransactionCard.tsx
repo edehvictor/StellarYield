@@ -21,6 +21,12 @@ import {
   buildExecutionDiagnostics,
   buildWalletSigningDiagnostics,
 } from "./governanceDiagnostics";
+import {
+  canRollbackExecution,
+  executionPhaseFor,
+  isExecutionInterrupted,
+  type GovernanceExecutionState,
+} from "./governanceOperation";
 import type { GovernanceDiagnostic } from "../../../../shared/types/governanceDiagnostic";
 import {
   canRollbackExecution,
@@ -74,6 +80,7 @@ export default function PendingTransactionCard({
   const [execHash, setExecHash] = useState<string | null>(
     () => persistedOperation?.txHash ?? null,
   );
+  const [execDiagnostics, setExecDiagnostics] = useState<GovernanceDiagnostic[]>([]);
   const lastExecPhaseRef = useRef<TxPhase>(
     persistedOperation?.failedAtPhase ??
       (persistedOperation?.txHash ? "polling" : "submitting"),
@@ -176,24 +183,28 @@ export default function PendingTransactionCard({
       } else {
         const msg = result.error ?? "Transaction failed";
         const failedAtPhase = lastExecPhaseRef.current;
+        const recordedPhase = lastExecPhaseRef.current as TxPhase;
+        const failedAtPhase = recordedPhase === "idle" ? "submitting" : recordedPhase;
         setExecError(msg);
         setError(msg);
         onExecutionFailed(transaction.id, msg, failedAtPhase);
         setExecDiagnostics(
           buildExecutionDiagnostics(
-            lastExecPhaseRef.current === "submitting" ? "submitting" : "polling",
+            recordedPhase === "submitting" ? "submitting" : "polling",
           ),
         );
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       const failedAtPhase = lastExecPhaseRef.current;
+      const recordedPhase = lastExecPhaseRef.current as TxPhase;
+      const failedAtPhase = recordedPhase === "idle" ? "submitting" : recordedPhase;
       setExecError(msg);
       setError(msg);
       onExecutionFailed(transaction.id, msg, failedAtPhase);
       setExecDiagnostics(
         buildExecutionDiagnostics(
-          lastExecPhaseRef.current === "submitting" ? "submitting" : "polling",
+          recordedPhase === "submitting" ? "submitting" : "polling",
         ),
       );
     } finally {

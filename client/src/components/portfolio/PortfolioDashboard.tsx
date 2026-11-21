@@ -243,6 +243,13 @@ export default function PortfolioDashboard({
     () =>
       positions
         .filter((p): p is typeof p & { currentValue: number } => p.currentValue !== null)
+      // Unpriced positions have no USD value to plot; they stay in the table
+      // and exposure summary but cannot contribute to the heatmap.
+      positions
+        .filter(
+          (p): p is VaultPosition & { currentValue: number } =>
+            typeof p.currentValue === "number",
+        )
         .map((p) => ({
           asset: p.asset,
           protocol: p.protocol,

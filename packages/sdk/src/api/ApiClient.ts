@@ -27,6 +27,7 @@ import {
   normalizeEndpointUrl,
   resolveSafeDiagnostics,
 } from "../endpoint";
+import { StaleSimulationConfigError } from "../errors";
 import {
   captureSimulationConfig,
   computeSimulationConfigFingerprint,

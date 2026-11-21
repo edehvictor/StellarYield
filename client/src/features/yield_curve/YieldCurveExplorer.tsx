@@ -63,6 +63,9 @@ const DEFAULT_ALLOCATIONS: AllocationLeg[] = [
 ];
 
 function formatUsd(value: number): string {
+  if (!Number.isFinite(value)) {
+    return "—";
+  }
   return new Intl.NumberFormat("en-US", {
     style: "currency",
     currency: "USD",
@@ -72,6 +75,9 @@ function formatUsd(value: number): string {
 }
 
 function formatPct(value: number, decimals = 2): string {
+  if (!Number.isFinite(value)) {
+    return "—%";
+  }
   return `${value.toFixed(decimals)}%`;
 }
 
@@ -127,8 +133,21 @@ export default function YieldCurveExplorer({
   }, [result, horizon]);
 
   const updateAllocation = (id: string, patch: Partial<AllocationLeg>) => {
+    const sanitizedPatch = Object.fromEntries(
+      Object.entries(patch).filter(([, value]) => {
+        if (typeof value === "number") {
+          return Number.isFinite(value);
+        }
+        return true;
+      }),
+    ) as Partial<AllocationLeg>;
+
+    if (Object.keys(sanitizedPatch).length === 0) {
+      return;
+    }
+
     setAllocations((prev) =>
-      prev.map((leg) => (leg.id === id ? { ...leg, ...patch } : leg)),
+      prev.map((leg) => (leg.id === id ? { ...leg, ...sanitizedPatch } : leg)),
     );
   };
 
@@ -225,7 +244,11 @@ export default function YieldCurveExplorer({
             min={0}
             step={100}
             value={principal}
-            onChange={(e) => setPrincipal(Number(e.target.value))}
+            onChange={(e) => {
+              const next = Number(e.target.value);
+              if (!Number.isFinite(next)) return;
+              setPrincipal(Math.max(0, next));
+            }}
             className="w-full bg-slate-800 border border-slate-700 rounded px-3 py-1.5 text-sm text-white"
           />
         </div>
@@ -244,7 +267,11 @@ export default function YieldCurveExplorer({
             max={10}
             step={0.1}
             value={feeDrag}
-            onChange={(e) => setFeeDrag(Number(e.target.value))}
+            onChange={(e) => {
+              const next = Number(e.target.value);
+              if (!Number.isFinite(next)) return;
+              setFeeDrag(Math.max(0, Math.min(10, next)));
+            }}
             className="w-full"
           />
         </div>
@@ -280,9 +307,11 @@ export default function YieldCurveExplorer({
                   step={0.1}
                   value={leg.apyPct}
                   aria-label={`${leg.label} APY`}
-                  onChange={(e) =>
-                    updateAllocation(leg.id, { apyPct: Number(e.target.value) })
-                  }
+                  onChange={(e) => {
+                    const next = Number(e.target.value);
+                    if (!Number.isFinite(next)) return;
+                    updateAllocation(leg.id, { apyPct: Math.max(0, next) });
+                  }}
                   className="w-full bg-slate-800 border border-slate-700 rounded px-2 py-1 text-sm text-white"
                 />
               </div>
@@ -297,11 +326,13 @@ export default function YieldCurveExplorer({
                   step={1}
                   value={leg.weightPct}
                   aria-label={`${leg.label} weight`}
-                  onChange={(e) =>
+                  onChange={(e) => {
+                    const next = Number(e.target.value);
+                    if (!Number.isFinite(next)) return;
                     updateAllocation(leg.id, {
-                      weightPct: Number(e.target.value),
-                    })
-                  }
+                      weightPct: Math.max(0, Math.min(100, next)),
+                    });
+                  }}
                   className="w-full"
                 />
               </div>

@@ -124,6 +124,7 @@ function validateStrategyYield(entry: unknown): StrategyYield | null {
   if (s.rebalancingBehavior !== undefined && 
       s.rebalancingBehavior !== null &&
       (typeof s.rebalancingBehavior !== "string" ||
+      (typeof s.rebalancingBehavior !== 'string' ||
         !['Static', 'Dynamic', 'Yield-Weighted'].includes(s.rebalancingBehavior))) return null;
   if (typeof s.fetchedAt !== 'string') return null;
   // Checked boundaries (#1922): non-negative USD, 0-100 risk score, 0-10,000

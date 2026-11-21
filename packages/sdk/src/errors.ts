@@ -53,8 +53,11 @@ export abstract class SorobanSdkError extends Error {
   /**
    * Privacy-safe diagnostics naming the failed stage and remediation path.
    * Present on simulation-path errors; never contains raw error payloads.
+   * Endpoint/lifecycle errors carry `SdkDiagnostic`s, simulation-path errors
+   * carry `SimulationDiagnostic`s.
    */
   public diagnostics?: readonly SdkDiagnostic[] | SimulationDiagnostic[];
+  public diagnostics?: readonly SdkDiagnostic[] | readonly SimulationDiagnostic[];
 
   constructor(
     message: string,
@@ -206,9 +209,10 @@ export function attachSimulationDiagnostics<T extends SorobanSdkError>(
   error: T,
   diagnostics: SimulationDiagnostic[]
 ): T {
-  if (!error.diagnostics || error.diagnostics.length === 0) {
-    error.diagnostics = diagnostics;
-  }
+  // Simulation diagnostics supersede any endpoint-shaped defaults the error was
+  // constructed with (for example an InvalidAmountError's validation
+  // diagnostics), so callers always see the simulation stage that failed.
+  error.diagnostics = diagnostics;
   return error;
 }
 
