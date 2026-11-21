@@ -8,7 +8,13 @@ import {
   ExternalLink,
   Wallet,
 } from "lucide-react";
+import {
+  buildTransactionReviewFailureDiagnostics,
+  getTransactionReviewStageLabel,
+  type TransactionReviewDiagnostic,
+} from "../../../../shared/types/transactionReviewDiagnostic";
 import { QuoteAssumptionFingerprintDisplay } from "./QuoteAssumptionFingerprintDisplay";
+import { shortenAddress, validateReviewAmounts } from "./reviewAmounts";
 import type { QuoteAssumptions } from "../../../../shared/types/quoteAssumptionFingerprint";
 
 export interface TransactionReviewTokenDetail {
@@ -33,6 +39,12 @@ export interface TransactionReviewModalProps {
   isStale?: boolean;
   onRefreshQuote?: () => void;
   error?: string | null;
+  /**
+   * Privacy-safe stage diagnostics for the failure. When `error` is set and no
+   * diagnostics are supplied, a `CONTEXT_INSUFFICIENT` diagnostic is shown so
+   * the user still gets a remediation path and a state-preserved statement.
+   */
+  diagnostics?: readonly TransactionReviewDiagnostic[] | null;
 }
 
 export function TransactionReviewModal({
@@ -50,6 +62,7 @@ export function TransactionReviewModal({
   isStale = false,
   onRefreshQuote,
   error = null,
+  diagnostics = null,
 }: TransactionReviewModalProps) {
   // Close on Escape key
   const handleKeyDown = useCallback(
@@ -70,7 +83,18 @@ export function TransactionReviewModal({
 
   if (!isOpen) return null;
 
-  const canConfirm = !isSubmitting && !isStale && !error;
+  const amountCheck = validateReviewAmounts({ inputToken, vaultToken, slippageTolerance });
+  const amountError = amountCheck.valid ? null : amountCheck.reason;
+  const displayError = error ?? amountError;
+  const canConfirm = !isSubmitting && !isStale && !displayError;
+  const shownDiagnostics: readonly TransactionReviewDiagnostic[] =
+    diagnostics && diagnostics.length > 0
+      ? diagnostics
+      : error
+        ? buildTransactionReviewFailureDiagnostics("CONTEXT_INSUFFICIENT", { stage: "unknown" })
+        : amountError
+          ? buildTransactionReviewFailureDiagnostics("VALIDATION_FAILED", { stage: "request-validation" })
+          : [];
 
   return (
     <div
@@ -114,7 +138,7 @@ export function TransactionReviewModal({
               Connected Account
             </span>
             <span className="font-mono text-gray-200">
-              {walletAddress.slice(0, 6)}…{walletAddress.slice(-4)}
+              {shortenAddress(walletAddress)}
             </span>
           </div>
 
@@ -159,7 +183,7 @@ export function TransactionReviewModal({
           </div>
 
           {/* Error Message if Present */}
-          {error && (
+          {displayError && (
             <div
               className="flex items-start gap-2 rounded-xl border border-red-500/30 bg-red-500/10 p-3 text-xs text-red-200"
               role="alert"
@@ -167,9 +191,27 @@ export function TransactionReviewModal({
               <AlertTriangle className="h-4 w-4 shrink-0 text-red-400 mt-0.5" />
               <div>
                 <p className="font-semibold text-red-300">Submission blocked</p>
-                <p>{error}</p>
+                <p>{displayError}</p>
               </div>
             </div>
+          )}
+
+          {shownDiagnostics.length > 0 && (
+            <ul
+              data-testid="transaction-review-diagnostics"
+              aria-label="Transaction review diagnostics"
+              className="space-y-2 rounded-xl border border-amber-500/20 bg-amber-500/5 p-3"
+            >
+              {shownDiagnostics.map((d) => (
+                <li key={`${d.code}-${d.stage}`} className="text-xs text-gray-300">
+                  <p className="font-medium text-amber-200">
+                    {getTransactionReviewStageLabel(d.stage)} · {d.code}
+                  </p>
+                  <p className="mt-0.5">{d.summary}</p>
+                  <p className="mt-0.5 text-gray-400">Next: {d.remediation}</p>
+                </li>
+              ))}
+            </ul>
           )}
         </div>
 

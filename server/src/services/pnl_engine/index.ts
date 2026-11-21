@@ -3,6 +3,7 @@ export {
   calculateTWR,
   FifoCostBasis,
   AverageCostBasis,
+  PortfolioValuationError,
 } from "./pnlCalculator";
 
 export type {
@@ -13,4 +14,5 @@ export type {
   TaxLot,
   CostBasisMethod,
   ValuationSource,
+  PortfolioValuationFailureStage,
 } from "./pnlCalculator";
