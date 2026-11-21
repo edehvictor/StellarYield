@@ -4,6 +4,7 @@ import {
   buildSdkFailureDiagnostics,
   redactDiagnosticText,
 } from "./diagnostics";
+import {
   buildSimulationFailureDiagnostics,
   classifySimulationFailure,
   type SimulationDiagnostic,
@@ -47,15 +48,13 @@ export abstract class SorobanSdkError extends Error {
   public readonly phase?: SdkErrorPhase;
   /** Whether retrying the operation that produced this error may succeed. */
   public readonly retryable: boolean;
-  /** Privacy-safe diagnostics attached to the error. */
-  public readonly diagnostics?: readonly SdkDiagnostic[];
   /** Literal marker certifying that diagnostics contain no sensitive values. */
   public readonly privacySafe: boolean;
   /**
    * Privacy-safe diagnostics naming the failed stage and remediation path.
    * Present on simulation-path errors; never contains raw error payloads.
    */
-  public diagnostics?: SimulationDiagnostic[];
+  public diagnostics?: readonly SdkDiagnostic[] | SimulationDiagnostic[];
 
   constructor(
     message: string,
@@ -90,6 +89,8 @@ export class SdkEndpointError extends SorobanSdkError {
     this.name = "SdkEndpointError";
     this.validationErrors = validationErrors;
   }
+}
+
 export interface DiagnosticContext {
   stage: SdkErrorPhase;
   remediation: string;

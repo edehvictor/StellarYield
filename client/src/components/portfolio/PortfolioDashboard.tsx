@@ -241,11 +241,13 @@ export default function PortfolioDashboard({
   );
   const heatmapPositions = useMemo(
     () =>
-      positions.map((p) => ({
-        asset: p.asset,
-        protocol: p.protocol,
-        valueUsd: p.currentValue,
-      })),
+      positions
+        .filter((p): p is typeof p & { currentValue: number } => p.currentValue !== null)
+        .map((p) => ({
+          asset: p.asset,
+          protocol: p.protocol,
+          valueUsd: p.currentValue,
+        })),
     [positions],
   );
 

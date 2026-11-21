@@ -6,8 +6,9 @@ import {
   RECOVERABLE_VERIFY_ERROR_CODES,
   type ZapQuoteBody,
 } from "../services/zapQuote";
-import { sendError } from "../utils/errorResponse";
+import { sendError, sendReviewError } from "../utils/errorResponse";
 import { validateZapQuote } from "../middleware/validation";
+import { reviewOperationIdentity } from "../middleware/reviewOperation";
 import { recordFailure, resolveNetworkLabel } from "../monitoring/prometheus";
 import { getVaultPauseState } from "../services/vaultPauseStateService";
 import { computeQuoteAssumptionFingerprint } from "../../../shared/types/quoteAssumptionFingerprint";
@@ -17,6 +18,10 @@ import {
 } from "../../../shared/types/transactionReviewDiagnostic";
 
 const router = Router();
+
+// All zap review routes accept an optional, validated operation identity.
+// It is echoed on responses and included in errors for log correlation.
+router.use(reviewOperationIdentity);
 
 router.get("/pause-state", async (_req: Request, res: Response) => {
   res.json({ vaultPauseState: await getVaultPauseState() });
@@ -85,16 +90,15 @@ router.post("/quote", validateZapQuote, async (req: Request, res: Response) => {
       network: resolveNetworkLabel(),
       failure_category: "quote_failed",
     });
-    sendError(
+    sendReviewError(
+      req,
       res,
       500,
       "QUOTE_FAILED",
       "Quote failed",
+      true,
       // Raw exception text can carry RPC URLs or addresses; callers get a
       // privacy-safe stage diagnostic instead (#1893).
-      undefined,
-      undefined,
-      true,
       buildTransactionReviewFailureDiagnostics("STAGE_UNAVAILABLE", { stage: "quote" })
     );
   }
@@ -104,26 +108,24 @@ router.post("/verify", (req: Request, res: Response) => {
   try {
     const result = verifyZapQuote(req.body);
     if (!result.valid) {
-      return sendError(
+      return sendReviewError(
+        req,
         res,
         400,
         result.errorCode,
         result.reason,
-        undefined,
-        undefined,
         RECOVERABLE_VERIFY_ERROR_CODES.has(result.errorCode) || undefined,
         buildQuoteVerificationDiagnostics(result.errorCode),
       );
     }
     res.json({ success: true });
   } catch (e) {
-    sendError(
+    sendReviewError(
+      req,
       res,
       500,
       "VERIFY_FAILED",
       "Failed to verify quote",
-      undefined,
-      undefined,
       undefined,
       buildTransactionReviewFailureDiagnostics("STAGE_UNAVAILABLE", { stage: "quote-verification" })
     );
@@ -134,13 +136,12 @@ router.post("/fingerprint", (req: Request, res: Response) => {
   try {
     const body = req.body;
     if (!body || typeof body !== "object") {
-      return sendError(
+      return sendReviewError(
+        req,
         res,
         400,
         "INVALID_ASSUMPTIONS",
         "Invalid assumptions payload",
-        undefined,
-        undefined,
         undefined,
         buildTransactionReviewFailureDiagnostics("VALIDATION_FAILED", { stage: "request-validation" })
       );
@@ -148,13 +149,12 @@ router.post("/fingerprint", (req: Request, res: Response) => {
     const result = computeQuoteAssumptionFingerprint(body);
     res.json(result);
   } catch (e) {
-    sendError(
+    sendReviewError(
+      req,
       res,
       500,
       "FINGERPRINT_FAILED",
       "Failed to compute quote assumption fingerprint",
-      undefined,
-      undefined,
       undefined,
       buildTransactionReviewFailureDiagnostics("STAGE_UNAVAILABLE", { stage: "quote-verification" })
     );

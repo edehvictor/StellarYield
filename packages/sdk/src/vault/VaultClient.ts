@@ -13,10 +13,7 @@ import {
   parseContractError,
   RestoreRequiredError,
   SdkEndpointError,
-} from "../errors";
   SimulationDiagnosticsError,
-  parseContractError,
-  RestoreRequiredError,
   toSimulationError,
 } from "../errors";
 import {

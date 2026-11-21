@@ -2,7 +2,11 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ArrowDown, Zap, Loader2, AlertTriangle, RefreshCw, Clock, Info, Ban, ExternalLink, LifeBuoy, CheckCircle2, History } from "lucide-react";
 import TxStatusTimeline from "../../components/transaction/TxStatusTimeline";
 import TransactionFailedModal from "../../components/transaction/TransactionFailedModal";
-import { decodeTransactionError, ZAP_QUOTE_EXPIRED_ERROR_CODE } from "../../utils/errorDecoder";
+import {
+  decodeTransactionError,
+  ZAP_OP_ALREADY_SETTLED_ERROR_CODE,
+  ZAP_QUOTE_EXPIRED_ERROR_CODE,
+} from "../../utils/errorDecoder";
 import { zapDeposit } from "../../services/soroban";
 import type { DecodedContractPanic } from "../../../../shared/types/contractPanic";
 import type { TxPhase } from "../../services/transactionPhase";
@@ -54,9 +58,15 @@ import SessionExpiredRecovery from "../../components/wallet/SessionExpiredRecove
 import {
   saveDepositDraft,
   clearDepositDraft,
+  loadDepositDraft,
   reconcileDepositDraft,
   type DepositDraftState,
 } from "./depositDraft";
+import {
+  buildReviewPayload,
+  resolveReviewOperation,
+  toPersistedReviewOperation,
+} from "./reviewOperation";
 import { apiFetch, apiUrl } from "../../lib/api";
 
 export interface ZapDepositPanelProps {
@@ -492,6 +502,24 @@ export default function ZapDepositPanel({ walletAddress }: ZapDepositPanelProps)
       return;
     }
 
+    const deadlineUnixSeconds = zapQuoteDeadlineSeconds(quoteData);
+    const reviewPayload = buildReviewPayload({
+      walletAddress,
+      inputTokenContract: inputAsset.contractId,
+      vaultTokenContract: vaultToken.contractId,
+      vaultContractId,
+      amountIn,
+      minAmountOut: minOut,
+      expectedAmountOut: expectedOut ?? 0n,
+      allowPartial: true,
+      deadlineUnixSeconds,
+      routeHash: quoteData?.routeHash,
+    });
+    const reviewOperation = resolveReviewOperation(
+      reviewPayload,
+      loadDepositDraft(walletAddress)?.reviewOperation,
+    );
+
     lastProgressPhaseRef.current = "idle";
     setLastProgressPhase("idle");
     setTxPhase("idle");
@@ -524,7 +552,9 @@ export default function ZapDepositPanel({ walletAddress }: ZapDepositPanelProps)
         }
 
         try {
-          const isValid = await verifySwapQuote(quoteData);
+          const isValid = await verifySwapQuote(quoteData, {
+            operationId: reviewOperation.operationId,
+          });
           if (!isValid) {
             invalidatePreview();
             setStatus("error");
@@ -574,6 +604,7 @@ export default function ZapDepositPanel({ walletAddress }: ZapDepositPanelProps)
         vaultTokenSymbol: vaultToken.symbol,
         inputTokenContract: inputAsset.contractId,
         inputTokenSymbol: inputAsset.symbol,
+        reviewOperation: toPersistedReviewOperation(reviewOperation),
         submittedAt: Date.now(),
       });
 
@@ -589,7 +620,8 @@ export default function ZapDepositPanel({ walletAddress }: ZapDepositPanelProps)
           expectedAmountOut: expectedOut ?? 0n,
           // `minAmountOut` already enforces the user's slippage tolerance.
           allowPartial: true,
-          deadlineUnixSeconds: zapQuoteDeadlineSeconds(quoteData),
+          opId: BigInt(reviewOperation.contractOpId),
+          deadlineUnixSeconds,
         },
         emitPhase,
         false,
@@ -600,6 +632,23 @@ export default function ZapDepositPanel({ walletAddress }: ZapDepositPanelProps)
         invalidatePreview();
         setStatus("error");
         setError(ZAP_QUOTE_EXPIRED_MESSAGE);
+        return;
+      }
+      if (!result.success && result.errorCode === ZAP_OP_ALREADY_SETTLED_ERROR_CODE) {
+        // The same review identity already completed on-chain. No effect was
+        // applied by this submission; drop the settled identity so the user can
+        // start a genuinely new deposit if they still want one.
+        saveDepositDraft(walletAddress, {
+          amount,
+          vaultContractId,
+          vaultTokenSymbol: vaultToken.symbol,
+          inputTokenContract: inputAsset.contractId,
+          inputTokenSymbol: inputAsset.symbol,
+          txHash: result.hash,
+          submittedAt: Date.now(),
+        });
+        setStatus("error");
+        setError("This deposit was already submitted. Refresh the quote before trying again.");
         return;
       }
       if (!result.success) {

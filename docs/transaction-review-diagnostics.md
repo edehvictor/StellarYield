@@ -50,8 +50,18 @@ Unknown verify codes degrade to `CONTEXT_INSUFFICIENT` instead of guessing.
   `RETRY_UNSAFE`: the transaction may already be on the network, so check its
   status before retrying. Failures during signing are safe to retry.
 
+## Duplicate submissions (#1888)
+
+Review requests may carry an optional `X-Operation-Identity` header. A valid
+value is echoed on the response and included as `operationId` in error bodies;
+a malformed value is rejected with `INVALID_OPERATION_IDENTITY` (400) and a
+`VALIDATION_FAILED` diagnostic at `request-validation`. The same identity is
+passed to the zap contract as `op_id` so a retry cannot apply the deposit
+twice. See [transaction-review-duplicate-protection.md](transaction-review-duplicate-protection.md).
+
 ## Tests
 
 - `shared/types/transactionReviewDiagnostic.test.ts`
 - `server/src/__tests__/transactionReviewDiagnostics.test.ts`
 - `client/src/components/transaction/TransactionReviewModal.test.tsx` (`diagnostics (#1893)`)
+- `server/src/__tests__/zapReviewOperation.test.ts`

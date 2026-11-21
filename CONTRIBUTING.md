@@ -9,6 +9,7 @@ Thanks for contributing to StellarYield, a Stellar-native DeFi yield aggregator 
 * **Use Issue Canvases:** For non-trivial features, refactors, or smart contract tasks, review and follow the [Issue Canvases Framework](./docs/issue-canvases.md) and use the markdown templates in [`docs/templates/issue-canvases/`](./docs/templates/issue-canvases/README.md).
 * **Keep it Focused:** Keep pull requests limited to one specific feature, bug fix, or contract concern at a time.
 * **Discuss Major Changes:** Start a discussion in the issues tab before changing core architecture, smart contract storage models, or automated routing logic.
+* **Retry-safe flows:** When changing transaction review, quote verification, or zap submission, follow the operation identity and state-preservation rules in [transaction-review-duplicate-protection.md](./docs/transaction-review-duplicate-protection.md).
 
 ### 🙋 How to Claim an Issue
 

@@ -51,6 +51,12 @@ export const KNOWN_CONTRACT_ERROR_CODES = new Set([
 /** Zap contract: the ledger closed after the quote deadline. */
 export const ZAP_QUOTE_EXPIRED_ERROR_CODE = 4001;
 
+/**
+ * Zap contract: the `op_id` already settled. A retry with the same review
+ * identity was applied before, so the UI must not start a new deposit effect.
+ */
+export const ZAP_OP_ALREADY_SETTLED_ERROR_CODE = 7;
+
 /** Maps known contract error codes to user-facing messages. */
 const CONTRACT_ERROR_MAP: Record<
     number,

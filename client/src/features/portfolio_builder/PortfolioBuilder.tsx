@@ -152,12 +152,6 @@ export default function PortfolioBuilder({
     [allocations],
   );
 
-  /**
-   * Execute the current allocation batch, starting at `startIndex`.
-   * A rejected signature is classified into the typed recovery flow; retrying
-   * resumes at the failed vault so already-signed deposits are not repeated.
-   */
-  async function executeDeposits(startIndex: number) {
   const handleAutoResolveDust = useCallback(() => {
     if (!dustValidation?.suggestedAllocations) return;
 
@@ -182,7 +176,12 @@ export default function PortfolioBuilder({
     }
   }, [allocations, dustValidation]);
 
-  const handleExecuteDeposits = useCallback(async () => {
+  /**
+   * Execute the current allocation batch, starting at `startIndex`.
+   * A rejected signature is classified into the typed recovery flow; retrying
+   * resumes at the failed vault so already-signed deposits are not repeated.
+   */
+  async function executeDeposits(startIndex: number) {
     if (!walletAddress) {
       setError("Wallet not connected");
       return;
@@ -328,14 +327,6 @@ export default function PortfolioBuilder({
     setCompletedCount(0);
     setTxPhase("idle");
   };
-    totalAmountValue,
-    isValid,
-    executeTx,
-    distributedAllocations,
-    signTransaction,
-    hasDustAllocations,
-    dustValidation?.message,
-  ]);
 
   return (
     <div className="space-y-6">

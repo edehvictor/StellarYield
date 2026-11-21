@@ -327,6 +327,66 @@ describe("verifySwapQuote", () => {
   });
 });
 
+describe("review operation identity propagation (#1888)", () => {
+  const origFetch = globalThis.fetch;
+  const operationId = "txrev_abcdef123456";
+
+  afterEach(() => {
+    vi.stubGlobal("fetch", origFetch);
+  });
+
+  it("sends the operation identity header on quote and verify requests", async () => {
+    const spy = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({ success: true }),
+    }) as Response);
+    vi.stubGlobal("fetch", spy);
+
+    await fetchSwapQuote(quoteRequest, { operationId });
+    await verifySwapQuote({} as Parameters<typeof verifySwapQuote>[0], { operationId });
+
+    expect(spy).toHaveBeenCalledTimes(2);
+    for (const [, init] of spy.mock.calls) {
+      expect((init as RequestInit).headers).toMatchObject({ "X-Operation-Identity": operationId });
+    }
+  });
+
+  it("omits the header when no operation identity is supplied", async () => {
+    const spy = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({ success: true }),
+    }) as Response);
+    vi.stubGlobal("fetch", spy);
+
+    await fetchSwapQuote(quoteRequest);
+
+    expect((spy.mock.calls[0][1] as RequestInit).headers).not.toHaveProperty(
+      "X-Operation-Identity",
+    );
+  });
+
+  it("preserves the server-echoed operation id on typed errors", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => ({
+        ok: false,
+        status: 400,
+        json: async () => ({
+          error: "INVALID_QUOTE",
+          message: "Quote rejected",
+          operationId,
+        }),
+      }) as Response),
+    );
+
+    const err = await verifySwapQuote({} as Parameters<typeof verifySwapQuote>[0]).catch(
+      (e: unknown) => e,
+    );
+    expect(err).toBeInstanceOf(ZapQuoteError);
+    expect((err as ZapQuoteError).operationId).toBe(operationId);
+  });
+});
+
 describe("describeZapQuoteVerifyFailure", () => {
   function codeError(code: string, message: string): ZapQuoteError {
     return new ZapQuoteError(message, { code, status: 400 });
