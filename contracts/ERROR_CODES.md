@@ -327,11 +327,22 @@ Source: `contracts/options/src/lib.rs`
 | 19   | `CancellationWindowClosed` | Cancellation attempted after `expiration_time`       | Use `expire` instead                                          |
 | 20   | `AlreadyCancelled`        | Position was already cancelled                        | No action needed                                              |
 | 21   | `StaleConfig`             | Configuration changed since the caller captured its fingerprint | Refresh with `get_config_fingerprint` and retry settlement |
+| 22   | `InvalidStrike`           | `mint` was called with a zero or negative strike price          | Pass a positive strike price                                      |
 
 `exercise` and `exercise_partial` validate the expected configuration
 fingerprint before any collateral moves, so a `StaleConfig` rejection leaves
 balances, reserves, exercised amounts and the position record unchanged and the
 same settlement can be retried under the refreshed configuration.
+
+Settlement arithmetic uses `checked_sub` for the collateral still backing an
+option and `checked_add` for cumulative exercised amounts and option ids, so
+inconsistent near-limit values fail with `MathOverflow` instead of wrapping or
+aborting the host. `mint` computes the next option id before transferring or
+reserving collateral, and `exercise` / `exercise_partial` compute the new
+cumulative exercised amount before transferring collateral. A `MathOverflow`,
+`ExceedsCollateral`, `ZeroAmount` or `InvalidStrike` rejection therefore leaves
+balances, reserves, exercised amounts and position records unchanged, and the
+caller can retry with valid inputs.
 
 ---
 
