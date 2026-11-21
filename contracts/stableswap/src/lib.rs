@@ -43,6 +43,22 @@
 //! Minimum reserves are `1` unit per token; zero reserves or a zero invariant are
 //! rejected. Requesting an amount that pushes an intermediate value outside the
 //! `i128` domain is rejected with `MathOverflow` rather than wrapping.
+//!
+//! ## Partial completion and retry
+//!
+//! A successful mutation commits its reserves, LP accounting, operation receipt
+//! and a monotonically increasing `StateSeq` **before** the token transfers; a
+//! failing transfer reverts the whole invocation, so no intermediate state is
+//! ever observable. `get_pool_state()` exposes that checkpoint and
+//! `get_operation_state()` reports whether a particular submission landed.
+//!
+//! For submissions whose outcome is unknown (lost response, timeout), the
+//! `*_checked` entry points additionally require the `state_seq` observed before
+//! the first attempt. If that attempt already landed the sequence advanced and
+//! the retry is refused with `StateChanged`; if it never landed the sequence is
+//! unchanged and the same operation id can be reused safely. This closes the
+//! gap where a client generating a fresh id on retry would otherwise apply the
+//! same trade twice.
 
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, symbol_short, token, xdr::ToXdr, Address,
@@ -102,6 +118,11 @@ enum DataKey {
     StorageVersion,
     /// Receipt for a consumed operation identity (see `operation_key`).
     Operation(BytesN<32>),
+    /// Pool state sequence, incremented once per successful mutation. Appended
+    /// last so existing keys keep their XDR discriminants after an upgrade.
+    StateSeq,
+    /// State sequence an operation committed at (see `Operation`).
+    OperationSeq(BytesN<32>),
 }
 
 // ── Errors ──────────────────────────────────────────────────────────────
@@ -131,6 +152,9 @@ pub enum StableSwapError {
     WrongVersion = 14,
     /// The operation identity was already consumed by a successful call.
     DuplicateOperation = 15,
+    /// The pool state changed since the caller captured it. A retried
+    /// submission may have landed; re-read `get_pool_state()` before deciding.
+    StateChanged = 16,
 }
 
 // ── Pool context ────────────────────────────────────────────────────────
@@ -150,6 +174,30 @@ pub struct PoolContext {
     pub contract: Address,
     /// Pool context version of the stored state.
     pub version: u32,
+}
+
+/// Resumable checkpoint of the pool, returned by `get_pool_state()`.
+///
+/// `state_seq` advances exactly once per successful mutation. A caller whose
+/// submission outcome is unknown captures it before sending and passes it to a
+/// `*_checked` entry point on retry.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PoolState {
+    pub reserve0: i128,
+    pub reserve1: i128,
+    pub total_supply: i128,
+    pub state_seq: u64,
+}
+
+/// Persisted outcome of one operation identity, returned by
+/// `get_operation_state()`. `committed` is false for an unknown or failed
+/// submission; `state_seq` is the checkpoint reached when it committed.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OperationState {
+    pub committed: bool,
+    pub state_seq: u64,
 }
 
 // ── Diagnostics ─────────────────────────────────────────────────────────
@@ -179,6 +227,9 @@ pub enum FailureStage {
     Invariant = 6,
     /// Result fell below the caller's slippage bound.
     Slippage = 7,
+    /// The pool state moved since the caller captured it; a prior attempt may
+    /// have committed.
+    StateChanged = 8,
 }
 
 /// Suggested next step for the caller.
@@ -204,6 +255,8 @@ pub enum RemediationPath {
     RefreshContext = 7,
     /// Check `is_operation_consumed`; the earlier submission may have landed.
     CheckOperation = 8,
+    /// Re-read `get_pool_state()` and retry with its `state_seq`.
+    RefreshState = 9,
 }
 
 /// Privacy-safe result of a dry-run (`preview_*`) call.
@@ -238,6 +291,7 @@ fn default_remediation(error: StableSwapError) -> RemediationPath {
         | StableSwapError::WrongContract
         | StableSwapError::WrongVersion => RemediationPath::RefreshContext,
         StableSwapError::DuplicateOperation => RemediationPath::CheckOperation,
+        StableSwapError::StateChanged => RemediationPath::RefreshState,
         _ => RemediationPath::ContactAdmin,
     }
 }
@@ -367,6 +421,7 @@ impl StableSwap {
         // context version so later network or layout transitions are detectable.
         s.set(&DataKey::NetworkId, &env.ledger().network_id());
         s.set(&DataKey::StorageVersion, &CURRENT_POOL_VERSION);
+        s.set(&DataKey::StateSeq, &0_u64);
 
         env.events()
             .publish((symbol_short!("init"),), (admin, amp_coeff, base_fee));
@@ -446,7 +501,9 @@ impl StableSwap {
     /// retry that reuses an id already consumed by a successful call fails with
     /// `DuplicateOperation`; a failed call does not consume it.
     ///
-    /// Use `preview_add_liquidity` for a read-only, privacy-safe diagnosis.
+    /// Use `preview_add_liquidity` for a read-only, privacy-safe diagnosis, or
+    /// `add_liquidity_checked` when the outcome of an earlier submission is
+    /// unknown.
     pub fn add_liquidity(
         env: Env,
         sender: Address,
@@ -455,6 +512,54 @@ impl StableSwap {
         min_mint_amount: i128,
         expected_context: PoolContext,
         operation_id: BytesN<32>,
+    ) -> Result<i128, StableSwapError> {
+        Self::execute_add_liquidity(
+            env,
+            sender,
+            amount0,
+            amount1,
+            min_mint_amount,
+            expected_context,
+            operation_id,
+            None,
+        )
+    }
+
+    /// Retry-safe `add_liquidity`. Also requires `expected_state_seq` to equal
+    /// `get_pool_state().state_seq` as captured before the first attempt. An
+    /// attempt that already landed advanced the sequence, so the retry fails
+    /// with `StateChanged` instead of minting twice.
+    pub fn add_liquidity_checked(
+        env: Env,
+        sender: Address,
+        amount0: i128,
+        amount1: i128,
+        min_mint_amount: i128,
+        expected_context: PoolContext,
+        operation_id: BytesN<32>,
+        expected_state_seq: u64,
+    ) -> Result<i128, StableSwapError> {
+        Self::execute_add_liquidity(
+            env,
+            sender,
+            amount0,
+            amount1,
+            min_mint_amount,
+            expected_context,
+            operation_id,
+            Some(expected_state_seq),
+        )
+    }
+
+    fn execute_add_liquidity(
+        env: Env,
+        sender: Address,
+        amount0: i128,
+        amount1: i128,
+        min_mint_amount: i128,
+        expected_context: PoolContext,
+        operation_id: BytesN<32>,
+        expected_state_seq: Option<u64>,
     ) -> Result<i128, StableSwapError> {
         sender.require_auth();
         let plan = Self::plan_add_liquidity(
@@ -465,22 +570,12 @@ impl StableSwap {
             min_mint_amount,
             &expected_context,
             &operation_id,
+            expected_state_seq,
         )
         .map_err(|f| f.error)?;
 
-        // Pull tokens from sender only after invariant validation and calculations succeed
-        token::Client::new(&env, &plan.token0).transfer(
-            &sender,
-            &env.current_contract_address(),
-            &amount0,
-        );
-        token::Client::new(&env, &plan.token1).transfer(
-            &sender,
-            &env.current_contract_address(),
-            &amount1,
-        );
-
-        // Update state
+        // Commit the checkpoint before moving funds. A failing transfer reverts
+        // the whole invocation, so nothing is ever left half-applied.
         env.storage()
             .instance()
             .set(&DataKey::Reserve0, &plan.new_reserve0);
@@ -493,8 +588,19 @@ impl StableSwap {
         env.storage()
             .persistent()
             .set(&DataKey::LpBalance(sender.clone()), &plan.new_lp);
+        Self::commit_operation(&env, &plan.op_key)?;
 
-        Self::record_operation(&env, &plan.op_key);
+        token::Client::new(&env, &plan.token0).transfer(
+            &sender,
+            &env.current_contract_address(),
+            &amount0,
+        );
+        token::Client::new(&env, &plan.token1).transfer(
+            &sender,
+            &env.current_contract_address(),
+            &amount1,
+        );
+
         Self::publish_operation(&env, &sender, symbol_short!("add_liq"), &operation_id);
         env.events().publish(
             (symbol_short!("add_liq"),),
@@ -522,6 +628,30 @@ impl StableSwap {
             min_mint_amount,
             &expected_context,
             &operation_id,
+            None,
+        ))
+    }
+
+    /// Read-only dry run of `add_liquidity_checked`.
+    pub fn preview_add_liquidity_checked(
+        env: Env,
+        sender: Address,
+        amount0: i128,
+        amount1: i128,
+        min_mint_amount: i128,
+        expected_context: PoolContext,
+        operation_id: BytesN<32>,
+        expected_state_seq: u64,
+    ) -> Diagnostic {
+        diagnostic_of(Self::plan_add_liquidity(
+            &env,
+            &sender,
+            amount0,
+            amount1,
+            min_mint_amount,
+            &expected_context,
+            &operation_id,
+            Some(expected_state_seq),
         ))
     }
 
@@ -529,7 +659,8 @@ impl StableSwap {
     /// `expected_context` must equal `get_pool_context()`.
     /// `operation_id` works as in `add_liquidity`.
     ///
-    /// Use `preview_remove_liquidity` for a read-only, privacy-safe diagnosis.
+    /// Use `preview_remove_liquidity` for a read-only, privacy-safe diagnosis,
+    /// or `remove_liquidity_checked` when an earlier outcome is unknown.
     pub fn remove_liquidity(
         env: Env,
         sender: Address,
@@ -538,6 +669,51 @@ impl StableSwap {
         min_amount1: i128,
         expected_context: PoolContext,
         operation_id: BytesN<32>,
+    ) -> Result<(i128, i128), StableSwapError> {
+        Self::execute_remove_liquidity(
+            env,
+            sender,
+            lp_amount,
+            min_amount0,
+            min_amount1,
+            expected_context,
+            operation_id,
+            None,
+        )
+    }
+
+    /// Retry-safe `remove_liquidity`; see `add_liquidity_checked`.
+    pub fn remove_liquidity_checked(
+        env: Env,
+        sender: Address,
+        lp_amount: i128,
+        min_amount0: i128,
+        min_amount1: i128,
+        expected_context: PoolContext,
+        operation_id: BytesN<32>,
+        expected_state_seq: u64,
+    ) -> Result<(i128, i128), StableSwapError> {
+        Self::execute_remove_liquidity(
+            env,
+            sender,
+            lp_amount,
+            min_amount0,
+            min_amount1,
+            expected_context,
+            operation_id,
+            Some(expected_state_seq),
+        )
+    }
+
+    fn execute_remove_liquidity(
+        env: Env,
+        sender: Address,
+        lp_amount: i128,
+        min_amount0: i128,
+        min_amount1: i128,
+        expected_context: PoolContext,
+        operation_id: BytesN<32>,
+        expected_state_seq: Option<u64>,
     ) -> Result<(i128, i128), StableSwapError> {
         sender.require_auth();
         let plan = Self::plan_remove_liquidity(
@@ -548,22 +724,11 @@ impl StableSwap {
             min_amount1,
             &expected_context,
             &operation_id,
+            expected_state_seq,
         )
         .map_err(|f| f.error)?;
 
-        // Transfer tokens to sender
-        token::Client::new(&env, &plan.token0).transfer(
-            &env.current_contract_address(),
-            &sender,
-            &plan.out0,
-        );
-        token::Client::new(&env, &plan.token1).transfer(
-            &env.current_contract_address(),
-            &sender,
-            &plan.out1,
-        );
-
-        // Burn LP and update reserves
+        // Burn LP and commit the checkpoint before the payout leg.
         env.storage()
             .persistent()
             .set(&DataKey::LpBalance(sender.clone()), &plan.new_sender_lp);
@@ -576,8 +741,19 @@ impl StableSwap {
         env.storage()
             .instance()
             .set(&DataKey::Reserve1, &plan.new_reserve1);
+        Self::commit_operation(&env, &plan.op_key)?;
 
-        Self::record_operation(&env, &plan.op_key);
+        token::Client::new(&env, &plan.token0).transfer(
+            &env.current_contract_address(),
+            &sender,
+            &plan.out0,
+        );
+        token::Client::new(&env, &plan.token1).transfer(
+            &env.current_contract_address(),
+            &sender,
+            &plan.out1,
+        );
+
         Self::publish_operation(&env, &sender, symbol_short!("rem_liq"), &operation_id);
         env.events().publish(
             (symbol_short!("rem_liq"),),
@@ -605,6 +781,30 @@ impl StableSwap {
             min_amount1,
             &expected_context,
             &operation_id,
+            None,
+        ))
+    }
+
+    /// Read-only dry run of `remove_liquidity_checked`.
+    pub fn preview_remove_liquidity_checked(
+        env: Env,
+        sender: Address,
+        lp_amount: i128,
+        min_amount0: i128,
+        min_amount1: i128,
+        expected_context: PoolContext,
+        operation_id: BytesN<32>,
+        expected_state_seq: u64,
+    ) -> Diagnostic {
+        diagnostic_of(Self::plan_remove_liquidity(
+            &env,
+            &sender,
+            lp_amount,
+            min_amount0,
+            min_amount1,
+            &expected_context,
+            &operation_id,
+            Some(expected_state_seq),
         ))
     }
 
@@ -617,7 +817,8 @@ impl StableSwap {
     /// `expected_context` must equal `get_pool_context()`.
     /// `operation_id` works as in `add_liquidity`.
     ///
-    /// Use `preview_swap` for a read-only, privacy-safe diagnosis.
+    /// Use `preview_swap` for a read-only, privacy-safe diagnosis, or
+    /// `swap_checked` when the outcome of an earlier submission is unknown.
     pub fn swap(
         env: Env,
         sender: Address,
@@ -626,6 +827,54 @@ impl StableSwap {
         min_out: i128,
         expected_context: PoolContext,
         operation_id: BytesN<32>,
+    ) -> Result<i128, StableSwapError> {
+        Self::execute_swap(
+            env,
+            sender,
+            token_in,
+            amount_in,
+            min_out,
+            expected_context,
+            operation_id,
+            None,
+        )
+    }
+
+    /// Retry-safe `swap`. Also requires `expected_state_seq` to equal
+    /// `get_pool_state().state_seq` as captured before the first attempt. If
+    /// that attempt landed, the sequence advanced and the retry fails with
+    /// `StateChanged` instead of swapping twice.
+    pub fn swap_checked(
+        env: Env,
+        sender: Address,
+        token_in: Address,
+        amount_in: i128,
+        min_out: i128,
+        expected_context: PoolContext,
+        operation_id: BytesN<32>,
+        expected_state_seq: u64,
+    ) -> Result<i128, StableSwapError> {
+        Self::execute_swap(
+            env,
+            sender,
+            token_in,
+            amount_in,
+            min_out,
+            expected_context,
+            operation_id,
+            Some(expected_state_seq),
+        )
+    }
+
+    fn execute_swap(
+        env: Env,
+        sender: Address,
+        token_in: Address,
+        amount_in: i128,
+        min_out: i128,
+        expected_context: PoolContext,
+        operation_id: BytesN<32>,
+        expected_state_seq: Option<u64>,
     ) -> Result<i128, StableSwapError> {
         sender.require_auth();
         let plan = Self::plan_swap(
@@ -636,10 +885,20 @@ impl StableSwap {
             min_out,
             &expected_context,
             &operation_id,
+            expected_state_seq,
         )
         .map_err(|f| f.error)?;
 
-        // Transfer tokens
+        // Commit reserves and the checkpoint before moving funds.
+        let (new_r0, new_r1) = if plan.token_in_is_0 {
+            (plan.new_reserve_in, plan.new_reserve_out)
+        } else {
+            (plan.new_reserve_out, plan.new_reserve_in)
+        };
+        env.storage().instance().set(&DataKey::Reserve0, &new_r0);
+        env.storage().instance().set(&DataKey::Reserve1, &new_r1);
+        Self::commit_operation(&env, &plan.op_key)?;
+
         token::Client::new(&env, &token_in).transfer(
             &sender,
             &env.current_contract_address(),
@@ -651,16 +910,6 @@ impl StableSwap {
             &plan.amount_out,
         );
 
-        // Update reserves
-        let (new_r0, new_r1) = if plan.token_in_is_0 {
-            (plan.new_reserve_in, plan.new_reserve_out)
-        } else {
-            (plan.new_reserve_out, plan.new_reserve_in)
-        };
-        env.storage().instance().set(&DataKey::Reserve0, &new_r0);
-        env.storage().instance().set(&DataKey::Reserve1, &new_r1);
-
-        Self::record_operation(&env, &plan.op_key);
         Self::publish_operation(&env, &sender, symbol_short!("swap"), &operation_id);
         env.events().publish(
             (symbol_short!("swap"),),
@@ -688,6 +937,30 @@ impl StableSwap {
             min_out,
             &expected_context,
             &operation_id,
+            None,
+        ))
+    }
+
+    /// Read-only dry run of `swap_checked`.
+    pub fn preview_swap_checked(
+        env: Env,
+        sender: Address,
+        token_in: Address,
+        amount_in: i128,
+        min_out: i128,
+        expected_context: PoolContext,
+        operation_id: BytesN<32>,
+        expected_state_seq: u64,
+    ) -> Diagnostic {
+        diagnostic_of(Self::plan_swap(
+            &env,
+            &sender,
+            &token_in,
+            amount_in,
+            min_out,
+            &expected_context,
+            &operation_id,
+            Some(expected_state_seq),
         ))
     }
 
@@ -703,6 +976,27 @@ impl StableSwap {
         let key = Self::operation_key(&env, &sender, kind, &operation_id);
         env.storage().persistent().has(&DataKey::Operation(key))
     }
+
+    /// Persisted outcome of a submission: whether it committed and the pool
+    /// checkpoint it reached. Use it together with `get_pool_state()` after a
+    /// lost response to decide whether to retry or stop.
+    pub fn get_operation_state(
+        env: Env,
+        sender: Address,
+        kind: Symbol,
+        operation_id: BytesN<32>,
+    ) -> OperationState {
+        let key = Self::operation_key(&env, &sender, kind, &operation_id);
+        OperationState {
+            committed: env.storage().persistent().has(&DataKey::Operation(key.clone())),
+            state_seq: env
+                .storage()
+                .persistent()
+                .get(&DataKey::OperationSeq(key))
+                .unwrap_or(0),
+        }
+    }
+
     // ── Planning (pure validation + math, no writes) ───────────────────
 
     fn plan_add_liquidity(
@@ -713,9 +1007,11 @@ impl StableSwap {
         min_mint_amount: i128,
         expected_context: &PoolContext,
         operation_id: &BytesN<32>,
+        expected_state_seq: Option<u64>,
     ) -> Result<AddLiquidityPlan, Failure> {
         Self::assert_initialized(env).map_err(at(FailureStage::PoolState))?;
         Self::require_context(env, expected_context).map_err(at(FailureStage::Context))?;
+        Self::require_expected_state(env, expected_state_seq).map_err(at(FailureStage::StateChanged))?;
         let op_key = Self::operation_key(env, sender, symbol_short!("add_liq"), operation_id);
         Self::require_new_operation(env, &op_key).map_err(at(FailureStage::Replay))?;
 
@@ -814,9 +1110,11 @@ impl StableSwap {
         min_amount1: i128,
         expected_context: &PoolContext,
         operation_id: &BytesN<32>,
+        expected_state_seq: Option<u64>,
     ) -> Result<RemoveLiquidityPlan, Failure> {
         Self::assert_initialized(env).map_err(at(FailureStage::PoolState))?;
         Self::require_context(env, expected_context).map_err(at(FailureStage::Context))?;
+        Self::require_expected_state(env, expected_state_seq).map_err(at(FailureStage::StateChanged))?;
         let op_key = Self::operation_key(env, sender, symbol_short!("rem_liq"), operation_id);
         Self::require_new_operation(env, &op_key).map_err(at(FailureStage::Replay))?;
 
@@ -925,9 +1223,11 @@ impl StableSwap {
         min_out: i128,
         expected_context: &PoolContext,
         operation_id: &BytesN<32>,
+        expected_state_seq: Option<u64>,
     ) -> Result<SwapPlan, Failure> {
         Self::assert_initialized(env).map_err(at(FailureStage::PoolState))?;
         Self::require_context(env, expected_context).map_err(at(FailureStage::Context))?;
+        Self::require_expected_state(env, expected_state_seq).map_err(at(FailureStage::StateChanged))?;
         let op_key = Self::operation_key(env, sender, symbol_short!("swap"), operation_id);
         Self::require_new_operation(env, &op_key).map_err(at(FailureStage::Replay))?;
 
@@ -1086,16 +1386,45 @@ impl StableSwap {
         Ok(())
     }
 
-    /// Mark an identity consumed. Called only after every check passed and the
-    /// effect was applied, so a failed call never burns its id.
-    fn record_operation(env: &Env, key: &BytesN<32>) {
+    /// Refuse a checked operation planned against a stale pool checkpoint.
+    /// Runs before the replay check so a retry whose earlier attempt landed is
+    /// reported as `StateChanged` (the caller must re-read the pool) rather than
+    /// merely `DuplicateOperation`.
+    fn require_expected_state(env: &Env, expected: Option<u64>) -> Result<(), StableSwapError> {
+        match expected {
+            None => Ok(()),
+            Some(expected_seq) if expected_seq == Self::read_state_seq(env) => Ok(()),
+            Some(_) => Err(StableSwapError::StateChanged),
+        }
+    }
+
+    /// Advance the pool checkpoint and mark the identity consumed. Called once
+    /// the plan has been committed to storage and before any token transfer, so
+    /// the receipt always names the exact checkpoint of its effect. If a later
+    /// transfer fails, Soroban reverts these writes with everything else.
+    fn commit_operation(env: &Env, key: &BytesN<32>) -> Result<(), StableSwapError> {
+        let state_seq = Self::read_state_seq(env)
+            .checked_add(1)
+            .ok_or(StableSwapError::MathOverflow)?;
+        env.storage().instance().set(&DataKey::StateSeq, &state_seq);
+
         let storage_key = DataKey::Operation(key.clone());
         env.storage().persistent().set(&storage_key, &true);
+        env.storage()
+            .persistent()
+            .set(&DataKey::OperationSeq(key.clone()), &state_seq);
         env.storage().persistent().extend_ttl(
             &storage_key,
             OPERATION_TTL_THRESHOLD,
             OPERATION_TTL_EXTEND_TO,
         );
+        let seq_key = DataKey::OperationSeq(key.clone());
+        env.storage().persistent().extend_ttl(
+            &seq_key,
+            OPERATION_TTL_THRESHOLD,
+            OPERATION_TTL_EXTEND_TO,
+        );
+        Ok(())
     }
 
     /// Retry-correlation event for a consumed operation identity.
@@ -1116,6 +1445,30 @@ impl StableSwap {
         let r0: i128 = env.storage().instance().get(&DataKey::Reserve0).unwrap();
         let r1: i128 = env.storage().instance().get(&DataKey::Reserve1).unwrap();
         Ok((r0, r1))
+    }
+
+    /// Resumable checkpoint of the pool. Capture this before an operation whose
+    /// outcome may be lost, then pass `state_seq` to a `*_checked` retry.
+    pub fn get_pool_state(env: Env) -> Result<PoolState, StableSwapError> {
+        Self::assert_initialized(&env)?;
+        Self::require_live_network(&env)?;
+        let state_seq = Self::read_state_seq(&env);
+        let st = env.storage().instance();
+        Ok(PoolState {
+            reserve0: st.get(&DataKey::Reserve0).unwrap(),
+            reserve1: st.get(&DataKey::Reserve1).unwrap(),
+            total_supply: st.get(&DataKey::TotalSupply).unwrap(),
+            state_seq,
+        })
+    }
+
+    fn read_state_seq(env: &Env) -> u64 {
+        // Legacy pools predate the counter and start at zero, just like their
+        // context version.
+        env.storage()
+            .instance()
+            .get(&DataKey::StateSeq)
+            .unwrap_or(0)
     }
 
     pub fn get_lp_balance(env: Env, account: Address) -> i128 {
@@ -2905,5 +3258,261 @@ mod tests {
         assert_eq!(d.stage, FailureStage::PoolState);
         assert_eq!(d.error_code, StableSwapError::InsufficientLiquidity as u32);
         assert_eq!(d.remediation, RemediationPath::AddLiquidity);
+    }
+
+    // ── Partial completion and retry (#1765) ─────────────────────────────
+
+    mod state_checkpoint_and_retry {
+        use super::*;
+
+        #[test]
+        fn state_seq_and_receipts_track_every_committed_mutation() {
+            let env = Env::default();
+            let (client, user, t0, _t1) = funded(&env);
+
+            let bootstrap = client.get_pool_state().unwrap();
+            assert_eq!(bootstrap.state_seq, 1);
+            assert_eq!(bootstrap.reserve0, 1_000_000);
+            assert_eq!(bootstrap.reserve1, 1_000_000);
+
+            let swap_id = op_id(&env, 21);
+            client.swap(&user, &t0, &10_000, &0, &ctx(&client), &swap_id);
+            let after_swap = client.get_pool_state().unwrap();
+            assert_eq!(after_swap.state_seq, bootstrap.state_seq + 1);
+            assert!(after_swap.reserve0 > bootstrap.reserve0);
+            assert!(after_swap.reserve1 < bootstrap.reserve1);
+            assert_eq!(
+                client.get_operation_state(&user, &symbol_short!("swap"), &swap_id),
+                OperationState {
+                    committed: true,
+                    state_seq: after_swap.state_seq,
+                }
+            );
+
+            let add_id = op_id(&env, 22);
+            client.add_liquidity(
+                &user,
+                &10_000,
+                &10_000,
+                &0,
+                &ctx(&client),
+                &add_id,
+            );
+            let after_add = client.get_pool_state().unwrap();
+            assert_eq!(after_add.state_seq, after_swap.state_seq + 1);
+            assert!(after_add.total_supply > after_swap.total_supply);
+            assert_eq!(
+                client.get_operation_state(&user, &symbol_short!("add_liq"), &add_id),
+                OperationState {
+                    committed: true,
+                    state_seq: after_add.state_seq,
+                }
+            );
+
+            let burn_id = op_id(&env, 23);
+            let supply = after_add.total_supply;
+            client.remove_liquidity(&user, &(supply / 10), &0, &0, &ctx(&client), &burn_id);
+            let after_remove = client.get_pool_state().unwrap();
+            assert_eq!(after_remove.state_seq, after_add.state_seq + 1);
+            assert_eq!(
+                client.get_operation_state(&user, &symbol_short!("rem_liq"), &burn_id),
+                OperationState {
+                    committed: true,
+                    state_seq: after_remove.state_seq,
+                }
+            );
+
+            // An id that never landed has no checkpoint.
+            let unknown = op_id(&env, 24);
+            assert_eq!(
+                client.get_operation_state(&user, &symbol_short!("swap"), &unknown),
+                OperationState {
+                    committed: false,
+                    state_seq: 0,
+                }
+            );
+            assert_eq!(client.get_total_supply(), after_remove.total_supply);
+        }
+
+        #[test]
+        fn stale_checked_call_is_refused_without_touching_state() {
+            let env = Env::default();
+            let (client, user, t0, t1) = funded(&env);
+            let stale = client.get_pool_state().unwrap();
+            let c = ctx(&client);
+            let id = op_id(&env, 31);
+
+            // Someone else moves the pool after the caller captured its state.
+            client.swap(&user, &t0, &5_000, &0, &c, &op_id(&env, 30));
+            let current = client.get_pool_state().unwrap();
+            let after_other = snapshot(&env, &client, &t0, &t1, &user);
+            assert_eq!(current.state_seq, stale.state_seq + 1);
+
+            let d = client.preview_swap_checked(&user, &t0, &10_000, &0, &c, &id, stale.state_seq);
+            assert_eq!(
+                (d.ok, d.stage, d.error_code, d.remediation),
+                (
+                    false,
+                    FailureStage::StateChanged,
+                    StableSwapError::StateChanged as u32,
+                    RemediationPath::RefreshState
+                )
+            );
+            assert_eq!(
+                client.try_swap_checked(&user, &t0, &10_000, &0, &c, &id, stale.state_seq),
+                Err(Ok(StableSwapError::StateChanged))
+            );
+            assert_eq!(
+                client.try_add_liquidity_checked(
+                    &user,
+                    &1_000,
+                    &1_000,
+                    &0,
+                    &c,
+                    &id,
+                    stale.state_seq
+                ),
+                Err(Ok(StableSwapError::StateChanged))
+            );
+            assert_eq!(
+                client.try_remove_liquidity_checked(&user, &1_000, &0, &0, &c, &id, stale.state_seq),
+                Err(Ok(StableSwapError::StateChanged))
+            );
+
+            // Refused calls moved nothing, burned no id and did not bump the seq.
+            assert_eq!(client.get_pool_state().unwrap(), current);
+            assert_eq!(snapshot(&env, &client, &t0, &t1, &user), after_other);
+            assert!(!client.is_operation_consumed(&user, &symbol_short!("swap"), &id));
+
+            // The checkpoint can be refreshed and the intent retried.
+            let out = client.swap_checked(&user, &t0, &10_000, &0, &c, &id, current.state_seq);
+            assert!(out > 0);
+            assert_eq!(client.get_pool_state().unwrap().state_seq, current.state_seq + 1);
+        }
+
+        #[test]
+        fn lost_response_retry_cannot_apply_the_same_swap_twice() {
+            let env = Env::default();
+            let (client, user, t0, t1) = funded(&env);
+            let c = ctx(&client);
+            let initial = client.get_pool_state().unwrap();
+            let id = op_id(&env, 41);
+
+            // First attempt lands, but the response is lost.
+            let first_out = client.swap_checked(&user, &t0, &20_000, &0, &c, &id, initial.state_seq);
+            let landed = client.get_pool_state().unwrap();
+            assert_eq!(landed.state_seq, initial.state_seq + 1);
+            assert!(client.is_operation_consumed(&user, &symbol_short!("swap"), &id));
+
+            // Retrying the same id with the stale checkpoint reports the state
+            // change first, so the caller knows to re-read the pool.
+            assert_eq!(
+                client.try_swap_checked(&user, &t0, &20_000, &0, &c, &id, initial.state_seq),
+                Err(Ok(StableSwapError::StateChanged))
+            );
+            // With a fresh checkpoint the existing receipt stops the replay.
+            assert_eq!(
+                client.try_swap_checked(&user, &t0, &20_000, &0, &c, &id, landed.state_seq),
+                Err(Ok(StableSwapError::DuplicateOperation))
+            );
+            // A brand-new id is still bound to the state it was planned against.
+            let fresh = op_id(&env, 42);
+            assert_eq!(
+                client.try_swap_checked(&user, &t0, &20_000, &0, &c, &fresh, initial.state_seq),
+                Err(Ok(StableSwapError::StateChanged))
+            );
+
+            assert_eq!(client.get_pool_state().unwrap(), landed);
+            assert_eq!(
+                token::Client::new(&env, &t0).balance(&user),
+                10_000_000 - 1_000_000 - 20_000
+            );
+
+            // Resuming from the observed checkpoint applies exactly one more swap.
+            let second_out =
+                client.swap_checked(&user, &t0, &20_000, &0, &c, &fresh, landed.state_seq);
+            assert!(second_out > 0);
+            let final_state = client.get_pool_state().unwrap();
+            assert_eq!(final_state.state_seq, landed.state_seq + 1);
+            assert_eq!(
+                token::Client::new(&env, &t0).balance(&user),
+                10_000_000 - 1_000_000 - 40_000
+            );
+            assert_eq!(
+                client.get_operation_state(&user, &symbol_short!("swap"), &fresh),
+                OperationState {
+                    committed: true,
+                    state_seq: final_state.state_seq,
+                }
+            );
+            assert!(first_out > 0);
+        }
+
+        #[test]
+        fn failed_transfer_rolls_back_checkpoint_and_retry_succeeds() {
+            let env = Env::default();
+            let (client, user, t0, t1) = funded(&env);
+            let c = ctx(&client);
+            let expected = client.get_pool_state().unwrap();
+            let t1_client = token::Client::new(&env, &t1);
+            let sink = Address::generate(&env);
+
+            // Make the payout leg fail by emptying the contract's output reserve.
+            let drained = t1_client.balance(&client.address);
+            env.as_contract(&client.address, || {
+                t1_client.transfer(&client.address, &sink, &drained);
+            });
+
+            let before = snapshot(&env, &client, &t0, &t1, &user);
+            let id = op_id(&env, 51);
+            assert!(
+                client
+                    .try_swap_checked(&user, &t0, &10_000, &0, &c, &id, expected.state_seq)
+                    .is_err()
+            );
+
+            // Storage, sequence, receipt and balances are exactly as before.
+            assert_eq!(client.get_pool_state().unwrap(), expected);
+            assert_eq!(snapshot(&env, &client, &t0, &t1, &user), before);
+            assert!(!client.is_operation_consumed(&user, &symbol_short!("swap"), &id));
+
+            // Once the transfer can succeed the same id and checkpoint work.
+            t1_client.transfer(&sink, &client.address, &drained);
+            let out = client.swap_checked(&user, &t0, &10_000, &0, &c, &id, expected.state_seq);
+            assert!(out > 0);
+            assert_eq!(
+                client.get_pool_state().unwrap().state_seq,
+                expected.state_seq + 1
+            );
+            assert!(client.is_operation_consumed(&user, &symbol_short!("swap"), &id));
+            assert_eq!(
+                client.try_swap_checked(&user, &t0, &10_000, &0, &c, &id, expected.state_seq),
+                Err(Ok(StableSwapError::StateChanged))
+            );
+        }
+
+        #[test]
+        fn legacy_pool_checkpoint_starts_at_zero() {
+            let env = Env::default();
+            let (client, user, t0, _t1) = funded(&env);
+            env.as_contract(&client.address, || {
+                env.storage().instance().remove(&DataKey::StateSeq);
+            });
+
+            let state = client.get_pool_state().unwrap();
+            assert_eq!(state.state_seq, 0);
+            let id = op_id(&env, 61);
+            let out = client.swap_checked(&user, &t0, &5_000, &0, &ctx(&client), &id, 0);
+            assert!(out > 0);
+            assert_eq!(client.get_pool_state().unwrap().state_seq, 1);
+            assert_eq!(
+                client.get_operation_state(&user, &symbol_short!("swap"), &id),
+                OperationState {
+                    committed: true,
+                    state_seq: 1,
+                }
+            );
+        }
+
     }
 }

@@ -72,6 +72,7 @@ Source: `contracts/stableswap/src/lib.rs`
 | 13   | `WrongContract`         | The caller's context names a different pool deployment | Use the context from the pool you are calling |
 | 14   | `WrongVersion`          | Stored state or the caller's context is not at the pool context version this code understands | Refresh with `get_pool_context()`; upgrade the contract if the stored version is newer |
 | 15   | `DuplicateOperation`    | `operation_id` was already consumed by a successful call of the same kind from the same sender | Treat the earlier submission as landed (check `is_operation_consumed`); use a fresh id for a new intent |
+| 16   | `StateChanged`          | A `*_checked` call was planned against a pool checkpoint that has since advanced | Re-read `get_pool_state()` / `get_operation_state()`; retry from the new `state_seq` or treat the earlier attempt as landed |
 
 Use `preview_swap` / `preview_add_liquidity` / `preview_remove_liquidity` to get a
 privacy-safe `Diagnostic` (failed stage, error code, remediation path) without
@@ -83,10 +84,12 @@ invariant, fee, deposit and withdrawal calculation. Boundary values (zero,
 minimum one-unit reserves, maximum `i128` inputs) either produce a defined
 result or a typed error above; a rejected call never changes reserves, LP supply,
 LP balances or token balances. `add_liquidity`, `remove_liquidity` and `swap`
-validate the caller's `PoolContext` (network, deployment, version) before any
-reserve math, transfer or storage write. See
-`docs/contracts/stableswap-invariant.md` for the rounding table, numeric limits
-and context binding.
+validate the caller's `PoolContext` (network, deployment, version) and, for the
+`*_checked` variants, the captured `state_seq` before any reserve math, transfer
+or storage write. Mutations commit their checkpoint before the token leg, so a
+failed transfer reverts everything. See
+`docs/contracts/stableswap-invariant.md` for the rounding table, numeric limits,
+context binding and retry checkpoints.
 
 ---
 
