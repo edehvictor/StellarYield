@@ -6,8 +6,9 @@
  * statuses once on-chain events are confirmed.
  */
 import { Router, Request, Response } from "express";
+import { idempotency, IDEMPOTENT_REPLAYED_HEADER } from "../middleware/idempotency";
 import {
-  submitVoteReceipt,
+  submitVoteReceiptOnce,
   reconcileVoteReceipts,
   getVoteReceipt,
   listVoteReceipts,
@@ -22,8 +23,19 @@ const router = Router();
  * Submit a new governance vote and receive a pending receipt.
  *
  * Body: { proposalId: string, voter: string, choice: string }
+ *
+ * A vote is identified by (proposalId, voter), so a retry can never record it
+ * twice, with or without an `Idempotency-Key`:
+ *   first submission                       → 201 and a pending receipt
+ *   retry, same choice                     → 200, the same receipt, `Idempotent-Replayed: true`
+ *   different choice, vote already pending
+ *   or recorded                            → 409 VOTE_ALREADY_SUBMITTED, nothing changes
+ *   resubmission after the receipt failed  → 201 and a new receipt
  */
-router.post("/vote-receipts", (req: Request, res: Response) => {
+router.post(
+  "/vote-receipts",
+  idempotency({ scope: "governance.vote-receipts" }),
+  (req: Request, res: Response) => {
   const { proposalId, voter, choice } = req.body as {
     proposalId?: string;
     voter?: string;
@@ -43,7 +55,22 @@ router.post("/vote-receipts", (req: Request, res: Response) => {
     return;
   }
 
-  const receipt = submitVoteReceipt(proposalId, voter, choice);
+  const { outcome, receipt } = submitVoteReceiptOnce(proposalId, voter, choice);
+  if (outcome === "conflict") {
+    sendError(
+      res,
+      409,
+      "VOTE_ALREADY_SUBMITTED",
+      "This voter already has a vote in flight or recorded for this proposal with a different choice. The existing receipt was not changed.",
+      { receiptId: receipt.receiptId, choice: receipt.choice, status: receipt.status },
+    );
+    return;
+  }
+  if (outcome === "replayed") {
+    res.set(IDEMPOTENT_REPLAYED_HEADER, "true");
+    res.status(200).json(receipt);
+    return;
+  }
   res.status(201).json(receipt);
 });
 

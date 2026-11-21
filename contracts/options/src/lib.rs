@@ -3,8 +3,11 @@
 
 use soroban_sdk::{
     contract, contractclient, contracterror, contractimpl, contracttype, symbol_short, token,
-    Address, Env,
+    xdr::ToXdr, Address, Bytes, BytesN, Env,
 };
+
+/// Domain separator for the configuration fingerprint (versioned).
+const CONFIG_FINGERPRINT_DOMAIN: &[u8] = b"stellaryield_options_config_v1";
 
 mod events;
 mod math;
@@ -12,7 +15,9 @@ mod storage;
 #[cfg(test)]
 mod tests;
 
-use events::{emit_cancelled, emit_created, emit_exercised, emit_expired, emit_filled};
+use events::{
+    emit_cancelled, emit_config_updated, emit_created, emit_exercised, emit_expired, emit_filled,
+};
 use math::black_scholes_call;
 use storage::{
     clear_oracle_max_age, has_admin, read_admin, read_cancelled, read_exercised_amount,
@@ -59,10 +64,16 @@ pub enum OptionsError {
     CancellationWindowClosed = 19,
     /// The option has already been cancelled.
     AlreadyCancelled = 20,
+    /// The configuration changed since the caller captured its fingerprint.
+    /// Refresh with `get_config_fingerprint` and retry settlement.
+    StaleConfig = 21,
+    /// The option's settlement progress no longer matches what the caller
+    /// expected, so a retried settlement was refused instead of paying twice.
+    SettlementStateChanged = 22,
     /// The option changed after the caller read it; retry with its new sequence.
-    ConcurrentModification = 21,
+    ConcurrentModification = 23,
     /// A token callback attempted to re-enter settlement for the same option.
-    ReentrantSettlement = 22,
+    ReentrantSettlement = 24,
 }
 
 /// Price source consulted when the oracle guard is enabled. `get_price`
@@ -72,6 +83,24 @@ pub enum OptionsError {
 #[allow(dead_code)]
 pub trait OracleInterface {
     fn get_price(env: Env, asset: Address) -> Option<(i128, u64)>;
+}
+
+/// Immutable snapshot of the admin-controlled configuration that shapes
+/// settlement.
+///
+/// Only configuration is included: option records, balances and oracle quotes
+/// change continuously and must not invalidate a caller's snapshot. Two
+/// deployments with identical configuration produce identical snapshots, and
+/// any admin change produces a different one.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ConfigSnapshot {
+    pub admin: Address,
+    pub oracle: Address,
+    /// Oracle freshness guard in seconds, or `None` when the guard is off.
+    pub oracle_max_age: Option<u64>,
+    /// Active storage layout version.
+    pub storage_version: u32,
 }
 
 #[contracttype]
@@ -87,6 +116,35 @@ pub struct CollateralHealth {
     pub exercised: bool,
     /// Whether the position has expired.
     pub expired: bool,
+}
+
+/// Where an option sits in its settlement lifecycle.
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SettlementStatus {
+    /// Open with nothing exercised yet.
+    Open,
+    /// Open with part of the collateral already paid out.
+    PartiallyExercised,
+    /// Fully exercised; nothing remains to settle.
+    Exercised,
+    /// Expired; the unexercised collateral was returned to the minter.
+    Expired,
+    /// Cancelled; the unexercised collateral was returned to the minter.
+    Cancelled,
+}
+
+/// Persisted settlement progress of an option. After an operation fails or its
+/// outcome is unknown, `exercised_amount` is the exact point to resume from
+/// (pass it as `expected_exercised` to `exercise_partial_checked`).
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SettlementState {
+    pub status: SettlementStatus,
+    /// Collateral already paid out to exercisers.
+    pub exercised_amount: i128,
+    /// Collateral still backing the option (zero once it is closed).
+    pub remaining_amount: i128,
 }
 
 #[contract]
@@ -114,6 +172,7 @@ impl OptionsContract {
 
         if read_storage_version(&env) < CURRENT_STORAGE_VERSION {
             write_storage_version(&env, CURRENT_STORAGE_VERSION);
+            publish_config_update(&env, &admin);
         }
         Ok(())
     }
@@ -129,7 +188,9 @@ impl OptionsContract {
         if max_age == 0 {
             return Err(OptionsError::InvalidMaxAge);
         }
+        let admin = read_admin(&env);
         write_oracle_max_age(&env, max_age);
+        publish_config_update(&env, &admin);
         Ok(())
     }
 
@@ -138,14 +199,38 @@ impl OptionsContract {
         if !has_admin(&env) {
             return Err(OptionsError::NotInitialized);
         }
-        read_admin(&env).require_auth();
+        let admin = read_admin(&env);
+        admin.require_auth();
         clear_oracle_max_age(&env);
+        publish_config_update(&env, &admin);
         Ok(())
     }
 
     /// Maximum accepted observation age, or `None` when the guard is off.
     pub fn get_oracle_max_age(env: Env) -> Option<u64> {
         read_oracle_max_age(&env)
+    }
+
+    /// Current admin-controlled configuration that settlement depends on.
+    pub fn get_config_snapshot(env: Env) -> Result<ConfigSnapshot, OptionsError> {
+        if !has_admin(&env) {
+            return Err(OptionsError::NotInitialized);
+        }
+        Ok(config_snapshot(&env))
+    }
+
+    /// SHA-256 fingerprint of [`Self::get_config_snapshot`].
+    ///
+    /// Callers capture this before preparing a settlement and pass it to
+    /// `exercise` or `exercise_partial`. If any configuration changes in
+    /// between, the fingerprint no longer matches and settlement fails with
+    /// `StaleConfig` before any collateral moves, so the caller can refresh and
+    /// retry under terms it has actually seen.
+    pub fn get_config_fingerprint(env: Env) -> Result<BytesN<32>, OptionsError> {
+        if !has_admin(&env) {
+            return Err(OptionsError::NotInitialized);
+        }
+        Ok(config_fingerprint(&env))
     }
 
     pub fn mint(
@@ -228,37 +313,62 @@ impl OptionsContract {
         Ok(counter)
     }
 
-    /// Exercises the whole option.
-    /// Compatibility wrapper. New callers should use `exercise_with_sequence`.
-    pub fn exercise(env: Env, exerciser: Address, option_id: u32) -> Result<(), OptionsError> {
+    /// Exercises the whole option with a configuration fingerprint.
+    pub fn exercise(
+        env: Env,
+        exerciser: Address,
+        option_id: u32,
+        expected_config_fingerprint: BytesN<32>,
+    ) -> Result<(), OptionsError> {
         let expected_sequence = read_settlement_sequence(&env, option_id);
-        Self::exercise_with_sequence(env, exerciser, option_id, expected_sequence)
+        Self::exercise_with_sequence(
+            env,
+            exerciser,
+            option_id,
+            expected_sequence,
+            expected_config_fingerprint,
+        )
     }
 
-    /// Exercises with an optimistic-concurrency check.
+    /// Exercises with both configuration and optimistic-concurrency checks.
     pub fn exercise_with_sequence(
         env: Env,
         exerciser: Address,
         option_id: u32,
         expected_sequence: u64,
+        expected_config_fingerprint: BytesN<32>,
     ) -> Result<(), OptionsError> {
         exerciser.require_auth();
         let option = read_option(&env, option_id);
-        Self::settle(&env, exerciser, option_id, expected_sequence, option, None)
+        Self::settle(
+            &env,
+            exerciser,
+            option_id,
+            expected_sequence,
+            option,
+            None,
+            &expected_config_fingerprint,
+        )
     }
 
-    /// Exercises `amount` of the option's collateral. The matching reserve is
-    /// released; the rest stays reserved until the option is fully exercised or
-    /// expires.
-    /// Compatibility wrapper. New callers should use `exercise_partial_with_sequence`.
+    /// Exercises `amount` of the option's collateral, validating configuration
+    /// and the settlement sequence before any collateral moves.
     pub fn exercise_partial(
         env: Env,
         exerciser: Address,
         option_id: u32,
         amount: i128,
+        expected_config_fingerprint: BytesN<32>,
     ) -> Result<(), OptionsError> {
         let expected_sequence = read_settlement_sequence(&env, option_id);
-        Self::exercise_partial_with_sequence(env, exerciser, option_id, amount, expected_sequence)
+        Self::exercise_partial_with_sequence(
+            env,
+            exerciser,
+            option_id,
+            amount,
+            expected_sequence,
+            expected_config_fingerprint,
+        )
     }
 
     pub fn exercise_partial_with_sequence(
@@ -267,6 +377,7 @@ impl OptionsContract {
         option_id: u32,
         amount: i128,
         expected_sequence: u64,
+        expected_config_fingerprint: BytesN<32>,
     ) -> Result<(), OptionsError> {
         exerciser.require_auth();
         let option = read_option(&env, option_id);
@@ -277,7 +388,58 @@ impl OptionsContract {
             expected_sequence,
             option,
             Some(amount),
+            &expected_config_fingerprint,
         )
+    }
+
+    /// Retry-safe partial exercise. A stale sequence, configuration, or
+    /// exercised amount refuses the retry before it can pay out twice.
+    pub fn exercise_partial_checked(
+        env: Env,
+        exerciser: Address,
+        option_id: u32,
+        amount: i128,
+        expected_exercised: i128,
+        expected_sequence: u64,
+        expected_config_fingerprint: BytesN<32>,
+    ) -> Result<(), OptionsError> {
+        exerciser.require_auth();
+        let option = read_option(&env, option_id);
+        if read_exercised_amount(&env, option_id) != expected_exercised {
+            return Err(OptionsError::SettlementStateChanged);
+        }
+        Self::settle(
+            &env,
+            exerciser,
+            option_id,
+            expected_sequence,
+            option,
+            Some(amount),
+            &expected_config_fingerprint,
+        )
+    }
+
+    /// Settlement progress of an option, without mutating any state.
+    pub fn get_settlement_state(env: Env, option_id: u32) -> SettlementState {
+        let option = read_option(&env, option_id);
+        let exercised_amount = read_exercised_amount(&env, option_id);
+        let open_remaining = (option.collateral_amount - exercised_amount).max(0);
+        let (status, remaining_amount) = if read_cancelled(&env, option_id) {
+            (SettlementStatus::Cancelled, 0)
+        } else if option.expired {
+            (SettlementStatus::Expired, 0)
+        } else if option.exercised {
+            (SettlementStatus::Exercised, 0)
+        } else if exercised_amount > 0 {
+            (SettlementStatus::PartiallyExercised, open_remaining)
+        } else {
+            (SettlementStatus::Open, open_remaining)
+        };
+        SettlementState {
+            status,
+            exercised_amount,
+            remaining_amount,
+        }
     }
 
     /// Cancels an unexpired option and returns only its unexercised collateral
@@ -321,15 +483,15 @@ impl OptionsContract {
         let exercised_amount = read_exercised_amount(&env, option_id);
         let remaining = option.collateral_amount - exercised_amount;
 
+        // Commit state before the token leg; a failed transfer reverts all of it.
+        release_reserved(&env, &minter, &collateral_asset, remaining);
+        write_cancelled(&env, option_id);
+        Self::advance_settlement(&env, option_id)?;
         token::Client::new(&env, &collateral_asset).transfer(
             &env.current_contract_address(),
             &minter,
             &remaining,
         );
-        release_reserved(&env, &minter, &collateral_asset, remaining);
-        write_cancelled(&env, option_id);
-        Self::advance_settlement(&env, option_id)?;
-
         emit_cancelled(&env, option_id, &option, remaining, exercised_amount);
         Self::end_settlement(&env, option_id);
 
@@ -372,14 +534,14 @@ impl OptionsContract {
         let exercised_amount = read_exercised_amount(&env, option_id);
         let remaining = option.collateral_amount - exercised_amount;
 
-        let client = token::Client::new(&env, &collateral_asset);
-        client.transfer(&env.current_contract_address(), &option.minter, &remaining);
-
+        // Commit state before the token leg; a failed transfer reverts all of it.
         release_reserved(&env, &option.minter, &collateral_asset, remaining);
-
         option.expired = true;
         write_option(&env, option_id, &option);
         Self::advance_settlement(&env, option_id)?;
+
+        let client = token::Client::new(&env, &collateral_asset);
+        client.transfer(&env.current_contract_address(), &option.minter, &remaining);
 
         emit_expired(&env, option_id, &option, remaining, exercised_amount);
         Self::end_settlement(&env, option_id);
@@ -506,7 +668,13 @@ impl OptionsContract {
         expected_sequence: u64,
         mut option: OptionData,
         amount: Option<i128>,
+        expected_config_fingerprint: &BytesN<32>,
     ) -> Result<(), OptionsError> {
+        // Reject a stale configuration snapshot before validating the position
+        // or moving any collateral: the caller prepares settlement under terms
+        // it has seen, and a mismatch means those terms no longer hold.
+        require_config(env, expected_config_fingerprint)?;
+
         if read_cancelled(env, option_id) {
             return Err(OptionsError::AlreadyCancelled);
         }
@@ -546,23 +714,29 @@ impl OptionsContract {
             OptionType::Put => option.quote_asset.clone(),
         };
 
-        // Pay out the exercised collateral to the exerciser and release its reserve.
+        // Validate arithmetic before touching any state or moving funds.
+        let new_exercised = already_exercised
+            .checked_add(to_exercise)
+            .ok_or(OptionsError::MathOverflow)?;
+        let fully_exercised = new_exercised >= option.collateral_amount;
+
+        // Commit state first, then pay out. A failed transfer reverts the whole
+        // call, leaving balances, reserve, and progress exactly as they were.
+        release_reserved(env, &option.minter, &collateral_asset, to_exercise);
+        write_exercised_amount(env, option_id, new_exercised);
+        Self::advance_settlement(env, option_id)?;
+        if fully_exercised {
+            option.exercised = true;
+            write_option(env, option_id, &option);
+        }
+
         token::Client::new(env, &collateral_asset).transfer(
             &env.current_contract_address(),
             &exerciser,
             &to_exercise,
         );
-        release_reserved(env, &option.minter, &collateral_asset, to_exercise);
 
-        let new_exercised = already_exercised
-            .checked_add(to_exercise)
-            .ok_or(OptionsError::MathOverflow)?;
-        write_exercised_amount(env, option_id, new_exercised);
-        Self::advance_settlement(env, option_id)?;
-
-        if new_exercised >= option.collateral_amount {
-            option.exercised = true;
-            write_option(env, option_id, &option);
+        if fully_exercised {
             emit_exercised(
                 env,
                 option_id,
@@ -622,6 +796,37 @@ impl OptionsContract {
         write_settlement_sequence(env, option_id, next);
         Ok(())
     }
+}
+
+/// Read the configuration settlement depends on, applying the same defaults
+/// the execution paths use.
+fn config_snapshot(env: &Env) -> ConfigSnapshot {
+    ConfigSnapshot {
+        admin: read_admin(env),
+        oracle: read_oracle(env),
+        oracle_max_age: read_oracle_max_age(env),
+        storage_version: read_storage_version(env),
+    }
+}
+
+/// Deterministic SHA-256 fingerprint of the current configuration.
+fn config_fingerprint(env: &Env) -> BytesN<32> {
+    let mut preimage = Bytes::from_slice(env, CONFIG_FINGERPRINT_DOMAIN);
+    preimage.append(&config_snapshot(env).to_xdr(env));
+    env.crypto().sha256(&preimage).to_bytes()
+}
+
+/// Reject settlement whose caller observed a different configuration.
+fn require_config(env: &Env, expected: &BytesN<32>) -> Result<(), OptionsError> {
+    if config_fingerprint(env) != *expected {
+        return Err(OptionsError::StaleConfig);
+    }
+    Ok(())
+}
+
+/// Announce the new configuration fingerprint after an admin change.
+fn publish_config_update(env: &Env, admin: &Address) {
+    emit_config_updated(env, admin, &config_fingerprint(env));
 }
 
 /// Requires the configured oracle to hold a valid, recent observation for

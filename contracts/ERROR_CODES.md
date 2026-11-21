@@ -68,14 +68,25 @@ Source: `contracts/stableswap/src/lib.rs`
 | 9    | `MathOverflow`          | A checked intermediate cannot be represented in `i128` | Reduce the amount; see the per-side reserve limit in `docs/contracts/stableswap-invariant.md` |
 | 10   | `ZeroInvariant`         | Pool invariant is zero                       | Pool is empty; add liquidity first          |
 | 11   | `InvalidToken`          | Token address is duplicate, LP token, or unrecognized in swap | Use distinct, registered pool tokens |
+| 12   | `WrongNetwork`          | Live ledger or the caller's context is not the network the pool state is bound to, or `migrate` was asked to adopt another network's state | Read the pool on its bound network; retry with `get_pool_context()` |
+| 13   | `WrongContract`         | The caller's context names a different pool deployment | Use the context from the pool you are calling |
+| 14   | `WrongVersion`          | Stored state or the caller's context is not at the pool context version this code understands | Refresh with `get_pool_context()`; upgrade the contract if the stored version is newer |
+| 15   | `DuplicateOperation`    | `operation_id` was already consumed by a successful call of the same kind from the same sender | Treat the earlier submission as landed (check `is_operation_consumed`); use a fresh id for a new intent |
+
+Use `preview_swap` / `preview_add_liquidity` / `preview_remove_liquidity` to get a
+privacy-safe `Diagnostic` (failed stage, error code, remediation path) without
+mutating state. See `contracts/stableswap/README.md` for the stage and
+remediation enums.
 
 `stableswap` uses checked arithmetic and documented floor rounding for every
 invariant, fee, deposit and withdrawal calculation. Boundary values (zero,
 minimum one-unit reserves, maximum `i128` inputs) either produce a defined
 result or a typed error above; a rejected call never changes reserves, LP supply,
-LP balances or token balances. See
-`docs/contracts/stableswap-invariant.md` for the rounding table and numeric
-limits.
+LP balances or token balances. `add_liquidity`, `remove_liquidity` and `swap`
+validate the caller's `PoolContext` (network, deployment, version) before any
+reserve math, transfer or storage write. See
+`docs/contracts/stableswap-invariant.md` for the rounding table, numeric limits
+and context binding.
 
 ---
 
@@ -100,14 +111,21 @@ Source: `contracts/isolated_lending/src/lib.rs`
 | 13   | `OracleQuoteStale`       | Oracle quote older than the policy allows | Push a fresh quote                         |
 | 14   | `OracleConfidenceTooLow` | Oracle quote confidence below the policy | Wait for a higher-confidence quote          |
 | 15   | `StaleConfig`            | Configuration changed since the caller captured its fingerprint | Refresh with `get_config_fingerprint` and retry |
+| 16   | `WrongNetwork`           | Context names a different network than the live ledger or stored binding | Refresh with `get_ledger_context()` and retry on the correct network |
+| 17   | `WrongContract`          | Context names a different pair deployment address | Use the context from `get_ledger_context()` for this exact pair |
+| 18   | `WrongVersion`           | Context storage version does not match the stored version | Refresh with `get_ledger_context()` after migration |
+| 19   | `InvalidOracleQuote`     | Oracle quote has an invalid price, confidence or future ledger | Publish a valid quote from the configured oracle |
 
 `isolated_lending` uses checked arithmetic and documented floor rounding for
 values, limits, interest, fees and liquidation payouts (the close-factor cap is
 the one upward rounding, capped at the debt). Every checked value is computed
 before tokens move or storage is written, so a call that fails with any code
 above leaves balances, positions, totals, pending withdrawals and configuration
-unchanged and can be retried with corrected inputs. See
-`docs/contracts/isolated-lending.md` for the rounding table and numeric limits.
+unchanged and can be retried with corrected inputs. All state-modifying entry
+points now require both a `LedgerContext` (network/version binding) and, where
+applicable, a configuration fingerprint. See
+`docs/contracts/isolated-lending.md` for the rounding table, numeric limits,
+and context binding.
 
 ---
 
@@ -264,6 +282,7 @@ Source: `contracts/zap/src/lib.rs`
 | 4    | `Unauthorized`       | Caller is not admin          | Use the admin address                    |
 | 5    | `SlippageExceeded`   | Swap output below minimum    | Increase slippage tolerance              |
 | 6    | `SwapFailed`         | Underlying swap call failed  | Check pool liquidity and token approvals |
+| 7    | `OpAlreadySettled`   | `op_id` was already successfully completed | Use a new `op_id` for a new operation; check `get_op_status` first |
 | 4001 | `QuoteExpired`       | Ledger closed after the quote deadline (`zap_deposit_with_deadline`) | Refresh the quote and resubmit |
 
 ---
@@ -283,6 +302,41 @@ Source: `contracts/stealth_addresses/src/lib.rs`
 | 7    | `Unauthorized`        | Caller is not the deposit recipient | Use the correct recipient key                 |
 | 8    | `MetaLabelTooLong`    | Metadata label exceeds length limit | Shorten the label string                      |
 | 9    | `MetaAddressNotFound` | Meta-address not registered         | Register the meta-address first               |
+
+---
+
+## options — `OptionsError`
+
+Source: `contracts/options/src/lib.rs`
+
+| Code | Name                      | Meaning                                               | Remediation                                                   |
+| ---- | ------------------------- | ----------------------------------------------------- | ------------------------------------------------------------- |
+| 1    | `AlreadyInitialized`      | `initialize()` was called twice                       | No action needed                                              |
+| 2    | `NotInitialized`          | Contract not initialized                              | Call `initialize(admin, oracle)`                              |
+| 3    | `Unauthorized`            | Caller does not own the position being cancelled      | Use the minter address                                        |
+| 4    | `InvalidOption`           | Reserved for invalid option definitions               | Check the option parameters                                   |
+| 5    | `NotExpired`              | `expire` called before `expiration_time`              | Wait until the exercise window closes                         |
+| 6    | `AlreadyExercised`        | Position was already fully exercised                  | No action needed                                              |
+| 7    | `AlreadyExpired`          | Position has already been closed by expiry            | No action needed                                              |
+| 8    | `ZeroAmount`              | Amount is zero or negative                            | Pass a positive amount                                        |
+| 9    | `InvalidPrice`            | Oracle price is non-positive, zero-timestamped, or from the future | Check the oracle observation                        |
+| 10   | `TooEarly`                | Exercise attempted before `opening_time`              | Retry inside the exercise window                              |
+| 11   | `ExerciseWindowClosed`    | Exercise attempted after `expiration_time`            | Use `expire` instead                                          |
+| 12   | `InvalidExerciseWindow`   | `opening_time` is not strictly before `expiration_time` | Order the window correctly                                   |
+| 13   | `InsufficientFreeCollateral` | Withdrawal exceeds free (unreserved) collateral    | Withdraw no more than `get_free_collateral` reports            |
+| 14   | `ExceedsCollateral`       | Exercise amount exceeds the remaining collateral      | Exercise no more than the remaining collateral                 |
+| 15   | `MathOverflow`            | A checked intermediate cannot be represented in `i128` | Reduce input amounts                                         |
+| 16   | `OracleObservationMissing` | Oracle has no observation for a required asset       | Publish an observation for the underlying and collateral asset |
+| 17   | `StaleOracleObservation`  | Observation older than the configured `oracle_max_age` | Publish a fresh observation                                  |
+| 18   | `InvalidMaxAge`           | `set_oracle_max_age(0)` was rejected                   | Pass a non-zero max age                                       |
+| 19   | `CancellationWindowClosed` | Cancellation attempted after `expiration_time`       | Use `expire` instead                                          |
+| 20   | `AlreadyCancelled`        | Position was already cancelled                        | No action needed                                              |
+| 21   | `StaleConfig`             | Configuration changed since the caller captured its fingerprint | Refresh with `get_config_fingerprint` and retry settlement |
+
+`exercise` and `exercise_partial` validate the expected configuration
+fingerprint before any collateral moves, so a `StaleConfig` rejection leaves
+balances, reserves, exercised amounts and the position record unchanged and the
+same settlement can be retried under the refreshed configuration.
 
 ---
 
