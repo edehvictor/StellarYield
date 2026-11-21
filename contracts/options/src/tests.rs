@@ -2078,3 +2078,377 @@ mod settlement_config_fingerprint {
         assert_eq!(fingerprint, client.get_config_fingerprint());
     }
 }
+
+// ── Settlement hardening: partial completion and retry (#1749) ───────────────
+
+mod settlement_retry {
+    use super::*;
+    use crate::{OptionsError, SettlementState, SettlementStatus};
+    use soroban_sdk::token;
+
+    /// Simulates a failing token leg by draining the contract's escrow so the
+    /// next payout transfer cannot succeed. Returns the amount drained.
+    fn drain_escrow(
+        env: &Env,
+        client: &OptionsContractClient,
+        asset: &Address,
+        sink: &Address,
+    ) -> i128 {
+        let token = token::Client::new(env, asset);
+        let balance = token.balance(&client.address);
+        env.as_contract(&client.address, || {
+            token.transfer(&client.address, sink, &balance);
+        });
+        balance
+    }
+
+    fn restore_escrow(
+        env: &Env,
+        client: &OptionsContractClient,
+        asset: &Address,
+        sink: &Address,
+        amount: i128,
+    ) {
+        token::Client::new(env, asset).transfer(sink, &client.address, &amount);
+    }
+
+    #[test]
+    fn settlement_state_tracks_the_full_lifecycle() {
+        let (env, client, _, _, underlying, quote) = setup_env();
+        let (option_id, _) = mint_call_option(&env, &client, &underlying, &quote);
+        let exerciser = Address::generate(&env);
+
+        assert_eq!(
+            client.get_settlement_state(&option_id),
+            SettlementState {
+                status: SettlementStatus::Open,
+                exercised_amount: 0,
+                remaining_amount: 10_000_000,
+            }
+        );
+
+        env.ledger().set_timestamp(750);
+        client.exercise_partial(
+            &exerciser,
+            &option_id,
+            &4_000_000,
+            &client.get_config_fingerprint(),
+        );
+        assert_eq!(
+            client.get_settlement_state(&option_id),
+            SettlementState {
+                status: SettlementStatus::PartiallyExercised,
+                exercised_amount: 4_000_000,
+                remaining_amount: 6_000_000,
+            }
+        );
+
+        client.exercise(&exerciser, &option_id, &client.get_config_fingerprint());
+        assert_eq!(
+            client.get_settlement_state(&option_id),
+            SettlementState {
+                status: SettlementStatus::Exercised,
+                exercised_amount: 10_000_000,
+                remaining_amount: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn settlement_state_reports_expired_and_cancelled() {
+        let (env, client, _, _, underlying, quote) = setup_env();
+        let (expiring, _) = mint_call_option(&env, &client, &underlying, &quote);
+        let (cancelled, minter) = mint_call_option(&env, &client, &underlying, &quote);
+
+        client.cancel(&minter, &cancelled);
+        assert_eq!(
+            client.get_settlement_state(&cancelled).status,
+            SettlementStatus::Cancelled
+        );
+
+        env.ledger().set_timestamp(1001);
+        client.expire(&expiring);
+        let state = client.get_settlement_state(&expiring);
+        assert_eq!(state.status, SettlementStatus::Expired);
+        assert_eq!(state.remaining_amount, 0);
+    }
+
+    #[test]
+    fn failed_exercise_leaves_state_and_balances_untouched_then_retry_succeeds() {
+        let (env, client, _, _, underlying, quote) = setup_env();
+        let (option_id, minter) = mint_call_option(&env, &client, &underlying, &quote);
+        let exerciser = Address::generate(&env);
+        let sink = Address::generate(&env);
+        let token_u = token::Client::new(&env, &underlying);
+
+        env.ledger().set_timestamp(750);
+        let drained = drain_escrow(&env, &client, &underlying, &sink);
+        let before = client.get_settlement_state(&option_id);
+
+        assert!(client
+            .try_exercise_partial(
+                &exerciser,
+                &option_id,
+                &4_000_000,
+                &client.get_config_fingerprint()
+            )
+            .is_err());
+
+        // Nothing moved, no progress recorded, reserve intact.
+        assert_eq!(client.get_settlement_state(&option_id), before);
+        assert_eq!(token_u.balance(&exerciser), 0);
+        assert_eq!(
+            client.get_reserved_collateral(&minter, &underlying),
+            10_000_000
+        );
+
+        // Once the leg can succeed, the same call completes exactly once.
+        restore_escrow(&env, &client, &underlying, &sink, drained);
+        client.exercise_partial(
+            &exerciser,
+            &option_id,
+            &4_000_000,
+            &client.get_config_fingerprint(),
+        );
+        assert_eq!(token_u.balance(&exerciser), 4_000_000);
+        assert_eq!(
+            client.get_settlement_state(&option_id).exercised_amount,
+            4_000_000
+        );
+        assert_eq!(
+            client.get_reserved_collateral(&minter, &underlying),
+            6_000_000
+        );
+    }
+
+    #[test]
+    fn failed_full_exercise_does_not_mark_option_exercised() {
+        let (env, client, _, _, underlying, quote) = setup_env();
+        let (option_id, _) = mint_call_option(&env, &client, &underlying, &quote);
+        let exerciser = Address::generate(&env);
+        let sink = Address::generate(&env);
+
+        env.ledger().set_timestamp(750);
+        let drained = drain_escrow(&env, &client, &underlying, &sink);
+        assert!(client
+            .try_exercise(&exerciser, &option_id, &client.get_config_fingerprint())
+            .is_err());
+        assert_eq!(
+            client.get_settlement_state(&option_id).status,
+            SettlementStatus::Open
+        );
+
+        restore_escrow(&env, &client, &underlying, &sink, drained);
+        client.exercise(&exerciser, &option_id, &client.get_config_fingerprint());
+        assert_eq!(
+            client.get_settlement_state(&option_id).status,
+            SettlementStatus::Exercised
+        );
+    }
+
+    #[test]
+    fn failed_expire_is_rolled_back_and_can_be_retried() {
+        let (env, client, _, _, underlying, quote) = setup_env();
+        let (option_id, minter) = mint_call_option(&env, &client, &underlying, &quote);
+        let sink = Address::generate(&env);
+        let token_u = token::Client::new(&env, &underlying);
+
+        env.ledger().set_timestamp(1001);
+        let drained = drain_escrow(&env, &client, &underlying, &sink);
+        assert!(client.try_expire(&option_id).is_err());
+
+        // Not marked expired, reserve not released, minter not paid.
+        assert_eq!(
+            client.get_settlement_state(&option_id).status,
+            SettlementStatus::Open
+        );
+        assert_eq!(
+            client.get_reserved_collateral(&minter, &underlying),
+            10_000_000
+        );
+        assert_eq!(token_u.balance(&minter), 10_000_000);
+
+        restore_escrow(&env, &client, &underlying, &sink, drained);
+        client.expire(&option_id);
+        assert_eq!(token_u.balance(&minter), 20_000_000);
+        assert_eq!(client.get_reserved_collateral(&minter, &underlying), 0);
+        assert_eq!(
+            client.try_expire(&option_id),
+            Err(Ok(OptionsError::AlreadyExpired))
+        );
+    }
+
+    #[test]
+    fn failed_cancel_is_rolled_back_and_can_be_retried() {
+        let (env, client, _, _, underlying, quote) = setup_env();
+        let (option_id, minter) = mint_call_option(&env, &client, &underlying, &quote);
+        let sink = Address::generate(&env);
+        let token_u = token::Client::new(&env, &underlying);
+
+        let drained = drain_escrow(&env, &client, &underlying, &sink);
+        assert!(client.try_cancel(&minter, &option_id).is_err());
+        assert_eq!(
+            client.get_settlement_state(&option_id).status,
+            SettlementStatus::Open
+        );
+        assert_eq!(
+            client.get_reserved_collateral(&minter, &underlying),
+            10_000_000
+        );
+
+        restore_escrow(&env, &client, &underlying, &sink, drained);
+        client.cancel(&minter, &option_id);
+        assert_eq!(token_u.balance(&minter), 20_000_000);
+        assert_eq!(
+            client.try_cancel(&minter, &option_id),
+            Err(Ok(OptionsError::AlreadyCancelled))
+        );
+    }
+
+    #[test]
+    fn rejected_validation_changes_nothing() {
+        let (env, client, _, _, underlying, quote) = setup_env();
+        let (option_id, minter) = mint_call_option(&env, &client, &underlying, &quote);
+        let exerciser = Address::generate(&env);
+        let token_u = token::Client::new(&env, &underlying);
+
+        env.ledger().set_timestamp(750);
+        assert_eq!(
+            client.try_exercise_partial(
+                &exerciser,
+                &option_id,
+                &10_000_001,
+                &client.get_config_fingerprint()
+            ),
+            Err(Ok(OptionsError::ExceedsCollateral))
+        );
+        assert_eq!(
+            client.try_exercise_partial(
+                &exerciser,
+                &option_id,
+                &0,
+                &client.get_config_fingerprint()
+            ),
+            Err(Ok(OptionsError::ZeroAmount))
+        );
+
+        assert_eq!(client.get_settlement_state(&option_id).exercised_amount, 0);
+        assert_eq!(token_u.balance(&client.address), 10_000_000);
+        assert_eq!(
+            client.get_reserved_collateral(&minter, &underlying),
+            10_000_000
+        );
+    }
+
+    #[test]
+    fn checked_exercise_pays_once_when_the_same_request_is_retried() {
+        let (env, client, _, _, underlying, quote) = setup_env();
+        let (option_id, minter) = mint_call_option(&env, &client, &underlying, &quote);
+        let exerciser = Address::generate(&env);
+        let token_u = token::Client::new(&env, &underlying);
+
+        env.ledger().set_timestamp(750);
+        client.exercise_partial_checked(
+            &exerciser,
+            &option_id,
+            &4_000_000,
+            &0,
+            &client.get_config_fingerprint(),
+        );
+
+        // The client never saw the first result and resubmits the identical call.
+        assert_eq!(
+            client.try_exercise_partial_checked(
+                &exerciser,
+                &option_id,
+                &4_000_000,
+                &0,
+                &client.get_config_fingerprint()
+            ),
+            Err(Ok(OptionsError::SettlementStateChanged))
+        );
+
+        assert_eq!(token_u.balance(&exerciser), 4_000_000);
+        assert_eq!(
+            client.get_settlement_state(&option_id).exercised_amount,
+            4_000_000
+        );
+        assert_eq!(
+            client.get_reserved_collateral(&minter, &underlying),
+            6_000_000
+        );
+
+        // Resuming from the persisted progress continues normally.
+        client.exercise_partial_checked(
+            &exerciser,
+            &option_id,
+            &6_000_000,
+            &4_000_000,
+            &client.get_config_fingerprint(),
+        );
+        assert_eq!(
+            client.get_settlement_state(&option_id).status,
+            SettlementStatus::Exercised
+        );
+        assert_eq!(token_u.balance(&exerciser), 10_000_000);
+        assert_eq!(client.get_reserved_collateral(&minter, &underlying), 0);
+    }
+
+    #[test]
+    fn checked_exercise_after_full_settlement_is_refused() {
+        let (env, client, _, _, underlying, quote) = setup_env();
+        let (option_id, _) = mint_call_option(&env, &client, &underlying, &quote);
+        let exerciser = Address::generate(&env);
+        let token_u = token::Client::new(&env, &underlying);
+
+        env.ledger().set_timestamp(750);
+        client.exercise_partial_checked(
+            &exerciser,
+            &option_id,
+            &10_000_000,
+            &0,
+            &client.get_config_fingerprint(),
+        );
+        assert_eq!(
+            client.try_exercise_partial_checked(
+                &exerciser,
+                &option_id,
+                &10_000_000,
+                &0,
+                &client.get_config_fingerprint()
+            ),
+            Err(Ok(OptionsError::SettlementStateChanged))
+        );
+        assert_eq!(token_u.balance(&exerciser), 10_000_000);
+    }
+
+    #[test]
+    fn checked_exercise_still_enforces_normal_validation() {
+        let (env, client, _, _, underlying, quote) = setup_env();
+        let (option_id, minter) = mint_call_option(&env, &client, &underlying, &quote);
+        let exerciser = Address::generate(&env);
+
+        env.ledger().set_timestamp(750);
+        assert_eq!(
+            client.try_exercise_partial_checked(
+                &exerciser,
+                &option_id,
+                &10_000_001,
+                &0,
+                &client.get_config_fingerprint()
+            ),
+            Err(Ok(OptionsError::ExceedsCollateral))
+        );
+        client.cancel(&minter, &option_id);
+        assert_eq!(
+            client.try_exercise_partial_checked(
+                &exerciser,
+                &option_id,
+                &1,
+                &0,
+                &client.get_config_fingerprint()
+            ),
+            Err(Ok(OptionsError::AlreadyCancelled))
+        );
+    }
+}

@@ -16,7 +16,15 @@ tags:
   - name: Health
     description: System health monitoring
   - name: Yields
-    description: Yield data and APY information
+    description: |
+      Yield data and APY information.
+
+      **Concurrency guarantee:** `GET /api/yields` coalesces concurrent requests
+      that arrive while the cache is cold into a single upstream network fetch.
+      All callers receive the same result; no duplicate protocol snapshots are
+      built. The `X-Config-Version` header carries the asset-configuration
+      fingerprint so clients can detect when a held quote was priced against a
+      now-stale configuration.
   - name: Portfolio
     description: User portfolio and PnL tracking
   - name: Leaderboard
@@ -42,12 +50,15 @@ tags:
       | Error code | HTTP status | Description |
       |---|---|---|
       | `MISSING_FIELDS` | 400 | Required request fields are missing. |
-      | `INVALID_AMOUNT` | 400 | `amountInStroops` is not a valid integer string. |
+      | `INVALID_AMOUNT` | 400 | `amountInStroops` is not a plain non-negative integer string, is zero, or exceeds the maximum (2^127 - 1). |
+      | `INVALID_SLIPPAGE` | 400 | `slippageTolerance` is present but not a finite number. |
       | `STALE_QUOTE` | 400 / 422 | The provided quote is past its `expiresAt` (TTL configured via `ZAP_QUOTE_TTL_MS`, default 60s) and must be refreshed. Responses carry `recoverable: true`. |
       | `UNSUPPORTED_ASSET` | 400 / 422 | One or more assets in the quote path are no longer in the supported asset set. |
       | `SLIPPAGE_EXCEEDED` | 400 / 422 | The applied slippage exceeds the maximum allowed threshold (15%). |
       | `ROUTE_MISMATCH` | 400 | The route hash in the quote does not match the current computed path. |
       | `CONFIG_DRIFT` | 400 | The asset configuration version has changed since the quote was issued. |
+      | `ASSUMPTION_DRIFT` | 400 | The cryptographic fingerprint no longer matches the quote assumptions — assumptions were modified after quoting. Re-quote to proceed. Responses carry `recoverable: true`. |
+      | `INVALID_FINGERPRINT` | 400 | The assumption fingerprint is missing or malformed. |
       | `QUOTE_FAILED` | 500 | Quote generation failed due to an internal error. |
       | `VERIFY_FAILED` | 500 | Quote verification failed due to an internal error. |
       | `CONFIG_UNAVAILABLE` | 503 | The supported assets configuration could not be loaded. |
@@ -468,7 +479,19 @@ paths:
   /api/yields:
     get:
       summary: Get current yield data
-      description: Returns current yield information for all available vaults with APY, TVL, and risk ratings
+      description: |
+        Returns current yield information for all available vaults with APY,
+        TVL, and risk ratings.
+
+        Each entry carries `isStale` (boolean) and `warnings` (string[]) so
+        the client can display freshness badges without additional calls.
+
+        The `X-Config-Version` response header is a 64-character SHA-256 hex
+        digest of the current asset configuration snapshot. Clients that hold
+        a quote issued against an earlier snapshot must compare this value with
+        the `assetConfigVersion` in the quote; a mismatch means the
+        configuration has changed and the quote must be refreshed before
+        submission.
       tags:
         - Yields
       parameters:
@@ -507,6 +530,22 @@ paths:
       responses:
         '200':
           description: Successful response with yields data
+          headers:
+            X-Cache-Status:
+              schema:
+                type: string
+                enum: [HIT, MISS]
+              description: Whether the response was served from cache.
+            X-Config-Version:
+              schema:
+                type: string
+                pattern: '^[a-f0-9]{64}$'
+              description: |
+                Immutable SHA-256 fingerprint of the current asset configuration
+                snapshot. Clients use this to detect when a held quote was
+                computed against a now-stale configuration; re-quote before
+                signing when this value differs from the quote's
+                `assetConfigVersion`.
           content:
             application/json:
               schema:
@@ -557,8 +596,12 @@ paths:
                 $ref: '#/components/schemas/PnLData'
         '404':
           description: User not found
+        '422':
+          description: Persisted transaction or price history is incomplete or invalid; correct the source records and retry
+        '503':
+          description: Current share-price data is unavailable; retry after a new snapshot is recorded
         '500':
-          description: Failed to fetch PnL data
+          description: Valuation failed; the persisted transaction history and balances remain unchanged and the request can be retried
 
   /api/users/{walletAddress}/export/csv:
     get:
@@ -5763,7 +5806,10 @@ Incident:
           example: "CDVAULTXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
         amountInStroops:
           type: string
-          description: Amount of input token to swap, in stroops (smallest unit, integer string)
+          description: |
+            Amount of input token to swap, in stroops (smallest unit), as a plain integer string.
+            Valid range is 1 to 2^127 - 1 (Soroban i128 maximum). Zero, negative, decimal,
+            exponent, signed or whitespace-padded values are rejected with `INVALID_AMOUNT`.
           example: "10000000"
         inputDecimals:
           type: integer
@@ -5784,7 +5830,11 @@ Incident:
           minimum: 0.001
           maximum: 0.15
           default: 0.005
-          description: User-defined slippage tolerance as a decimal fraction (e.g. 0.01 = 1%). Clamped to [0.001, 0.15].
+          description: |
+            User-defined slippage tolerance as a decimal fraction (e.g. 0.01 = 1%). Clamped to [0.001, 0.15];
+            non-finite values are rejected with `INVALID_SLIPPAGE`. The slippage actually applied is rounded to
+            the nearest 1e-6 and `minAmountOutStroops` is `floor(expectedAmountOut * (1 - slippage))`
+            (integer math, rounded down so the guaranteed minimum is never overstated).
           example: 0.01
       example:
         inputTokenContract: "CDXLMXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
@@ -5935,10 +5985,53 @@ Incident:
             retrying (e.g. STALE_QUOTE, CONFIG_DRIFT, ROUTE_MISMATCH,
             UNSUPPORTED_ASSET, transient QUOTE_FAILED). Absent or false for
             validation failures that require changing inputs.
+        diagnostics:
+          type: array
+          description: >
+            Privacy-safe stage diagnostics for transaction review failures
+            (#1893). The first entry names the failed stage and the remediation
+            path; a trailing `STATE_PRESERVED` entry confirms balances and
+            quotes were not modified. Text comes from fixed templates and never
+            contains raw error output, addresses, URLs or stack traces. See
+            docs/transaction-review-diagnostics.md.
+          items:
+            type: object
+            required: [code, stage, severity, summary, remediation, retryable, privacySafe]
+            properties:
+              code:
+                type: string
+                enum: [CONTEXT_INSUFFICIENT, VALIDATION_FAILED, STAGE_UNAVAILABLE, QUOTE_REFRESH_REQUIRED, STATE_PRESERVED, RETRY_UNSAFE]
+              stage:
+                type: string
+                enum: [request-validation, quote, quote-verification, wallet-signing, submission, confirmation, state-persistence, unknown]
+              severity:
+                type: string
+                enum: [info, warning, critical]
+              summary:
+                type: string
+              remediation:
+                type: string
+              retryable:
+                type: boolean
+              privacySafe:
+                type: boolean
+                enum: [true]
+              affectedStages:
+                type: array
+                items:
+                  type: string
       example:
         error: "STALE_QUOTE"
         message: "Quote has expired"
         recoverable: true
+        diagnostics:
+          - code: "QUOTE_REFRESH_REQUIRED"
+            stage: "quote-verification"
+            severity: "warning"
+            summary: "The quote no longer matches current conditions and was not accepted."
+            remediation: "Request a fresh quote and review it again; the old quote cannot be reused."
+            retryable: true
+            privacySafe: true
 
     ZapSupportedAssetsResponse:
       type: object

@@ -68,6 +68,9 @@ pub enum OptionsError {
     StaleConfig = 21,
     /// The option strike must be positive.
     InvalidStrike = 22,
+    /// The option's settlement progress no longer matches what the caller
+    /// expected, so a retried settlement was refused instead of paying twice.
+    SettlementStateChanged = 22,
 }
 
 /// Price source consulted when the oracle guard is enabled. `get_price`
@@ -110,6 +113,35 @@ pub struct CollateralHealth {
     pub exercised: bool,
     /// Whether the position has expired.
     pub expired: bool,
+}
+
+/// Where an option sits in its settlement lifecycle.
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SettlementStatus {
+    /// Open with nothing exercised yet.
+    Open,
+    /// Open with part of the collateral already paid out.
+    PartiallyExercised,
+    /// Fully exercised; nothing remains to settle.
+    Exercised,
+    /// Expired; the unexercised collateral was returned to the minter.
+    Expired,
+    /// Cancelled; the unexercised collateral was returned to the minter.
+    Cancelled,
+}
+
+/// Persisted settlement progress of an option. After an operation fails or its
+/// outcome is unknown, `exercised_amount` is the exact point to resume from
+/// (pass it as `expected_exercised` to `exercise_partial_checked`).
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SettlementState {
+    pub status: SettlementStatus,
+    /// Collateral already paid out to exercisers.
+    pub exercised_amount: i128,
+    /// Collateral still backing the option (zero once it is closed).
+    pub remaining_amount: i128,
 }
 
 #[contract]
@@ -327,6 +359,59 @@ impl OptionsContract {
         )
     }
 
+    /// Retry-safe partial exercise. Behaves like `exercise_partial` but only
+    /// proceeds when the option's cumulative exercised amount still equals
+    /// `expected_exercised` (see `get_settlement_state`). If an earlier attempt
+    /// already landed, a resubmission fails with `SettlementStateChanged` and
+    /// moves nothing, so a retry can never pay out twice.
+    pub fn exercise_partial_checked(
+        env: Env,
+        exerciser: Address,
+        option_id: u32,
+        amount: i128,
+        expected_exercised: i128,
+        expected_config_fingerprint: BytesN<32>,
+    ) -> Result<(), OptionsError> {
+        exerciser.require_auth();
+        let option = read_option(&env, option_id);
+        if read_exercised_amount(&env, option_id) != expected_exercised {
+            return Err(OptionsError::SettlementStateChanged);
+        }
+        Self::settle(
+            &env,
+            exerciser,
+            option_id,
+            option,
+            Some(amount),
+            &expected_config_fingerprint,
+        )
+    }
+
+    /// Settlement progress of an option, without mutating any state. Use it to
+    /// decide whether to resume, retry, or stop after a failed settlement.
+    pub fn get_settlement_state(env: Env, option_id: u32) -> SettlementState {
+        let option = read_option(&env, option_id);
+        let exercised_amount = read_exercised_amount(&env, option_id);
+        let open_remaining = (option.collateral_amount - exercised_amount).max(0);
+
+        let (status, remaining_amount) = if read_cancelled(&env, option_id) {
+            (SettlementStatus::Cancelled, 0)
+        } else if option.expired {
+            (SettlementStatus::Expired, 0)
+        } else if option.exercised {
+            (SettlementStatus::Exercised, 0)
+        } else if exercised_amount > 0 {
+            (SettlementStatus::PartiallyExercised, open_remaining)
+        } else {
+            (SettlementStatus::Open, open_remaining)
+        };
+        SettlementState {
+            status,
+            exercised_amount,
+            remaining_amount,
+        }
+    }
+
     /// Cancels an unexpired option and returns only its unexercised collateral
     /// to the minter. The minter must authorize the cancellation.
     pub fn cancel(env: Env, minter: Address, option_id: u32) -> Result<(), OptionsError> {
@@ -356,13 +441,14 @@ impl OptionsContract {
         let exercised_amount = read_exercised_amount(&env, option_id);
         let remaining = remaining_collateral(option.collateral_amount, exercised_amount)?;
 
+        // Commit state before the token leg; a failed transfer reverts all of it.
+        release_reserved(&env, &minter, &collateral_asset, remaining);
+        write_cancelled(&env, option_id);
         token::Client::new(&env, &collateral_asset).transfer(
             &env.current_contract_address(),
             &minter,
             &remaining,
         );
-        release_reserved(&env, &minter, &collateral_asset, remaining);
-        write_cancelled(&env, option_id);
 
         emit_cancelled(&env, option_id, &option, remaining, exercised_amount);
 
@@ -394,13 +480,13 @@ impl OptionsContract {
         let exercised_amount = read_exercised_amount(&env, option_id);
         let remaining = remaining_collateral(option.collateral_amount, exercised_amount)?;
 
-        let client = token::Client::new(&env, &collateral_asset);
-        client.transfer(&env.current_contract_address(), &option.minter, &remaining);
-
+        // Commit state before the token leg; a failed transfer reverts all of it.
         release_reserved(&env, &option.minter, &collateral_asset, remaining);
-
         option.expired = true;
         write_option(&env, option_id, &option);
+
+        let client = token::Client::new(&env, &collateral_asset);
+        client.transfer(&env.current_contract_address(), &option.minter, &remaining);
 
         emit_expired(&env, option_id, &option, remaining, exercised_amount);
 
@@ -573,10 +659,28 @@ impl OptionsContract {
         release_reserved(env, &option.minter, &collateral_asset, to_exercise);
 
         write_exercised_amount(env, option_id, new_exercised);
+        // Validate arithmetic before touching any state or moving funds.
+        let new_exercised = already_exercised
+            .checked_add(to_exercise)
+            .ok_or(OptionsError::MathOverflow)?;
+        let fully_exercised = new_exercised >= option.collateral_amount;
 
-        if new_exercised >= option.collateral_amount {
+        // Commit state first, then pay out. A failed transfer reverts the whole
+        // call, leaving balances, reserve, and progress exactly as they were.
+        release_reserved(env, &option.minter, &collateral_asset, to_exercise);
+        write_exercised_amount(env, option_id, new_exercised);
+        if fully_exercised {
             option.exercised = true;
             write_option(env, option_id, &option);
+        }
+
+        token::Client::new(env, &collateral_asset).transfer(
+            &env.current_contract_address(),
+            &exerciser,
+            &to_exercise,
+        );
+
+        if fully_exercised {
             emit_exercised(
                 env,
                 option_id,

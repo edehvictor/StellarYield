@@ -18,6 +18,12 @@ import {
 } from "../../../shared/types/quoteAssumptionFingerprint";
 import type { ZapQuoteRouteAssumptions } from "../../../shared/types/routeAssumptions";
 import { buildZapQuoteRouteAssumptions } from "./routeAssumptionsService";
+import {
+  applySlippageFloor,
+  mulDivFloor,
+  parseStroopsAmount,
+  sanitizeSlippageFraction,
+} from "./stroopsMath";
 
 export interface ZapQuoteBody {
   inputTokenContract: string;
@@ -225,14 +231,17 @@ export function detectFeeDrift(
 
 const rpcUrl = process.env.SOROBAN_RPC_URL ?? "https://soroban-testnet.stellar.org";
 
+/**
+ * Checked `amountIn * numerator / denominator` (floor). A zero or invalid
+ * denominator/numerator yields "0" instead of throwing, preserving the prior
+ * fallback behavior; overflow past i128 still throws via {@link mulDivFloor}.
+ */
 function mulDivStroops(amountIn: string, numerator: string, denominator: string): string {
-  const a = BigInt(amountIn);
-  const n = BigInt(numerator);
-  const d = BigInt(denominator);
-  if (d === BigInt(0)) {
-    return "0";
-  }
-  return ((a * n) / d).toString();
+  const n = /^\d+$/.test(numerator) ? BigInt(numerator) : null;
+  const d = /^\d+$/.test(denominator) ? BigInt(denominator) : null;
+  if (n === null || d === null) return "0";
+  const result = mulDivFloor(parseStroopsAmount(amountIn), n, d);
+  return result === null ? "0" : result.toString();
 }
 
 export function getAssetConfigVersion(): string {
@@ -386,20 +395,27 @@ export async function getZapQuote(body: ZapQuoteBody): Promise<ZapQuoteResult> {
 
   const yieldData = await getYieldData();
   const protocolData = yieldData.find(y => y.protocolName.toLowerCase() === protocol.toLowerCase());
-  const tvl = BigInt(Math.floor(protocolData?.tvl || 10_000_000));
+  // Guard TVL: NaN/Infinity/negative would make BigInt() throw or poison the model.
+  const rawTvl = protocolData?.tvl;
+  const tvlNumber =
+    typeof rawTvl === "number" && Number.isFinite(rawTvl) && rawTvl >= 0 ? rawTvl : 10_000_000;
+  const tvl = BigInt(Math.floor(tvlNumber));
 
-  const amountIn = BigInt(body.amountInStroops);
-  const slippage = model.calculateSlippage(amountIn, tvl);
+  // Validate first so zero / negative / over-i128 amounts fail before any math.
+  const amountIn = parseStroopsAmount(body.amountInStroops);
+  const slippage = sanitizeSlippageFraction(model.calculateSlippage(amountIn, tvl), 0);
 
-  const userSlippage = body.slippageTolerance !== undefined
-    ? Math.min(Math.max(body.slippageTolerance, 0.001), 0.15)
-    : slippage;
+  // User tolerance is clamped to [0.001, 0.15]; non-finite input is ignored.
+  const userSlippage =
+    typeof body.slippageTolerance === "number" && Number.isFinite(body.slippageTolerance)
+      ? Math.min(Math.max(body.slippageTolerance, 0.001), 0.15)
+      : slippage;
 
   const effectiveSlippage = Math.max(slippage, userSlippage);
 
+  // Integer-only: slippage rounded to 1e-6, minimum output rounded down.
   const expectedOut = BigInt(sim.expectedAmountOutStroops);
-  const multiplier = 1 - effectiveSlippage;
-  const outAfterSlippage = (expectedOut * BigInt(Math.floor(multiplier * 10000))) / BigInt(10000);
+  const outAfterSlippage = applySlippageFloor(expectedOut, effectiveSlippage);
 
   const now = Date.now();
   const quotedAtMs = new Date(quotedAt).getTime();
@@ -464,7 +480,9 @@ export type ZapQuoteVerificationErrorCode =
   | "CONFIG_DRIFT"
   | "ROUTE_MISMATCH"
   | "UNSUPPORTED_ASSET"
-  | "SLIPPAGE_EXCEEDED";
+  | "SLIPPAGE_EXCEEDED"
+  | "ASSUMPTION_DRIFT"
+  | "INVALID_FINGERPRINT";
 
 /** Result of verifying a previously issued zap quote. */
 export type ZapQuoteVerification =
@@ -481,6 +499,7 @@ export const RECOVERABLE_VERIFY_ERROR_CODES: ReadonlySet<ZapQuoteVerificationErr
     "CONFIG_DRIFT",
     "ROUTE_MISMATCH",
     "UNSUPPORTED_ASSET",
+    "ASSUMPTION_DRIFT",
   ]);
 
 /**
@@ -567,35 +586,64 @@ export function verifyZapQuote(quote: unknown): ZapQuoteVerification {
   }
 
   // Check cryptographic assumption fingerprint (#1366)
-  if (quote.assumptionFingerprint) {
-    const assumptionsToCheck: QuoteAssumptions = quote.assumptions || {
-      inputTokenContract: quote.inputTokenContract || (quote.path?.[0]?.contractId ?? ""),
-      vaultTokenContract: quote.vaultTokenContract || (quote.path?.[quote.path.length - 1]?.contractId ?? ""),
-      amountInStroops: quote.amountInStroops || "",
-      expectedAmountOutStroops: quote.expectedAmountOutStroops || "",
-      minAmountOutStroops: quote.minAmountOutStroops || quote.amountOutAfterSlippage || "",
-      slippageTolerancePct: typeof quote.slippageApplied === "number" ? quote.slippageApplied * 100 : 0,
-      routeHash: quote.routeHash || currentRouteHash,
-      path: quote.path.map((h: any) => (typeof h === "string" ? h : h.contractId)),
-      source: quote.source || "router_simulation",
-      assetConfigVersion: quote.assetConfigVersion || currentVersion,
-      quotedAt: quote.quotedAt || "",
-      expiresAt: quote.expiresAt || "",
-      protocol: quote.protocol,
-      reserveSafe: quote.reserveCheck ? quote.reserveCheck.safe : undefined,
-    };
+  if (typeof q.assumptionFingerprint === "string" && q.assumptionFingerprint) {
+    const rawPath = Array.isArray(q.path) ? (q.path as { contractId: string }[]) : [];
+
+    const assumptionsToCheck: QuoteAssumptions =
+      q.assumptions != null && typeof q.assumptions === "object"
+        ? (q.assumptions as QuoteAssumptions)
+        : {
+            inputTokenContract:
+              typeof q.inputTokenContract === "string"
+                ? q.inputTokenContract
+                : (rawPath[0]?.contractId ?? ""),
+            vaultTokenContract:
+              typeof q.vaultTokenContract === "string"
+                ? q.vaultTokenContract
+                : (rawPath[rawPath.length - 1]?.contractId ?? ""),
+            amountInStroops: typeof q.amountInStroops === "string" ? q.amountInStroops : "",
+            expectedAmountOutStroops:
+              typeof q.expectedAmountOutStroops === "string" ? q.expectedAmountOutStroops : "",
+            minAmountOutStroops:
+              typeof q.minAmountOutStroops === "string"
+                ? q.minAmountOutStroops
+                : typeof q.amountOutAfterSlippage === "string"
+                  ? q.amountOutAfterSlippage
+                  : "",
+            slippageTolerancePct:
+              typeof q.slippageApplied === "number" ? q.slippageApplied * 100 : 0,
+            routeHash: typeof q.routeHash === "string" ? q.routeHash : currentRouteHash,
+            path: rawPath.map((h) => (typeof h === "string" ? h : h.contractId)),
+            source:
+              typeof q.source === "string"
+                ? (q.source as QuoteAssumptions["source"])
+                : "router_simulation",
+            assetConfigVersion:
+              typeof q.assetConfigVersion === "string"
+                ? q.assetConfigVersion
+                : currentVersion,
+            quotedAt: typeof q.quotedAt === "string" ? q.quotedAt : "",
+            expiresAt: typeof q.expiresAt === "string" ? q.expiresAt : "",
+            protocol: typeof q.protocol === "string" ? q.protocol : undefined,
+            reserveSafe:
+              q.reserveCheck != null &&
+              typeof q.reserveCheck === "object" &&
+              "safe" in q.reserveCheck
+                ? Boolean((q.reserveCheck as { safe: unknown }).safe)
+                : undefined,
+          };
 
     const fpResult = verifyQuoteAssumptionFingerprint(
       assumptionsToCheck,
-      quote.assumptionFingerprint,
-      { nowMs: now },
+      q.assumptionFingerprint,
+      { nowMs: Date.now() },
     );
 
     if (!fpResult.valid) {
       return {
         valid: false,
         reason: fpResult.message,
-        errorCode: fpResult.code,
+        errorCode: fpResult.code as ZapQuoteVerificationErrorCode,
       };
     }
   }
