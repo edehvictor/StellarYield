@@ -126,6 +126,12 @@ const vaultData = await api.getVaultData('vault-contract-id');
   - `getAdmin()`, `getToken()`, `getFlashLoanFee()`: Read-only contract state
   - `recoverTransaction(hash)`: Resume polling a previously submitted transaction
 
+- **Signer Adapter Idempotency**: Harden signer adapters against duplicate submissions (#1861)
+  - `SignerOperationIdentity`: Immutable SHA-256 operation identity for signing requests.
+  - `executeSafeSignerSubmission()`: Execute signing and submission with duplicate detection and atomic state preservation.
+  - `IdempotentSignerAdapter`: Decorator wrapping any `SignerAdapter` to prevent duplicate prompt popups or repeated effect execution.
+  - Native `operationId` support across `ServerKeypairSigner`, `CustomSigner`, and `FreighterSigner`.
+
 - **Lifecycle helpers**: `PreparedTransaction` -> `.sign()` -> `SignedTransaction` -> `.submit()` -> `SubmittedTransaction` -> `.wait()` -> `ConfirmedTransaction`, plus `restoreAndRetry()`/`needsRestore()` for the Soroban footprint-restore path. Errors carry a `phase` (`simulate`/`sign`/`submit`/`poll`/`restore`) and `retryable` flag.
 
 - **ApiClient**: Fetch vault metrics from backend
