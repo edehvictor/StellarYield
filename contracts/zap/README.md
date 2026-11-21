@@ -7,15 +7,23 @@
 ## Public API
 
 - `initialize(admin, dex_router)`
-- `zap_deposit(user, input_token, vault_token, vault, amount_in, min_amount_out, min_shares_out, expected_amount_out, allow_partial)`
 - `zap_deposit(user, input_token, vault_token, vault, amount_in, min_amount_out, min_shares_out, expected_amount_out, allow_partial, op_id)`
-- `zap_deposit_with_deadline(user, input_token, vault_token, vault, amount_in, min_amount_out, min_shares_out, expected_amount_out, allow_partial, op_id, deadline)`
+- `zap_deposit_with_deadline(user, input_token, vault_token, vault, amount_in, min_amount_out, min_shares_out, options: ZapOptions, deadline)`
 - `get_op_status(user, op_id) -> Option<ZapStatus>`
 - `set_dex_router(admin, new_router)`
+
+`min_amount_out` is inclusive: output equal to the minimum is accepted.
+During a swap, the router may transfer only exactly `amount_in` of
+`input_token` from the zap contract to the configured router address. It must
+return any unused input to the zap; a larger transfer or alternate recipient
+fails with `SwapFailed`.
 
 ## Partial completion and retry safety
 
 Both `zap_deposit` and `zap_deposit_with_deadline` accept an `op_id: u64` caller-chosen identifier. The contract uses it to prevent double-execution and support safe retry.
+
+`ZapOptions` groups `expected_amount_out`, `allow_partial`, and `op_id` for the
+deadline-bound entry point.
 
 | Status | Meaning | Client action |
 |--------|---------|---------------|
@@ -23,9 +31,9 @@ Both `zap_deposit` and `zap_deposit_with_deadline` accept an `op_id: u64` caller
 | `Pending` | Input transferred, swap or deposit incomplete | Retry with the same `op_id` |
 | `Settled` | Successfully completed | Do not retry; start fresh with a new `op_id` |
 
-**Retry behaviour:** When an op_id is `Pending`, the retry call skips the input transfer and uses whatever vault_token the contract already holds from the prior (partial) swap. Any leftover input is refunded before the deposit is attempted.
+**Retry behaviour:** When an op_id is `Pending`, the retry call skips the input transfer and uses any `vault_token` already held by the contract from a prior swap. Any leftover input is refunded before the deposit is attempted.
 
-**Atomicity guarantees:** A call that returns an error after writing `Pending` leaves the status as `Pending` so the client can distinguish a recoverable mid-flight failure from a clean rejection. A `Settled` op_id is never re-executed; a second attempt with the same `op_id` returns `OpAlreadySettled` (error code 7) before any token moves.
+**Atomicity guarantees:** Soroban rolls back token transfers, events, and status updates when an invocation fails. A failed first attempt therefore leaves the operation absent; a failed retry preserves its prior `Pending` status. A `Settled` op_id is never re-executed; a second attempt with the same `op_id` returns `OpAlreadySettled` (error code 7) before any token moves.
 
 ## Events
 
@@ -44,8 +52,8 @@ See [Zap event reference](../../docs/contracts/zap-events.md) for indexer field 
 | 2 | `AlreadyInitialized` | `initialize` already called |
 | 3 | `ZeroAmount` | `amount_in` is zero or negative |
 | 4 | `Unauthorized` | Caller is not the admin |
-| 5 | `SlippageExceeded` | Swap output below `min_amount_out` or below quote when partial fill is disallowed |
-| 6 | `SwapFailed` | Router dry-run returned zero output |
+| 5 | `SlippageExceeded` | Swap output below the inclusive `min_amount_out` boundary or below quote when partial fill is disallowed |
+| 6 | `SwapFailed` | Router call or dry-run failed, returned invalid output, or requested an input-token transfer outside the authorized amount or recipient |
 | 7 | `OpAlreadySettled` | `op_id` was already successfully completed; use a new op_id |
 | 4001 | `QuoteExpired` | Ledger timestamp is past `deadline` |
 

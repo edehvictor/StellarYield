@@ -42,7 +42,7 @@ When `allow_partial` is true, `expected_amount_out > 0`, and `min_amount_out <= 
 
 ### Failure (no zap events)
 
-If output is below `min_amount_out`, or below `expected_amount_out` when partial fills are disallowed, the transaction reverts with `SlippageExceeded`. No `zap_part`, `zap_ref`, or `zap_dep` events are emitted.
+If output is below `min_amount_out`, or below `expected_amount_out` when partial fills are disallowed, the transaction reverts with `SlippageExceeded`. If the router callback requests an input-token transfer other than exactly `amount_in` to the configured router, it reverts with `SwapFailed`. Soroban rolls back token transfers, operation status changes, and events on either failure; no `zap_part`, `zap_ref`, or `zap_dep` events remain.
 
 ## Field Reference
 

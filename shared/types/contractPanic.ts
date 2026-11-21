@@ -248,8 +248,8 @@ const ZAP_ERRORS: Record<number, ContractErrorEntry> = {
   6: {
     name: "SwapFailed",
     title: "Swap Failed",
-    message: "The underlying swap could not be completed.",
-    remediation: "Check pool liquidity for this pair and try again with a fresh quote.",
+    message: "The router failed or requested an input transfer outside the authorized amount or recipient.",
+    remediation: "Refresh the quote and try again. Contact support if the router continues to fail.",
     retryable: true,
   },
   4001: {
