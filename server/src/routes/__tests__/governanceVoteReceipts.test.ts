@@ -105,4 +105,40 @@ describe("POST /api/governance/vote-receipts (#1896)", () => {
     expect(other.status).toBe(201);
     expect(listVoteReceipts("p-1")).toHaveLength(2);
   });
+
+  it("rejects whitespace-only fields and malformed reconcile events without mutating state", async () => {
+    const app = buildApp();
+    const valid = await vote(app, { proposalId: "p-1", voter: "GABC", choice: "yes" });
+    expect(valid.status).toBe(201);
+
+    const badVote = await vote(app, { proposalId: "   ", voter: "GDEF", choice: "no" });
+    expect(badVote.status).toBe(400);
+    expect(badVote.body.error).toBe("MISSING_PROPOSAL_ID");
+
+    const badReconcile = await request(app)
+      .post("/api/governance/vote-receipts/reconcile")
+      .send({ events: [null, { proposalId: "p-1", voter: "GABC", choice: "yes", txHash: "TX", indexedAt: "not-a-date" }] });
+    expect(badReconcile.status).toBe(400);
+    expect(badReconcile.body.error).toBe("INVALID_EVENT_SHAPE");
+
+    const stored = listVoteReceipts("p-1");
+    expect(stored).toHaveLength(1);
+    expect(stored[0].status).toBe("pending");
+
+    const retryReconcile = await request(app)
+      .post("/api/governance/vote-receipts/reconcile")
+      .send({
+        events: [
+          {
+            proposalId: "p-1",
+            voter: "GABC",
+            choice: "yes",
+            txHash: "TX1",
+            indexedAt: new Date().toISOString(),
+          },
+        ],
+      });
+    expect(retryReconcile.status).toBe(200);
+    expect(retryReconcile.body.reconciled).toBe(1);
+  });
 });

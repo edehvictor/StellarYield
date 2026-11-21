@@ -32,30 +32,38 @@ const router = Router();
  *   or recorded                            → 409 VOTE_ALREADY_SUBMITTED, nothing changes
  *   resubmission after the receipt failed  → 201 and a new receipt
  */
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === "string" && value.trim().length > 0;
+}
+
 router.post(
   "/vote-receipts",
   idempotency({ scope: "governance.vote-receipts" }),
   (req: Request, res: Response) => {
-  const { proposalId, voter, choice } = req.body as {
-    proposalId?: string;
-    voter?: string;
-    choice?: string;
-  };
+  const body =
+    req.body && typeof req.body === "object" && !Array.isArray(req.body)
+      ? (req.body as { proposalId?: unknown; voter?: unknown; choice?: unknown })
+      : {};
+  const { proposalId, voter, choice } = body;
 
-  if (!proposalId || typeof proposalId !== "string") {
+  if (!isNonEmptyString(proposalId)) {
     sendError(res, 400, "MISSING_PROPOSAL_ID", "proposalId is required.");
     return;
   }
-  if (!voter || typeof voter !== "string") {
+  if (!isNonEmptyString(voter)) {
     sendError(res, 400, "MISSING_VOTER", "voter (Stellar account address) is required.");
     return;
   }
-  if (!choice || typeof choice !== "string") {
+  if (!isNonEmptyString(choice)) {
     sendError(res, 400, "MISSING_CHOICE", "choice is required (e.g. yes, no, abstain).");
     return;
   }
 
-  const { outcome, receipt } = submitVoteReceiptOnce(proposalId, voter, choice);
+  const { outcome, receipt } = submitVoteReceiptOnce(
+    proposalId.trim(),
+    voter.trim(),
+    choice.trim(),
+  );
   if (outcome === "conflict") {
     sendError(
       res,
@@ -114,29 +122,37 @@ router.get("/vote-receipts", (req: Request, res: Response) => {
  * Body: { events: IndexedGovernanceEvent[] }
  */
 router.post("/vote-receipts/reconcile", (req: Request, res: Response) => {
-  const { events } = req.body as { events?: unknown };
+  const body =
+    req.body && typeof req.body === "object" && !Array.isArray(req.body)
+      ? (req.body as { events?: unknown })
+      : {};
+  const { events } = body;
 
   if (!Array.isArray(events)) {
     sendError(res, 400, "INVALID_EVENTS", "events must be an array of indexed governance events.");
     return;
   }
 
-  // Basic shape validation
-  const valid = (events as IndexedGovernanceEvent[]).every(
-    (e) =>
-      typeof e.proposalId === "string" &&
-      typeof e.voter === "string" &&
-      typeof e.choice === "string" &&
-      typeof e.txHash === "string" &&
-      typeof e.indexedAt === "string",
-  );
+  // Validate each element as a non-null plain object before reading fields.
+  const valid = events.every((e) => {
+    if (!e || typeof e !== "object" || Array.isArray(e)) return false;
+    const candidate = e as Record<string, unknown>;
+    return (
+      isNonEmptyString(candidate.proposalId) &&
+      isNonEmptyString(candidate.voter) &&
+      isNonEmptyString(candidate.choice) &&
+      isNonEmptyString(candidate.txHash) &&
+      isNonEmptyString(candidate.indexedAt) &&
+      Number.isFinite(Date.parse(candidate.indexedAt))
+    );
+  });
 
   if (!valid) {
     sendError(
       res,
       400,
       "INVALID_EVENT_SHAPE",
-      "Each event must have proposalId, voter, choice, txHash, and indexedAt.",
+      "Each event must have non-empty proposalId, voter, choice, txHash, and valid indexedAt.",
     );
     return;
   }

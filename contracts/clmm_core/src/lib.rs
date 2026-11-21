@@ -26,8 +26,13 @@ mod math;
 mod position;
 mod tick;
 
+/// Domain separator for pool configuration fingerprints.
+const CONFIG_FINGERPRINT_DOMAIN: &[u8] = b"stellaryield_clmm_config_v1";
 /// Domain separator for position operation identities.
 const OPERATION_DOMAIN: &[u8] = b"stellaryield_clmm_op_v1";
+/// Current pool context version. Version zero is a pool initialized before
+/// context binding existed; it keeps working and is bound by `migrate`.
+const CURRENT_POOL_VERSION: u32 = 1;
 /// Refresh an operation receipt once less than ~1 day of ledgers remains.
 const OPERATION_TTL_THRESHOLD: u32 = 17_280;
 /// Keep consumed operation identities for ~30 days of ledgers, so a delayed
@@ -59,11 +64,32 @@ pub enum DataKey {
     PositionConfigFingerprint(u64),
     ConfigFingerprint,
     NextPositionId,
+    /// SHA-256 of the network ID this pool's state is bound to.
+    NetworkId,
+    /// Pool context version of the stored state.
+    StorageVersion,
     /// Marks a domain-separated position operation identity as consumed.
     Operation(BytesN<32>),
 }
 
 // ── Data Structures ─────────────────────────────────────────────────────
+
+/// Explicit network, deployment and version context of a CLMM pool.
+///
+/// Callers capture this with `get_pool_context()` and pass it to `mint`,
+/// `burn`, `collect` and `swap`. An operation executes only if the live ledger
+/// network, the network the pool state was created on, the deployment address
+/// and the stored context version all match.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PoolContext {
+    /// SHA-256 of the network ID the pool state is bound to.
+    pub network_id: BytesN<32>,
+    /// Address of this pool deployment.
+    pub contract: Address,
+    /// Pool context version of the stored state.
+    pub version: u32,
+}
 
 #[contracttype]
 #[derive(Clone, Debug)]
@@ -106,6 +132,20 @@ pub enum ClmmError {
     InvalidPosition = 9,
     DuplicateOperation = 10,
     ConcurrentModification = 11,
+    InvalidFee = 12,
+    InvalidTickSpacing = 13,
+    MathOverflow = 14,
+    CorruptedPosition = 15,
+    InvalidSqrtPrice = 16,
+    StaleConfiguration = 17,
+    /// The live ledger or the caller's context belongs to another network than
+    /// the pool's stored state, or the pool is already bound to another network.
+    WrongNetwork = 18,
+    /// The caller's context names a different pool deployment.
+    WrongContract = 19,
+    /// The stored state or the caller's context is not at the pool context
+    /// version this code understands.
+    WrongVersion = 20,
 }
 
 // ── Contract ────────────────────────────────────────────────────────────
@@ -171,6 +211,14 @@ impl ClmmCore {
             .instance()
             .set(&DataKey::NextPositionId, &1u64);
         env.storage().instance().set(&DataKey::Initialized, &true);
+        // Bind the pool's state to the network it was created on, and stamp the
+        // context version so later network or layout transitions are detectable.
+        env.storage()
+            .instance()
+            .set(&DataKey::NetworkId, &env.ledger().network_id());
+        env.storage()
+            .instance()
+            .set(&DataKey::StorageVersion, &CURRENT_POOL_VERSION);
         let fingerprint = Self::configuration_fingerprint(&env);
         env.storage()
             .instance()
@@ -184,6 +232,66 @@ impl ClmmCore {
         Ok(())
     }
 
+    /// Bind a pool created before context binding existed to the live network
+    /// and to the current context version.
+    ///
+    /// Existing pools keep operating unchanged before this is called: with no
+    /// stored binding they adopt the live network. `migrate` pins that binding,
+    /// so afterwards state restored on a different network or read by code with
+    /// a different context version is rejected instead of being silently used.
+    ///
+    /// Migration is idempotent and never re-binds a pool that is already bound
+    /// to another network; that returns `WrongNetwork` and changes nothing.
+    pub fn migrate(env: Env) -> Result<PoolContext, ClmmError> {
+        Self::require_init(&env)?;
+
+        let live_network = env.ledger().network_id();
+        let stored_network: Option<BytesN<32>> = env.storage().instance().get(&DataKey::NetworkId);
+        match stored_network {
+            Some(bound) if bound != live_network => return Err(ClmmError::WrongNetwork),
+            Some(_) => {}
+            None => env
+                .storage()
+                .instance()
+                .set(&DataKey::NetworkId, &live_network),
+        }
+
+        let version = Self::read_version(&env);
+        // Code older than the stored layout must not interpret it.
+        if version > CURRENT_POOL_VERSION {
+            return Err(ClmmError::WrongVersion);
+        }
+        if version < CURRENT_POOL_VERSION {
+            env.storage()
+                .instance()
+                .set(&DataKey::StorageVersion, &CURRENT_POOL_VERSION);
+        }
+
+        let context = PoolContext {
+            network_id: live_network.clone(),
+            contract: env.current_contract_address(),
+            version: CURRENT_POOL_VERSION,
+        };
+        env.events().publish(
+            (symbol_short!("migrate"),),
+            (live_network, CURRENT_POOL_VERSION),
+        );
+        Ok(context)
+    }
+
+    /// Explicit network, deployment and version context of this pool.
+    ///
+    /// Pass the returned value to `mint`, `burn`, `collect` and `swap`.
+    /// Refresh it after `migrate`, which changes the version.
+    pub fn get_pool_context(env: Env) -> Result<PoolContext, ClmmError> {
+        Self::require_init(&env)?;
+        Ok(PoolContext {
+            network_id: Self::bound_network(&env),
+            contract: env.current_contract_address(),
+            version: Self::read_version(&env),
+        })
+    }
+
     /// Mint a new liquidity position with custom price range.
     ///
     /// # Arguments
@@ -193,6 +301,8 @@ impl ClmmCore {
     /// * `amount` — Liquidity amount to add
     /// * `amount0_max` — Maximum token0 to deposit
     /// * `amount1_max` — Maximum token1 to deposit
+    /// * `expected_context` — Network, deployment, and version context from
+    ///   `get_pool_context()`. Mismatches are rejected before any state change.
     /// * `operation_id` — Caller-generated identity for this submission. A
     ///   retry that reuses an identity already consumed by a successful mint
     ///   is rejected with `DuplicateOperation`; a call that fails does not
@@ -208,9 +318,11 @@ impl ClmmCore {
         amount: u128,
         amount0_max: u128,
         amount1_max: u128,
+        expected_context: PoolContext,
         operation_id: BytesN<32>,
     ) -> Result<(u64, u128, u128), ClmmError> {
         Self::require_init(&env)?;
+        Self::require_context(&env, &expected_context)?;
         Self::validate_configuration(&env, None)?;
         owner.require_auth();
 
@@ -359,6 +471,8 @@ impl ClmmCore {
     ///   by the caller. If concurrent operations have modified the position,
     ///   the call fails with `ConcurrentModification` before any ticks, balances
     ///   or state are mutated.
+    /// * `expected_context` — Network, deployment, and version context from
+    ///   `get_pool_context()`. Mismatches are rejected before any state change.
     /// * `operation_id` — Caller-generated identity for this submission,
     ///   scoped to the position owner, the operation kind and the position.
     ///
@@ -369,9 +483,11 @@ impl ClmmCore {
         position_id: u64,
         amount: u128,
         expected_sequence: u64,
+        expected_context: PoolContext,
         operation_id: BytesN<32>,
     ) -> Result<(u128, u128), ClmmError> {
         Self::require_init(&env)?;
+        Self::require_context(&env, &expected_context)?;
 
         // Treat the persisted record as untrusted: validate its fields before
         // any accounting or state mutation.
@@ -398,7 +514,7 @@ impl ClmmCore {
             return Err(ClmmError::InsufficientLiquidity);
         }
         if amount > i128::MAX as u128 {
-            return Err(ClmmError::ArithmeticError);
+            return Err(ClmmError::MathOverflow);
         }
 
         let current_tick: i32 = env.storage().instance().get(&DataKey::CurrentTick).unwrap();
@@ -487,6 +603,8 @@ impl ClmmCore {
     /// * `zero_for_one` — True if swapping token0 for token1
     /// * `amount_specified` — Amount to swap (positive for exact input, negative for exact output)
     /// * `sqrt_price_limit_x96` — Price limit to prevent excessive slippage
+    /// * `expected_context` — Network, deployment, and version context from
+    ///   `get_pool_context()`. Mismatches are rejected before any state change.
     ///
     /// # Returns
     /// (amount0, amount1) — Actual amounts swapped (negative = sent, positive = received)
@@ -500,8 +618,10 @@ impl ClmmCore {
         zero_for_one: bool,
         amount_specified: i128,
         sqrt_price_limit_x96: u128,
+        expected_context: PoolContext,
     ) -> Result<(i128, i128), ClmmError> {
         Self::require_init(&env)?;
+        Self::require_context(&env, &expected_context)?;
         recipient.require_auth();
 
         if amount_specified == 0 {
@@ -737,6 +857,8 @@ impl ClmmCore {
     ///   by the caller. If concurrent operations have modified the position,
     ///   the call fails with `ConcurrentModification` before any checkpoints,
     ///   balances or state are mutated.
+    /// * `expected_context` — Network, deployment, and version context from
+    ///   `get_pool_context()`. Mismatches are rejected before any state change.
     /// * `operation_id` — Caller-generated identity for this submission,
     ///   scoped to the position owner, the operation kind and the position.
     ///
@@ -746,9 +868,11 @@ impl ClmmCore {
         env: Env,
         position_id: u64,
         expected_sequence: u64,
+        expected_context: PoolContext,
         operation_id: BytesN<32>,
     ) -> Result<(u128, u128), ClmmError> {
         Self::require_init(&env)?;
+        Self::require_context(&env, &expected_context)?;
 
         // Validate the persisted record before computing or transferring fees.
         let mut position = position::load_validated_position(&env, position_id)?;
@@ -864,10 +988,14 @@ impl ClmmCore {
     // ── View Functions ──────────────────────────────────────────────
 
     pub fn get_position(env: Env, position_id: u64) -> Result<Position, ClmmError> {
+        Self::require_init(&env)?;
+        Self::require_live_context(&env)?;
         position::load_validated_position(&env, position_id)
     }
 
     pub fn get_position_sequence(env: Env, position_id: u64) -> Result<u64, ClmmError> {
+        Self::require_init(&env)?;
+        Self::require_live_context(&env)?;
         let position: Position = env
             .storage()
             .persistent()
@@ -876,25 +1004,34 @@ impl ClmmCore {
         Ok(position.sequence)
     }
 
-    pub fn get_current_tick(env: Env) -> i32 {
-        env.storage()
+    pub fn get_current_tick(env: Env) -> Result<i32, ClmmError> {
+        Self::require_init(&env)?;
+        Self::require_live_context(&env)?;
+        Ok(env
+            .storage()
             .instance()
             .get(&DataKey::CurrentTick)
-            .unwrap_or(0)
+            .unwrap_or(0))
     }
 
-    pub fn get_sqrt_price(env: Env) -> u128 {
-        env.storage()
+    pub fn get_sqrt_price(env: Env) -> Result<u128, ClmmError> {
+        Self::require_init(&env)?;
+        Self::require_live_context(&env)?;
+        Ok(env
+            .storage()
             .instance()
             .get(&DataKey::SqrtPriceX96)
-            .unwrap_or(0)
+            .unwrap_or(0))
     }
 
-    pub fn get_liquidity(env: Env) -> u128 {
-        env.storage()
+    pub fn get_liquidity(env: Env) -> Result<u128, ClmmError> {
+        Self::require_init(&env)?;
+        Self::require_live_context(&env)?;
+        Ok(env
+            .storage()
             .instance()
             .get(&DataKey::Liquidity)
-            .unwrap_or(0)
+            .unwrap_or(0))
     }
 
     // ── Internal Helpers ────────────────────────────────────────────
@@ -961,6 +1098,91 @@ impl ClmmCore {
     fn require_init(env: &Env) -> Result<(), ClmmError> {
         if !env.storage().instance().has(&DataKey::Initialized) {
             return Err(ClmmError::NotInitialized);
+        }
+        Ok(())
+    }
+
+    /// Network the stored state is bound to. Pools initialized before context
+    /// binding have no stored network and adopt the live ledger network, so
+    /// they behave as before until `migrate` pins the binding.
+    fn bound_network(env: &Env) -> BytesN<32> {
+        env.storage()
+            .instance()
+            .get(&DataKey::NetworkId)
+            .unwrap_or_else(|| env.ledger().network_id())
+    }
+
+    fn read_version(env: &Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey::StorageVersion)
+            .unwrap_or(0)
+    }
+
+    /// Reject reads of state that belongs to another network or a newer storage
+    /// layout than this contract understands.
+    fn require_live_context(env: &Env) -> Result<(), ClmmError> {
+        if Self::bound_network(env) != env.ledger().network_id() {
+            return Err(ClmmError::WrongNetwork);
+        }
+        if Self::read_version(env) > CURRENT_POOL_VERSION {
+            return Err(ClmmError::WrongVersion);
+        }
+        Ok(())
+    }
+
+    /// Reject operations bound to a different network, deployment, or context
+    /// version. Checked before any position read, math, transfer, or write.
+    fn require_context(env: &Env, expected: &PoolContext) -> Result<(), ClmmError> {
+        Self::require_live_context(env)?;
+        if expected.network_id != Self::bound_network(env) {
+            return Err(ClmmError::WrongNetwork);
+        }
+        if expected.contract != env.current_contract_address() {
+            return Err(ClmmError::WrongContract);
+        }
+        let version = Self::read_version(env);
+        if version > CURRENT_POOL_VERSION || expected.version != version {
+            return Err(ClmmError::WrongVersion);
+        }
+        Ok(())
+    }
+
+    /// SHA-256 fingerprint of the pool's immutable configuration
+    /// (`token0`, `token1`, `fee`, `tick_spacing`).
+    fn configuration_fingerprint(env: &Env) -> BytesN<32> {
+        let token0: Address = env.storage().instance().get(&DataKey::Token0).unwrap();
+        let token1: Address = env.storage().instance().get(&DataKey::Token1).unwrap();
+        let fee: u32 = env.storage().instance().get(&DataKey::Fee).unwrap();
+        let tick_spacing: i32 = env.storage().instance().get(&DataKey::TickSpacing).unwrap();
+
+        let mut preimage = Bytes::from_slice(env, CONFIG_FINGERPRINT_DOMAIN);
+        preimage.append(&(token0, token1, fee, tick_spacing).to_xdr(env));
+        env.crypto().sha256(&preimage).to_bytes()
+    }
+
+    /// Reject operations when the live pool configuration differs from its
+    /// initialization fingerprint or when the position's snapshot is absent or
+    /// mismatched.
+    fn validate_configuration(env: &Env, position_id: Option<u64>) -> Result<(), ClmmError> {
+        tick::get_tick_spacing(env)?;
+        let stored: BytesN<32> = env
+            .storage()
+            .instance()
+            .get(&DataKey::ConfigFingerprint)
+            .ok_or(ClmmError::StaleConfiguration)?;
+        if stored != Self::configuration_fingerprint(env) {
+            return Err(ClmmError::StaleConfiguration);
+        }
+        if let Some(pid) = position_id {
+            let pos_fp: BytesN<32> = env
+                .storage()
+                .persistent()
+                .get(&DataKey::PositionConfigFingerprint(pid))
+                .ok_or(ClmmError::StaleConfiguration)?;
+            if pos_fp != stored {
+                return Err(ClmmError::StaleConfiguration);
+            }
         }
         Ok(())
     }
@@ -1052,6 +1274,11 @@ mod tests {
         BytesN::from_array(env, &[seed; 32])
     }
 
+    /// Current context a caller would capture before an operation.
+    fn ctx(client: &ClmmCoreClient<'_>) -> PoolContext {
+        client.get_pool_context()
+    }
+
     /// Open a position of 100_000 liquidity over [-60, 60] and return its owner.
     fn open_position(
         env: &Env,
@@ -1069,6 +1296,7 @@ mod tests {
             &100_000,
             &100_000,
             &100_000,
+            &ctx(client),
             &operation_id(env, 1),
         );
         (owner, position_id)
@@ -1108,6 +1336,7 @@ mod tests {
             &100_000,
             &100_000,
             &100_000,
+            &ctx(&client),
             &operation_id(&env, 1),
         );
 
@@ -1130,7 +1359,8 @@ mod tests {
         mint_tokens(&env, &token1, &user, 100_000);
         let id = operation_id(&env, 7);
 
-        let (position_id, ..) = client.mint(&user, &-60, &60, &100_000, &100_000, &100_000, &id);
+        let (position_id, ..) =
+            client.mint(&user, &-60, &60, &100_000, &100_000, &100_000, &ctx(&client), &id);
         let user0 = balance(&env, &token0, &user);
         let user1 = balance(&env, &token1, &user);
         let pool0 = balance(&env, &token0, &client.address);
@@ -1138,7 +1368,8 @@ mod tests {
         let liquidity = client.get_liquidity();
 
         // The same submission again must not create a second position or move funds.
-        let retry = client.try_mint(&user, &-60, &60, &100_000, &100_000, &100_000, &id);
+        let retry =
+            client.try_mint(&user, &-60, &60, &100_000, &100_000, &100_000, &ctx(&client), &id);
         assert_eq!(retry, Err(Ok(ClmmError::DuplicateOperation)));
 
         assert_eq!(balance(&env, &token0, &user), user0);
@@ -1155,6 +1386,7 @@ mod tests {
             &1_000,
             &100_000,
             &100_000,
+            &ctx(&client),
             &operation_id(&env, 8),
         );
         assert_eq!(next_id, position_id + 1);
@@ -1169,13 +1401,14 @@ mod tests {
         let id = operation_id(&env, 9);
 
         // Rejected before any transfer: the caps cannot cover the deposit.
-        let failed = client.try_mint(&user, &-60, &60, &100_000, &0, &0, &id);
+        let failed = client.try_mint(&user, &-60, &60, &100_000, &0, &0, &ctx(&client), &id);
         assert_eq!(failed, Err(Ok(ClmmError::InvalidAmount)));
         assert_eq!(balance(&env, &token0, &user), 100_000);
         assert_eq!(balance(&env, &token1, &user), 100_000);
 
         // The same identity is still valid for a retry.
-        let (position_id, ..) = client.mint(&user, &-60, &60, &100_000, &100_000, &100_000, &id);
+        let (position_id, ..) =
+            client.mint(&user, &-60, &60, &100_000, &100_000, &100_000, &ctx(&client), &id);
         assert_eq!(position_id, 1);
         assert_eq!(client.get_position(&position_id).liquidity, 100_000);
     }
@@ -1186,14 +1419,14 @@ mod tests {
         let (owner, position_id) = open_position(&env, &client, &token0, &token1);
         let id = operation_id(&env, 2);
 
-        client.burn(&position_id, &40_000, &1, &id);
+        client.burn(&position_id, &40_000, &1, &ctx(&client), &id);
         let after = client.get_position(&position_id);
         assert_eq!(after.sequence, 2);
         let liquidity = client.get_liquidity();
         let owner0 = balance(&env, &token0, &owner);
         let owner1 = balance(&env, &token1, &owner);
 
-        let retry = client.try_burn(&position_id, &40_000, &2, &id);
+        let retry = client.try_burn(&position_id, &40_000, &2, &ctx(&client), &id);
         assert_eq!(retry, Err(Ok(ClmmError::DuplicateOperation)));
 
         let now = client.get_position(&position_id);
@@ -1212,12 +1445,12 @@ mod tests {
         let (_owner, position_id) = open_position(&env, &client, &token0, &token1);
         let id = operation_id(&env, 3);
 
-        let failed = client.try_burn(&position_id, &100_001, &1, &id);
+        let failed = client.try_burn(&position_id, &100_001, &1, &ctx(&client), &id);
         assert_eq!(failed, Err(Ok(ClmmError::InsufficientLiquidity)));
         assert_eq!(client.get_position(&position_id).liquidity, 100_000);
         assert_eq!(client.get_position(&position_id).sequence, 1);
 
-        client.burn(&position_id, &40_000, &1, &id);
+        client.burn(&position_id, &40_000, &1, &ctx(&client), &id);
         assert_eq!(client.get_position(&position_id).liquidity, 60_000);
         assert_eq!(client.get_position(&position_id).sequence, 2);
     }
@@ -1228,19 +1461,19 @@ mod tests {
         let (owner, position_id) = open_position(&env, &client, &token0, &token1);
         let id = operation_id(&env, 4);
 
-        assert_eq!(client.collect(&position_id, &1, &id), (0, 0));
+        assert_eq!(client.collect(&position_id, &1, &ctx(&client), &id), (0, 0));
         assert_eq!(client.get_position(&position_id).sequence, 2);
         let owner0 = balance(&env, &token0, &owner);
         let owner1 = balance(&env, &token1, &owner);
 
-        let retry = client.try_collect(&position_id, &2, &id);
+        let retry = client.try_collect(&position_id, &2, &ctx(&client), &id);
         assert_eq!(retry, Err(Ok(ClmmError::DuplicateOperation)));
         assert_eq!(balance(&env, &token0, &owner), owner0);
         assert_eq!(balance(&env, &token1, &owner), owner1);
 
         // A fresh identity collects later without re-applying the first effect.
         assert_eq!(
-            client.collect(&position_id, &2, &operation_id(&env, 5)),
+            client.collect(&position_id, &2, &ctx(&client), &operation_id(&env, 5)),
             (0, 0)
         );
         assert_eq!(client.get_position(&position_id).sequence, 3);
@@ -1257,12 +1490,15 @@ mod tests {
         mint_tokens(&env, &token0, &bob, 50_000);
         mint_tokens(&env, &token1, &bob, 50_000);
 
-        let (alice_position, ..) = client.mint(&alice, &-60, &60, &10_000, &50_000, &50_000, &id);
-        let (bob_position, ..) = client.mint(&bob, &-60, &60, &10_000, &50_000, &50_000, &id);
+        let (alice_position, ..) =
+            client.mint(&alice, &-60, &60, &10_000, &50_000, &50_000, &ctx(&client), &id);
+        let (bob_position, ..) =
+            client.mint(&bob, &-60, &60, &10_000, &50_000, &50_000, &ctx(&client), &id);
 
         assert_ne!(alice_position, bob_position);
         // Alice's id is consumed for her; Bob's identical id was never hers to spend.
-        let replay = client.try_mint(&alice, &-60, &60, &10_000, &50_000, &50_000, &id);
+        let replay =
+            client.try_mint(&alice, &-60, &60, &10_000, &50_000, &50_000, &ctx(&client), &id);
         assert_eq!(replay, Err(Ok(ClmmError::DuplicateOperation)));
     }
 
@@ -1273,8 +1509,8 @@ mod tests {
         let id = operation_id(&env, 12);
 
         // The mint above used id 1; the same value is free for a burn and a collect.
-        client.burn(&position_id, &1_000, &1, &id);
-        assert!(client.try_collect(&position_id, &2, &id).is_ok());
+        client.burn(&position_id, &1_000, &1, &ctx(&client), &id);
+        assert!(client.try_collect(&position_id, &2, &ctx(&client), &id).is_ok());
 
         let owner_now = client.get_position(&position_id);
         assert_eq!(owner_now.owner, owner);
@@ -1292,21 +1528,22 @@ mod tests {
         assert_eq!(client.get_position_sequence(&position_id), 1);
 
         // Burn with matching sequence 1 advances sequence to 2
-        let (b0, b1) = client.burn(&position_id, &25_000, &1, &operation_id(&env, 20));
+        let (b0, b1) =
+            client.burn(&position_id, &25_000, &1, &ctx(&client), &operation_id(&env, 20));
         assert!(b0 > 0 || b1 > 0);
         assert_eq!(client.get_position(&position_id).sequence, 2);
         assert_eq!(client.get_position_sequence(&position_id), 2);
         assert_eq!(client.get_position(&position_id).liquidity, 75_000);
 
         // Collect with matching sequence 2 advances sequence to 3
-        let (c0, c1) = client.collect(&position_id, &2, &operation_id(&env, 21));
+        let (c0, c1) = client.collect(&position_id, &2, &ctx(&client), &operation_id(&env, 21));
         assert_eq!(c0, b0);
         assert_eq!(c1, b1);
         assert_eq!(client.get_position(&position_id).sequence, 3);
         assert_eq!(client.get_position_sequence(&position_id), 3);
 
         // Second burn with matching sequence 3 advances sequence to 4
-        client.burn(&position_id, &25_000, &3, &operation_id(&env, 22));
+        client.burn(&position_id, &25_000, &3, &ctx(&client), &operation_id(&env, 22));
         assert_eq!(client.get_position(&position_id).sequence, 4);
         assert_eq!(client.get_position_sequence(&position_id), 4);
         assert_eq!(client.get_position(&position_id).liquidity, 50_000);
@@ -1326,10 +1563,12 @@ mod tests {
         let pool_balance_1 = balance(&env, &token1, &client.address);
 
         // Attempt burn with stale / mismatched sequence (e.g., 0, 2, 99)
-        let stale_res = client.try_burn(&position_id, &30_000, &0, &operation_id(&env, 30));
+        let stale_res =
+            client.try_burn(&position_id, &30_000, &0, &ctx(&client), &operation_id(&env, 30));
         assert_eq!(stale_res, Err(Ok(ClmmError::ConcurrentModification)));
 
-        let mismatched_res = client.try_burn(&position_id, &30_000, &99, &operation_id(&env, 31));
+        let mismatched_res =
+            client.try_burn(&position_id, &30_000, &99, &ctx(&client), &operation_id(&env, 31));
         assert_eq!(mismatched_res, Err(Ok(ClmmError::ConcurrentModification)));
 
         // Verify position state is completely preserved
@@ -1351,7 +1590,7 @@ mod tests {
         let (owner, position_id) = open_position(&env, &client, &token0, &token1);
 
         // Burn 20_000 to accrue tokens_owed on the position; sequence becomes 2
-        client.burn(&position_id, &20_000, &1, &operation_id(&env, 40));
+        client.burn(&position_id, &20_000, &1, &ctx(&client), &operation_id(&env, 40));
         let position_before = client.get_position(&position_id);
         assert_eq!(position_before.sequence, 2);
         assert!(position_before.tokens_owed_0 > 0 || position_before.tokens_owed_1 > 0);
@@ -1362,11 +1601,13 @@ mod tests {
         let pool_balance_1 = balance(&env, &token1, &client.address);
 
         // Attempt collect with stale sequence 1
-        let stale_res = client.try_collect(&position_id, &1, &operation_id(&env, 41));
+        let stale_res =
+            client.try_collect(&position_id, &1, &ctx(&client), &operation_id(&env, 41));
         assert_eq!(stale_res, Err(Ok(ClmmError::ConcurrentModification)));
 
         // Attempt collect with future sequence 99
-        let future_res = client.try_collect(&position_id, &99, &operation_id(&env, 42));
+        let future_res =
+            client.try_collect(&position_id, &99, &ctx(&client), &operation_id(&env, 42));
         assert_eq!(future_res, Err(Ok(ClmmError::ConcurrentModification)));
 
         // Verify tokens owed and fee checkpoints are preserved
@@ -1394,12 +1635,24 @@ mod tests {
         let id_worker_b = operation_id(&env, 51);
 
         // Worker A executes first and succeeds, bumping sequence to 2
-        client.burn(&position_id, &20_000, &seq_snapshot, &id_worker_a);
+        client.burn(
+            &position_id,
+            &20_000,
+            &seq_snapshot,
+            &ctx(&client),
+            &id_worker_a,
+        );
         assert_eq!(client.get_position_sequence(&position_id), 2);
         assert_eq!(client.get_position(&position_id).liquidity, 80_000);
 
         // Worker B's transaction arrives with the now-stale snapshot (sequence 1)
-        let collision_res = client.try_burn(&position_id, &30_000, &seq_snapshot, &id_worker_b);
+        let collision_res = client.try_burn(
+            &position_id,
+            &30_000,
+            &seq_snapshot,
+            &ctx(&client),
+            &id_worker_b,
+        );
         assert_eq!(collision_res, Err(Ok(ClmmError::ConcurrentModification)));
 
         // State was not corrupted by Worker B's failed attempt
@@ -1410,7 +1663,13 @@ mod tests {
         let updated_seq = client.get_position_sequence(&position_id);
         assert_eq!(updated_seq, 2);
 
-        let (b0, b1) = client.burn(&position_id, &30_000, &updated_seq, &id_worker_b);
+        let (b0, b1) = client.burn(
+            &position_id,
+            &30_000,
+            &updated_seq,
+            &ctx(&client),
+            &id_worker_b,
+        );
         assert!(b0 > 0 || b1 > 0);
         assert_eq!(client.get_position(&position_id).liquidity, 50_000);
         assert_eq!(client.get_position_sequence(&position_id), 3);
@@ -1429,11 +1688,12 @@ mod tests {
         let id_collect = operation_id(&env, 61);
 
         // Burn lands first, advancing sequence to 2
-        client.burn(&position_id, &15_000, &seq_snapshot, &id_burn);
+        client.burn(&position_id, &15_000, &seq_snapshot, &ctx(&client), &id_burn);
         assert_eq!(client.get_position_sequence(&position_id), 2);
 
         // Concurrent collect with stale sequence 1 is rejected
-        let collect_res = client.try_collect(&position_id, &seq_snapshot, &id_collect);
+        let collect_res =
+            client.try_collect(&position_id, &seq_snapshot, &ctx(&client), &id_collect);
         assert_eq!(collect_res, Err(Ok(ClmmError::ConcurrentModification)));
 
         let bal_before_0 = balance(&env, &token0, &owner);
@@ -1443,7 +1703,8 @@ mod tests {
         let refreshed_seq = client.get_position_sequence(&position_id);
         assert_eq!(refreshed_seq, 2);
 
-        let (collected_0, collected_1) = client.collect(&position_id, &refreshed_seq, &id_collect);
+        let (collected_0, collected_1) =
+            client.collect(&position_id, &refreshed_seq, &ctx(&client), &id_collect);
         assert!(collected_0 > 0 || collected_1 > 0);
         assert_eq!(client.get_position_sequence(&position_id), 3);
         assert_eq!(client.get_position(&position_id).tokens_owed_0, 0);
@@ -1465,15 +1726,15 @@ mod tests {
         let id = operation_id(&env, 70);
 
         // Rejected due to sequence mismatch: operation id is NOT consumed
-        let failed = client.try_burn(&position_id, &10_000, &99, &id);
+        let failed = client.try_burn(&position_id, &10_000, &99, &ctx(&client), &id);
         assert_eq!(failed, Err(Ok(ClmmError::ConcurrentModification)));
 
         // Safe retry with correct sequence using the SAME operation id succeeds
-        client.burn(&position_id, &10_000, &1, &id);
+        client.burn(&position_id, &10_000, &1, &ctx(&client), &id);
         assert_eq!(client.get_position_sequence(&position_id), 2);
 
         // Once consumed, submitting the same operation id again is rejected with DuplicateOperation
-        let duplicate = client.try_burn(&position_id, &10_000, &2, &id);
+        let duplicate = client.try_burn(&position_id, &10_000, &2, &ctx(&client), &id);
         assert_eq!(duplicate, Err(Ok(ClmmError::DuplicateOperation)));
     }
 
@@ -1526,6 +1787,11 @@ mod tests {
         );
 
         // A failed initialize must leave the pool uninitialized.
+        let uninit_ctx = PoolContext {
+            network_id: BytesN::from_array(&env, &[0u8; 32]),
+            contract: contract_id.clone(),
+            version: CURRENT_POOL_VERSION,
+        };
         assert_eq!(
             client.try_mint(
                 &Address::generate(&env),
@@ -1534,6 +1800,7 @@ mod tests {
                 &1,
                 &1,
                 &1,
+                &uninit_ctx,
                 &operation_id(&env, 20),
             ),
             Err(Ok(ClmmError::NotInitialized))
@@ -1557,27 +1824,72 @@ mod tests {
 
         // Ticks not aligned with the pool tick spacing.
         assert_eq!(
-            client.try_mint(&user, &-61, &60, &1_000, &u128::MAX, &u128::MAX, &id),
+            client.try_mint(
+                &user,
+                &-61,
+                &60,
+                &1_000,
+                &u128::MAX,
+                &u128::MAX,
+                &ctx(&client),
+                &id
+            ),
             Err(Ok(ClmmError::InvalidTick))
         );
         // Inverted range.
         assert_eq!(
-            client.try_mint(&user, &60, &-60, &1_000, &u128::MAX, &u128::MAX, &id),
+            client.try_mint(
+                &user,
+                &60,
+                &-60,
+                &1_000,
+                &u128::MAX,
+                &u128::MAX,
+                &ctx(&client),
+                &id
+            ),
             Err(Ok(ClmmError::InvalidTickRange))
         );
         // Aligned but outside the supported tick domain.
         assert_eq!(
-            client.try_mint(&user, &-60, &887_280, &1_000, &u128::MAX, &u128::MAX, &id),
+            client.try_mint(
+                &user,
+                &-60,
+                &887_280,
+                &1_000,
+                &u128::MAX,
+                &u128::MAX,
+                &ctx(&client),
+                &id
+            ),
             Err(Ok(ClmmError::InvalidTick))
         );
         // Zero liquidity.
         assert_eq!(
-            client.try_mint(&user, &-60, &60, &0, &u128::MAX, &u128::MAX, &id),
+            client.try_mint(
+                &user,
+                &-60,
+                &60,
+                &0,
+                &u128::MAX,
+                &u128::MAX,
+                &ctx(&client),
+                &id
+            ),
             Err(Ok(ClmmError::InvalidAmount))
         );
         // Liquidity larger than i128 cannot be represented in tick accounting.
         assert_eq!(
-            client.try_mint(&user, &-60, &60, &u128::MAX, &u128::MAX, &u128::MAX, &id),
+            client.try_mint(
+                &user,
+                &-60,
+                &60,
+                &u128::MAX,
+                &u128::MAX,
+                &u128::MAX,
+                &ctx(&client),
+                &id
+            ),
             Err(Ok(ClmmError::MathOverflow))
         );
 
@@ -1594,8 +1906,16 @@ mod tests {
 
         // Safe retry with the same operation identity succeeds: the failed
         // validation pass did not consume it.
-        let (position_id, amount0, amount1) =
-            client.mint(&user, &-60, &60, &100_000, &u128::MAX, &u128::MAX, &id);
+        let (position_id, amount0, amount1) = client.mint(
+            &user,
+            &-60,
+            &60,
+            &100_000,
+            &u128::MAX,
+            &u128::MAX,
+            &ctx(&client),
+            &id,
+        );
         assert_eq!(position_id, 1);
         assert_eq!(client.get_position(&position_id).liquidity, 100_000);
         assert_eq!(client.get_liquidity(), 100_000);
@@ -1611,7 +1931,13 @@ mod tests {
         let pool1 = balance(&env, &token1, &client.address);
 
         // Burning half returns exactly the pro-rata share tracked by the position.
-        let (burned0, burned1) = client.burn(&position_id, &50_000, &operation_id(&env, 22));
+        let (burned0, burned1) = client.burn(
+            &position_id,
+            &50_000,
+            &1,
+            &ctx(&client),
+            &operation_id(&env, 22),
+        );
         let position = client.get_position(&position_id);
 
         assert_eq!(position.liquidity, 50_000);
@@ -1626,17 +1952,19 @@ mod tests {
         // retry leaves the remaining position intact.
         let retry_id = operation_id(&env, 23);
         assert_eq!(
-            client.try_burn(&position_id, &0, &retry_id),
-            Err(Ok(ClmmError::InvalidAmount))
+            client.try_burn(&position_id, &0, &2, &ctx(&client), &retry_id),
+            Err(Ok(ClmmError::InsufficientLiquidity))
         );
         assert_eq!(client.get_position(&position_id).liquidity, 50_000);
-        let (reburned0, reburned1) = client.burn(&position_id, &10_000, &retry_id);
+        let (reburned0, reburned1) =
+            client.burn(&position_id, &10_000, &2, &ctx(&client), &retry_id);
         assert_eq!(client.get_position(&position_id).liquidity, 40_000);
 
         // Collect pays the recorded tokens once and zeroes the owed balances.
         let owner0 = balance(&env, &token0, &owner);
         let owner1 = balance(&env, &token1, &owner);
-        let (collected0, collected1) = client.collect(&position_id, &operation_id(&env, 24));
+        let (collected0, collected1) =
+            client.collect(&position_id, &3, &ctx(&client), &operation_id(&env, 24));
         assert_eq!(collected0, burned0 + reburned0);
         assert_eq!(collected1, burned1 + reburned1);
         assert_eq!(client.get_position(&position_id).tokens_owed_0, 0);
@@ -1666,11 +1994,17 @@ mod tests {
             Err(Ok(ClmmError::CorruptedPosition))
         );
         assert_eq!(
-            client.try_burn(&position_id, &1_000, &operation_id(&env, 25)),
+            client.try_burn(
+                &position_id,
+                &1_000,
+                &1,
+                &ctx(&client),
+                &operation_id(&env, 25)
+            ),
             Err(Ok(ClmmError::CorruptedPosition))
         );
         assert_eq!(
-            client.try_collect(&position_id, &operation_id(&env, 26)),
+            client.try_collect(&position_id, &1, &ctx(&client), &operation_id(&env, 26)),
             Err(Ok(ClmmError::CorruptedPosition))
         );
 
@@ -1682,7 +2016,13 @@ mod tests {
         // Restoring a valid record makes the operation retryable.
         write_position(&env, &client.address, position_id, &good_position);
         assert_eq!(client.get_position(&position_id).liquidity, 100_000);
-        client.burn(&position_id, &10_000, &operation_id(&env, 27));
+        client.burn(
+            &position_id,
+            &10_000,
+            &1,
+            &ctx(&client),
+            &operation_id(&env, 27),
+        );
         assert_eq!(client.get_position(&position_id).liquidity, 90_000);
     }
 
@@ -1703,7 +2043,7 @@ mod tests {
 
         let id = operation_id(&env, 28);
         assert_eq!(
-            client.try_collect(&position_id, &id),
+            client.try_collect(&position_id, &1, &ctx(&client), &id),
             Err(Ok(ClmmError::CorruptedPosition))
         );
         assert_eq!(balance(&env, &token0, &client.address), pool0);
@@ -1711,7 +2051,7 @@ mod tests {
 
         // Safe retry with the same identity after the record is repaired.
         write_position(&env, &client.address, position_id, &good_position);
-        assert_eq!(client.collect(&position_id, &id), (0, 0));
+        assert_eq!(client.collect(&position_id, &1, &ctx(&client), &id), (0, 0));
         assert_eq!(client.get_position(&position_id).liquidity, 100_000);
     }
 
@@ -1733,6 +2073,7 @@ mod tests {
                 &1_000,
                 &u128::MAX,
                 &u128::MAX,
+                &ctx(&client),
                 &operation_id(&env, 29)
             ),
             Err(Ok(ClmmError::InvalidTickSpacing))
@@ -1754,6 +2095,7 @@ mod tests {
             &10_000,
             &u128::MAX,
             &u128::MAX,
+            &ctx(&client),
             &operation_id(&env, 30),
         );
     }
@@ -1771,6 +2113,8 @@ mod tests {
             &100_000,
             &1_000_000_000_000_000_000,
             &1_000_000_000_000_000_000,
+            &ctx(&client),
+            &operation_id(&env, 31),
         );
         let contract_id = client.address.clone();
 
@@ -1805,8 +2149,492 @@ mod tests {
             );
         });
 
-        let (amount0, amount1) = client.burn(&position_id, &100_000);
+        let (amount0, amount1) = client.burn(
+            &position_id,
+            &100_000,
+            &1,
+            &ctx(&client),
+            &operation_id(&env, 32),
+        );
         assert_eq!(client.get_position(&position_id).liquidity, 0);
         assert!(amount0 > 0 || amount1 > 0);
+    }
+
+    // ── Network, ledger and version context binding (#1774) ────────────
+
+    mod pool_context_binding {
+        use super::*;
+        use soroban_sdk::testutils::Ledger;
+
+        const NET_A: [u8; 32] = [0xA1; 32];
+        const NET_B: [u8; 32] = [0xB2; 32];
+
+        /// Drop the context keys an older deployment never wrote, turning an
+        /// initialized pool into a legacy (version 0) pool.
+        fn degrade_to_legacy_pool(env: &Env, contract: &Address) {
+            env.as_contract(contract, || {
+                env.storage().instance().remove(&DataKey::NetworkId);
+                env.storage().instance().remove(&DataKey::StorageVersion);
+            });
+        }
+
+        fn set_version(env: &Env, contract: &Address, version: u32) {
+            env.as_contract(contract, || {
+                env.storage()
+                    .instance()
+                    .set(&DataKey::StorageVersion, &version);
+            });
+        }
+
+        #[test]
+        fn context_is_bound_to_network_deployment_and_version() {
+            let env = Env::default();
+            env.mock_all_auths();
+            env.ledger().set_network_id(NET_A);
+
+            let contract_id = env.register(ClmmCore, ());
+            let client = ClmmCoreClient::new(&env, &contract_id);
+            let token0 = env
+                .register_stellar_asset_contract_v2(Address::generate(&env))
+                .address();
+            let token1 = env
+                .register_stellar_asset_contract_v2(Address::generate(&env))
+                .address();
+            client.initialize(&token0, &token1, &3000, &60, &math::Q96);
+
+            let context = client.get_pool_context();
+            assert_eq!(context.network_id, BytesN::from_array(&env, &NET_A));
+            assert_eq!(context.contract, client.address);
+            assert_eq!(context.version, CURRENT_POOL_VERSION);
+
+            let user = Address::generate(&env);
+            mint_tokens(&env, &token0, &user, 1_000_000);
+            mint_tokens(&env, &token1, &user, 1_000_000);
+
+            // Normal operation: mint, swap, burn, and collect all accept the
+            // captured context, and pool activity does not alter it.
+            let (position_id, ..) = client.mint(
+                &user,
+                &-60,
+                &60,
+                &100_000,
+                &1_000_000,
+                &1_000_000,
+                &context,
+                &operation_id(&env, 1),
+            );
+            client.swap(
+                &user,
+                &true,
+                &1_000,
+                &(math::Q96 / 2),
+                &context,
+            );
+            client.burn(
+                &position_id,
+                &50_000,
+                &1,
+                &context,
+                &operation_id(&env, 2),
+            );
+            client.collect(&position_id, &2, &context, &operation_id(&env, 3));
+
+            assert_eq!(client.get_pool_context(), context);
+            assert_eq!(client.get_position(&position_id).liquidity, 50_000);
+            assert_eq!(client.get_position_sequence(&position_id), 3);
+        }
+
+        #[test]
+        fn legacy_pool_operates_until_migration_pins_the_binding() {
+            let env = Env::default();
+            env.mock_all_auths();
+            env.ledger().set_network_id(NET_A);
+
+            let contract_id = env.register(ClmmCore, ());
+            let client = ClmmCoreClient::new(&env, &contract_id);
+            let token0 = env
+                .register_stellar_asset_contract_v2(Address::generate(&env))
+                .address();
+            let token1 = env
+                .register_stellar_asset_contract_v2(Address::generate(&env))
+                .address();
+            client.initialize(&token0, &token1, &3000, &60, &math::Q96);
+            degrade_to_legacy_pool(&env, &client.address);
+
+            // No stored binding: the pool adopts the live network and stays at
+            // version 0, so pre-existing deployments keep working unchanged.
+            let legacy = client.get_pool_context();
+            assert_eq!(legacy.network_id, BytesN::from_array(&env, &NET_A));
+            assert_eq!(legacy.version, 0);
+
+            let user = Address::generate(&env);
+            mint_tokens(&env, &token0, &user, 100_000);
+            mint_tokens(&env, &token1, &user, 100_000);
+            let (position_id, ..) = client.mint(
+                &user,
+                &-60,
+                &60,
+                &50_000,
+                &100_000,
+                &100_000,
+                &legacy,
+                &operation_id(&env, 1),
+            );
+
+            let pos_before = client.get_position(&position_id);
+            let liq_before = client.get_liquidity();
+
+            // Migration pins the network and bumps the version without touching
+            // positions, liquidity, or balances.
+            let migrated = client.migrate();
+            assert_eq!(migrated.network_id, BytesN::from_array(&env, &NET_A));
+            assert_eq!(migrated.version, CURRENT_POOL_VERSION);
+            assert_eq!(client.get_position(&position_id), pos_before);
+            assert_eq!(client.get_liquidity(), liq_before);
+
+            // Idempotent, and the bound context is what subsequent calls accept.
+            assert_eq!(client.migrate(), migrated);
+            client.burn(
+                &position_id,
+                &10_000,
+                &1,
+                &migrated,
+                &operation_id(&env, 2),
+            );
+            assert_eq!(client.get_position(&position_id).liquidity, 40_000);
+        }
+
+        #[test]
+        fn stale_version_context_is_rejected_and_refreshed_retry_succeeds() {
+            let env = Env::default();
+            env.mock_all_auths();
+            env.ledger().set_network_id(NET_A);
+
+            let contract_id = env.register(ClmmCore, ());
+            let client = ClmmCoreClient::new(&env, &contract_id);
+            let token0 = env
+                .register_stellar_asset_contract_v2(Address::generate(&env))
+                .address();
+            let token1 = env
+                .register_stellar_asset_contract_v2(Address::generate(&env))
+                .address();
+            client.initialize(&token0, &token1, &3000, &60, &math::Q96);
+            degrade_to_legacy_pool(&env, &client.address);
+
+            let legacy = client.get_pool_context();
+            let user = Address::generate(&env);
+            mint_tokens(&env, &token0, &user, 100_000);
+            mint_tokens(&env, &token1, &user, 100_000);
+            let (position_id, ..) = client.mint(
+                &user,
+                &-60,
+                &60,
+                &50_000,
+                &100_000,
+                &100_000,
+                &legacy,
+                &operation_id(&env, 1),
+            );
+
+            let pos_before = client.get_position(&position_id);
+            let liq_before = client.get_liquidity();
+            let bal0_before = balance(&env, &token0, &user);
+            let bal1_before = balance(&env, &token1, &user);
+
+            // Pool migrates to version 1 after caller captured version 0 context.
+            client.migrate();
+
+            let burn_id = operation_id(&env, 2);
+            assert_eq!(
+                client.try_burn(&position_id, &10_000, &1, &legacy, &burn_id),
+                Err(Ok(ClmmError::WrongVersion))
+            );
+            assert_eq!(
+                client.try_collect(&position_id, &1, &legacy, &operation_id(&env, 3)),
+                Err(Ok(ClmmError::WrongVersion))
+            );
+            assert_eq!(
+                client.try_mint(
+                    &user,
+                    &-120,
+                    &120,
+                    &1_000,
+                    &100_000,
+                    &100_000,
+                    &legacy,
+                    &operation_id(&env, 4)
+                ),
+                Err(Ok(ClmmError::WrongVersion))
+            );
+            assert_eq!(
+                client.try_swap(&user, &true, &1_000, &(math::Q96 / 2), &legacy),
+                Err(Ok(ClmmError::WrongVersion))
+            );
+
+            // Position, liquidity, and balances are completely preserved.
+            assert_eq!(client.get_position(&position_id), pos_before);
+            assert_eq!(client.get_liquidity(), liq_before);
+            assert_eq!(balance(&env, &token0, &user), bal0_before);
+            assert_eq!(balance(&env, &token1, &user), bal1_before);
+
+            // Refresh context and retry with the SAME operation_id: succeeds once.
+            let refreshed = client.get_pool_context();
+            client.burn(&position_id, &10_000, &1, &refreshed, &burn_id);
+            assert_eq!(client.get_position(&position_id).liquidity, 40_000);
+            assert_eq!(client.get_position(&position_id).sequence, 2);
+        }
+
+        #[test]
+        fn state_read_and_write_on_another_network_is_rejected_and_recovers() {
+            let env = Env::default();
+            env.mock_all_auths();
+            env.ledger().set_network_id(NET_A);
+
+            let contract_id = env.register(ClmmCore, ());
+            let client = ClmmCoreClient::new(&env, &contract_id);
+            let token0 = env
+                .register_stellar_asset_contract_v2(Address::generate(&env))
+                .address();
+            let token1 = env
+                .register_stellar_asset_contract_v2(Address::generate(&env))
+                .address();
+            client.initialize(&token0, &token1, &3000, &60, &math::Q96);
+
+            let context = client.get_pool_context();
+            let user = Address::generate(&env);
+            mint_tokens(&env, &token0, &user, 100_000);
+            mint_tokens(&env, &token1, &user, 100_000);
+            let (position_id, ..) = client.mint(
+                &user,
+                &-60,
+                &60,
+                &50_000,
+                &100_000,
+                &100_000,
+                &context,
+                &operation_id(&env, 1),
+            );
+
+            let bal0 = balance(&env, &token0, &user);
+            let bal1 = balance(&env, &token1, &user);
+
+            // Transition to another network: reads and writes are rejected.
+            env.ledger().set_network_id(NET_B);
+            assert_eq!(
+                client.try_get_position(&position_id),
+                Err(Ok(ClmmError::WrongNetwork))
+            );
+            assert_eq!(
+                client.try_get_position_sequence(&position_id),
+                Err(Ok(ClmmError::WrongNetwork))
+            );
+            assert_eq!(
+                client.try_get_current_tick(),
+                Err(Ok(ClmmError::WrongNetwork))
+            );
+            assert_eq!(
+                client.try_get_sqrt_price(),
+                Err(Ok(ClmmError::WrongNetwork))
+            );
+            assert_eq!(
+                client.try_get_liquidity(),
+                Err(Ok(ClmmError::WrongNetwork))
+            );
+
+            let burn_id = operation_id(&env, 2);
+            assert_eq!(
+                client.try_burn(&position_id, &10_000, &1, &context, &burn_id),
+                Err(Ok(ClmmError::WrongNetwork))
+            );
+            assert_eq!(
+                client.try_collect(&position_id, &1, &context, &operation_id(&env, 3)),
+                Err(Ok(ClmmError::WrongNetwork))
+            );
+            assert_eq!(
+                client.try_mint(
+                    &user,
+                    &-120,
+                    &120,
+                    &1_000,
+                    &100_000,
+                    &100_000,
+                    &context,
+                    &operation_id(&env, 4)
+                ),
+                Err(Ok(ClmmError::WrongNetwork))
+            );
+            assert_eq!(
+                client.try_swap(&user, &true, &1_000, &(math::Q96 / 2), &context),
+                Err(Ok(ClmmError::WrongNetwork))
+            );
+
+            // A context claiming NET_B is also rejected because stored state is bound to NET_A.
+            let mut foreign = context.clone();
+            foreign.network_id = BytesN::from_array(&env, &NET_B);
+            assert_eq!(
+                client.try_burn(&position_id, &10_000, &1, &foreign, &burn_id),
+                Err(Ok(ClmmError::WrongNetwork))
+            );
+
+            assert_eq!(balance(&env, &token0, &user), bal0);
+            assert_eq!(balance(&env, &token1, &user), bal1);
+
+            // Back on NET_A, the original context and operation_id work again.
+            env.ledger().set_network_id(NET_A);
+            client.burn(&position_id, &10_000, &1, &context, &burn_id);
+            assert_eq!(client.get_position(&position_id).liquidity, 40_000);
+            assert_eq!(client.get_liquidity(), 40_000);
+        }
+
+        #[test]
+        fn context_for_another_deployment_is_rejected_without_state_change() {
+            let env = Env::default();
+            env.mock_all_auths();
+            env.ledger().set_network_id(NET_A);
+
+            let contract_id = env.register(ClmmCore, ());
+            let client = ClmmCoreClient::new(&env, &contract_id);
+            let token0 = env
+                .register_stellar_asset_contract_v2(Address::generate(&env))
+                .address();
+            let token1 = env
+                .register_stellar_asset_contract_v2(Address::generate(&env))
+                .address();
+            client.initialize(&token0, &token1, &3000, &60, &math::Q96);
+
+            let user = Address::generate(&env);
+            mint_tokens(&env, &token0, &user, 100_000);
+            mint_tokens(&env, &token1, &user, 100_000);
+            let (position_id, ..) = client.mint(
+                &user,
+                &-60,
+                &60,
+                &50_000,
+                &100_000,
+                &100_000,
+                &ctx(&client),
+                &operation_id(&env, 1),
+            );
+            let pos_before = client.get_position(&position_id);
+
+            let mut foreign = client.get_pool_context();
+            foreign.contract = Address::generate(&env);
+            assert_eq!(
+                client.try_mint(
+                    &user,
+                    &-120,
+                    &120,
+                    &1_000,
+                    &100_000,
+                    &100_000,
+                    &foreign,
+                    &operation_id(&env, 2)
+                ),
+                Err(Ok(ClmmError::WrongContract))
+            );
+            assert_eq!(
+                client.try_burn(
+                    &position_id,
+                    &10_000,
+                    &1,
+                    &foreign,
+                    &operation_id(&env, 3)
+                ),
+                Err(Ok(ClmmError::WrongContract))
+            );
+            assert_eq!(
+                client.try_collect(&position_id, &1, &foreign, &operation_id(&env, 4)),
+                Err(Ok(ClmmError::WrongContract))
+            );
+            assert_eq!(
+                client.try_swap(&user, &true, &1_000, &(math::Q96 / 2), &foreign),
+                Err(Ok(ClmmError::WrongContract))
+            );
+
+            assert_eq!(client.get_position(&position_id), pos_before);
+            assert_eq!(client.get_liquidity(), 50_000);
+        }
+
+        #[test]
+        fn newer_stored_version_is_refused_rather_than_interpreted() {
+            let env = Env::default();
+            env.mock_all_auths();
+            env.ledger().set_network_id(NET_A);
+
+            let contract_id = env.register(ClmmCore, ());
+            let client = ClmmCoreClient::new(&env, &contract_id);
+            let token0 = env
+                .register_stellar_asset_contract_v2(Address::generate(&env))
+                .address();
+            let token1 = env
+                .register_stellar_asset_contract_v2(Address::generate(&env))
+                .address();
+            client.initialize(&token0, &token1, &3000, &60, &math::Q96);
+
+            let user = Address::generate(&env);
+            mint_tokens(&env, &token0, &user, 100_000);
+            mint_tokens(&env, &token1, &user, 100_000);
+            let (position_id, ..) = client.mint(
+                &user,
+                &-60,
+                &60,
+                &50_000,
+                &100_000,
+                &100_000,
+                &ctx(&client),
+                &operation_id(&env, 1),
+            );
+
+            // Code downgrade: stored layout belongs to a newer version.
+            set_version(&env, &client.address, CURRENT_POOL_VERSION + 1);
+            let context = client.get_pool_context();
+            assert_eq!(context.version, CURRENT_POOL_VERSION + 1);
+
+            assert_eq!(
+                client.try_get_position(&position_id),
+                Err(Ok(ClmmError::WrongVersion))
+            );
+            assert_eq!(
+                client.try_get_liquidity(),
+                Err(Ok(ClmmError::WrongVersion))
+            );
+            assert_eq!(
+                client.try_burn(
+                    &position_id,
+                    &10_000,
+                    &1,
+                    &context,
+                    &operation_id(&env, 2)
+                ),
+                Err(Ok(ClmmError::WrongVersion))
+            );
+            assert_eq!(client.try_migrate(), Err(Ok(ClmmError::WrongVersion)));
+        }
+
+        #[test]
+        fn migration_never_rebinds_state_from_another_network() {
+            let env = Env::default();
+            env.mock_all_auths();
+            env.ledger().set_network_id(NET_A);
+
+            let contract_id = env.register(ClmmCore, ());
+            let client = ClmmCoreClient::new(&env, &contract_id);
+            let token0 = env
+                .register_stellar_asset_contract_v2(Address::generate(&env))
+                .address();
+            let token1 = env
+                .register_stellar_asset_contract_v2(Address::generate(&env))
+                .address();
+            client.initialize(&token0, &token1, &3000, &60, &math::Q96);
+
+            env.ledger().set_network_id(NET_B);
+            assert_eq!(client.try_migrate(), Err(Ok(ClmmError::WrongNetwork)));
+
+            env.ledger().set_network_id(NET_A);
+            assert_eq!(
+                client.get_pool_context().network_id,
+                BytesN::from_array(&env, &NET_A)
+            );
+        }
     }
 }

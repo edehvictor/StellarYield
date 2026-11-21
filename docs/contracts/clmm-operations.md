@@ -10,12 +10,40 @@ Calls carry a caller-generated **operation identity** for deduplication and an
 
 | Entry point | Effect | Concurrency & Identity scope |
 |---|---|---|
-| `mint(owner, tick_lower, tick_upper, amount, amount0_max, amount1_max, operation_id)` | Creates a position, initializes sequence to `1`, and pulls tokens | `owner` + mint + position `0` (no id exists yet) |
-| `burn(position_id, amount, expected_sequence, operation_id)` | Verifies `sequence == expected_sequence`, removes liquidity, accrues owed tokens, and advances sequence | `position.owner` + burn + `position_id` |
-| `collect(position_id, expected_sequence, operation_id)` | Verifies `sequence == expected_sequence`, pays accrued fees/owed tokens, resets checkpoints, and advances sequence | `position.owner` + collect + `position_id` |
+| `mint(owner, tick_lower, tick_upper, amount, amount0_max, amount1_max, expected_context, operation_id)` | Verifies `expected_context`, creates a position, initializes sequence to `1`, and pulls tokens | `owner` + mint + position `0` (no id exists yet) |
+| `burn(position_id, amount, expected_sequence, expected_context, operation_id)` | Verifies `expected_context` and `sequence == expected_sequence`, removes liquidity, accrues owed tokens, and advances sequence | `position.owner` + burn + `position_id` |
+| `collect(position_id, expected_sequence, expected_context, operation_id)` | Verifies `expected_context` and `sequence == expected_sequence`, pays accrued fees/owed tokens, resets checkpoints, and advances sequence | `position.owner` + collect + `position_id` |
+| `swap(recipient, zero_for_one, amount_specified, sqrt_price_limit_x96, expected_context)` | Verifies `expected_context` and executes an exact single-shot trade with slippage bounds | Context-bound only (no `operation_id` or `sequence`) |
 
-`swap` is not protected: it is an exact, single-shot trade with slippage bounds
-and no position accounting, and it is outside the scope of this change.
+## Network, ledger, and version context binding
+
+The pool's stored state is bound to the network it was initialized on and to a
+context version (`CURRENT_POOL_VERSION = 1`). Callers capture
+`get_pool_context() -> Result<PoolContext, ClmmError>` (`{ network_id, contract, version }`)
+and pass it as `expected_context` to `mint`, `burn`, `collect`, and `swap`.
+Read views (`get_position`, `get_position_sequence`, `get_current_tick`,
+`get_sqrt_price`, `get_liquidity`) enforce live network and version
+compatibility via `require_live_context`.
+
+Validation runs immediately after `require_init`, before any position load,
+operation-id check, math, token transfer, or storage write:
+
+| Mismatch | Error |
+|---|---|
+| Live ledger network ≠ network the stored state is bound to | `WrongNetwork` (`18`) |
+| Caller's `network_id` ≠ bound network | `WrongNetwork` (`18`) |
+| Caller's `contract` ≠ this deployment | `WrongContract` (`19`) |
+| Stored version > `CURRENT_POOL_VERSION` (code downgrade) | `WrongVersion` (`20`) |
+| Caller's `version` ≠ stored version (e.g. before/after `migrate`) | `WrongVersion` (`20`) |
+
+A legacy pool initialized before context binding existed has no stored
+`NetworkId` or `StorageVersion`; it adopts the live network at version `0` and
+keeps operating unchanged until `migrate()` pins the live network and bumps
+`StorageVersion` to `1` without touching positions, liquidity, or balances.
+`migrate()` is idempotent and returns `WrongNetwork` rather than re-binding
+state that already belongs to another network. Because context validation fails
+before any state change or operation-id consumption, callers can refresh
+`get_pool_context()` and retry safely with the same `operation_id`.
 
 ## Optimistic Concurrency Control (OCC)
 
@@ -148,13 +176,15 @@ Each consumed identity and sequence transition publishes events:
 | `("collect",)` | `(position_id, collect_0, collect_1)` | Fee collection event |
 | `("pos_seq",)` | `(position_id, sequence)` | Sequence transition event emitted on mint (1), burn, and collect |
 | `("op",)` | `(owner, kind, position_id, operation_id)` | Consumed operation identity event for indexer deduplication |
+| `("migrate",)` | `(network_id, version)` | Pool context migration event |
 
 ## Storage
 
 | Key | Class | Notes |
 |---|---|---|
-| `Token0`, `Token1`, `Fee`, `TickSpacing`, `CurrentTick`, `SqrtPriceX96`, `Liquidity`, `FeeGrowthGlobal0X128`, `FeeGrowthGlobal1X128`, `NextPositionId`, `Initialized` | instance | Pool configuration and globals |
+| `Token0`, `Token1`, `Fee`, `TickSpacing`, `CurrentTick`, `SqrtPriceX96`, `Liquidity`, `FeeGrowthGlobal0X128`, `FeeGrowthGlobal1X128`, `NextPositionId`, `Initialized`, `ConfigFingerprint`, `NetworkId`, `StorageVersion` | instance | Pool configuration, context binding, and globals |
 | `Position(id)` | persistent | Position accounting, including `sequence: u64` |
+| `PositionConfigFingerprint(id)` | persistent | Configuration fingerprint captured when the position was minted |
 | `Tick(tick)` | persistent | Tick liquidity and fee-growth checkpoints |
 | `Operation(operation_key)` | persistent | Consumed identity receipt; explicit TTL as described above |
 
@@ -162,10 +192,13 @@ See [storage-ttl-strategy.md](./storage-ttl-strategy.md).
 
 ## Breaking API changes
 
-- `burn` and `collect` gain an `expected_sequence: u64` parameter before `operation_id: BytesN<32>`.
+- `mint`, `burn`, `collect`, and `swap` take `expected_context: PoolContext` (before `operation_id` on `mint`/`burn`/`collect`).
+- `ClmmCore` exposes `get_pool_context() -> Result<PoolContext, ClmmError>` and `migrate() -> Result<PoolContext, ClmmError>`.
+- `get_current_tick`, `get_sqrt_price`, and `get_liquidity` return `Result<..., ClmmError>` so read calls reject `WrongNetwork`, `WrongVersion`, and `NotInitialized`.
+- `burn` and `collect` gain an `expected_sequence: u64` parameter before `expected_context: PoolContext` and `operation_id: BytesN<32>`.
 - `Position` includes a new field `sequence: u64` (initialized to `1` on `mint`).
 - `ClmmCore` exposes a new view function `get_position_sequence(position_id) -> Result<u64, ClmmError>`.
-- `ClmmError` gains `ConcurrentModification = 11`.
-- A new event `("pos_seq",)` is emitted with `(position_id, sequence)`.
+- `ClmmError` includes `ConcurrentModification = 11` through `WrongVersion = 20`.
+- Events `("pos_seq",)` and `("migrate",)` are emitted on sequence transitions and context migrations.
 
 See `contracts/ERROR_CODES.md` for the full error table.

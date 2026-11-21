@@ -281,4 +281,57 @@ describe("governance diagnostics (#1901)", () => {
       expect(retried.body.forecast).toBeDefined();
     });
   });
+
+  describe("malformed external data hardening (#1897)", () => {
+    it("rejects non-finite or non-numeric forecast parameters without throwing", async () => {
+      const res = await request(app)
+        .post("/api/governance/forecast")
+        .send({
+          ...VALID_FORECAST,
+          parameters: { feeRatePct: "not-a-number" },
+        });
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toBe("VALIDATION_FAILED");
+      expect(res.body.fields).toEqual(["parameters"]);
+      expect(areGovernanceDiagnosticsPrivacySafe(diagnosticsOf(res.body))).toBe(true);
+    });
+
+    it("rejects negative tvlUsd or malformed baseline fields", async () => {
+      const res = await request(app)
+        .post("/api/governance/forecast")
+        .send({
+          ...VALID_FORECAST,
+          baseline: { ...VALID_FORECAST.baseline, tvlUsd: -100 },
+        });
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toBe("VALIDATION_FAILED");
+      expect(res.body.fields).toEqual(["baseline"]);
+    });
+
+    it("rejects non-string signer/signature entries and invalid threshold in quorum-progress", async () => {
+      const res = await request(app)
+        .post("/api/governance/quorum-progress")
+        .send({
+          signers: ["GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF", 123, "   "],
+          signatures: [null],
+          threshold: 0,
+        });
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toBe("VALIDATION_FAILED");
+      expect(res.body.fields).toEqual(["signers", "signatures", "threshold"]);
+
+      const retry = await request(app)
+        .post("/api/governance/quorum-progress")
+        .send({
+          signers: ["GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF"],
+          signatures: ["GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF"],
+          threshold: 1,
+        });
+      expect(retry.status).toBe(200);
+      expect(retry.body.met).toBe(true);
+    });
+  });
 });

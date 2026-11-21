@@ -133,21 +133,35 @@ and context binding.
 
 Source: `contracts/clmm_core/src/lib.rs`
 
-| Code | Name                    | Meaning                                                        | Remediation                                              |
-| ---- | ----------------------- | -------------------------------------------------------------- | -------------------------------------------------------- |
-| 1    | `NotInitialized`        | Pool has not been initialized                                  | Call `initialize()`                                      |
-| 2    | `AlreadyInitialized`    | `initialize()` called twice                                    | No action needed                                         |
-| 3    | `InvalidTick`           | Tick is not aligned to the pool's tick spacing or is out of range | Use a tick divisible by `TickSpacing` within ±887272 |
-| 4    | `InvalidTickRange`      | `tick_lower` is not below `tick_upper`                         | Order the range correctly                                |
-| 5    | `InsufficientLiquidity` | Burn or swap amount exceeds the available liquidity            | Burn no more than the position holds                     |
-| 6    | `InvalidAmount`         | Amount is zero or the required deposit exceeds a cap           | Pass a positive amount and sufficient caps               |
-| 7    | `PriceLimitExceeded`    | Swap price limit is on the wrong side of the current price     | Set the limit beyond the current price in the swap direction |
-| 8    | `Unauthorized`          | Caller is not the position owner                               | Use the position owner address                           |
-| 9    | `InvalidPosition`       | No position exists with this id                                | Check the position id                                    |
-| 10   | `DuplicateOperation`    | An operation identity was already consumed by a successful call | Reuse the identity only for a genuine retry of the same call; use a new one for a new operation |
-| 11   | `ConcurrentModification` | Position sequence does not match; position state was modified concurrently | Query current sequence via `get_position()` / `get_position_sequence()` and retry |
+| Code | Name                     | Meaning                                                                     | Remediation                                                               |
+| ---- | ------------------------ | --------------------------------------------------------------------------- | ------------------------------------------------------------------------- |
+| 1    | `NotInitialized`         | Pool has not been initialized                                               | Call `initialize()`                                                       |
+| 2    | `AlreadyInitialized`     | `initialize()` called twice                                                 | No action needed                                                          |
+| 3    | `InvalidTick`            | Tick is not aligned to the pool's tick spacing or is out of range           | Use a tick divisible by `TickSpacing` within ±887272                      |
+| 4    | `InvalidTickRange`       | `tick_lower` is not below `tick_upper`                                      | Order the range correctly                                                 |
+| 5    | `InsufficientLiquidity`  | Burn or swap amount exceeds the available liquidity                         | Burn no more than the position holds                                      |
+| 6    | `InvalidAmount`          | Amount is zero or the required deposit exceeds a cap                        | Pass a positive amount and sufficient caps                                |
+| 7    | `PriceLimitExceeded`     | Swap price limit is on the wrong side of the current price                  | Set the limit beyond the current price in the swap direction              |
+| 8    | `Unauthorized`           | Caller is not the position owner                                            | Use the position owner address                                            |
+| 9    | `InvalidPosition`        | No position exists with this id                                             | Check the position id                                                     |
+| 10   | `DuplicateOperation`     | An operation identity was already consumed by a successful call             | Reuse the identity only for a genuine retry; use a new one for a new call |
+| 11   | `ConcurrentModification` | Position sequence does not match; position state was modified concurrently  | Query current sequence via `get_position()` / `get_position_sequence()` and retry |
+| 12   | `InvalidFee`             | Pool fee exceeds `MAX_FEE_BPS` (10 000 bps)                                 | Pass a fee <= 10 000 bps                                                  |
+| 13   | `InvalidTickSpacing`     | Tick spacing is non-positive or exceeds `MAX_TICK_SPACING` (16 384)         | Use a valid positive tick spacing                                         |
+| 14   | `MathOverflow`           | A checked intermediate or cast cannot be represented safely                 | Reduce input amounts or liquidity                                         |
+| 15   | `CorruptedPosition`      | Persisted position record failed boundary or fee-growth invariants          | Inspect and repair the persisted position record                          |
+| 16   | `InvalidSqrtPrice`       | Initial sqrt price is outside `[MIN_SQRT_RATIO, MAX_SQRT_RATIO]`            | Pass a valid Q64.96 sqrt price                                            |
+| 17   | `StaleConfiguration`     | Live pool config or position config snapshot differs from initialization    | Verify pool configuration and position fingerprint before retrying        |
+| 18   | `WrongNetwork`           | Live ledger or caller context is not the network the pool state is bound to | Read/write the pool on its bound network; retry with `get_pool_context()` |
+| 19   | `WrongContract`          | Caller context names a different pool deployment address                    | Use the context from `get_pool_context()` for this deployment             |
+| 20   | `WrongVersion`           | Stored state or caller context is not at the expected pool context version  | Refresh with `get_pool_context()` after `migrate()`; upgrade if downgraded |
 
-See `docs/contracts/clmm-operations.md` for identity scoping, optimistic concurrency, and retry rules.
+`mint`, `burn`, `collect`, and `swap` validate the caller's `PoolContext`
+(network, deployment, version) before any position read, math, transfer, or
+storage write. Read views (`get_position`, `get_position_sequence`,
+`get_current_tick`, `get_sqrt_price`, `get_liquidity`) enforce live network and
+version compatibility. See `docs/contracts/clmm-operations.md` for identity
+scoping, optimistic concurrency, context binding, and retry rules.
 
 ---
 
