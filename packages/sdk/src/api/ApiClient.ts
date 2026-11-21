@@ -200,10 +200,10 @@ function createLinkedAbort(
  */
 export class ApiClient {
   private config: ApiConfig;
-  private readonly timeoutMs: number;
-  private readonly maxRetries: number;
-  private readonly retryDelayMs: number;
-  private readonly retryableStatuses: Set<number>;
+  private timeoutMs: number;
+  private maxRetries: number;
+  private retryDelayMs: number;
+  private retryableStatuses: Set<number>;
   private simulationConfigSnapshot: SimulationConfigSnapshot | null = null;
   private simulationConfigReader?: () => SimulationConfig;
 
@@ -245,10 +245,18 @@ export class ApiClient {
         false
       );
     }
+    // Apply atomically: derived retry/timeout state is updated together with
+    // the config object so a partial update can never leave stale values.
     this.config = {
       ...candidate,
       baseUrl: normalizeEndpointUrl(candidate.baseUrl),
     };
+    this.timeoutMs = this.config.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+    this.maxRetries = this.config.maxRetries ?? DEFAULT_MAX_RETRIES;
+    this.retryDelayMs = this.config.retryDelayMs ?? DEFAULT_RETRY_DELAY_MS;
+    this.retryableStatuses = new Set(
+      this.config.retryableStatuses ?? DEFAULT_RETRYABLE_STATUSES
+    );
   }
 
   public getConfig(): Readonly<ApiConfig> {

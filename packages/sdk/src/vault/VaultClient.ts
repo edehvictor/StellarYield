@@ -80,10 +80,10 @@ interface PreparedRequest {
 }
 
 export class VaultClient {
-  public readonly generatedClient: GeneratedVaultClient;
+  public generatedClient: GeneratedVaultClient;
   public readonly contractId: string;
   public readonly networkPassphrase: string;
-  public readonly rpcUrl: string;
+  public rpcUrl: string;
   public readonly specHash: string;
   public readonly configFingerprint?: string;
 
@@ -145,7 +145,14 @@ export class VaultClient {
         false
       );
     }
-    (this as any).rpcUrl = normalizeEndpointUrl(rpcUrl);
+    // Apply atomically: update the URL and rebuild the generated client together
+    // so a partial update can never leave the client bound to a stale endpoint.
+    this.rpcUrl = normalizeEndpointUrl(rpcUrl);
+    this.generatedClient = new GeneratedVaultClient({
+      contractId: this.contractId,
+      networkPassphrase: this.networkPassphrase,
+      rpcUrl: this.rpcUrl,
+    });
   }
 
   private initMethods() {
