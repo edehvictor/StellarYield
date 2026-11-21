@@ -58,7 +58,69 @@ export interface OpportunitySnapshot {
   };
 }
 
+interface IdempotentExportJob {
+  key: string;
+  params: Record<string, any>;
+  result: SnapshotBundle;
+  createdAt: number;
+}
+
+/** Default TTL for idempotency keys (24 hours). */
+const IDEMPOTENCY_KEY_TTL_MS = 24 * 60 * 60 * 1000;
+
+export interface IdempotencyCheckResult {
+  status: "hit" | "mismatch" | "stale" | "miss";
+  result?: SnapshotBundle;
+}
+
 export class ExportService {
+  private idempotencyCache = new Map<string, IdempotentExportJob>();
+
+  /**
+   * Checks whether an idempotency key already has a stored result.
+   *
+   * - "hit"    → caller should return the cached result immediately.
+   * - "mismatch" → the key exists but was created with different params;
+   *                 caller must reject with 422.
+   * - "stale"  → the key exists but has expired; caller should treat as
+   *               a fresh request ("miss") and overwrite the stale entry.
+   * - "miss"   → no entry for this key; proceed normally.
+   */
+  checkIdempotency(
+    key: string,
+    currentParams: Record<string, any>,
+  ): IdempotencyCheckResult {
+    const existing = this.idempotencyCache.get(key);
+    if (!existing) return { status: "miss" };
+
+    if (Date.now() - existing.createdAt > IDEMPOTENCY_KEY_TTL_MS) {
+      this.idempotencyCache.delete(key);
+      return { status: "stale" };
+    }
+
+    const paramsMatch =
+      JSON.stringify(existing.params) === JSON.stringify(currentParams);
+    if (!paramsMatch) return { status: "mismatch" };
+
+    return { status: "hit", result: existing.result };
+  }
+
+  /**
+   * Stores a result against the given idempotency key.
+   */
+  storeIdempotentResult(
+    key: string,
+    params: Record<string, any>,
+    result: SnapshotBundle,
+  ): void {
+    this.idempotencyCache.set(key, {
+      key,
+      params,
+      result,
+      createdAt: Date.now(),
+    });
+  }
+
   /**
    * Generates a full snapshot bundle of current opportunity data.
    * Excludes secrets and internal-only metadata.
@@ -152,3 +214,5 @@ export class ExportService {
 }
 
 export const exportService = new ExportService();
+
+export { IDEMPOTENCY_KEY_TTL_MS };
