@@ -50,7 +50,8 @@ tags:
       | Error code | HTTP status | Description |
       |---|---|---|
       | `MISSING_FIELDS` | 400 | Required request fields are missing. |
-      | `INVALID_AMOUNT` | 400 | `amountInStroops` is not a valid integer string. |
+      | `INVALID_AMOUNT` | 400 | `amountInStroops` is not a plain non-negative integer string, is zero, or exceeds the maximum (2^127 - 1). |
+      | `INVALID_SLIPPAGE` | 400 | `slippageTolerance` is present but not a finite number. |
       | `STALE_QUOTE` | 400 / 422 | The provided quote is past its `expiresAt` (TTL configured via `ZAP_QUOTE_TTL_MS`, default 60s) and must be refreshed. Responses carry `recoverable: true`. |
       | `UNSUPPORTED_ASSET` | 400 / 422 | One or more assets in the quote path are no longer in the supported asset set. |
       | `SLIPPAGE_EXCEEDED` | 400 / 422 | The applied slippage exceeds the maximum allowed threshold (15%). |
@@ -5805,7 +5806,10 @@ Incident:
           example: "CDVAULTXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
         amountInStroops:
           type: string
-          description: Amount of input token to swap, in stroops (smallest unit, integer string)
+          description: |
+            Amount of input token to swap, in stroops (smallest unit), as a plain integer string.
+            Valid range is 1 to 2^127 - 1 (Soroban i128 maximum). Zero, negative, decimal,
+            exponent, signed or whitespace-padded values are rejected with `INVALID_AMOUNT`.
           example: "10000000"
         inputDecimals:
           type: integer
@@ -5826,7 +5830,11 @@ Incident:
           minimum: 0.001
           maximum: 0.15
           default: 0.005
-          description: User-defined slippage tolerance as a decimal fraction (e.g. 0.01 = 1%). Clamped to [0.001, 0.15].
+          description: |
+            User-defined slippage tolerance as a decimal fraction (e.g. 0.01 = 1%). Clamped to [0.001, 0.15];
+            non-finite values are rejected with `INVALID_SLIPPAGE`. The slippage actually applied is rounded to
+            the nearest 1e-6 and `minAmountOutStroops` is `floor(expectedAmountOut * (1 - slippage))`
+            (integer math, rounded down so the guaranteed minimum is never overstated).
           example: 0.01
       example:
         inputTokenContract: "CDXLMXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"

@@ -14,6 +14,7 @@ import {
   type TransactionReviewDiagnostic,
 } from "../../../../shared/types/transactionReviewDiagnostic";
 import { QuoteAssumptionFingerprintDisplay } from "./QuoteAssumptionFingerprintDisplay";
+import { shortenAddress, validateReviewAmounts } from "./reviewAmounts";
 import type { QuoteAssumptions } from "../../../../shared/types/quoteAssumptionFingerprint";
 
 export interface TransactionReviewTokenDetail {
@@ -82,13 +83,18 @@ export function TransactionReviewModal({
 
   if (!isOpen) return null;
 
-  const canConfirm = !isSubmitting && !isStale && !error;
+  const amountCheck = validateReviewAmounts({ inputToken, vaultToken, slippageTolerance });
+  const amountError = amountCheck.valid ? null : amountCheck.reason;
+  const displayError = error ?? amountError;
+  const canConfirm = !isSubmitting && !isStale && !displayError;
   const shownDiagnostics: readonly TransactionReviewDiagnostic[] =
     diagnostics && diagnostics.length > 0
       ? diagnostics
       : error
         ? buildTransactionReviewFailureDiagnostics("CONTEXT_INSUFFICIENT", { stage: "unknown" })
-        : [];
+        : amountError
+          ? buildTransactionReviewFailureDiagnostics("VALIDATION_FAILED", { stage: "request-validation" })
+          : [];
 
   return (
     <div
@@ -132,7 +138,7 @@ export function TransactionReviewModal({
               Connected Account
             </span>
             <span className="font-mono text-gray-200">
-              {walletAddress.slice(0, 6)}…{walletAddress.slice(-4)}
+              {shortenAddress(walletAddress)}
             </span>
           </div>
 
@@ -177,7 +183,7 @@ export function TransactionReviewModal({
           </div>
 
           {/* Error Message if Present */}
-          {error && (
+          {displayError && (
             <div
               className="flex items-start gap-2 rounded-xl border border-red-500/30 bg-red-500/10 p-3 text-xs text-red-200"
               role="alert"
@@ -185,7 +191,7 @@ export function TransactionReviewModal({
               <AlertTriangle className="h-4 w-4 shrink-0 text-red-400 mt-0.5" />
               <div>
                 <p className="font-semibold text-red-300">Submission blocked</p>
-                <p>{error}</p>
+                <p>{displayError}</p>
               </div>
             </div>
           )}

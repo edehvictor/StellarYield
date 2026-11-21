@@ -8,6 +8,7 @@ function zapValidationDiagnostics() {
     stage: "request-validation",
   });
 }
+import { parseStroopsAmount, StroopsMathError } from "../services/stroopsMath";
 
 export function validateWalletAddress(req: Request, res: Response, next: NextFunction): void {
   const address = req.params.address || req.params.walletAddress;
@@ -38,8 +39,26 @@ export function validateZapQuote(req: Request, res: Response, next: NextFunction
     sendError(res, 400, "MISSING_FIELDS", "inputTokenContract, vaultTokenContract, and amountInStroops are required.", undefined, undefined, undefined, zapValidationDiagnostics());
     return;
   }
-  if (typeof amountInStroops !== "string" || !/^-?\d+$/.test(amountInStroops)) {
-    sendError(res, 400, "INVALID_AMOUNT", "amountInStroops must be an integer string.", undefined, undefined, undefined, zapValidationDiagnostics());
+  // Strict, checked parse: rejects negatives, zero, decimals, and values above i128 max.
+  try {
+    parseStroopsAmount(amountInStroops);
+  } catch (e) {
+    if (e instanceof StroopsMathError) {
+      sendError(res, 400, "INVALID_AMOUNT", e.message, undefined, undefined, undefined, zapValidationDiagnostics());
+      return;
+    }
+    throw e;
+  }
+  const { slippageTolerance } = req.body;
+  if (
+    slippageTolerance !== undefined &&
+    !(
+      (typeof slippageTolerance === "number" ||
+        (typeof slippageTolerance === "string" && slippageTolerance.trim() !== "")) &&
+      Number.isFinite(Number(slippageTolerance))
+    )
+  ) {
+    sendError(res, 400, "INVALID_SLIPPAGE", "slippageTolerance must be a finite number.", undefined, undefined, undefined, zapValidationDiagnostics());
     return;
   }
   next();
