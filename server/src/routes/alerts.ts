@@ -10,6 +10,9 @@
  * `X-Alert-Network-Id` / `X-Alert-Schema-Version`. Writes accept that version
  * back as `If-Match` (or `expectedVersion` in the body) and answer 409
  * PREFERENCE_VERSION_CONFLICT when another write committed first (#1903).
+ * Reads also expose an immutable configuration fingerprint; writes may send it
+ * as `If-Preferences-Fingerprint` and answer 409
+ * PREFERENCE_FINGERPRINT_CONFLICT when it is stale (#1902).
  * Reads and writes also carry the explicit context (headers or `context` in
  * the body); a mismatch answers 409 PREFERENCE_CONTEXT_CONFLICT and changes
  * nothing (#1908).
@@ -26,6 +29,8 @@ import {
   revertAlertPreferences,
   rebindAlertPreferenceContext,
   getAlertPreferencesVersion,
+  getAlertPreferencesFingerprint,
+  computeAlertPreferencesFingerprint,
   type PreferenceVersionConflictError,
   MAX_ALERTS_PER_USER,
   type AlertCondition,
@@ -74,6 +79,25 @@ function setVersionHeaders(res: Response, version: number): void {
   res.setHeader("X-Preferences-Version", String(version));
 }
 
+function setFingerprintHeaders(res: Response, fingerprint: string | null): void {
+  if (fingerprint) res.setHeader("X-Preferences-Fingerprint", fingerprint);
+}
+
+function readExpectedFingerprint(req: Request): string | undefined {
+  const header = req.headers["if-preferences-fingerprint"];
+  const raw = typeof header === "string"
+    ? header.trim()
+    : (req.body as { configurationFingerprint?: unknown } | undefined)?.configurationFingerprint;
+  if (raw === undefined || raw === null || String(raw).trim() === "") return undefined;
+  const value = String(raw).trim();
+  if (!/^[0-9a-f]{64}$/i.test(value)) {
+    throw new InvalidExpectedVersionError(
+      "If-Preferences-Fingerprint / configurationFingerprint must be a SHA-256 hex digest",
+    );
+  }
+  return value.toLowerCase();
+}
+
 function setContextHeaders(res: Response, vaultId: string): void {
   const context = getServerAlertContext(vaultId);
   res.setHeader("X-Alert-Network-Id", context.networkId);
@@ -118,10 +142,34 @@ function sendVersionConflict(res: Response, err: unknown): boolean {
   if ((err as { code?: unknown } | null)?.code !== "PREFERENCE_VERSION_CONFLICT") return false;
   const conflict = err as PreferenceVersionConflictError;
   setVersionHeaders(res, conflict.currentVersion);
+  setFingerprintHeaders(res, conflict.currentFingerprint);
   res.status(409).json({
     error: conflict.message,
     code: conflict.code,
     expectedVersion: conflict.expectedVersion,
+    currentVersion: conflict.currentVersion,
+    currentFingerprint: conflict.currentFingerprint,
+    preferences: conflict.currentPreferences,
+  });
+  return true;
+}
+
+function sendFingerprintConflict(res: Response, err: unknown): boolean {
+  if ((err as { code?: unknown } | null)?.code !== "PREFERENCE_FINGERPRINT_CONFLICT") return false;
+  const conflict = err as {
+    message: string;
+    expectedFingerprint: string;
+    currentFingerprint: string | null;
+    currentPreferences: AlertPreferences | null;
+    currentVersion: number;
+  };
+  setVersionHeaders(res, conflict.currentVersion);
+  setFingerprintHeaders(res, conflict.currentFingerprint);
+  res.status(409).json({
+    error: conflict.message,
+    code: "PREFERENCE_FINGERPRINT_CONFLICT",
+    expectedFingerprint: conflict.expectedFingerprint,
+    currentFingerprint: conflict.currentFingerprint,
     currentVersion: conflict.currentVersion,
     preferences: conflict.currentPreferences,
   });
@@ -233,7 +281,10 @@ router.post("/", async (req: Request, res: Response) => {
       context: contextInput.value,
     });
 
-    if (preferences) setContextHeaders(res, vaultId);
+    if (preferences) {
+      setContextHeaders(res, vaultId);
+      setFingerprintHeaders(res, getAlertPreferencesFingerprint(walletAddress, vaultId));
+    }
     if ((alert as any).__replayed) {
       res.setHeader("X-Idempotent-Replayed", "true");
       const { __replayed, ...cleanAlert } = alert as any;
@@ -267,6 +318,7 @@ router.get("/preferences/:wallet/:vaultId", (req: Request, res: Response) => {
       return;
     }
     setVersionHeaders(res, getAlertPreferencesVersion(wallet, vaultId));
+    setFingerprintHeaders(res, getAlertPreferencesFingerprint(wallet, vaultId));
     setContextHeaders(res, vaultId);
     res.json(preferences);
   } catch (err) {
@@ -330,6 +382,11 @@ router.put("/preferences", (req: Request, res: Response) => {
 
   const expected = expectedVersionOr400(req, res);
   if (!expected.ok) return;
+  let expectedFingerprint: string | undefined;
+  try { expectedFingerprint = readExpectedFingerprint(req); } catch (err) {
+    res.status(400).json({ error: (err as Error).message, code: "INVALID_EXPECTED_FINGERPRINT" });
+    return;
+  }
   const contextInput = contextOr400(req, res, vaultId);
   if (!contextInput.ok) return;
 
@@ -348,16 +405,19 @@ router.put("/preferences", (req: Request, res: Response) => {
       // Only passed when sent, so unconditional writes keep their old call shape.
       ...(expected.value === undefined ? [] : [expected.value]),
       contextInput.value,
+      expectedFingerprint,
     );
 
     if (result.replayed) {
       res.setHeader("X-Idempotent-Replayed", "true");
     }
     setVersionHeaders(res, result.version);
+    setFingerprintHeaders(res, computeAlertPreferencesFingerprint(result.preferences));
     setContextHeaders(res, vaultId);
     res.json(result.preferences);
   } catch (err: any) {
     if (sendVersionConflict(res, err)) return;
+    if (sendFingerprintConflict(res, err)) return;
     if (sendContextConflict(res, err)) return;
     const message = err instanceof Error ? err.message : "Failed to update alert preferences";
     if (err.code === "OPERATION_IDENTITY_CONFLICT" || message.includes("Operation identity has already been used")) {
@@ -408,12 +468,14 @@ router.get("/:wallet/preferences/:vaultId", (req: Request, res: Response) => {
     }
     const version = getAlertPreferencesVersion(wallet, vaultId);
     setVersionHeaders(res, version);
+    setFingerprintHeaders(res, getAlertPreferencesFingerprint(wallet, vaultId));
     setContextHeaders(res, vaultId);
     res.json({
       walletAddress: wallet,
       vaultId,
       preferences,
       version,
+      configurationFingerprint: getAlertPreferencesFingerprint(wallet, vaultId),
       context: getServerAlertContext(vaultId),
     });
   } catch (err) {
@@ -460,6 +522,11 @@ router.put("/:wallet/preferences/:vaultId", (req: Request, res: Response) => {
 
   const expected = expectedVersionOr400(req, res);
   if (!expected.ok) return;
+  let expectedFingerprint: string | undefined;
+  try { expectedFingerprint = readExpectedFingerprint(req); } catch (err) {
+    res.status(400).json({ error: (err as Error).message, code: "INVALID_EXPECTED_FINGERPRINT" });
+    return;
+  }
   const contextInput = contextOr400(req, res, vaultId);
   if (!contextInput.ok) return;
 
@@ -470,12 +537,22 @@ router.put("/:wallet/preferences/:vaultId", (req: Request, res: Response) => {
       reason: req.body.reason as string | undefined,
       expectedVersion: expected.value,
       context: contextInput.value,
+      expectedFingerprint,
     });
     setVersionHeaders(res, version);
+    setFingerprintHeaders(res, getAlertPreferencesFingerprint(wallet, vaultId));
     setContextHeaders(res, vaultId);
-    res.json({ walletAddress: wallet, vaultId, preferences, auditEntry, version });
+    res.json({
+      walletAddress: wallet,
+      vaultId,
+      preferences,
+      auditEntry,
+      version,
+      configurationFingerprint: getAlertPreferencesFingerprint(wallet, vaultId),
+    });
   } catch (err) {
     if (sendVersionConflict(res, err)) return;
+    if (sendFingerprintConflict(res, err)) return;
     if (sendContextConflict(res, err)) return;
     const message = err instanceof Error ? err.message : "Failed to update alert preferences";
     res.status(500).json({ error: message });
@@ -488,6 +565,11 @@ router.post("/:wallet/preferences/:vaultId/revert", (req: Request, res: Response
   const { entryId } = req.body as { entryId?: string };
   const expected = expectedVersionOr400(req, res);
   if (!expected.ok) return;
+  let expectedFingerprint: string | undefined;
+  try { expectedFingerprint = readExpectedFingerprint(req); } catch (err) {
+    res.status(400).json({ error: (err as Error).message, code: "INVALID_EXPECTED_FINGERPRINT" });
+    return;
+  }
   const contextInput = contextOr400(req, res, vaultId);
   if (!contextInput.ok) return;
 
@@ -498,12 +580,21 @@ router.post("/:wallet/preferences/:vaultId/revert", (req: Request, res: Response
       entryId,
       expected.value,
       contextInput.value,
+      expectedFingerprint,
     );
     setVersionHeaders(res, version);
     setContextHeaders(res, vaultId);
-    res.json({ walletAddress: wallet, vaultId, preferences, auditEntry, version });
+    res.json({
+      walletAddress: wallet,
+      vaultId,
+      preferences,
+      auditEntry,
+      version,
+      configurationFingerprint: getAlertPreferencesFingerprint(wallet, vaultId),
+    });
   } catch (err) {
     if (sendVersionConflict(res, err)) return;
+    if (sendFingerprintConflict(res, err)) return;
     if (sendContextConflict(res, err)) return;
     const message = err instanceof Error ? err.message : "Failed to revert preferences";
     const status = message.includes("not found") ? 404 : 500;
