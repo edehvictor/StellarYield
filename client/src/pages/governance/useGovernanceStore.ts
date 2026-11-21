@@ -13,15 +13,28 @@ import {
   createSignerRotationAuditRecord,
   type SignerRotationAuditRecord,
 } from "./signerRotationAudit";
+import {
+  GovernanceValidationError,
+  parseStoredAuditRecords,
+  parseStoredConfig,
+  parseStoredTransactions,
+  validateGovernanceConfigInput,
+  validatePendingTransactionInput,
+  validateSignatureInput,
+} from "./governanceValidation";
 
 const STORAGE_KEY = "stellar_yield_governance_txns";
 const CONFIG_KEY = "stellar_yield_governance_config";
 const SIGNER_ROTATION_AUDIT_KEY = "stellar_yield_signer_rotation_audit";
 
-function loadFromStorage<T>(key: string, fallback: T): T {
+function loadFromStorage<T>(
+  key: string,
+  fallback: T,
+  parse: (raw: unknown) => T,
+): T {
   try {
     const stored = localStorage.getItem(key);
-    if (stored) return JSON.parse(stored) as T;
+    if (stored) return parse(JSON.parse(stored));
   } catch {
     // Ignore parse errors
   }
@@ -40,14 +53,16 @@ const DEFAULT_CONFIG: GovernanceConfig = {
 
 export function useGovernanceStore() {
   const [transactions, setTransactions] = useState<PendingTransaction[]>(() =>
-    loadFromStorage(STORAGE_KEY, []),
+    loadFromStorage(STORAGE_KEY, [], parseStoredTransactions),
   );
   const [config, setConfig] = useState<GovernanceConfig>(() =>
-    loadFromStorage(CONFIG_KEY, DEFAULT_CONFIG),
+    loadFromStorage(CONFIG_KEY, DEFAULT_CONFIG, (raw) =>
+      parseStoredConfig(raw, DEFAULT_CONFIG),
+    ),
   );
   const [signerRotationAudit, setSignerRotationAudit] = useState<
     SignerRotationAuditRecord[]
-  >(() => loadFromStorage(SIGNER_ROTATION_AUDIT_KEY, []));
+  >(() => loadFromStorage(SIGNER_ROTATION_AUDIT_KEY, [], parseStoredAuditRecords));
 
   /**
    * Persist first, then publish to React. A storage failure leaves the
@@ -79,20 +94,24 @@ export function useGovernanceStore() {
 
   const addTransaction = useCallback(
     (tx: PendingTransaction) => {
-      commitTransactions([...transactions, tx]);
+      const validated = validatePendingTransactionInput(tx);
+      commitTransactions([...transactions, validated]);
     },
     [transactions, commitTransactions],
   );
 
   const addSignature = useCallback(
     (txId: string, publicKey: string) => {
-      return updateTransaction(txId, (tx) => {
-        const alreadySigned = tx.signatures.some((s) => s.publicKey === publicKey);
+      const validated = validateSignatureInput(txId, publicKey);
+      return updateTransaction(validated.txId, (tx) => {
+        const alreadySigned = tx.signatures.some(
+          (s) => s.publicKey === validated.publicKey,
+        );
         if (alreadySigned) return tx;
 
         const newSignatures = [
           ...tx.signatures,
-          { publicKey, signedAt: Date.now() },
+          { publicKey: validated.publicKey, signedAt: Date.now() },
         ];
         const newStatus =
           newSignatures.length >= tx.threshold ? "ready" : "pending";
@@ -128,12 +147,20 @@ export function useGovernanceStore() {
 
   const recordExecutionSubmitted = useCallback(
     (txId: string, txHash: string) => {
+      if (typeof txHash !== "string" || txHash.trim().length === 0) {
+        throw new GovernanceValidationError(
+          "MALFORMED_EXECUTION_PAYLOAD",
+          "txHash must be a non-empty string.",
+          "txHash",
+        );
+      }
+      const normalizedHash = txHash.trim();
       return updateTransaction(txId, (tx) => {
         if (tx.status === "executed") return tx;
         const operation = tx.operation ?? startExecutionAttempt(undefined);
         return {
           ...tx,
-          operation: markExecutionSubmitted(operation, txHash),
+          operation: markExecutionSubmitted(operation, normalizedHash),
         };
       });
     },
@@ -193,9 +220,10 @@ export function useGovernanceStore() {
 
   const updateConfig = useCallback(
     (newConfig: GovernanceConfig, actor: string) => {
+      const validatedConfig = validateGovernanceConfigInput(newConfig);
       const record = createSignerRotationAuditRecord(
         config,
-        newConfig,
+        validatedConfig,
         actor,
         new Date().toISOString(),
       );
@@ -205,7 +233,7 @@ export function useGovernanceStore() {
       let configPersisted = false;
 
       try {
-        saveToStorage(CONFIG_KEY, newConfig);
+        saveToStorage(CONFIG_KEY, validatedConfig);
         configPersisted = true;
         if (record) {
           saveToStorage(SIGNER_ROTATION_AUDIT_KEY, updatedAudit);
@@ -225,7 +253,7 @@ export function useGovernanceStore() {
         );
       }
 
-      setConfig(newConfig);
+      setConfig(validatedConfig);
       if (record) setSignerRotationAudit(updatedAudit);
     },
     [config, signerRotationAudit],

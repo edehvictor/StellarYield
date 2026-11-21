@@ -188,16 +188,20 @@ function isExecutionAttemptStatus(value: unknown): value is ExecutionAttemptStat
  */
 const OPERATION_ID_PATTERN = /^[A-Za-z0-9._:-]{1,128}$/;
 
-router.post("/", (req: Request, res: Response) => {
-  const body = (req.body ?? {}) as Partial<RecordExecutionAttemptInput>;
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
 
-  if (!body.proposalId || typeof body.proposalId !== "string") {
+router.post("/", (req: Request, res: Response) => {
+  const body = (isPlainObject(req.body) ? req.body : {}) as Partial<RecordExecutionAttemptInput>;
+
+  if (!body.proposalId || typeof body.proposalId !== "string" || body.proposalId.trim().length === 0) {
     sendError(res, 400, "MISSING_PROPOSAL_ID", "proposalId is required.");
     return;
   }
 
-  if (body.txHash !== undefined && typeof body.txHash !== "string") {
-    sendError(res, 400, "INVALID_TX_HASH", "txHash must be a string.");
+  if (body.txHash !== undefined && (typeof body.txHash !== "string" || body.txHash.trim().length === 0)) {
+    sendError(res, 400, "INVALID_TX_HASH", "txHash must be a non-empty string.");
     return;
   }
   if (body.status !== undefined && !isExecutionAttemptStatus(body.status)) {
@@ -208,8 +212,21 @@ router.post("/", (req: Request, res: Response) => {
     sendError(res, 400, "INVALID_PHASE", "phase must be a valid transaction phase.");
     return;
   }
-  if (body.attemptNumber !== undefined && (typeof body.attemptNumber !== "number" || !Number.isFinite(body.attemptNumber))) {
-    sendError(res, 400, "INVALID_ATTEMPT_NUMBER", "attemptNumber must be a number.");
+  if (
+    body.attemptNumber !== undefined &&
+    (typeof body.attemptNumber !== "number" ||
+      !Number.isInteger(body.attemptNumber) ||
+      body.attemptNumber < 1)
+  ) {
+    sendError(res, 400, "INVALID_ATTEMPT_NUMBER", "attemptNumber must be a positive integer.");
+    return;
+  }
+  if (body.error !== undefined && typeof body.error !== "string") {
+    sendError(res, 400, "INVALID_ERROR", "error must be a string.");
+    return;
+  }
+  if (body.failedAtPhase !== undefined && !isTxPhase(body.failedAtPhase)) {
+    sendError(res, 400, "INVALID_PHASE", "failedAtPhase must be a valid transaction phase.");
     return;
   }
 
@@ -308,8 +325,15 @@ router.get("/", (req: Request, res: Response) => {
  * attempt that is already final, returns the stored attempt unchanged.
  */
 router.post("/:attemptId/succeeded", (req: Request, res: Response) => {
-  const { txHash } = (req.body ?? {}) as { txHash?: string };
-  respondToTransition(req, res, req.params.attemptId, { kind: "succeeded", txHash });
+  const { txHash } = (isPlainObject(req.body) ? req.body : {}) as { txHash?: unknown };
+  if (txHash !== undefined && (typeof txHash !== "string" || txHash.trim().length === 0)) {
+    sendError(res, 400, "INVALID_TX_HASH", "txHash must be a non-empty string.");
+    return;
+  }
+  respondToTransition(req, res, req.params.attemptId, {
+    kind: "succeeded",
+    txHash: typeof txHash === "string" ? txHash.trim() : undefined,
+  });
 });
 
 /**
@@ -320,12 +344,12 @@ router.post("/:attemptId/succeeded", (req: Request, res: Response) => {
  * Body: { error, failedAtPhase }
  */
 router.post("/:attemptId/failed", (req: Request, res: Response) => {
-  const { error, failedAtPhase } = (req.body ?? {}) as {
-    error?: string;
-    failedAtPhase?: string;
+  const { error, failedAtPhase } = (isPlainObject(req.body) ? req.body : {}) as {
+    error?: unknown;
+    failedAtPhase?: unknown;
   };
 
-  if (!error || typeof error !== "string") {
+  if (!error || typeof error !== "string" || error.trim().length === 0) {
     sendError(res, 400, "MISSING_ERROR", "error is required.");
     return;
   }
@@ -336,7 +360,7 @@ router.post("/:attemptId/failed", (req: Request, res: Response) => {
 
   respondToTransition(req, res, req.params.attemptId, {
     kind: "failed",
-    error,
+    error: error.trim(),
     failedAtPhase: failedAtPhase ?? "submitting",
   });
 });
