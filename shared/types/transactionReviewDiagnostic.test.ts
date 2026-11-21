@@ -16,8 +16,20 @@ describe("transactionReviewDiagnostic (#1893)", () => {
   });
 
   it("maps verify codes to refresh vs validation, and unknown codes to insufficient context", () => {
-    expect(buildQuoteVerificationDiagnostics("STALE_QUOTE")[0].code).toBe("QUOTE_REFRESH_REQUIRED");
-    expect(buildQuoteVerificationDiagnostics("CONFIG_DRIFT")[0].code).toBe("QUOTE_REFRESH_REQUIRED");
+    for (const code of ["STALE_QUOTE", "CONFIG_DRIFT", "ASSUMPTION_DRIFT", "INVALID_FINGERPRINT"]) {
+      const diagnostics = buildQuoteVerificationDiagnostics(code);
+      expect(diagnostics[0]).toMatchObject({
+        code: "QUOTE_REFRESH_REQUIRED",
+        stage: "quote-verification",
+        retryable: true,
+      });
+      expect(diagnostics[1]).toMatchObject({
+        code: "STATE_PRESERVED",
+        affectedStages: ["quote-verification"],
+      });
+      expect(areTransactionReviewDiagnosticsPrivacySafe(diagnostics)).toBe(true);
+    }
+
     expect(buildQuoteVerificationDiagnostics("SLIPPAGE_EXCEEDED")[0]).toMatchObject({
       code: "VALIDATION_FAILED",
       retryable: false,
