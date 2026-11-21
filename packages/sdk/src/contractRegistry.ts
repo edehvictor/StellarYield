@@ -19,6 +19,13 @@
  */
 
 import { validateNetworkName, type NetworkName } from "./network";
+import {
+  buildSdkFailureDiagnostics,
+  redactDiagnosticText,
+  type SdkDiagnostic,
+  type SdkDiagnosticCode,
+  type SdkStage,
+} from "./diagnostics";
 
 export type { NetworkName };
 
@@ -136,18 +143,86 @@ export interface RegistryWarning {
   contract?: ContractName;
 }
 
-export class ContractRegistryLoader {
-  private readonly _warnings: RegistryWarning[] = [];
-  private readonly _usedFallback: boolean;
+/**
+ * Optional diagnostic context supplied when constructing or reloading a
+ * contract registry loader.
+ */
+export interface ContractRegistryDiagnosticContext {
+  /** Optional source label (e.g. 'bundled', 'remote'); redacted if sensitive. */
+  source?: string;
+  /** Optional correlation or request identifier. */
+  correlationId?: string;
+  /** Whether to attach a `STATE_PRESERVED` diagnostic on failure. Defaults to `true`. */
+  preserveState?: boolean;
+}
+
+export interface ContractRegistryResolutionResult {
+  ok: boolean;
+  resolved: ResolvedContractId;
+  diagnostics: SdkDiagnostic[];
+}
+
+export interface ContractRegistryReloadResult {
+  ok: boolean;
+  diagnostics: SdkDiagnostic[];
+}
+
+/**
+ * Typed error thrown when contract registry resolution fails (e.g. missing
+ * contract ID or insufficient diagnostic context). Carries privacy-safe
+ * diagnostics identifying the failed stage, remediation path, and state
+ * preservation guarantee.
+ */
+export class ContractRegistryError extends Error {
+  readonly code: SdkDiagnosticCode;
+  readonly stage: SdkStage = "contract-registry";
+  readonly retryable: boolean;
+  readonly statePreserved = true as const;
+  readonly diagnostics: SdkDiagnostic[];
+  readonly contract?: ContractName;
+  readonly network?: NetworkName;
 
   constructor(
-    private readonly registry: ContractRegistry,
-    private readonly overrides: Partial<Record<ContractName, string | undefined>> = {},
+    message: string,
+    options: {
+      code?: SdkDiagnosticCode;
+      retryable?: boolean;
+      diagnostics: SdkDiagnostic[];
+      contract?: ContractName;
+      network?: NetworkName;
+    },
   ) {
-    // Detect if the provided registry was replaced with safe defaults.
-    this._usedFallback = this.registry === SAFE_FALLBACK_REGISTRY ||
-      this.registry === null as unknown as ContractRegistry;
+    super(redactDiagnosticText(message, "Contract registry resolution failed."));
+    this.name = "ContractRegistryError";
+    this.code = options.code ?? "CONTEXT_INSUFFICIENT";
+    this.retryable = options.retryable ?? true;
+    this.diagnostics = options.diagnostics;
+    this.contract = options.contract;
+    this.network = options.network;
+  }
+}
 
+export class ContractRegistryLoader {
+  private readonly _warnings: RegistryWarning[] = [];
+  private readonly _diagnostics: SdkDiagnostic[] = [];
+  private _usedFallback: boolean;
+  private registry: ContractRegistry;
+
+  constructor(
+    registry: ContractRegistry,
+    private readonly overrides: Partial<Record<ContractName, string | undefined>> = {},
+    private readonly context?: ContractRegistryDiagnosticContext,
+  ) {
+    this.registry = registry;
+    // Detect if the provided registry was replaced with safe defaults.
+    this._usedFallback =
+      this.registry === SAFE_FALLBACK_REGISTRY ||
+      this.registry === (null as unknown as ContractRegistry);
+
+    this.collectEmptyNetworkWarnings();
+  }
+
+  private collectEmptyNetworkWarnings(): void {
     // Check for partial metadata: any network where all contract addresses are empty.
     const networks: NetworkName[] = ["testnet", "mainnet", "local"];
     for (const net of networks) {
@@ -165,18 +240,36 @@ export class ContractRegistryLoader {
 
   /**
    * Create a loader with the safe fallback registry and an optional warning.
+   * Any raw reason string is redacted so sensitive paths, URLs, or secrets are
+   * never exposed in warnings or diagnostics.
    */
   static withFallback(
     reason?: string,
     overrides?: Partial<Record<ContractName, string | undefined>>,
+    context?: ContractRegistryDiagnosticContext,
   ): ContractRegistryLoader {
-    const loader = new ContractRegistryLoader(SAFE_FALLBACK_REGISTRY, overrides);
-    if (reason) {
-      loader._warnings.unshift({
-        code: "fallback_used",
-        message: reason,
-      });
-    }
+    const loader = new ContractRegistryLoader(SAFE_FALLBACK_REGISTRY, overrides, context);
+    const safeReason =
+      typeof reason === "string" && reason.trim().length > 0
+        ? redactDiagnosticText(reason, "Contract registry lacked sufficient diagnostic context.")
+        : "Contract registry lacked sufficient diagnostic context.";
+
+    loader._warnings.unshift({
+      code: "fallback_used",
+      message: safeReason,
+    });
+
+    loader._diagnostics.push(
+      ...buildSdkFailureDiagnostics("CONTEXT_INSUFFICIENT", {
+        stage: "contract-registry",
+        summary: `Contract registry fell back to safe defaults: ${safeReason}`,
+        remediation:
+          "Provide a valid contract registry or explicit contract overrides and retry; existing state and balances were preserved.",
+        retryable: true,
+        preserveState: context?.preserveState ?? true,
+      }),
+    );
+
     return loader;
   }
 
@@ -185,9 +278,64 @@ export class ContractRegistryLoader {
     return [...this._warnings];
   }
 
+  /** Privacy-safe diagnostics accumulated during construction / reload. */
+  get diagnostics(): SdkDiagnostic[] {
+    return [...this._diagnostics];
+  }
+
   /** Whether the loader is operating on the safe fallback registry. */
   get usedFallback(): boolean {
     return this._usedFallback;
+  }
+
+  /**
+   * Safely reloads the underlying contract registry.
+   *
+   * When the incoming registry is `null`, `undefined`, or malformed, the
+   * existing registry state is preserved unchanged and privacy-safe
+   * `CONTEXT_INSUFFICIENT` + `STATE_PRESERVED` diagnostics are returned so
+   * callers can retry safely once valid data is available.
+   */
+  reload(
+    registry: ContractRegistry | null | undefined,
+    context?: ContractRegistryDiagnosticContext,
+  ): ContractRegistryReloadResult {
+    const effectiveContext = context ?? this.context;
+
+    if (registry === null || registry === undefined) {
+      const diagnostics = buildSdkFailureDiagnostics("CONTEXT_INSUFFICIENT", {
+        stage: "contract-registry",
+        summary:
+          "Contract registry reload received null or undefined input; insufficient context to update registry.",
+        remediation:
+          "Supply a valid contract registry object and retry; existing registry state and balances were preserved.",
+        retryable: true,
+        preserveState: effectiveContext?.preserveState ?? true,
+      });
+      this._diagnostics.push(...diagnostics);
+      return { ok: false, diagnostics };
+    }
+
+    const normalised = normaliseRegistry(registry);
+    if (normalised === null) {
+      const diagnostics = buildSdkFailureDiagnostics("CONTEXT_INSUFFICIENT", {
+        stage: "contract-registry",
+        summary:
+          "Contract registry reload received an invalid or incomplete structure; insufficient context to update registry.",
+        remediation:
+          "Provide a registry containing at least one supported network mapping and retry; existing registry state and balances were preserved.",
+        retryable: true,
+        preserveState: effectiveContext?.preserveState ?? true,
+      });
+      this._diagnostics.push(...diagnostics);
+      return { ok: false, diagnostics };
+    }
+
+    this.registry = normalised;
+    this._usedFallback = false;
+    this._warnings.length = 0;
+    this.collectEmptyNetworkWarnings();
+    return { ok: true, diagnostics: [] };
   }
 
   /**
@@ -242,6 +390,33 @@ export class ContractRegistryLoader {
     };
   }
 
+  /**
+   * Resolves a contract ID and returns privacy-safe diagnostics when the
+   * contract cannot be resolved, without mutating existing state.
+   */
+  resolveWithDiagnostics(
+    name: ContractName,
+    network: NetworkName,
+  ): ContractRegistryResolutionResult {
+    const resolved = this.resolve(name, network);
+    if (resolved.contractId) {
+      return { ok: true, resolved, diagnostics: [] };
+    }
+
+    const fallbackChain = NETWORK_FALLBACK_ORDER[network];
+    const attempted = [network, ...fallbackChain].join(" -> ");
+    const diagnostics = buildSdkFailureDiagnostics("CONTEXT_INSUFFICIENT", {
+      stage: "contract-registry",
+      summary: `Contract "${name}" could not be resolved for network "${network}" (attempted: ${attempted}).`,
+      remediation:
+        "Provide an explicit contract override or populate the contract registry and retry; existing state and balances were preserved.",
+      retryable: true,
+      preserveState: this.context?.preserveState ?? true,
+    });
+
+    return { ok: false, resolved, diagnostics };
+  }
+
   /** Resolves every known contract name for the given network. */
   resolveAll(network: NetworkName): Record<ContractName, ResolvedContractId> {
     return Object.fromEntries(
@@ -250,41 +425,58 @@ export class ContractRegistryLoader {
   }
 
   /**
-   * Resolves a contract ID or throws a descriptive error, listing the
-   * fallback networks that were attempted, when nothing could be found.
+   * Resolves a contract ID or throws a typed {@link ContractRegistryError}
+   * carrying privacy-safe diagnostics, listing the fallback networks that were
+   * attempted, when nothing could be found.
    */
   requireContractId(name: ContractName, network: NetworkName): string {
-    const resolved = this.resolve(name, network);
-    if (!resolved.contractId) {
+    const result = this.resolveWithDiagnostics(name, network);
+    if (!result.ok) {
       const fallbackChain = NETWORK_FALLBACK_ORDER[network];
       const attempted = [network, ...fallbackChain].join(" -> ");
-      throw new Error(
+      throw new ContractRegistryError(
         `Missing contract ID for "${name}" on network "${network}". ` +
           `Attempted lookup chain: ${attempted}. ` +
           `Provide an override or populate contracts/registry.json.`,
+        {
+          code: "CONTEXT_INSUFFICIENT",
+          retryable: true,
+          diagnostics: result.diagnostics,
+          contract: name,
+          network,
+        },
       );
     }
-    return resolved.contractId;
+    return result.resolved.contractId;
   }
 }
 
 /**
  * Convenience factory.  When `registry` is `null`, `undefined`, or
  * irredeemably malformed, the loader automatically falls back to safe
- * defaults and records a warning.
+ * defaults and records privacy-safe warnings and diagnostics.
  */
 export function createContractRegistryLoader(
   registry: ContractRegistry | null | undefined,
   overrides: Partial<Record<ContractName, string | undefined>> = {},
+  context?: ContractRegistryDiagnosticContext,
 ): ContractRegistryLoader {
   if (registry === null || registry === undefined) {
-    return ContractRegistryLoader.withFallback("Registry was null or undefined", overrides);
+    return ContractRegistryLoader.withFallback(
+      "Registry was null or undefined",
+      overrides,
+      context,
+    );
   }
 
   const normalised = normaliseRegistry(registry);
   if (normalised === null) {
-    return ContractRegistryLoader.withFallback("Registry has an invalid structure", overrides);
+    return ContractRegistryLoader.withFallback(
+      "Registry has an invalid structure",
+      overrides,
+      context,
+    );
   }
 
-  return new ContractRegistryLoader(normalised, overrides);
+  return new ContractRegistryLoader(normalised, overrides, context);
 }

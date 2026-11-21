@@ -179,6 +179,12 @@ const vaultData = await api.getVaultData('vault-contract-id');
   - `simulateDeposit()`: Preview deposit allocation, shares, and fee estimates
   - `simulateWithConfig()`: Execute simulation under immutable configuration snapshot
 
+- **Contract Registry & Privacy-Safe Diagnostics**:
+  - `createContractRegistryLoader(registry, overrides?, context?)` and `ContractRegistryLoader`: Resolve Soroban contract IDs with explicit override priority and safe network fallbacks (`local -> testnet`; never `testnet <-> mainnet`).
+  - Insufficient diagnostic context: When the registry is `null`, `undefined`, malformed, or missing a contract ID, the loader records or throws `ContractRegistryError` with privacy-safe `CONTEXT_INSUFFICIENT` (`stage: "contract-registry"`) and `STATE_PRESERVED` (`stage: "state-persistence"`) diagnostics; sensitive paths, URLs, tokens, and keys are automatically redacted.
+  - Safe reload & retry: `loader.reload(registry)` atomically updates the registry on valid input and preserves existing registry state and overrides when input is invalid or incomplete, allowing safe retries.
+  - `loader.resolveWithDiagnostics(name, network)` returns `{ ok, resolved, diagnostics }` without throwing.
+
 - **Simulation Configuration & Fingerprint Hardening**:
   - `captureSimulationConfig(config)`: Captures a deep-frozen, immutable snapshot of simulation parameters and derives a deterministic `simcfg1:<hex>` fingerprint.
   - `assertSimulationConfigCurrent(expected, current)`: Rejects stale configuration snapshots with typed, retryable `StaleSimulationConfigError`.
