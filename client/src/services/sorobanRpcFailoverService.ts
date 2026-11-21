@@ -5,7 +5,7 @@
  * node health, failover metrics, and alert hook telemetry.
  */
 
-import { getApiBase } from "../lib/api";
+import { getApiBaseUrl } from "../lib/api";
 
 export interface SorobanRpcEndpointInfo {
   url: string;
@@ -60,7 +60,7 @@ export interface SorobanRpcStatusSnapshot {
 }
 
 export async function fetchSorobanRpcStatus(): Promise<SorobanRpcStatusSnapshot> {
-  const base = getApiBase();
+  const base = getApiBaseUrl();
   const res = await fetch(`${base}/api/rpc/status`);
   if (!res.ok) {
     throw new Error(`Failed to fetch Soroban RPC status (HTTP ${res.status})`);
@@ -72,7 +72,7 @@ export async function triggerManualFailover(
   targetEndpoint?: string,
   reason?: string,
 ): Promise<{ success: boolean; activeEndpoint: string }> {
-  const base = getApiBase();
+  const base = getApiBaseUrl();
   const res = await fetch(`${base}/api/rpc/failover`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -85,7 +85,7 @@ export async function triggerManualFailover(
 }
 
 export async function triggerProbeRecovery(): Promise<{ success: boolean }> {
-  const base = getApiBase();
+  const base = getApiBaseUrl();
   const res = await fetch(`${base}/api/rpc/probe`, {
     method: "POST",
   });
