@@ -7,4 +7,5 @@ export * from "./errors";
 export * from "./simulationDiagnostics";
 export * from "./network";
 export * from "./contractRegistry";
+export * from "./simulationConfig";
 export * from "./generated/yield_vault";
