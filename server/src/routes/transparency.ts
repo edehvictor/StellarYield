@@ -21,6 +21,7 @@ import { Router, type Request, type Response } from "express";
 import {
   failoverIncidentHistoryService,
   FailoverIncidentValidationError,
+  ConcurrencyConflictError,
 } from "../services/failoverIncidentHistoryService";
 
 const transparencyRouter = Router();
@@ -460,14 +461,22 @@ transparencyRouter.post(
       });
       return;
     }
-    const { recoveredAt } = (req.body ?? {}) as { recoveredAt?: unknown };
+    const { recoveredAt, version } = (req.body ?? {}) as {
+      recoveredAt?: string;
+      version?: number;
+    };
     let incident: ReturnType<typeof failoverIncidentHistoryService.resolveIncident>;
     try {
       incident = failoverIncidentHistoryService.resolveIncident(
         req.params.protocolId,
-        recoveredAt as string | undefined,
+        recoveredAt,
+        version,
       );
     } catch (error) {
+      if (error instanceof ConcurrencyConflictError) {
+        res.status(409).json({ error: error.message });
+        return;
+      }
       if (error instanceof FailoverIncidentValidationError) {
         res.status(400).json({ error: error.message, code: error.code });
         return;
