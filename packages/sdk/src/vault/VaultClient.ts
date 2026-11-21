@@ -8,7 +8,18 @@ import {
   SubmittedTransaction,
   needsRestore,
 } from "../lifecycle";
-import { SpecMismatchError, parseContractError, RestoreRequiredError } from "../errors";
+import {
+  SpecMismatchError,
+  SimulationDiagnosticsError,
+  parseContractError,
+  RestoreRequiredError,
+  toSimulationError,
+} from "../errors";
+import {
+  buildSimulationFailureDiagnostics,
+  extractContractErrorCode,
+} from "../simulationDiagnostics";
+import { rpc } from "@stellar/stellar-sdk";
 import { toTokenUnits } from "../types";
 import type { TokenAmount, VaultConfig } from "../types";
 
@@ -124,16 +135,47 @@ export class VaultClient {
     methodName: string,
     buildArgs: () => Record<string, any>
   ): Promise<PreparedTransaction<TResult>> {
-    // Amount validation runs outside the try block so InvalidAmountError
-    // reaches the caller as-is instead of being re-parsed as a contract error.
-    const args = buildArgs();
+    // Argument validation runs before any RPC call. InvalidAmountError keeps
+    // its class (callers already branch on it) but gains privacy-safe
+    // diagnostics naming the validation stage; no transaction is built.
+    let args: Record<string, any>;
+    try {
+      args = buildArgs();
+    } catch (error) {
+      throw toSimulationError(error, { method: methodName });
+    }
+
     try {
       const fn = (this.generatedClient as any)[methodName];
       if (typeof fn !== "function") {
-        throw new Error(`Unknown contract method '${methodName}'`);
+        throw new SimulationDiagnosticsError(
+          buildSimulationFailureDiagnostics("CONTEXT_INSUFFICIENT", {
+            stage: "transaction-build",
+          }),
+          { method: methodName }
+        );
       }
 
       const assembled = await fn.call(this.generatedClient, args);
+      const simulation = assembled.simulation;
+
+      // Defensive: a failed simulation can be returned instead of thrown by
+      // the generated client. Surface it through the same diagnostic path so
+      // the caller never receives a half-built PreparedTransaction.
+      if (simulation && rpc.Api.isSimulationError(simulation)) {
+        const eventCount = Array.isArray((simulation as any).diagnosticEvents)
+          ? (simulation as any).diagnosticEvents.length
+          : Array.isArray((simulation as any).events)
+          ? (simulation as any).events.length
+          : 0;
+        throw toSimulationError(
+          new Error(String((simulation as any).error ?? "simulation failed")),
+          {
+            method: methodName,
+            context: { diagnosticEventCount: eventCount },
+          }
+        );
+      }
 
       if (needsRestore(assembled.simulation)) {
         throw new RestoreRequiredError(
@@ -142,10 +184,32 @@ export class VaultClient {
         );
       }
 
+      let simulationResult: TResult;
+      try {
+        simulationResult = (assembled.result?.unwrap?.() ?? assembled.result) as TResult;
+      } catch (decodeError) {
+        // A contract rejection thrown by Result.unwrap carries a decodable
+        // code; anything else means the pinned bindings could not decode the
+        // returned value.
+        const code = extractContractErrorCode(decodeError);
+        if (code !== undefined) {
+          throw toSimulationError(decodeError, {
+            method: methodName,
+            context: { contractErrorCode: code },
+          });
+        }
+        throw new SimulationDiagnosticsError(
+          buildSimulationFailureDiagnostics("RESULT_DECODE_FAILED", {
+            stage: "result-decoding",
+          }),
+          { method: methodName }
+        );
+      }
+
       const rawXdr = assembled.built ? assembled.built.toXDR() : assembled.simulation;
 
       const meta: PreparedTransactionMeta<TResult> = {
-        simulationResult: (assembled.result?.unwrap?.() ?? assembled.result) as TResult,
+        simulationResult,
         footprint: assembled.simulation?.footprint || "",
         authEntries: assembled.simulation?.auth || [],
         minResourceFee: assembled.simulation?.minResourceFee || "0",
@@ -163,7 +227,10 @@ export class VaultClient {
 
       return new PreparedTransaction<TResult>(rawXdr, meta);
     } catch (error) {
-      throw parseContractError(error, undefined, undefined, "simulate");
+      // Known typed errors keep their class and gain diagnostics; failures
+      // without a decodable code or diagnostic events become a privacy-safe
+      // SimulationDiagnosticsError instead of echoing raw upstream text.
+      throw toSimulationError(error, { method: methodName });
     }
   }
 
