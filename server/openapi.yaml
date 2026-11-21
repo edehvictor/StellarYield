@@ -595,8 +595,12 @@ paths:
                 $ref: '#/components/schemas/PnLData'
         '404':
           description: User not found
+        '422':
+          description: Persisted transaction or price history is incomplete or invalid; correct the source records and retry
+        '503':
+          description: Current share-price data is unavailable; retry after a new snapshot is recorded
         '500':
-          description: Failed to fetch PnL data
+          description: Valuation failed; the persisted transaction history and balances remain unchanged and the request can be retried
 
   /api/users/{walletAddress}/export/csv:
     get:
