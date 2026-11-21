@@ -105,6 +105,8 @@ Source: `contracts/isolated_lending/src/lib.rs`
 | 13   | `OracleQuoteStale`       | Oracle quote older than the policy allows | Push a fresh quote                         |
 | 14   | `OracleConfidenceTooLow` | Oracle quote confidence below the policy | Wait for a higher-confidence quote          |
 | 15   | `StaleConfig`            | Configuration changed since the caller captured its fingerprint | Refresh with `get_config_fingerprint` and retry |
+| 16   | `InvalidOperationId`     | The all-zero operation id was passed to a `*_with_id` entry point | Generate a random 32-byte id per logical operation |
+| 17   | `OperationConflict`      | The operation id was already used by this account for a different request (kind, beneficiary or amount) | Use a new id for a new operation; retry only the identical request with the same id |
 
 `isolated_lending` uses checked arithmetic and documented floor rounding for
 values, limits, interest, fees and liquidation payouts (the close-factor cap is
@@ -113,6 +115,9 @@ before tokens move or storage is written, so a call that fails with any code
 above leaves balances, positions, totals, pending withdrawals and configuration
 unchanged and can be retried with corrected inputs. See
 `docs/contracts/isolated-lending.md` for the rounding table and numeric limits.
+A failed `*_with_id` call does not consume its operation id; a duplicate of
+an applied request returns the stored receipt without changing state. See the
+"Operation identity and safe retries" section of the same document.
 
 ---
 
