@@ -401,10 +401,6 @@ export function createApp() {
         "INVALID_AUTH_REQUEST",
         error instanceof Error ? error.message : "Invalid auth request.",
       );
-      res.status(400).json({
-        error: error instanceof Error ? error.message : "Invalid auth request.",
-        requestId: (req as unknown as { requestId?: string }).requestId,
-      });
     }
   });
 
@@ -412,6 +408,32 @@ export function createApp() {
     try {
       res.json(verifyAuthChallenge(req.body));
     } catch (error) {
+      const stale =
+        typeof error === "object" &&
+        error !== null &&
+        "code" in error &&
+        (error as { code?: unknown }).code === "STALE_WALLET_AUTH_CONFIG";
+      if (stale) {
+        const currentAuthConfigFingerprint =
+          "currentAuthConfigFingerprint" in (error as object)
+            ? (error as { currentAuthConfigFingerprint?: unknown })
+                .currentAuthConfigFingerprint
+            : undefined;
+        res.status(409).json({
+          error:
+            error instanceof Error
+              ? error.message
+              : "Wallet authentication configuration snapshot is stale.",
+          code: "STALE_WALLET_AUTH_CONFIG",
+          currentAuthConfigFingerprint:
+            typeof currentAuthConfigFingerprint === "string"
+              ? currentAuthConfigFingerprint
+              : undefined,
+          requestId: (req as unknown as { requestId?: string }).requestId,
+        });
+        return;
+      }
+
       sendError(
         res,
         400,
@@ -420,13 +442,6 @@ export function createApp() {
           ? error.message
           : "Invalid auth verification request.",
       );
-      res.status(400).json({
-        error:
-          error instanceof Error
-            ? error.message
-            : "Invalid auth verification request.",
-        requestId: (req as unknown as { requestId?: string }).requestId,
-      });
     }
   });
 
