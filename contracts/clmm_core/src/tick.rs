@@ -67,7 +67,11 @@ pub fn update_tick(
     let magnitude = liquidity_delta.unsigned_abs();
 
     // Update gross liquidity (always positive)
-    let liquidity_gross_after = if liquidity_delta < 0 {
+    // Mint uses (+ at lower, - at upper); burn uses (- at lower, + at upper).
+    // The boundary and sign together distinguish additions from removals.
+    let is_addition = upper == (liquidity_delta < 0);
+    let gross_delta = liquidity_delta.unsigned_abs();
+    let liquidity_gross_after = if is_addition {
         info.liquidity_gross
             .checked_sub(magnitude)
             .ok_or(ClmmError::InsufficientLiquidity)?

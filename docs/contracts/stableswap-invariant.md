@@ -51,6 +51,36 @@ sides is rejected with `InsufficientLiquidity`, preserving the LP balance.
 - `amp_coeff` must be `1..=MAX_A`; out-of-range values return
   `InvalidAmpCoeff` (7).
 
+## Network, ledger and version context
+
+The pool's stored state is bound to the network it was created on and to a
+context version. `get_pool_context()` returns
+`{ network_id, contract, version }`, and `add_liquidity`, `remove_liquidity` and
+`swap` require that value as `expected_context`. `get_reserves()` applies the
+live-network check without needing a context.
+
+Validation is the first thing each entry point does after initialization, before
+any invariant math:
+
+| Mismatch | Error |
+|---|---|
+| Live ledger network ≠ network the stored state is bound to | `WrongNetwork` (12) |
+| Caller's `network_id` ≠ bound network | `WrongNetwork` (12) |
+| Caller's `contract` ≠ this deployment | `WrongContract` (13) |
+| Stored version > `CURRENT_POOL_VERSION` (code downgrade) | `WrongVersion` (14) |
+| Caller's `version` ≠ stored version (e.g. before a `migrate`) | `WrongVersion` (14) |
+
+A pool initialized before this binding exists has no stored network or version.
+It adopts the live network and reports version `0`, so it keeps operating
+unchanged. Admin `migrate()` persists the binding and sets the version to
+`CURRENT_POOL_VERSION` = 1 without touching reserves, LP supply or balances; it
+is idempotent and returns `WrongNetwork` rather than re-binding state that
+already belongs to another network.
+
+Because the context is validated before any state change, a caller whose
+captured context went stale (for example because the admin migrated the pool)
+can call `get_pool_context()` again and retry the same operation.
+
 ## Failure atomicity and retries
 
 `add_liquidity`, `remove_liquidity` and `swap` validate arguments, compute the
@@ -63,7 +93,7 @@ error, a failed call leaves:
 - `TotalSupply` and the caller's `LpBalance` unchanged.
 
 The same call can therefore be retried once the cause is fixed (smaller amount,
-looser-bound but valid minimum, or corrected token). There are no operation
+looser-bound but valid minimum, corrected token, or a refreshed pool context). There are no operation
 identity receipts in this contract: retries are safe because the failed call
 never partially applied.
 

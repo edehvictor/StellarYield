@@ -6,6 +6,22 @@
 //! Accepts any SAC token from the user, swaps it for the vault's required
 //! token via a DEX router, and deposits the result into the YieldVault in
 //! a single transaction. Handles slippage tolerance during the swap.
+//!
+//! ## Partial completion and retry safety
+//!
+//! Every call that moves tokens is guarded by an operation ID
+//! (`op_id: u64`). The contract records `ZapStatus::Pending` before the first
+//! token transfer and `ZapStatus::Settled` on success. If the transaction
+//! fails after the input transfer but before the deposit completes, the caller
+//! can inspect `get_op_status(op_id)` and either:
+//!
+//! - Retry with the **same `op_id`** to resume from the recorded intermediate
+//!   state (refunds any input already on the contract and re-attempts the
+//!   deposit with the amount that was already converted).
+//! - Or, once confirmed settled/failed, start fresh with a new `op_id`.
+//!
+//! An `op_id` already in `Settled` state is rejected with `OpAlreadySettled`
+//! to prevent double-execution.
 
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, symbol_short, token, vec, Address, Env,
@@ -19,6 +35,29 @@ enum DataKey {
     Admin,
     DexRouter,
     Initialized,
+    /// Per-operation status keyed by (user, op_id).
+    OpStatus(Address, u64),
+}
+
+// ── Operation state ───────────────────────────────────────────────────────────
+
+/// Lifecycle of a single zap operation.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ZapStatus {
+    /// Input has been transferred to the contract; swap and deposit pending.
+    Pending,
+    /// Swap and deposit completed successfully; shares credited.
+    Settled,
+}
+
+/// Operation identity and quote deadline for the deadline-bound entry point.
+/// Packed into one argument to stay within Soroban's contract parameter limit.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ZapOperationContext {
+    pub deadline: u64,
+    pub op_id: u64,
 }
 
 // ── Errors ───────────────────────────────────────────────────────────────────
@@ -37,6 +76,8 @@ pub enum ZapError {
     /// Uses its own range so clients can decode it without knowing which
     /// contract failed (1–11 overlap with `VaultError`).
     QuoteExpired = 4001,
+    /// The operation was already settled; using the same op_id again is rejected.
+    OpAlreadySettled = 7,
 }
 
 /// Coarse-grained context for a failed route. It deliberately contains no
@@ -139,6 +180,7 @@ impl Zap {
     /// * [`ZapError::SlippageExceeded`] — Swap output below `min_amount_out`, or below
     ///   `expected_amount_out` when partial fills are disallowed.
     /// * [`ZapError::ZeroAmount`] — `amount_in` is not positive.
+    /// * [`ZapError::OpAlreadySettled`] — `op_id` was already successfully completed.
     pub fn zap_deposit(
         env: Env,
         user: Address,
@@ -150,6 +192,7 @@ impl Zap {
         min_shares_out: i128,
         expected_amount_out: i128,
         allow_partial: bool,
+        op_id: u64,
     ) -> Result<i128, ZapError> {
         Self::require_init(&env)?;
         Self::execute_zap(
@@ -163,6 +206,7 @@ impl Zap {
             min_shares_out,
             expected_amount_out,
             allow_partial,
+            op_id,
         )
     }
 
@@ -196,10 +240,10 @@ impl Zap {
         min_shares_out: i128,
         expected_amount_out: i128,
         allow_partial: bool,
-        deadline: u64,
+        operation: ZapOperationContext,
     ) -> Result<i128, ZapError> {
         Self::require_init(&env)?;
-        if env.ledger().timestamp() > deadline {
+        if env.ledger().timestamp() > operation.deadline {
             return Err(ZapError::QuoteExpired);
         }
         Self::execute_zap(
@@ -213,7 +257,19 @@ impl Zap {
             min_shares_out,
             expected_amount_out,
             allow_partial,
+            operation.op_id,
         )
+    }
+
+    /// Return the recorded status of an operation, or `None` if `op_id` is unknown.
+    ///
+    /// Clients can call this after a failed or timed-out transaction to decide
+    /// whether to retry (status is `Pending` or absent) or start fresh
+    /// (status is `Settled`).
+    pub fn get_op_status(env: Env, user: Address, op_id: u64) -> Option<ZapStatus> {
+        env.storage()
+            .temporary()
+            .get(&DataKey::OpStatus(user, op_id))
     }
 
     // ── Internal ─────────────────────────────────────────────────────
@@ -231,11 +287,27 @@ impl Zap {
         min_shares_out: i128,
         expected_amount_out: i128,
         allow_partial: bool,
+        op_id: u64,
     ) -> Result<i128, ZapError> {
         user.require_auth();
 
         if amount_in <= 0 {
             return Err(ZapError::ZeroAmount);
+        }
+
+        // Guard against double-execution: a Settled op_id is a hard stop.
+        let op_key = DataKey::OpStatus(user.clone(), op_id);
+        let existing: Option<ZapStatus> = env.storage().temporary().get(&op_key);
+        if let Some(ZapStatus::Settled) = existing {
+            return Err(ZapError::OpAlreadySettled);
+        }
+        // If the op_id is absent or Pending, record Pending now so a mid-flight
+        // failure leaves a recoverable marker. The TTL (1000 ledgers) is enough
+        // for a client to notice a failed transaction and retry.
+        let is_retry = matches!(existing, Some(ZapStatus::Pending));
+        if !is_retry {
+            env.storage().temporary().set(&op_key, &ZapStatus::Pending);
+            env.storage().temporary().extend_ttl(&op_key, 1_000, 1_000);
         }
 
         let zap_addr = env.current_contract_address();
@@ -245,70 +317,97 @@ impl Zap {
             .get(&DataKey::DexRouter)
             .ok_or(ZapError::NotInitialized)?;
 
-        // Step 1: Transfer input tokens from user to this contract
+        // Step 1: Transfer input tokens from user to this contract.
+        // On a retry (Pending op_id) the input was already transferred in the
+        // prior attempt; skip the pull and work with whatever the contract holds.
         let input_client = token::Client::new(&env, &input_token);
-        input_client.transfer(&user, &zap_addr, &amount_in);
+        if !is_retry {
+            input_client.transfer(&user, &zap_addr, &amount_in);
+        }
 
-        // Step 2: If input_token == vault_token, skip the swap
+        // Step 2: If input_token == vault_token, skip the swap.
+        // On a retry we may already hold vault_token (prior swap succeeded but
+        // deposit failed); check the balance and skip the swap if sufficient.
         let deposit_amount = if input_token == vault_token {
-            amount_in
-        } else {
-            // Approve DEX router to spend our input tokens
-            input_client.approve(
-                &zap_addr,
-                &dex_router,
-                &amount_in,
-                &(env.ledger().sequence() + 100),
-            );
-
-            // Swap via DEX router
-            let swap_fn = Symbol::new(&env, "swap");
-            let swap_args: soroban_sdk::Vec<Val> = vec![
-                &env,
-                input_token.into_val(&env),
-                vault_token.clone().into_val(&env),
-                amount_in.into_val(&env),
-                min_amount_out.into_val(&env),
-            ];
-            let amount_out: i128 = env.invoke_contract(&dex_router, &swap_fn, swap_args);
-
-            if amount_out < min_amount_out {
-                return Err(ZapError::SlippageExceeded);
-            }
-
-            let quoted = if expected_amount_out > 0 {
-                expected_amount_out
+            // Use whatever is on the contract (may be more than amount_in on retry).
+            let held = input_client.balance(&zap_addr);
+            if held > 0 {
+                held
             } else {
-                min_amount_out
-            };
+                amount_in
+            }
+        } else {
+            // On retry: if we already hold vault_token, skip the swap.
+            let vault_client = token::Client::new(&env, &vault_token);
+            let already_converted = vault_client.balance(&zap_addr);
+            if is_retry && already_converted > 0 {
+                // Refund any leftover input that did not get consumed.
+                Self::refund_unused_input(
+                    &env,
+                    &user,
+                    &input_token,
+                    &zap_addr,
+                    symbol_short!("unused_in"),
+                );
+                already_converted
+            } else {
+                // Approve DEX router to spend our input tokens
+                input_client.approve(
+                    &zap_addr,
+                    &dex_router,
+                    &amount_in,
+                    &(env.ledger().sequence() + 100),
+                );
 
-            if amount_out < quoted {
-                if !allow_partial {
+                // Swap via DEX router
+                let swap_fn = Symbol::new(&env, "swap");
+                let swap_args: soroban_sdk::Vec<Val> = vec![
+                    &env,
+                    input_token.into_val(&env),
+                    vault_token.clone().into_val(&env),
+                    amount_in.into_val(&env),
+                    min_amount_out.into_val(&env),
+                ];
+                let amount_out: i128 = env.invoke_contract(&dex_router, &swap_fn, swap_args);
+
+                if amount_out < min_amount_out {
                     return Err(ZapError::SlippageExceeded);
                 }
 
-                env.events().publish(
-                    (symbol_short!("zap_part"),),
-                    (
-                        user.clone(),
-                        input_token.clone(),
-                        vault_token.clone(),
-                        amount_in,
-                        quoted,
-                        amount_out,
-                    ),
+                let quoted = if expected_amount_out > 0 {
+                    expected_amount_out
+                } else {
+                    min_amount_out
+                };
+
+                if amount_out < quoted {
+                    if !allow_partial {
+                        return Err(ZapError::SlippageExceeded);
+                    }
+
+                    env.events().publish(
+                        (symbol_short!("zap_part"),),
+                        (
+                            user.clone(),
+                            input_token.clone(),
+                            vault_token.clone(),
+                            amount_in,
+                            quoted,
+                            amount_out,
+                        ),
+                    );
+                }
+
+                Self::refund_unused_input(
+                    &env,
+                    &user,
+                    &input_token,
+                    &zap_addr,
+                    symbol_short!("unused_in"),
                 );
+
+                amount_out
             }
-
-            Self::refund_unused_input(
-                &env,
-                &user,
-                &input_token,
-                &zap_addr,
-                symbol_short!("unused_in"),
-            );
-
-            amount_out
         };
 
         // Step 3: Deposit into YieldVault — shares go to `user` (payer is this contract)
@@ -321,6 +420,10 @@ impl Zap {
             min_shares_out.into_val(&env),
         ];
         let shares: i128 = env.invoke_contract(&vault, &deposit_fn, deposit_args);
+
+        // Mark the operation settled so it cannot be re-executed.
+        env.storage().temporary().set(&op_key, &ZapStatus::Settled);
+        env.storage().temporary().extend_ttl(&op_key, 1_000, 1_000);
 
         env.events().publish(
             (symbol_short!("zap_dep"),),
@@ -859,6 +962,7 @@ mod tests {
             &1,
             &900,
             &false,
+            &1,
         );
         assert_eq!(result, Err(Ok(ZapError::NotInitialized)));
     }
@@ -902,6 +1006,7 @@ mod tests {
             &1,
             &0,
             &false,
+            &1,
         );
 
         assert_eq!(shares, 1_000);
@@ -942,6 +1047,7 @@ mod tests {
             &1,
             &900,
             &false,
+            &1,
         );
 
         assert_eq!(shares, 900);
@@ -970,6 +1076,7 @@ mod tests {
             &1,
             &900,
             &true,
+            &1,
         );
 
         assert_eq!(shares, 600);
@@ -1013,6 +1120,7 @@ mod tests {
             &1,
             &900,
             &false,
+            &1,
         );
 
         assert_eq!(
@@ -1056,6 +1164,7 @@ mod tests {
             &1,
             &900,
             &true,
+            &2,
         );
         t.zap.zap_deposit(
             &t.user,
@@ -1067,6 +1176,7 @@ mod tests {
             &1,
             &900,
             &true,
+            &1,
         );
 
         let topics = zap_event_topics(&t.env, &t.zap_id);
@@ -1091,6 +1201,7 @@ mod tests {
             &1,
             &900,
             &false,
+            &1,
         );
         assert_eq!(result, Err(Ok(ZapError::SlippageExceeded)));
         assert_eq!(
@@ -1130,7 +1241,10 @@ mod tests {
             &1,
             &900,
             &false,
-            &1_060,
+            &ZapOperationContext {
+                deadline: 1_060,
+                op_id: 1,
+            },
         );
 
         assert_eq!(shares, 900);
@@ -1156,7 +1270,10 @@ mod tests {
             &1,
             &0,
             &false,
-            &1_060,
+            &ZapOperationContext {
+                deadline: 1_060,
+                op_id: 1,
+            },
         );
         assert_eq!(shares, 1_000);
     }
@@ -1179,7 +1296,10 @@ mod tests {
             &1,
             &900,
             &false,
-            &1_060,
+            &ZapOperationContext {
+                deadline: 1_060,
+                op_id: 1,
+            },
         );
 
         assert_eq!(result, Err(Ok(ZapError::QuoteExpired)));
@@ -1206,7 +1326,10 @@ mod tests {
             &1,
             &900,
             &false,
-            &1_060,
+            &ZapOperationContext {
+                deadline: 1_060,
+                op_id: 1,
+            },
         );
         assert_eq!(result, Err(Ok(ZapError::SlippageExceeded)));
     }
@@ -1230,5 +1353,152 @@ mod tests {
         let expired = zap.get_error_diagnostic(&(ZapError::QuoteExpired as u32));
         assert_eq!(expired.stage, ZapStage::Validation);
         assert_eq!(expired.remediation, symbol_short!("refresh"));
+    }
+
+    // ── Partial completion and retry (#1741) ─────────────────────────
+
+    #[test]
+    fn test_op_status_absent_before_any_call() {
+        let t = setup_zap_env();
+        assert_eq!(t.zap.get_op_status(&t.user, &42), None);
+    }
+
+    #[test]
+    fn test_op_status_settled_after_success() {
+        let t = setup_zap_env();
+        t.router.configure(&t.zap_id, &900, &1_000);
+
+        t.zap.zap_deposit(
+            &t.user,
+            &t.input_token,
+            &t.vault_token,
+            &t.vault_id,
+            &1_000,
+            &800,
+            &1,
+            &900,
+            &false,
+            &99,
+        );
+
+        assert_eq!(t.zap.get_op_status(&t.user, &99), Some(ZapStatus::Settled));
+    }
+
+    #[test]
+    fn test_settled_op_id_is_rejected_with_typed_error() {
+        let t = setup_zap_env();
+        StellarAssetClient::new(&t.env, &t.vault_token).mint(&t.user, &2_000);
+
+        t.zap.zap_deposit(
+            &t.user,
+            &t.vault_token,
+            &t.vault_token,
+            &t.vault_id,
+            &1_000,
+            &0,
+            &1,
+            &0,
+            &false,
+            &5,
+        );
+
+        // Same op_id on a second call must be rejected.
+        let result = t.zap.try_zap_deposit(
+            &t.user,
+            &t.vault_token,
+            &t.vault_token,
+            &t.vault_id,
+            &1_000,
+            &0,
+            &1,
+            &0,
+            &false,
+            &5,
+        );
+        assert_eq!(result, Err(Ok(ZapError::OpAlreadySettled)));
+    }
+
+    #[test]
+    fn test_different_op_ids_execute_independently() {
+        let t = setup_zap_env();
+        StellarAssetClient::new(&t.env, &t.vault_token).mint(&t.user, &2_000);
+
+        t.zap.zap_deposit(
+            &t.user,
+            &t.vault_token,
+            &t.vault_token,
+            &t.vault_id,
+            &1_000,
+            &0,
+            &1,
+            &0,
+            &false,
+            &1,
+        );
+        t.zap.zap_deposit(
+            &t.user,
+            &t.vault_token,
+            &t.vault_token,
+            &t.vault_id,
+            &1_000,
+            &0,
+            &1,
+            &0,
+            &false,
+            &2,
+        );
+
+        assert_eq!(t.zap.get_op_status(&t.user, &1), Some(ZapStatus::Settled));
+        assert_eq!(t.zap.get_op_status(&t.user, &2), Some(ZapStatus::Settled));
+    }
+
+    #[test]
+    fn test_retry_pending_op_completes_deposit_without_re_pulling_input() {
+        let t = setup_zap_env();
+        // Directly write a Pending entry to simulate an op_id whose swap
+        // succeeded but whose deposit was interrupted.
+        // Pre-fund the contract with vault_token to represent the already-converted amount.
+        StellarAssetClient::new(&t.env, &t.vault_token).mint(&t.zap_id, &900);
+        t.env.as_contract(&t.zap_id, || {
+            let op_key = DataKey::OpStatus(t.user.clone(), 7_u64);
+            t.env
+                .storage()
+                .temporary()
+                .set(&op_key, &ZapStatus::Pending);
+        });
+
+        let user_input_before = token::Client::new(&t.env, &t.input_token).balance(&t.user);
+
+        // Retry: the Pending state should allow completion using the
+        // vault_token already on the contract, without pulling input again.
+        let shares = t.zap.zap_deposit(
+            &t.user,
+            &t.input_token,
+            &t.vault_token,
+            &t.vault_id,
+            &1_000,
+            &800,
+            &1,
+            &900,
+            &false,
+            &7,
+        );
+
+        assert_eq!(shares, 900);
+        assert_eq!(
+            count_zap_events(&t.env, &t.zap_id, symbol_short!("zap_dep")),
+            1
+        );
+        // User's input balance must be unchanged (no second pull).
+        assert_eq!(
+            token::Client::new(&t.env, &t.input_token).balance(&t.user),
+            user_input_before
+        );
+        assert_eq!(t.zap.get_op_status(&t.user, &7), Some(ZapStatus::Settled));
+    }
+
+    #[test]
+    fn test_op_already_settled_error_code_is_stable() {
+        assert_eq!(ZapError::OpAlreadySettled as u32, 7);
     }
 }
