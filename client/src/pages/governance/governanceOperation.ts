@@ -28,15 +28,22 @@ export interface GovernanceExecutionState {
 export type GovernanceExecutionAction = "submit" | "poll";
 
 export class GovernanceExecutionError extends Error {
-  readonly code: "PROPOSAL_NOT_READY" | "RESUME_REQUIRED" | "ATTEMPT_MISSING";
+  readonly code:
+    | "PROPOSAL_NOT_READY"
+    | "RESUME_REQUIRED"
+    | "ATTEMPT_MISSING"
+    | "INVALID_INPUT";
+  readonly field?: string;
 
   constructor(
     code: GovernanceExecutionError["code"],
     message: string,
+    field?: string,
   ) {
     super(message);
     this.name = "GovernanceExecutionError";
     this.code = code;
+    this.field = field;
   }
 }
 

@@ -35,11 +35,13 @@ signature, or balance state before validating.
 
 ## Server behaviour
 
-Affected endpoints in `server/src/routes/governance.ts`:
+Affected endpoints:
 
-- `POST /api/governance/forecast`
-- `POST /api/governance/quorum-progress`
-- `POST /api/governance/proposals/attachments/validate`
+- `POST /api/governance/forecast` — validates `proposalType`, finite-number `parameters` entries, and non-negative finite `baseline` fields.
+- `POST /api/governance/quorum-progress` — validates non-empty string `signers`/`signatures` elements and positive integer `threshold`.
+- `POST /api/governance/proposals/attachments/validate` — validates attachment shapes and recomputes `sha256` from `xdr`.
+- `POST /api/governance/vote-receipts` and `POST /api/governance/vote-receipts/reconcile` — guard against non-object bodies, whitespace-only identifiers, and non-object/invalid-date event entries.
+- `POST /api/governance/execution-attempts` (and `/succeeded`, `/failed`) — validate non-empty `proposalId`/`txHash`/`error`, positive integer `attemptNumber`, and valid `failedAtPhase`.
 
 A failure body keeps the legacy `error` / `message` fields and adds:
 
@@ -94,43 +96,28 @@ same shared builder:
   `confirmation` with `RETRY_UNSAFE`.
 - `GovernanceDiagnosticsList` renders the stage label, code, summary, and
   `Next:` remediation inline with the existing transaction timeline.
+- `useGovernanceStore` (`client/src/pages/governance/useGovernanceStore.ts`)
+  validates persisted `localStorage` payloads (`parseStoredTransactions`,
+  `parseStoredConfig`, `parseStoredAuditRecords`) and rejects malformed
+  mutations (`addTransaction`, `addSignature`, `recordExecutionSubmitted`,
+  `failExecution`, `updateConfig`) with a typed `GovernanceExecutionError`
+  (`code: "INVALID_INPUT"`) before touching `localStorage` or React state.
 
 `areGovernanceDiagnosticsPrivacySafe` can be used by tests or component
 assertions to verify that every rendered diagnostic satisfies the privacy
 guarantee.
-
-## Boundary validation (#1897)
-
-- **Server routes**:
-  - `POST /api/governance/forecast` requires `parameters` to be a plain object
-    of finite numbers and `baseline` to be a plain object with finite metrics
-    and non-negative `tvlUsd`.
-  - `POST /api/governance/quorum-progress` requires `signers` and `signatures`
-    to be arrays of non-empty strings (invalid entries are rejected with `400`,
-    not silently filtered) and `threshold` to be a positive integer.
-  - `POST /api/governance/vote-receipts` and
-    `POST /api/governance/vote-receipts/reconcile` reject whitespace-only
-    identifiers, non-object event entries, and invalid `indexedAt` timestamps
-    before mutating any stored receipts.
-  - `POST /api/governance/execution-attempts` and its lifecycle transition
-    routes reject blank `proposalId`/`error`/`txHash`, non-integer
-    `attemptNumber`, and invalid `failedAtPhase` values before mutating stored
-    attempts.
-- **Client governance store**:
-  - `client/src/pages/governance/governanceValidation.ts` validates persisted
-    `localStorage` payloads (`parseStoredTransactions`, `parseStoredConfig`,
-    `parseStoredAuditRecords`) on load so corrupted storage cannot crash the
-    dashboard.
-  - `useGovernanceStore` validates `addTransaction`, `addSignature`,
-    `recordExecutionSubmitted`, and `updateConfig` inputs before writing to
-    `localStorage` or React state, throwing `GovernanceValidationError` on
-    malformed data while preserving existing state and allowing safe retry.
 
 ## Tests
 
 - `server/src/__tests__/governanceDiagnostics.test.ts` — normal operation,
   validation failure, unexpected stage failure with no raw error leakage,
   malformed attachment handling, and safe retry after failure.
+- `server/src/routes/__tests__/governanceVoteReceipts.test.ts` — vote receipt
+  validation, malformed reconcile event rejection, and safe retry.
+- `server/src/routes/__tests__/governanceExecutionAttempts.test.ts` — execution
+  attempt boundary validation, state preservation, and safe retry.
+- `client/src/pages/governance/useGovernanceStore.test.ts` — persisted state
+  recovery and typed `INVALID_INPUT` rejections with safe retry.
 - `client/src/pages/governance/governanceDiagnostics.test.ts` — stage
   attribution and retry-safety mapping.
 - `client/src/pages/governance/governanceProposalAttachment.test.ts` — existing

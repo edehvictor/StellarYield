@@ -32,10 +32,6 @@ const router = Router();
  *   or recorded                            → 409 VOTE_ALREADY_SUBMITTED, nothing changes
  *   resubmission after the receipt failed  → 201 and a new receipt
  */
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
-}
-
 function isNonEmptyString(value: unknown): value is string {
   return typeof value === "string" && value.trim().length > 0;
 }
@@ -44,11 +40,11 @@ router.post(
   "/vote-receipts",
   idempotency({ scope: "governance.vote-receipts" }),
   (req: Request, res: Response) => {
-  const { proposalId, voter, choice } = (isPlainObject(req.body) ? req.body : {}) as {
-    proposalId?: unknown;
-    voter?: unknown;
-    choice?: unknown;
-  };
+  const body =
+    req.body && typeof req.body === "object" && !Array.isArray(req.body)
+      ? (req.body as { proposalId?: unknown; voter?: unknown; choice?: unknown })
+      : {};
+  const { proposalId, voter, choice } = body;
 
   if (!isNonEmptyString(proposalId)) {
     sendError(res, 400, "MISSING_PROPOSAL_ID", "proposalId is required.");
@@ -126,37 +122,42 @@ router.get("/vote-receipts", (req: Request, res: Response) => {
  * Body: { events: IndexedGovernanceEvent[] }
  */
 router.post("/vote-receipts/reconcile", (req: Request, res: Response) => {
-  const { events } = (isPlainObject(req.body) ? req.body : {}) as { events?: unknown };
+  const body =
+    req.body && typeof req.body === "object" && !Array.isArray(req.body)
+      ? (req.body as { events?: unknown })
+      : {};
+  const { events } = body;
 
   if (!Array.isArray(events)) {
     sendError(res, 400, "INVALID_EVENTS", "events must be an array of indexed governance events.");
     return;
   }
 
-  // Validate each element is a plain object with non-empty string fields and
-  // a parseable timestamp before mutating any stored receipts.
-  const valid = events.every(
-    (e): e is IndexedGovernanceEvent =>
-      isPlainObject(e) &&
-      isNonEmptyString(e.proposalId) &&
-      isNonEmptyString(e.voter) &&
-      isNonEmptyString(e.choice) &&
-      isNonEmptyString(e.txHash) &&
-      isNonEmptyString(e.indexedAt) &&
-      Number.isFinite(Date.parse(e.indexedAt)),
-  );
+  // Validate each element as a non-null plain object before reading fields.
+  const valid = events.every((e) => {
+    if (!e || typeof e !== "object" || Array.isArray(e)) return false;
+    const candidate = e as Record<string, unknown>;
+    return (
+      isNonEmptyString(candidate.proposalId) &&
+      isNonEmptyString(candidate.voter) &&
+      isNonEmptyString(candidate.choice) &&
+      isNonEmptyString(candidate.txHash) &&
+      isNonEmptyString(candidate.indexedAt) &&
+      Number.isFinite(Date.parse(candidate.indexedAt))
+    );
+  });
 
   if (!valid) {
     sendError(
       res,
       400,
       "INVALID_EVENT_SHAPE",
-      "Each event must have proposalId, voter, choice, txHash, and a valid indexedAt timestamp.",
+      "Each event must have non-empty proposalId, voter, choice, txHash, and valid indexedAt.",
     );
     return;
   }
 
-  const updated = reconcileVoteReceipts(events);
+  const updated = reconcileVoteReceipts(events as IndexedGovernanceEvent[]);
   res.json({ reconciled: updated.length, receipts: updated });
 });
 

@@ -97,12 +97,10 @@ router.get("/forecast", (_req: Request, res: Response) => {
   res.json({ message: "Use POST /api/governance/forecast to submit forecast inputs." });
 });
 
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
-}
-
 function isFiniteNumberRecord(value: unknown): value is Record<string, number> {
-  if (!isPlainObject(value)) return false;
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return false;
+  }
   return Object.values(value).every(
     (entry) => typeof entry === "number" && Number.isFinite(entry),
   );
@@ -116,9 +114,10 @@ function isNonEmptyStringArray(value: unknown): value is string[] {
 }
 
 router.post("/forecast", forecastLimiter, (req: Request, res: Response) => {
-  const body = isPlainObject(req.body)
-    ? (req.body as Partial<GovernanceForecastInput>)
-    : {};
+  const body =
+    req.body && typeof req.body === "object" && !Array.isArray(req.body)
+      ? (req.body as Partial<GovernanceForecastInput>)
+      : {};
   const { proposalType, parameters, baseline } = body;
 
   const invalidFields: string[] = [];
@@ -129,22 +128,19 @@ router.post("/forecast", forecastLimiter, (req: Request, res: Response) => {
     invalidFields.push("parameters");
   }
   if (
-    !isPlainObject(baseline) ||
-    typeof baseline.yieldPct !== "number" ||
+    !baseline ||
+    typeof baseline !== "object" ||
+    Array.isArray(baseline) ||
     !Number.isFinite(baseline.yieldPct) ||
-    typeof baseline.exposurePct !== "number" ||
     !Number.isFinite(baseline.exposurePct) ||
-    typeof baseline.feeRatePct !== "number" ||
     !Number.isFinite(baseline.feeRatePct) ||
-    typeof baseline.tvlUsd !== "number" ||
     !Number.isFinite(baseline.tvlUsd) ||
     baseline.tvlUsd < 0 ||
     (baseline.riskScore !== undefined &&
-      (typeof baseline.riskScore !== "number" ||
-        !Number.isFinite(baseline.riskScore))) ||
+      (typeof baseline.riskScore !== "number" || !Number.isFinite(baseline.riskScore))) ||
     (baseline.vaultCount !== undefined &&
       (typeof baseline.vaultCount !== "number" ||
-        !Number.isFinite(baseline.vaultCount) ||
+        !Number.isInteger(baseline.vaultCount) ||
         baseline.vaultCount < 0))
   ) {
     invalidFields.push("baseline");
@@ -185,9 +181,10 @@ const MAX_ATTACHMENTS_PER_PROPOSAL = 20;
  * progressPct, met, perSigner) without touching the chain. Read-only (#1310).
  */
 router.post("/quorum-progress", (req: Request, res: Response) => {
-  const body = isPlainObject(req.body)
-    ? (req.body as Partial<SignerQuorumInput>)
-    : {};
+  const body =
+    req.body && typeof req.body === "object" && !Array.isArray(req.body)
+      ? (req.body as Partial<SignerQuorumInput>)
+      : {};
 
   const invalidFields: string[] = [];
   if (!isNonEmptyStringArray(body.signers)) invalidFields.push("signers");
@@ -204,9 +201,7 @@ router.post("/quorum-progress", (req: Request, res: Response) => {
     invalidFields.length > 0 ||
     !isNonEmptyStringArray(body.signers) ||
     !isNonEmptyStringArray(body.signatures) ||
-    typeof body.threshold !== "number" ||
-    !Number.isInteger(body.threshold) ||
-    body.threshold < 1
+    typeof body.threshold !== "number"
   ) {
     sendGovernanceFailure(res, 400, "VALIDATION_FAILED", "request-validation", {
       fields: invalidFields,
@@ -239,9 +234,7 @@ router.post("/quorum-progress", (req: Request, res: Response) => {
  * for content it didn't actually submit.
  */
 router.post("/proposals/attachments/validate", (req: Request, res: Response) => {
-  const { attachments } = (isPlainObject(req.body) ? req.body : {}) as {
-    attachments?: unknown;
-  };
+  const { attachments } = (req.body ?? {}) as { attachments?: unknown };
 
   if (!Array.isArray(attachments) || attachments.length === 0) {
     sendGovernanceFailure(res, 400, "CONTEXT_INSUFFICIENT", "attachments", {

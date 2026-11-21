@@ -188,19 +188,18 @@ function isExecutionAttemptStatus(value: unknown): value is ExecutionAttemptStat
  */
 const OPERATION_ID_PATTERN = /^[A-Za-z0-9._:-]{1,128}$/;
 
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
-}
-
 router.post("/", (req: Request, res: Response) => {
-  const body = (isPlainObject(req.body) ? req.body : {}) as Partial<RecordExecutionAttemptInput>;
+  const body =
+    req.body && typeof req.body === "object" && !Array.isArray(req.body)
+      ? (req.body as Partial<RecordExecutionAttemptInput>)
+      : {};
 
-  if (!body.proposalId || typeof body.proposalId !== "string" || body.proposalId.trim().length === 0) {
+  if (!body.proposalId || typeof body.proposalId !== "string" || body.proposalId.trim() === "") {
     sendError(res, 400, "MISSING_PROPOSAL_ID", "proposalId is required.");
     return;
   }
 
-  if (body.txHash !== undefined && (typeof body.txHash !== "string" || body.txHash.trim().length === 0)) {
+  if (body.txHash !== undefined && (typeof body.txHash !== "string" || body.txHash.trim() === "")) {
     sendError(res, 400, "INVALID_TX_HASH", "txHash must be a non-empty string.");
     return;
   }
@@ -221,8 +220,8 @@ router.post("/", (req: Request, res: Response) => {
     sendError(res, 400, "INVALID_ATTEMPT_NUMBER", "attemptNumber must be a positive integer.");
     return;
   }
-  if (body.error !== undefined && typeof body.error !== "string") {
-    sendError(res, 400, "INVALID_ERROR", "error must be a string.");
+  if (body.error !== undefined && (typeof body.error !== "string" || body.error.trim() === "")) {
+    sendError(res, 400, "INVALID_ERROR", "error must be a non-empty string.");
     return;
   }
   if (body.failedAtPhase !== undefined && !isTxPhase(body.failedAtPhase)) {
@@ -325,14 +324,18 @@ router.get("/", (req: Request, res: Response) => {
  * attempt that is already final, returns the stored attempt unchanged.
  */
 router.post("/:attemptId/succeeded", (req: Request, res: Response) => {
-  const { txHash } = (isPlainObject(req.body) ? req.body : {}) as { txHash?: unknown };
-  if (txHash !== undefined && (typeof txHash !== "string" || txHash.trim().length === 0)) {
+  const body =
+    req.body && typeof req.body === "object" && !Array.isArray(req.body)
+      ? (req.body as { txHash?: unknown })
+      : {};
+  const { txHash } = body;
+  if (txHash !== undefined && (typeof txHash !== "string" || txHash.trim() === "")) {
     sendError(res, 400, "INVALID_TX_HASH", "txHash must be a non-empty string.");
     return;
   }
   respondToTransition(req, res, req.params.attemptId, {
     kind: "succeeded",
-    txHash: typeof txHash === "string" ? txHash.trim() : undefined,
+    txHash: txHash as string | undefined,
   });
 });
 
@@ -344,12 +347,13 @@ router.post("/:attemptId/succeeded", (req: Request, res: Response) => {
  * Body: { error, failedAtPhase }
  */
 router.post("/:attemptId/failed", (req: Request, res: Response) => {
-  const { error, failedAtPhase } = (isPlainObject(req.body) ? req.body : {}) as {
-    error?: unknown;
-    failedAtPhase?: unknown;
-  };
+  const body =
+    req.body && typeof req.body === "object" && !Array.isArray(req.body)
+      ? (req.body as { error?: unknown; failedAtPhase?: unknown })
+      : {};
+  const { error, failedAtPhase } = body;
 
-  if (!error || typeof error !== "string" || error.trim().length === 0) {
+  if (!error || typeof error !== "string" || error.trim() === "") {
     sendError(res, 400, "MISSING_ERROR", "error is required.");
     return;
   }
@@ -360,8 +364,8 @@ router.post("/:attemptId/failed", (req: Request, res: Response) => {
 
   respondToTransition(req, res, req.params.attemptId, {
     kind: "failed",
-    error: error.trim(),
-    failedAtPhase: failedAtPhase ?? "submitting",
+    error,
+    failedAtPhase: (failedAtPhase as "submitting" | undefined) ?? "submitting",
   });
 });
 
