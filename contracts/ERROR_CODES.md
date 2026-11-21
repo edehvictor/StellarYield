@@ -332,11 +332,15 @@ Source: `contracts/options/src/lib.rs`
 | 19   | `CancellationWindowClosed` | Cancellation attempted after `expiration_time`       | Use `expire` instead                                          |
 | 20   | `AlreadyCancelled`        | Position was already cancelled                        | No action needed                                              |
 | 21   | `StaleConfig`             | Configuration changed since the caller captured its fingerprint | Refresh with `get_config_fingerprint` and retry settlement |
+| 22   | `DuplicateOperation`      | `operation_id` was already consumed by a successful settlement from this exerciser | The first submission already applied; check `is_operation_consumed`, or use a new id for a new operation |
 
 `exercise` and `exercise_partial` validate the expected configuration
-fingerprint before any collateral moves, so a `StaleConfig` rejection leaves
-balances, reserves, exercised amounts and the position record unchanged and the
-same settlement can be retried under the refreshed configuration.
+fingerprint and caller-supplied `operation_id` before any collateral moves.
+A `StaleConfig` rejection leaves balances, reserves, exercised amounts and the
+position record unchanged, and does not consume the `operation_id`, so the same
+settlement can be retried under the refreshed configuration. A retry reusing an
+already-consumed `operation_id` fails with `DuplicateOperation` (22) without
+re-executing the transfer or modifying reserves.
 
 ---
 

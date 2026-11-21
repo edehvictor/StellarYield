@@ -189,3 +189,18 @@ pub fn emit_cancelled(
     );
     emit(env, symbol_short!("cancel"), event);
 }
+
+/// Emits the `op` event for a consumed operation identity so clients can
+/// correlate retries.
+pub fn emit_operation(
+    env: &Env,
+    exerciser: &Address,
+    kind: Symbol,
+    option_id: u32,
+    operation_id: &BytesN<32>,
+) {
+    env.events().publish(
+        (symbol_short!("op"),),
+        (exerciser.clone(), kind, option_id, operation_id.clone()),
+    );
+}
