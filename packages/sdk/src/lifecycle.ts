@@ -2,10 +2,12 @@ import { rpc, TransactionBuilder, Operation, Account, hash } from "@stellar/stel
 import { Buffer } from "buffer";
 import type { SignerAdapter } from "./signers";
 import {
+  LifecycleContextMismatchError,
   SpecMismatchError,
   SubmissionTimeoutError,
   InvalidXdrError,
   parseContractError,
+  type SdkErrorPhase,
 } from "./errors";
 import { YIELD_VAULT_SPEC_HASH } from "./generated/yield_vault";
 
@@ -111,6 +113,115 @@ export function resetSubmittedOperations(): void {
   submittedOperations.clear();
 }
 
+/**
+ * Explicit context a prepared wallet operation is bound to. Every lifecycle
+ * transition can be checked against it so a transaction simulated for one
+ * network, ledger window, or contract version is never signed or submitted
+ * under another.
+ */
+export interface WalletLifecycleContext {
+  networkPassphrase: string;
+  /** Ledger the simulation (and its footprint) was evaluated against. */
+  latestLedger: number;
+  /** Last ledger the prepared transaction remains valid for. */
+  validUntilLedger: number;
+  specHash?: string;
+  configFingerprint?: string;
+}
+
+/**
+ * Caller-supplied expectation for one lifecycle transition. Only provided
+ * fields are checked; omitted fields keep the context captured at prepare time.
+ */
+export interface LifecycleContextExpectation {
+  /** Network the wallet is currently connected to / the RPC server serves. */
+  networkPassphrase?: string;
+  /** Current chain head, checked against the prepared ledger window. */
+  currentLedger?: number;
+  /** Pinned contract spec hash the caller expects. */
+  specHash?: string;
+  /** Configuration snapshot fingerprint the caller expects. */
+  configFingerprint?: string;
+}
+
+/**
+ * Reject a lifecycle transition whose expectation does not match the prepared
+ * context. Pure: it performs no I/O and mutates no session, balance, or
+ * duplicate-submission state, so callers can safely retry once the live
+ * context has been refreshed.
+ *
+ * Ledger checks are skipped for operations without a bound window (for
+ * example a restore-footprint transaction, whose simulation ledgers are zero).
+ */
+export function assertWalletLifecycleContext(
+  context: WalletLifecycleContext,
+  expectation: LifecycleContextExpectation,
+  phase: SdkErrorPhase = "sign"
+): void {
+  if (
+    expectation.networkPassphrase !== undefined &&
+    expectation.networkPassphrase !== context.networkPassphrase
+  ) {
+    throw new LifecycleContextMismatchError(
+      "network",
+      context.networkPassphrase,
+      expectation.networkPassphrase,
+      phase
+    );
+  }
+
+  if (expectation.specHash !== undefined && expectation.specHash !== context.specHash) {
+    throw new LifecycleContextMismatchError(
+      "version",
+      context.specHash ?? "unversioned",
+      expectation.specHash,
+      phase
+    );
+  }
+
+  if (
+    expectation.configFingerprint !== undefined &&
+    expectation.configFingerprint !== context.configFingerprint
+  ) {
+    throw new LifecycleContextMismatchError(
+      "version",
+      context.configFingerprint ?? "unversioned",
+      expectation.configFingerprint,
+      phase
+    );
+  }
+
+  if (expectation.currentLedger !== undefined) {
+    const currentLedger = expectation.currentLedger;
+    if (!Number.isSafeInteger(currentLedger) || currentLedger < 0) {
+      throw new LifecycleContextMismatchError(
+        "ledger",
+        "non-negative integer",
+        currentLedger,
+        phase
+      );
+    }
+    if (context.validUntilLedger > 0) {
+      if (currentLedger < context.latestLedger) {
+        throw new LifecycleContextMismatchError(
+          "ledger",
+          context.latestLedger,
+          currentLedger,
+          phase
+        );
+      }
+      if (currentLedger > context.validUntilLedger) {
+        throw new LifecycleContextMismatchError(
+          "ledger",
+          context.validUntilLedger,
+          currentLedger,
+          phase
+        );
+      }
+    }
+  }
+}
+
 export interface PreparedTransactionMeta<T> {
   simulationResult: T;
   footprint: string;
@@ -152,6 +263,25 @@ export class PreparedTransaction<T = unknown> {
     return this.meta.operationId;
   }
 
+  /** Immutable network/ledger/version context this operation is bound to. */
+  public get context(): WalletLifecycleContext {
+    return Object.freeze({
+      networkPassphrase: this.meta.networkPassphrase,
+      latestLedger: this.meta.latestLedger,
+      validUntilLedger: this.meta.validUntilLedger,
+      specHash: this.meta.specHash,
+      configFingerprint: this.meta.configFingerprint,
+    });
+  }
+
+  /** Reject a transition whose context does not match this prepared operation. */
+  public assertContext(
+    expectation: LifecycleContextExpectation = {},
+    phase: SdkErrorPhase = "sign"
+  ): void {
+    assertWalletLifecycleContext(this.context, expectation, phase);
+  }
+
   public static fromXDR<T>(
     xdrString: string,
     meta: PreparedTransactionMeta<T>
@@ -167,7 +297,14 @@ export class PreparedTransaction<T = unknown> {
     return new PreparedTransaction<T>(xdrString, meta);
   }
 
-  public async sign(signer: SignerAdapter): Promise<SignedTransaction<T>> {
+  public async sign(
+    signer: SignerAdapter,
+    expectation: LifecycleContextExpectation = {}
+  ): Promise<SignedTransaction<T>> {
+    // Validate the bound network/ledger/version context before the signer is
+    // asked to approve anything; failures leave the prepared transaction and
+    // existing balances untouched so a refreshed retry is safe.
+    this.assertContext(expectation, "sign");
     const signedXdr = await signer.signTransaction(this.xdr, {
       networkPassphrase: this.meta.networkPassphrase,
       contractId: this.meta.contractId,
@@ -218,6 +355,25 @@ export class SignedTransaction<T = unknown> {
     return this.signedXdr;
   }
 
+  /** Immutable network/ledger/version context this transaction is bound to. */
+  public get context(): WalletLifecycleContext {
+    return Object.freeze({
+      networkPassphrase: this.meta.networkPassphrase,
+      latestLedger: this.meta.latestLedger,
+      validUntilLedger: this.meta.validUntilLedger,
+      specHash: this.meta.specHash,
+      configFingerprint: this.meta.configFingerprint,
+    });
+  }
+
+  /** Reject a transition whose context does not match this signed transaction. */
+  public assertContext(
+    expectation: LifecycleContextExpectation = {},
+    phase: SdkErrorPhase = "submit"
+  ): void {
+    assertWalletLifecycleContext(this.context, expectation, phase);
+  }
+
   public static fromXDR<T>(
     signedXdr: string,
     meta: PreparedTransactionMeta<T>
@@ -236,8 +392,14 @@ export class SignedTransaction<T = unknown> {
    * after a transport failure still works.
    */
   public async submit(
-    serverOrUrl: rpc.Server | { rpcUrl: string } | string
+    serverOrUrl: rpc.Server | { rpcUrl: string } | string,
+    expectation: LifecycleContextExpectation = {}
   ): Promise<SubmittedTransaction<T>> {
+    // A network/ledger/version mismatch is rejected before the duplicate guard
+    // is consulted or anything reaches the network. The registered operation
+    // identity and vault balances stay exactly as they were, so the caller can
+    // refresh its context and retry this transaction.
+    this.assertContext(expectation, "submit");
     const operationId = this.resolveOperationId();
     const existingHash = lookupSubmittedOperation(operationId);
     if (existingHash) {
@@ -348,6 +510,26 @@ export class SubmittedTransaction<T = unknown> {
     return this.opts.preparedMeta?.operationId;
   }
 
+  /** Immutable network/ledger/version context this submission is bound to. */
+  public get context(): WalletLifecycleContext {
+    const meta = this.opts.preparedMeta;
+    return Object.freeze({
+      networkPassphrase: meta?.networkPassphrase ?? this.opts.networkPassphrase,
+      latestLedger: meta?.latestLedger ?? 0,
+      validUntilLedger: meta?.validUntilLedger ?? 0,
+      specHash: meta?.specHash,
+      configFingerprint: meta?.configFingerprint,
+    });
+  }
+
+  /** Reject a transition whose context does not match this submission. */
+  public assertContext(
+    expectation: LifecycleContextExpectation = {},
+    phase: SdkErrorPhase = "poll"
+  ): void {
+    assertWalletLifecycleContext(this.context, expectation, phase);
+  }
+
   public static fromHash<T>(
     hash: string,
     opts: SubmittedOpts<T>
@@ -359,9 +541,14 @@ export class SubmittedTransaction<T = unknown> {
     pollIntervalMs?: number;
     timeoutMs?: number;
     signal?: AbortSignal;
+    context?: LifecycleContextExpectation;
   }): Promise<ConfirmedTransaction<T>> {
+    // Bind polling to the prepared context before issuing any RPC read.
+    if (options?.context) this.assertContext(options.context, "poll");
+
     const pollInterval = options?.pollIntervalMs ?? 1000;
     const timeout = options?.timeoutMs ?? 30000;
+    const validUntilLedger = this.opts.preparedMeta?.validUntilLedger ?? 0;
     const startTime = Date.now();
     const server = this.opts.rpcServer ?? new rpc.Server(this.opts.rpcUrl);
 
@@ -395,6 +582,26 @@ export class SubmittedTransaction<T = unknown> {
           new Error(`Transaction failed on ledger ${txStatus.ledger}`),
           resultXdr,
           undefined,
+          "poll"
+        );
+      }
+
+      // A ledger transition past the prepared window means the simulation
+      // snapshot can no longer be applied. Release the operation identity so a
+      // freshly prepared retry may submit, and report the mismatch instead of
+      // polling until timeout with stale context.
+      const observedLedger = (txStatus as { latestLedger?: number }).latestLedger;
+      if (
+        validUntilLedger > 0 &&
+        typeof observedLedger === "number" &&
+        observedLedger > validUntilLedger
+      ) {
+        const operationId = this.operationId;
+        if (operationId) forgetSubmittedOperation(operationId);
+        throw new LifecycleContextMismatchError(
+          "ledger",
+          validUntilLedger,
+          observedLedger,
           "poll"
         );
       }

@@ -81,6 +81,8 @@ Submit-time behavior:
 | `wait()` times out with the transaction possibly pending | The identity is kept, so retrying returns the pending hash rather than submitting again. Use `recoverTransaction(hash)` to keep polling. |
 | Invalid amount or argument validation failure | No transaction is built, signed, or submitted; no identity is registered. |
 
+Every prepared operation is bound to the network passphrase, simulation ledger window (`latestLedger`..`validUntilLedger`), and pinned contract version (`specHash`/`configFingerprint`) captured at prepare time, exposed as `prepared.context`. Pass an expectation to any transition to reject a mismatch before it has a side effect: `prepared.sign(signer, { networkPassphrase, currentLedger })`, `signed.submit(server, { networkPassphrase, currentLedger })`, `submitted.wait({ context: { specHash } })`. A mismatch throws `LifecycleContextMismatchError` (`field: 'network' | 'ledger' | 'version'`, `statePreserved: true`); nothing is signed, sent, or registered, so a retry with refreshed context is safe. If polling observes the ledger closing past `validUntilLedger` while the transaction is still `NOT_FOUND`, `wait()` rejects with a `ledger` mismatch and releases the operation identity for a fresh prepare/submit.
+
 `prepare()` and `submit()` never mutate vault balances or existing transactions on failure. The duplicate guard is an in-process, bounded registry (and is scoped to the SDK instance's process); for idempotency across processes or restarts, persist `idempotencyKey` yourself and reuse it on retry. `resetSubmittedOperations()` clears the guard explicitly, and `lookupSubmittedOperation(id)` exposes the remembered hash for observability.
 
 ### Simulation failure diagnostics
@@ -159,9 +161,10 @@ const vaultData = await api.getVaultData('vault-contract-id');
   - `getShares()`: Check user share balance
   - `totalShares()`, `totalAssets()`: Vault metrics
   - `getAdmin()`, `getToken()`, `getFlashLoanFee()`: Read-only contract state
+  - Every read accepts an optional `ReadContextExpectation` (`{ networkPassphrase, specHash, configFingerprint }`) and rejects a mismatch with `LifecycleContextMismatchError` before the RPC read; see `getLifecycleContext()`. Ledger expectations belong to prepared transactions.
   - `recoverTransaction(hash)`: Resume polling a previously submitted transaction
 
-- **Lifecycle helpers**: `PreparedTransaction` -> `.sign()` -> `SignedTransaction` -> `.submit()` -> `SubmittedTransaction` -> `.wait()` -> `ConfirmedTransaction`, plus `restoreAndRetry()`/`needsRestore()` for the Soroban footprint-restore path. Errors carry a `phase` (`simulate`/`sign`/`submit`/`poll`/`restore`) and `retryable` flag. Prepared operations carry an `operationId`; pass an `idempotencyKey` to make retries duplicate-safe.
+- **Lifecycle helpers**: `PreparedTransaction` -> `.sign()` -> `SignedTransaction` -> `.submit()` -> `SubmittedTransaction` -> `.wait()` -> `ConfirmedTransaction`, plus `restoreAndRetry()`/`needsRestore()` for the Soroban footprint-restore path. Errors carry a `phase` (`simulate`/`sign`/`submit`/`poll`/`restore`) and `retryable` flag. Prepared operations carry an `operationId`; pass an `idempotencyKey` to make retries duplicate-safe. Prepared operations also carry a `context` (network, ledger window, spec/config version) and each transition accepts an explicit context expectation that rejects mismatches before any side effect.
 
 - **ApiClient**: Fetch vault metrics from backend
   - `getCurrentAPY()`: Get current APY

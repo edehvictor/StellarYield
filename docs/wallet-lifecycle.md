@@ -44,6 +44,49 @@ rather than discarding it. Verified smart-wallet sessions persist the bound
 `authConfigFingerprint` so stale snapshots can be detected and refreshed on
 subsequent lifecycle operations.
 
+Network, ledger, and contract-version context for prepared transactions is
+covered in [Network, ledger, and version context](#network-ledger-and-version-context-1884)
+below.
+
+## Network, ledger, and version context (#1884)
+
+Every prepared vault operation is bound to the network passphrase, simulation
+ledger window (`latestLedger`..`validUntilLedger`), and pinned contract version
+(`specHash`, plus the optional `configFingerprint`) captured at prepare time.
+`prepared.context` exposes that snapshot, and each transition accepts an
+explicit expectation:
+
+```ts
+await prepared.sign(signer, { networkPassphrase, currentLedger: head });
+await signed.submit(server, { networkPassphrase, currentLedger: head });
+await submitted.wait({ context: { specHash, configFingerprint } });
+```
+
+Any mismatch is rejected with `LifecycleContextMismatchError` (`field` is
+`network`, `ledger`, or `version`) *before* the signer is invoked, before
+`sendTransaction`, or before the next poll. Because the check is pure and runs
+first, a rejected transition leaves the prepared/signed transaction, existing
+balances, and the duplicate-submission registry unchanged, so retrying with a
+refreshed context is safe.
+
+Read-only `VaultClient` views (`totalAssets`, `totalShares`, `getShares`,
+`getAdmin`, `getToken`, `getFlashLoanFee`) accept a `ReadContextExpectation`
+and are bound to the client's network, pinned `specHash`, and
+`configFingerprint`. A mismatch is rejected before the RPC read with a
+`simulate`-phase `LifecycleContextMismatchError`. A one-shot read has no
+prepared ledger window, so `getLifecycleContext()` reports zero ledgers and
+ledger expectations are excluded from the read surface (the
+`latestLedger`..`validUntilLedger` window applies to prepared transactions).
+Failed reads return no value and change no state, so the caller can refresh
+and retry.
+
+While polling, if the network reports that the ledger has advanced past
+`validUntilLedger` and the transaction is still `NOT_FOUND`, the wait rejects
+with a `ledger` mismatch instead of polling stale context until timeout. The
+operation identity is released in that case, because no effect landed, so a
+freshly prepared retry may submit again. Ledger checks are skipped for
+operations without a bound window, such as restore-footprint transactions.
+
 ## Session and challenge boundary semantics (#1882)
 
 - Client: a session whose age equals `SESSION_TTL_MS` is still valid and expires 1ms later. Idle time equal to `STALE_THRESHOLD_MS` is still fresh. Future timestamps (clock skew) are clamped to zero age. An unparseable `connectedAt` or `lastActivityAt` fails closed (expired / stale). Checks are pure and never mutate the session, so retrying is safe.
