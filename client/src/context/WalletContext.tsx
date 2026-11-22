@@ -193,7 +193,7 @@ export function WalletProvider({ children }: { children: ReactNode }) {
 
     // Persist intent before attempting so an interrupted connect can be
     // detected and rolled back on the next mount.
-    writeLifecycleState("connecting", options?.walletAddress ?? null);
+    writeLifecycleState("connecting", null);
 
     try {
       const nextSession = await connectWalletSession(options);
