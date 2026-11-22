@@ -303,15 +303,41 @@ export async function recoverSession(): Promise<SessionRecoveryResult> {
   return { status: "recovered", session: recovered };
 }
 
+/**
+ * Elapsed milliseconds since an ISO timestamp, or `null` when the timestamp is
+ * not a finite date (corrupted storage, tampered value).
+ *
+ * Negative values (timestamp in the future because of clock skew) are clamped
+ * to zero so skew never makes a session look older than it is.
+ */
+function elapsedSince(timestamp: string): number | null {
+  const parsed = new Date(timestamp).getTime();
+  if (!Number.isFinite(parsed)) return null;
+  const elapsed = Date.now() - parsed;
+  return elapsed < 0 ? 0 : elapsed;
+}
+
+/**
+ * Boundary semantics: a session whose age is exactly `SESSION_TTL_MS` is still
+ * valid; it expires one millisecond later. A missing `connectedAt` is treated
+ * as not expired (legacy sessions), but an unparseable `connectedAt` fails
+ * closed and is treated as expired.
+ */
 export function isSessionExpired(session: WalletSession): boolean {
   if (!session.connectedAt) return false;
-  const age = Date.now() - new Date(session.connectedAt).getTime();
+  const age = elapsedSince(session.connectedAt);
+  if (age === null) return true;
   return age > SESSION_TTL_MS;
 }
 
+/**
+ * Boundary semantics: idle time exactly `STALE_THRESHOLD_MS` is still fresh.
+ * A missing or unparseable `lastActivityAt` fails closed and is stale.
+ */
 export function isSessionStale(session: WalletSession): boolean {
   if (!session.lastActivityAt) return true;
-  const idle = Date.now() - new Date(session.lastActivityAt).getTime();
+  const idle = elapsedSince(session.lastActivityAt);
+  if (idle === null) return true;
   return idle > STALE_THRESHOLD_MS;
 }
 
