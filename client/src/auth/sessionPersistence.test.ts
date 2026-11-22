@@ -31,7 +31,7 @@ import {
   broadcastSessionEvent,
   recoverSession,
   SESSION_TTL_MS,
-  STAME_THRESHOLD_MS,
+  STALE_THRESHOLD_MS,
 } from "./session";
 import { getAdapter } from "./walletAdapters";
 import type { WalletSession } from "./types";
@@ -354,13 +354,13 @@ describe("recoverSession — #1297 wallet session handoff recovery", () => {
     vi.clearAllMocks();
   });
 
-  it("returns no_session when nothing is stored", () => {
+  it("returns no_session when nothing is stored", async () => {
     const result = await recoverSession();
     expect(result.status).toBe("no_session");
     expect(result.session).toBeNull();
   });
 
-  it("returns expired and clears storage when session TVL has passed", () => {
+  it("returns expired and clears storage when session TVL has passed", async () => {
     const expired = makeSession({
       connectedAt: new Date(Date.now() - SESSION_TTL_MS - 1000).toISOString(),
     });
@@ -372,12 +372,16 @@ describe("recoverSession — #1297 wallet session handoff recovery", () => {
     expect(localStorage.getItem(STORAGE_KEY)).toBeNull();
   });
 
-  it("returns recovered and updates lastActivityAt for an extension wallet with available provider", () => {
-    const session = makeSession({ providerId: "freighter", providerAvailable: false });
+  it("returns recovered and updates lastActivityAt for an extension wallet with available provider", async () => {
+    const session = makeSession({
+      providerId: "freighter",
+      providerAvailable: false,
+      lastActivityAt: new Date(Date.now() - 1_000).toISOString(),
+    });
     localStorage.setItem(STORAGE_KEY, JSON.stringify(session));
 
     (getAdapter as ReturnType<typeof vi.fn>).mockReturnValue({
-      isAvailable: vi.fn().mockResolved(true),
+      isAvailable: vi.fn().mockResolvedValue(true),
     });
 
     const result = await recoverSession();
@@ -386,12 +390,12 @@ describe("recoverSession — #1297 wallet session handoff recovery", () => {
     expect(result.session?.lastActivityAt).not.toBe(session.lastActivityAt);
   });
 
-  it("returns degraded when the extension provider is not available after reload", () => {
+  it("returns degraded when the extension provider is not available after reload", async () => {
     const session = makeSession({ providerId: "freighter", providerAvailable: true });
     localStorage.setItem(STORAGE_KEY, JSON.stringify(session));
 
     (getAdapter as ReturnType<typeof vi.fn>).mockReturnValue({
-      isAvailable: vi.fn().mockResolved(false),
+      isAvailable: vi.fn().mockResolvedValue(false),
     });
 
     const result = await recoverSession();
@@ -401,12 +405,12 @@ describe("recoverSession — #1297 wallet session handoff recovery", () => {
     expect(localStorage.getItem(STORAGE_KEY)).not.toBeNull();
   });
 
-  it("returns degraded and does not throw when isAvailable() rejects", () => {
+  it("returns degraded and does not throw when isAvailable() rejects", async () => {
     const session = makeSession({ providerId: "freighter" });
     localStorage.setItem(STORAGE_KEY, JSON.stringify(session));
 
     (getAdapter as ReturnType<typeof vi.fn>).mockReturnValue({
-      isAvailable: vi.fn().mockRejected(new Error("Extension crashed")),
+      isAvailable: vi.fn().mockRejectedValue(new Error("Extension crashed")),
     });
 
     const result = await recoverSession();

@@ -11,17 +11,18 @@ import {
   DRAFT_STORAGE_KEY,
 } from "../../services/transactionDraft";
 
+
 // Mock freighter api
 vi.mock("@stellar/freighter-api", () => ({
-  isConnected: vi.fn().mockResolved({ isConnected: true }),
+  isConnected: vi.fn().mockResolvedValue({ isConnected: true }),
 }));
 
 // Mock wallet adapters
 vi.mock("../../auth/walletAdapters", () => ({
   getAdapter: vi.fn().mockReturnValue({
-    isAvailable: vi.fn().mockResolved(true),
-    getPublicKey: vi.fn().mockResolved("GACCOUNT_A"),
-    signTransaction: vi.fn().mockResolved("signed_xdr"),
+    isAvailable: vi.fn().mockResolvedValue(true),
+    getPublicKey: vi.fn().mockResolvedValue("GADTECHLUB3KXVSQ4NPF6IPV62I7KNDSD6TXXAMWEWZVTNQ4UTJQ555S"),
+    signTransaction: vi.fn().mockResolvedValue("signed_xdr"),
   }),
 }));
 
@@ -48,7 +49,7 @@ describe("Wallet Disconnect & State Cleanup (#1046)", () => {
 
   it("clears pending transaction drafts when active wallet disconnects", async () => {
     const { getAdapter } = await import("../../auth/walletAdapters");
-    (getAdapter as any)().getPublicKey.mockResolved("GACCOUNT_A");
+    (getAdapter as any)().getPublicKey.mockResolvedValue("GADTECHLUB3KXVSQ4NPF6IPV62I7KNDSD6TXXAMWEWZVTNQ4UTJQ555S");
 
     render(
       <WalletProvider>
@@ -61,19 +62,19 @@ describe("Wallet Disconnect & State Cleanup (#1046)", () => {
       fireEvent.click(screen.getByText("Connect"));
     });
     expect(screen.getByTestId("status")).toHaveTextContent("connected");
-    expect(screen.getByTestId("address")).toHaveTextContent("GACCOUNT_A");
+    expect(screen.getByTestId("address")).toHaveTextContent("GADTECHLUB3KXVSQ4NPF6IPV62I7KNDSD6TXXAMWEWZVTNQ4UTJQ555S");
 
     // 2. Set safe preferences and sensitive drafts
     localStorage.setItem("stellar_yield_tx_settings", JSON.stringify({ customSlippagePct: 1.5 }));
     localStorage.setItem("stellar_yield_ui_density", "compact");
-    saveTransactionDraft("GACCOUNT_A", {
+    saveTransactionDraft("GADTECHLUB3KXVSQ4NPF6IPV62I7KNDSD6TXXAMWEWZVTNQ4UTJQ555S", {
       id: "draft-1",
       action: "deposit",
       amount: 100,
       status: "draft",
     });
 
-    expect(getTransactionDraft("GACCOUNT_A")).not.toBeNull();
+    expect(getTransactionDraft("GADTECHLUB3KXVSQ4NPF6IPV62I7KNDSD6TXXAMWEWZVTNQ4UTJQ555S")).not.toBeNull();
 
     // 3. Disconnect Wallet
     await act(async () => {
@@ -82,7 +83,7 @@ describe("Wallet Disconnect & State Cleanup (#1046)", () => {
 
     // 4. Assert drafts and sensitive tokens are cleared, but UI preferences survive
     expect(screen.getByTestId("status")).toHaveTextContent("disconnected");
-    expect(getTransactionDraft("GACCOUNT_A")).toBeNull();
+    expect(getTransactionDraft("GADTECHLUB3KXVSQ4NPF6IPV62I7KNDSD6TXXAMWEWZVTNQ4UTJQ555S")).toBeNull();
     expect(localStorage.getItem(DRAFT_STORAGE_KEY)).toBeNull();
     expect(localStorage.getItem("authToken")).toBeNull();
 
@@ -102,37 +103,37 @@ describe("Wallet Disconnect & State Cleanup (#1046)", () => {
     );
 
     // 1. Connect Account A
-    adapter.getPublicKey.mockResolved("GACCOUNT_A");
+    adapter.getPublicKey.mockResolvedValue("GADTECHLUB3KXVSQ4NPF6IPV62I7KNDSD6TXXAMWEWZVTNQ4UTJQ555S");
     await act(async () => {
       fireEvent.click(screen.getByText("Connect"));
     });
-    expect(screen.getByTestId("address")).toHaveTextContent("GACCOUNT_A");
+    expect(screen.getByTestId("address")).toHaveTextContent("GADTECHLUB3KXVSQ4NPF6IPV62I7KNDSD6TXXAMWEWZVTNQ4UTJQ555S");
 
     // 2. Create draft for Account A
-    saveTransactionDraft("GACCOUNT_A", {
+    saveTransactionDraft("GADTECHLUB3KXVSQ4NPF6IPV62I7KNDSD6TXXAMWEWZVTNQ4UTJQ555S", {
       id: "draft-A",
       action: "swap",
       amount: 500,
       status: "draft",
     });
-    expect(getTransactionDraft("GACCOUNT_A")?.id).toBe("draft-A");
+    expect(getTransactionDraft("GADTECHLUB3KXVSQ4NPF6IPV62I7KNDSD6TXXAMWEWZVTNQ4UTJQ555S")?.id).toBe("draft-A");
 
     // 3. Switch account to Account B and reconnect
-    adapter.getPublicKey.mockResolved("GACCOUNT_B");
+    adapter.getPublicKey.mockResolvedValue("GDJWGZ6KHOT2AACW7TE33HB3Q6VCHNLLLRHZJNMYFCMR4RGE67IWGTPT");
     await act(async () => {
       fireEvent.click(screen.getByText("Connect"));
     });
-    expect(screen.getByTestId("address")).toHaveTextContent("GACCOUNT_B");
+    expect(screen.getByTestId("address")).toHaveTextContent("GDJWGZ6KHOT2AACW7TE33HB3Q6VCHNLLLRHZJNMYFCMR4RGE67IWGTPT");
 
     // 4. Account B should NOT see Account A draft
-    expect(getTransactionDraft("GACCOUNT_B")).toBeNull();
-    expect(getTransactionDraft("GACCOUNT_A")).toBeNull();
+    expect(getTransactionDraft("GDJWGZ6KHOT2AACW7TE33HB3Q6VCHNLLLRHZJNMYFCMR4RGE67IWGTPT")).toBeNull();
+    expect(getTransactionDraft("GADTECHLUB3KXVSQ4NPF6IPV62I7KNDSD6TXXAMWEWZVTNQ4UTJQ555S")).toBeNull();
   });
 
   it("does not reuse stale payloads on reconnect", async () => {
     const { getAdapter } = await import("../../auth/walletAdapters");
     const adapter = (getAdapter as any)();
-    adapter.getPublicKey.mockResolved("GACCOUNT_A");
+    adapter.getPublicKey.mockResolvedValue("GADTECHLUB3KXVSQ4NPF6IPV62I7KNDSD6TXXAMWEWZVTNQ4UTJQ555S");
 
     render(
       <WalletProvider>
@@ -144,7 +145,7 @@ describe("Wallet Disconnect & State Cleanup (#1046)", () => {
       fireEvent.click(screen.getByText("Connect"));
     });
 
-    saveTransactionDraft("GACCOUNT_A", {
+    saveTransactionDraft("GADTECHLUB3KXVSQ4NPF6IPV62I7KNDSD6TXXAMWEWZVTNQ4UTJQ555S", {
       id: "draft-1",
       action: "deposit",
       payload: "stale_xdr_payload_12345",
@@ -162,7 +163,7 @@ describe("Wallet Disconnect & State Cleanup (#1046)", () => {
     });
 
     // Draft is gone, cannot reuse stale payload
-    const draft = getTransactionDraft("GACCOUNT_A");
+    const draft = getTransactionDraft("GADTECHLUB3KXVSQ4NPF6IPV62I7KNDSD6TXXAMWEWZVTNQ4UTJQ555S");
     expect(draft).toBeNull();
   });
 });

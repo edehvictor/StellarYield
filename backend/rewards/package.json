@@ -4,8 +4,8 @@
   "description": "Merkle tree rewards generator for weekly $YIELD distributions",
   "main": "dist/index.js",
   "scripts": {
-    "build": "tsc",
-    "start": "node dist/index.js",
+    "build": "node init && tsc",
+    "start": "node init && node dist/index.js",
     "generate": "ts-node src/generateTree.ts",
     "test": "jest",
     "lint": "eslint src/"
