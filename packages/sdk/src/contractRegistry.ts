@@ -27,7 +27,17 @@ export type ContractName =
 
 export type NetworkName = "testnet" | "mainnet" | "local";
 
-export type ContractRegistry = Record<NetworkName, Partial<Record<ContractName, string>>>;
+export interface ContractRegistration {
+  id: string;
+  network?: NetworkName;
+  ledger?: number;
+  version?: string;
+}
+
+export type ContractRegistry = Record<
+  NetworkName,
+  Partial<Record<ContractName, string | ContractRegistration>>
+>;
 
 export const CONTRACT_NAMES: ContractName[] = [
   "vault",
@@ -63,6 +73,24 @@ export interface ResolvedContractId {
   usedFallback: boolean;
 }
 
+export interface DeploymentContext {
+  network: NetworkName;
+  ledger?: number;
+  version?: string;
+}
+
+export class ContractContextMismatchError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ContractContextMismatchError";
+  }
+}
+
+function asRegistration(value: string | ContractRegistration | undefined): ContractRegistration | undefined {
+  if (typeof value === "string") return value.trim() ? { id: value } : undefined;
+  return value?.id?.trim() ? value : undefined;
+}
+
 export class ContractRegistryLoader {
   constructor(
     private readonly registry: ContractRegistry,
@@ -84,10 +112,10 @@ export class ContractRegistryLoader {
       };
     }
 
-    const direct = this.registry[network]?.[name];
-    if (direct && direct.trim() !== "") {
+    const direct = asRegistration(this.registry[network]?.[name]);
+    if (direct) {
       return {
-        contractId: direct,
+        contractId: direct.id,
         requestedNetwork: network,
         resolvedFrom: network,
         usedFallback: false,
@@ -95,10 +123,10 @@ export class ContractRegistryLoader {
     }
 
     for (const fallbackNetwork of NETWORK_FALLBACK_ORDER[network]) {
-      const fallbackId = this.registry[fallbackNetwork]?.[name];
-      if (fallbackId && fallbackId.trim() !== "") {
+      const fallbackId = asRegistration(this.registry[fallbackNetwork]?.[name]);
+      if (fallbackId) {
         return {
-          contractId: fallbackId,
+          contractId: fallbackId.id,
           requestedNetwork: network,
           resolvedFrom: fallbackNetwork,
           usedFallback: true,
@@ -112,6 +140,32 @@ export class ContractRegistryLoader {
       resolvedFrom: "none",
       usedFallback: false,
     };
+  }
+
+  /** Resolve only when the deployment metadata matches the caller context. */
+  resolveForContext(name: ContractName, context: DeploymentContext): ResolvedContractId {
+    const resolved = this.resolve(name, context.network);
+    if (!resolved.contractId) return resolved;
+    const source = resolved.resolvedFrom === "override"
+      ? this.overrides[name]
+      : this.registry[resolved.resolvedFrom]?.[name];
+    const metadata = asRegistration(source);
+    if (metadata?.network && metadata.network !== context.network) {
+      throw new ContractContextMismatchError(
+        `Contract "${name}" belongs to ${metadata.network}, not ${context.network}`,
+      );
+    }
+    if (metadata?.version && context.version && metadata.version !== context.version) {
+      throw new ContractContextMismatchError(
+        `Contract "${name}" version ${metadata.version} does not match ${context.version}`,
+      );
+    }
+    if (metadata?.ledger !== undefined && context.ledger !== undefined && context.ledger < metadata.ledger) {
+      throw new ContractContextMismatchError(
+        `Contract "${name}" is valid from ledger ${metadata.ledger}, current ledger is ${context.ledger}`,
+      );
+    }
+    return resolved;
   }
 
   /** Resolves every known contract name for the given network. */
