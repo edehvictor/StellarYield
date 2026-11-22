@@ -89,7 +89,12 @@ import rewardCampaignCalendarRouter from "./routes/rewardCampaignCalendar";
 import walletRecoveryRouter from "./routes/walletRecovery";
 import portfolioBuilderRouter from "./routes/portfolioBuilder";
 
-import { createAuthChallenge, verifyAuthChallenge } from "./utils/stellarAuth";
+import {
+  createAuthChallenge,
+  InvalidWalletOperationIdError,
+  verifyAuthChallenge,
+  WalletOperationConflictError,
+} from "./utils/stellarAuth";
 import {
   getRecommendationTimeline,
   recordRecommendation,
@@ -406,8 +411,35 @@ export function createApp() {
 
   app.post("/api/auth/verify", (req: Request, res: Response) => {
     try {
-      res.json(verifyAuthChallenge(req.body));
+      // Operation identity (#1880): accepted as `operationId` in the body or
+      // as an `Idempotency-Key` header. When both are sent they must match.
+      const body = (req.body ?? {}) as Record<string, unknown>;
+      const headerKey = req.get("Idempotency-Key")?.trim() || undefined;
+      const rawBodyKey = body.operationId;
+      const bodyKey =
+        typeof rawBodyKey === "string"
+          ? rawBodyKey.trim() || undefined
+          : rawBodyKey ?? undefined;
+      if (headerKey && bodyKey !== undefined && bodyKey !== headerKey) {
+        throw new InvalidWalletOperationIdError(
+          "Idempotency-Key header and operationId body field must match.",
+        );
+      }
+      res.json(
+        verifyAuthChallenge({
+          ...(body as unknown as Parameters<typeof verifyAuthChallenge>[0]),
+          operationId: (bodyKey ?? headerKey) as string | undefined,
+        }),
+      );
     } catch (error) {
+      if (error instanceof WalletOperationConflictError) {
+        sendError(res, 409, error.code, error.message);
+        return;
+      }
+      if (error instanceof InvalidWalletOperationIdError) {
+        sendError(res, 400, error.code, error.message);
+        return;
+      }
       const stale =
         typeof error === "object" &&
         error !== null &&

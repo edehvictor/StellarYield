@@ -166,6 +166,68 @@ interface VerifyResponse {
   walletAddressType: "account" | "contract";
   acceptedSignerTypes: string[];
   authConfigFingerprint?: string;
+  /** Echo of the operation identity sent with the request (#1880). */
+  operationId?: string;
+  /** True when the server answered a safe retry from its recorded outcome. */
+  replayed?: boolean;
+}
+
+/**
+ * Generate a unique operation identity for one challenge verification.
+ * The same id is reused when the identical request is retried, so the server
+ * can answer the retry from its recorded outcome instead of rejecting it as a
+ * challenge replay (#1880).
+ */
+export function createWalletOperationId(): string {
+  const cryptoApi = globalThis.crypto as Crypto | undefined;
+  if (cryptoApi && typeof cryptoApi.randomUUID === "function") {
+    return `wallet-verify-${cryptoApi.randomUUID()}`;
+  }
+  return `wallet-verify-${Date.now().toString(36)}-${Math.random()
+    .toString(36)
+    .slice(2, 12)}`;
+}
+
+/** Maximum number of times one verify request is sent with the same identity. */
+export const VERIFY_SAFE_RETRY_ATTEMPTS = 2;
+
+/**
+ * POST one verification request, retrying transport failures and 5xx
+ * responses with the exact same body and operation identity. Because the
+ * identity is stable, a retry after a lost success response is answered with
+ * the recorded outcome and never applies the verification twice.
+ */
+async function postVerifyWithSafeRetry(body: {
+  walletAddress: string;
+  sessionKeyAddress?: string;
+  challenge: string;
+  signature: string;
+  operationId: string;
+}): Promise<Response> {
+  const serialized = JSON.stringify(body);
+  let lastError: unknown;
+  for (let attempt = 0; attempt < VERIFY_SAFE_RETRY_ATTEMPTS; attempt += 1) {
+    try {
+      const response = await fetch(`${getApiBaseUrl()}/api/auth/verify`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Idempotency-Key": body.operationId,
+        },
+        body: serialized,
+      });
+      if (response.status >= 500 && attempt + 1 < VERIFY_SAFE_RETRY_ATTEMPTS) {
+        lastError = new Error(`verify responded ${response.status}`);
+        continue;
+      }
+      return response;
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  throw lastError instanceof Error
+    ? lastError
+    : new Error("Unable to verify smart wallet session.");
 }
 
 interface VerifyAttemptResult {
@@ -244,7 +306,20 @@ export interface SessionRecoveryResult {
  * Never throws — all errors are captured as `degraded` status so the caller
  * can choose whether to prompt the user to reconnect.
  */
-export async function recoverSession(): Promise<SessionRecoveryResult> {
+let recoverInFlight: Promise<SessionRecoveryResult> | null = null;
+
+export function recoverSession(): Promise<SessionRecoveryResult> {
+  // Duplicate submissions (e.g. a double-mounted effect) share one in-flight
+  // recovery so verification and persistence run only once.
+  if (!recoverInFlight) {
+    recoverInFlight = recoverSessionOnce().finally(() => {
+      recoverInFlight = null;
+    });
+  }
+  return recoverInFlight;
+}
+
+async function recoverSessionOnce(): Promise<SessionRecoveryResult> {
   const session = loadStoredSession();
 
   if (!session) {
@@ -452,21 +527,15 @@ async function verifySmartWalletSession(
         signer.sign(Buffer.from(challengePayload.challenge, "utf8")),
       );
 
-      const verificationResponse = await fetch(
-        `${getApiBaseUrl()}/api/auth/verify`,
-        {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            walletAddress: session.walletAddress,
-            sessionKeyAddress: session.sessionKeyAddress,
-            challenge: challengePayload.challenge,
-            signature,
-          }),
-        },
-      );
+      // One operation identity per challenge: a fresh challenge is a new
+      // operation, while transport retries of this request reuse the id.
+      const verificationResponse = await postVerifyWithSafeRetry({
+        walletAddress: session.walletAddress,
+        sessionKeyAddress: session.sessionKeyAddress,
+        challenge: challengePayload.challenge,
+        signature,
+        operationId: createWalletOperationId(),
+      });
 
       let verificationPayload: Partial<VerifyResponse> & { code?: string } = {};
       try {
@@ -524,8 +593,48 @@ function isExtensionProvider(
   return providerId === "freighter" || providerId === "xbull" || providerId === "albedo";
 }
 
-export async function connectWalletSession(
+/**
+ * In-flight connect operations keyed by operation identity
+ * (provider + normalised identifier). See {@link connectWalletSession}.
+ */
+const connectInFlight = new Map<string, Promise<WalletSession>>();
+
+export function getConnectOperationKey(options: ConnectWalletOptions = {}): string {
+  const providerId = options.providerId ?? "freighter";
+  if (isExtensionProvider(providerId)) {
+    return providerId;
+  }
+  return `${providerId}:${options.identifier?.trim().toLowerCase() ?? ""}`;
+}
+
+/**
+ * Connect a wallet and persist the resulting session.
+ *
+ * Duplicate submissions (double clicks, repeated Enter presses, re-rendered
+ * effects) for the same operation identity share a single in-flight
+ * operation: the provider is prompted once, one session key is generated, one
+ * verification is performed and the session is persisted once. Every caller
+ * receives the same session. Once the operation settles, a new call starts a
+ * fresh attempt, so retrying after a failure is always possible. A failure
+ * never replaces the previously persisted session (#1880).
+ */
+export function connectWalletSession(
   options: ConnectWalletOptions = {},
+): Promise<WalletSession> {
+  const key = getConnectOperationKey(options);
+  const existing = connectInFlight.get(key);
+  if (existing) {
+    return existing;
+  }
+  const operation = connectWalletSessionOnce(options).finally(() => {
+    connectInFlight.delete(key);
+  });
+  connectInFlight.set(key, operation);
+  return operation;
+}
+
+async function connectWalletSessionOnce(
+  options: ConnectWalletOptions,
 ): Promise<WalletSession> {
   const providerId = options.providerId ?? "freighter";
   const origin = createSessionOrigin();

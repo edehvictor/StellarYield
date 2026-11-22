@@ -3319,8 +3319,24 @@ paths:
         Verifies a signed wallet authentication challenge. Challenges bound to a
         stale or missing wallet auth configuration snapshot are rejected so the
         client can refresh and retry safely without consuming replay state.
+        An optional operation identity (`operationId` body field or
+        `Idempotency-Key` header) makes the request safely retryable: a retry of
+        a completed verification with the same identity and identical payload
+        returns the recorded outcome with `replayed: true` instead of being
+        rejected as a challenge replay. Completed operations are retained for
+        the 5 minute challenge TTL. Failed verifications are never recorded.
       tags:
         - Auth
+      parameters:
+        - in: header
+          name: Idempotency-Key
+          required: false
+          description: >-
+            Operation identity for safe retries. Must match `operationId` when
+            both are sent.
+          schema:
+            type: string
+            pattern: '^[A-Za-z0-9._:-]{8,128}$'
       requestBody:
         required: true
         content:
@@ -3337,6 +3353,10 @@ paths:
                   type: string
                 signature:
                   type: string
+                operationId:
+                  type: string
+                  pattern: '^[A-Za-z0-9._:-]{8,128}$'
+                  description: Operation identity for safe retries.
       responses:
         '200':
           description: Verification completed
@@ -3356,10 +3376,23 @@ paths:
                     type: array
                     items:
                       type: string
+                  operationId:
+                    type: string
+                    description: Echo of the operation identity, when one was sent.
+                  replayed:
+                    type: boolean
+                    description: >-
+                      True when the response is the recorded outcome of an
+                      earlier completed request with the same operation identity.
         '400':
-          description: Invalid, expired, replayed, or malformed verification request
+          description: >-
+            Invalid, expired, replayed, or malformed verification request, or a
+            malformed / mismatched operation identity (`INVALID_WALLET_OPERATION_ID`)
         '409':
-          description: Stale wallet auth configuration snapshot; refresh challenge and retry
+          description: >-
+            Stale wallet auth configuration snapshot (refresh challenge and retry),
+            or `WALLET_OPERATION_CONFLICT` when the operation identity was already
+            used for a different verification payload
           content:
             application/json:
               schema:
