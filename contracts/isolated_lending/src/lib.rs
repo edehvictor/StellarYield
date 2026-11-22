@@ -1861,11 +1861,9 @@ impl IsolatedLendingPair {
         Ok(())
     }
 
-    /// SHA-256 of the live network passphrase.
+    /// The live network identifier derived by the ledger.
     fn live_network_id(env: &Env) -> BytesN<32> {
-        env.crypto()
-            .sha256(&env.ledger().network_passphrase())
-            .to_bytes()
+        env.ledger().network_id()
     }
 
     /// Validate a caller's `expected_context` against the live network, the
@@ -2463,7 +2461,7 @@ mod test {
                 &OracleQuoteData {
                     price_bps: 10_000,
                     confidence_bps: 9_000,
-                    ledger: old_ledger + 1,
+                    ledger: old_ledger + 3,
                 },
             );
         });
@@ -2537,8 +2535,8 @@ mod test {
         pair.initialize(admin, collateral_token, debt_token, &8_000);
         mint(env, debt_token, lender, 1_000);
         mint(env, collateral_token, borrower, 100);
-        pair.supply(lender, &1_000);
-        pair.post_collateral(borrower, &100);
+        pair.supply(lender, &1_000, &pair.get_ledger_context());
+        pair.post_collateral(borrower, &100, &pair.get_ledger_context());
         pair.borrow(borrower, &80, &pair.get_ledger_context(), &pair.get_config_fingerprint());
         pair
     }
@@ -2547,7 +2545,6 @@ mod test {
         env: Env,
         admin: Address,
         borrower: Address,
-        lender: Address,
         col_a: Address,
         debt_a: Address,
         col_b: Address,
@@ -2581,7 +2578,6 @@ mod test {
             env,
             admin,
             borrower,
-            lender,
             col_a,
             debt_a,
             col_b,
@@ -3295,7 +3291,7 @@ mod test {
         let user_balance = balance(&s.env, &s.debt_token, &user);
         let pair_balance = balance(&s.env, &s.debt_token, &s.pair.address);
         assert_eq!(
-            s.pair.try_supply(&user, &1),
+            s.pair.try_supply(&user, &1, &s.ctx()),
             Err(Ok(IsolatedLendingError::MathOverflow))
         );
 
@@ -3394,7 +3390,7 @@ mod test {
         let totals = s.pair.get_totals();
 
         assert_eq!(
-            s.pair.try_supply(&s.lender, &0),
+            s.pair.try_supply(&s.lender, &0, &s.ctx()),
             Err(Ok(IsolatedLendingError::InvalidAmount))
         );
         assert_eq!(
