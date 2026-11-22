@@ -86,9 +86,19 @@ export class ContractContextMismatchError extends Error {
   }
 }
 
-function asRegistration(value: string | ContractRegistration | undefined): ContractRegistration | undefined {
-  if (typeof value === "string") return value.trim() ? { id: value } : undefined;
-  return value?.id?.trim() ? value : undefined;
+function asRegistration(
+  value: string | ContractRegistration | undefined,
+): ContractRegistration | undefined {
+  if (typeof value === "string") {
+    const id = value.trim();
+    return id ? { id } : undefined;
+  }
+
+  if (!value) return undefined;
+  const id = value.id?.trim();
+  if (!id) return undefined;
+
+  return { ...value, id };
 }
 
 export class ContractRegistryLoader {
@@ -146,6 +156,16 @@ export class ContractRegistryLoader {
   resolveForContext(name: ContractName, context: DeploymentContext): ResolvedContractId {
     const resolved = this.resolve(name, context.network);
     if (!resolved.contractId) return resolved;
+
+    if (
+      resolved.resolvedFrom !== "override" &&
+      resolved.resolvedFrom !== context.network
+    ) {
+      throw new ContractContextMismatchError(
+        `Contract "${name}" resolved from ${resolved.resolvedFrom}, not ${context.network}`,
+      );
+    }
+
     const source = resolved.resolvedFrom === "override"
       ? this.overrides[name]
       : this.registry[resolved.resolvedFrom]?.[name];
@@ -155,12 +175,22 @@ export class ContractRegistryLoader {
         `Contract "${name}" belongs to ${metadata.network}, not ${context.network}`,
       );
     }
-    if (metadata?.version && context.version && metadata.version !== context.version) {
+    if (metadata?.version && context.version === undefined) {
+      throw new ContractContextMismatchError(
+        `Contract "${name}" requires version context ${metadata.version}`,
+      );
+    }
+    if (metadata?.version && metadata.version !== context.version) {
       throw new ContractContextMismatchError(
         `Contract "${name}" version ${metadata.version} does not match ${context.version}`,
       );
     }
-    if (metadata?.ledger !== undefined && context.ledger !== undefined && context.ledger < metadata.ledger) {
+    if (metadata?.ledger !== undefined && context.ledger === undefined) {
+      throw new ContractContextMismatchError(
+        `Contract "${name}" requires ledger context ${metadata.ledger}`,
+      );
+    }
+    if (metadata?.ledger !== undefined && context.ledger < metadata.ledger) {
       throw new ContractContextMismatchError(
         `Contract "${name}" is valid from ledger ${metadata.ledger}, current ledger is ${context.ledger}`,
       );
@@ -187,6 +217,21 @@ export class ContractRegistryLoader {
       throw new Error(
         `Missing contract ID for "${name}" on network "${network}". ` +
           `Attempted lookup chain: ${attempted}. ` +
+          `Provide an override or populate contracts/registry.json.`,
+      );
+    }
+    return resolved.contractId;
+  }
+
+  /** Resolve a contract ID only after validating its deployment context. */
+  requireContractIdForContext(
+    name: ContractName,
+    context: DeploymentContext,
+  ): string {
+    const resolved = this.resolveForContext(name, context);
+    if (!resolved.contractId) {
+      throw new Error(
+        `Missing contract ID for "${name}" on network "${context.network}". ` +
           `Provide an override or populate contracts/registry.json.`,
       );
     }

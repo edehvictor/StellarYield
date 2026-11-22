@@ -48,6 +48,10 @@ const withdrawn = await (await withdrawal.submit(vault.rpcUrl)).wait();
 
 If a simulation reports expired ledger entries, it throws `RestoreRequiredError` (`error.restorePreamble`) — pass that into the exported `restoreAndRetry()` helper, then retry `prepare()`. See `src/examples/basic.ts` for a full worked example including the restore path.
 
+### Context-bound contract registry
+
+Registry entries may include an `id`, `network`, `ledger` (the first valid ledger), and `version`. Use `resolveForContext()` or `requireContractIdForContext()` with an explicit deployment context before constructing a client or preparing a transaction. The SDK rejects network changes, fallback-network addresses, missing required ledger/version context, stale ledger contexts, and version mismatches without modifying the registry, so callers can refresh context and retry safely.
+
 ### API Client
 
 ```typescript
