@@ -1,13 +1,50 @@
-# Isolated Lending — Configuration Fingerprints
+# Isolated Lending — Configuration Fingerprints and Network Context
 
 `contracts/isolated_lending` lets admins change market parameters at any time:
 collateral factor, collateral price, close factor, reserve requirement, interest
 rate, protocol fee, oracle address and oracle policy. A client that previews an
 operation under one configuration must not have it executed under another.
 
-The contract therefore exposes an **immutable configuration snapshot** and its
-**SHA-256 fingerprint**, and the entry points whose outcome depends on
-configuration require the caller to present that fingerprint.
+The contract exposes an **immutable configuration snapshot** and its **SHA-256
+fingerprint** (for configuration staleness), and an explicit **ledger context**
+(for network and version binding). Every state-modifying entry point requires
+both.
+
+## Ledger context binding
+
+`get_ledger_context() -> LedgerContext` returns the current network, deployment
+and version context:
+
+| Field | Meaning |
+|---|---|
+| `network_id` | SHA-256 of the network passphrase the pair state was initialised on |
+| `contract` | Address of this pair deployment |
+| `version` | Storage layout version (0 = legacy, 1 = current) |
+
+Callers capture this alongside `get_config_fingerprint()` before constructing a
+transaction and pass it as `expected_context` to every state-modifying call. The
+contract validates:
+
+1. `expected_context.network_id` equals the live network hash — rejects
+   `WrongNetwork` if the call arrives on a different network.
+2. `expected_context.contract` equals `env.current_contract_address()` — rejects
+   `WrongContract` if the caller's snapshot named a different deployment.
+3. `expected_context.version` equals the stored version — rejects `WrongVersion`
+   if the layout has been migrated between snapshot and execution.
+
+A legacy pair (version 0, initialised before this feature) has no stored binding
+and skips the network/version checks. Run `migrate(admin)` to stamp the live
+network and upgrade to version 1.
+
+### Entry points that require a context
+
+All state-modifying entry points now require `expected_context: LedgerContext`:
+`supply`, `withdraw`, `post_collateral`, `repay`, `repay_for`,
+`queue_withdrawal`, `borrow`, `withdraw_collateral`, and `liquidate`.
+
+Read-only entry points do not require one.
+
+## Configuration fingerprints
 
 ## Snapshot contents
 
@@ -125,6 +162,10 @@ invocations and decode the new `HealthFactor` shape.
 |---|---|---|
 | 4 | `InvalidConfig` | Invalid admin configuration value |
 | 15 | `StaleConfig` | Fingerprint does not match the current configuration; refresh and retry |
+| 16 | `WrongNetwork` | Context names a different network than the live ledger or stored binding |
+| 17 | `WrongContract` | Context names a different deployment address |
+| 18 | `WrongVersion` | Context storage version does not match the stored version |
+| 19 | `InvalidOracleQuote` | Oracle quote has an invalid price, confidence or future ledger |
 
 See `contracts/ERROR_CODES.md` for the full table.
 
@@ -161,6 +202,13 @@ unchanged, so the same call can be retried with corrected inputs. Examples:
 repay debt before borrowing another unit, withdraw no more than redeemable
 cash, or refresh the configuration fingerprint after an admin change and retry.
 
+Oracle quotes are checked both when pushed and when consumed. A quote must have
+a nonzero price, confidence at most 10,000 bps, and a ledger no later than the
+current ledger. A malformed stored quote fails with `InvalidOracleQuote` before
+borrow accrual or transfers; the oracle can publish a corrected quote and the
+borrow can be retried safely. The push entry point rejects invalid price or
+confidence with `InvalidConfig` and leaves the previous quote intact.
+
 ## Operation identity and safe retries
 
 A wallet that times out waiting for a transaction cannot tell whether it
@@ -172,14 +220,14 @@ points that takes a caller-chosen `operation_id: BytesN<32>` (#1754).
 
 | Plain entry point | Idempotent variant | Receipt `kind` |
 |---|---|---|
-| `supply(user, amount)` | `supply_with_id(user, amount, operation_id)` | `supply` |
-| `withdraw(user, amount)` | `withdraw_with_id(user, amount, operation_id)` | `withdraw` |
-| `post_collateral(user, amount)` | `post_collateral_with_id(user, amount, operation_id)` | `post_col` |
-| `borrow(user, amount, fp)` | `borrow_with_id(user, amount, fp, operation_id)` | `borrow` |
-| `withdraw_collateral(user, amount, fp)` | `withdraw_collateral_with_id(user, amount, fp, operation_id)` | `wd_col` |
-| `repay(user, amount)` | `repay_with_id(user, amount, operation_id)` | `repay` |
-| `repay_for(payer, borrower, amount)` | `repay_for_with_id(payer, borrower, amount, operation_id)` | `repay_for` |
-| `queue_withdrawal(user, amount)` | `queue_withdrawal_with_id(user, amount, operation_id)` | `queue_wd` |
+| `supply(user, amount, ctx)` | `supply_with_id(user, amount, ctx, operation_id)` | `supply` |
+| `withdraw(user, amount, ctx)` | `withdraw_with_id(user, amount, ctx, operation_id)` | `withdraw` |
+| `post_collateral(user, amount, ctx)` | `post_collateral_with_id(user, amount, ctx, operation_id)` | `post_col` |
+| `borrow(user, amount, ctx, fp)` | `borrow_with_id(user, amount, ctx, fp, operation_id)` | `borrow` |
+| `withdraw_collateral(user, amount, ctx, fp)` | `withdraw_collateral_with_id(user, amount, ctx, fp, operation_id)` | `wd_col` |
+| `repay(user, amount, ctx)` | `repay_with_id(user, amount, ctx, operation_id)` | `repay` |
+| `repay_for(payer, borrower, amount, ctx)` | `repay_for_with_id(payer, borrower, amount, ctx, operation_id)` | `repay_for` |
+| `queue_withdrawal(user, amount, ctx)` | `queue_withdrawal_with_id(user, amount, ctx, operation_id)` | `queue_wd` |
 
 Each variant returns an `OperationReceipt`:
 
@@ -195,6 +243,12 @@ Each variant returns an `OperationReceipt`:
 `get_operation(account, operation_id) -> Option<OperationReceipt>` reads a
 receipt without changing anything.
 
+`ctx` is the `LedgerContext` from `get_ledger_context()`, exactly as for the
+plain entry points. It is validated **before** the receipt lookup: a
+submission with the wrong network, contract or version is rejected
+(`WrongNetwork` / `WrongContract` / `WrongVersion`) even if its id was already
+applied, and it does not consume a fresh id.
+
 ### Identity rules
 
 - **Scope.** An id is scoped to the pair contract and to the authorizing
@@ -207,7 +261,7 @@ receipt without changing anything.
   request id) once per *logical* operation and keep it with the pending
   request until the outcome is known. Do not derive ids from timestamps or
   counters that can repeat. The all-zero id is reserved and rejected with
-  `InvalidOperationId` (16).
+  `InvalidOperationId` (20).
 - **One id, one request.** An id identifies a single request: its kind,
   beneficiary and amount. The configuration fingerprint passed to
   `borrow_with_id` and `withdraw_collateral_with_id` is a precondition, not part
@@ -219,9 +273,10 @@ receipt without changing anything.
 |---|---|---|
 | First successful submission | Effect applied, receipt stored, `("op",)` emitted, receipt returned | Yes, once |
 | Same id, same kind, beneficiary and amount (a duplicate or safe retry) | The stored receipt is returned unchanged; `("op_replay",)` emitted | **None**: no token transfer, no interest accrual, no storage write |
-| Same id, different kind, beneficiary or amount | `OperationConflict` (17) | None |
+| Same id, different kind, beneficiary or amount | `OperationConflict` (21) | None |
 | Submission fails (any typed error, e.g. `InsufficientCollateral`, `StaleConfig`, `InsufficientLiquidity`) | Error returned, **id not consumed** | None |
-| All-zero id | `InvalidOperationId` (16) | None |
+| All-zero id | `InvalidOperationId` (20) | None |
+| Wrong ledger context | `WrongNetwork` / `WrongContract` / `WrongVersion` | None; id not consumed |
 
 A replay returns the original receipt even when re-executing the request now
 would fail (for example a withdrawal after the market's cash has been
@@ -274,7 +329,7 @@ window with the same id.
 
 This is an **additive** change. The plain entry points keep their signatures
 and semantics (every call applies its effect and consumes no id), so existing
-callers are unaffected. `IsolatedLendingError` gains codes 16 and 17,
+callers are unaffected. `IsolatedLendingError` gains codes 20 and 21,
 `PairDataKey` gains `Operation`, and the contract exports the new
 `OperationReceipt` type. Clients that need retry safety should move to the
 `*_with_id` variants.

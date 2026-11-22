@@ -262,6 +262,60 @@ describe("isSessionStale", () => {
   });
 });
 
+describe("session age boundary values (#1882)", () => {
+  const NOW = new Date("2026-01-01T00:00:00.000Z").getTime();
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("keeps a session valid at exactly SESSION_TTL_MS and expires 1ms later", () => {
+    const at = (age: number) =>
+      makeSession({ connectedAt: new Date(NOW - age).toISOString() });
+    expect(isSessionExpired(at(0))).toBe(false);
+    expect(isSessionExpired(at(SESSION_TTL_MS - 1))).toBe(false);
+    expect(isSessionExpired(at(SESSION_TTL_MS))).toBe(false);
+    expect(isSessionExpired(at(SESSION_TTL_MS + 1))).toBe(true);
+  });
+
+  it("treats exactly STALE_THRESHOLD_MS idle as fresh and 1ms later as stale", () => {
+    const at = (idle: number) =>
+      makeSession({ lastActivityAt: new Date(NOW - idle).toISOString() });
+    expect(isSessionStale(at(0))).toBe(false);
+    expect(isSessionStale(at(STALE_THRESHOLD_MS))).toBe(false);
+    expect(isSessionStale(at(STALE_THRESHOLD_MS + 1))).toBe(true);
+  });
+
+  it("clamps future timestamps (clock skew) to zero age", () => {
+    const future = new Date(NOW + 10 * SESSION_TTL_MS).toISOString();
+    expect(isSessionExpired(makeSession({ connectedAt: future }))).toBe(false);
+    expect(isSessionStale(makeSession({ lastActivityAt: future }))).toBe(false);
+  });
+
+  it("fails closed on unparseable timestamps without mutating the session", () => {
+    const session = makeSession({
+      connectedAt: "not-a-date",
+      lastActivityAt: "not-a-date",
+    });
+    const snapshot = JSON.stringify(session);
+    expect(isSessionExpired(session)).toBe(true);
+    expect(isSessionStale(session)).toBe(true);
+    expect(JSON.stringify(session)).toBe(snapshot);
+  });
+
+  it("is idempotent so retrying the check yields the same answer", () => {
+    const session = makeSession({
+      connectedAt: new Date(NOW - SESSION_TTL_MS).toISOString(),
+    });
+    expect(isSessionExpired(session)).toBe(isSessionExpired(session));
+  });
+});
+
 describe("BroadcastChannel cross-tab events", () => {
   it("broadcastSessionEvent does not throw when BroadcastChannel is available", () => {
     expect(() => broadcastSessionEvent({ type: "disconnect", payload: null })).not.toThrow();

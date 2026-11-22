@@ -71,6 +71,12 @@ Source: `contracts/stableswap/src/lib.rs`
 | 12   | `WrongNetwork`          | Live ledger or the caller's context is not the network the pool state is bound to, or `migrate` was asked to adopt another network's state | Read the pool on its bound network; retry with `get_pool_context()` |
 | 13   | `WrongContract`         | The caller's context names a different pool deployment | Use the context from the pool you are calling |
 | 14   | `WrongVersion`          | Stored state or the caller's context is not at the pool context version this code understands | Refresh with `get_pool_context()`; upgrade the contract if the stored version is newer |
+| 15   | `DuplicateOperation`    | `operation_id` was already consumed by a successful call of the same kind from the same sender | Treat the earlier submission as landed (check `is_operation_consumed`); use a fresh id for a new intent |
+
+Use `preview_swap` / `preview_add_liquidity` / `preview_remove_liquidity` to get a
+privacy-safe `Diagnostic` (failed stage, error code, remediation path) without
+mutating state. See `contracts/stableswap/README.md` for the stage and
+remediation enums.
 
 `stableswap` uses checked arithmetic and documented floor rounding for every
 invariant, fee, deposit and withdrawal calculation. Boundary values (zero,
@@ -105,16 +111,23 @@ Source: `contracts/isolated_lending/src/lib.rs`
 | 13   | `OracleQuoteStale`       | Oracle quote older than the policy allows | Push a fresh quote                         |
 | 14   | `OracleConfidenceTooLow` | Oracle quote confidence below the policy | Wait for a higher-confidence quote          |
 | 15   | `StaleConfig`            | Configuration changed since the caller captured its fingerprint | Refresh with `get_config_fingerprint` and retry |
-| 16   | `InvalidOperationId`     | The all-zero operation id was passed to a `*_with_id` entry point | Generate a random 32-byte id per logical operation |
-| 17   | `OperationConflict`      | The operation id was already used by this account for a different request (kind, beneficiary or amount) | Use a new id for a new operation; retry only the identical request with the same id |
+| 16   | `WrongNetwork`           | Context names a different network than the live ledger or stored binding | Refresh with `get_ledger_context()` and retry on the correct network |
+| 17   | `WrongContract`          | Context names a different pair deployment address | Use the context from `get_ledger_context()` for this exact pair |
+| 18   | `WrongVersion`           | Context storage version does not match the stored version | Refresh with `get_ledger_context()` after migration |
+| 19   | `InvalidOracleQuote`     | Oracle quote has an invalid price, confidence or future ledger | Publish a valid quote from the configured oracle |
+| 20   | `InvalidOperationId`     | The all-zero operation id was passed to a `*_with_id` entry point | Generate a random 32-byte id per logical operation |
+| 21   | `OperationConflict`      | The operation id was already used by this account for a different request (kind, beneficiary or amount) | Use a new id for a new operation; retry only the identical request with the same id |
 
 `isolated_lending` uses checked arithmetic and documented floor rounding for
 values, limits, interest, fees and liquidation payouts (the close-factor cap is
 the one upward rounding, capped at the debt). Every checked value is computed
 before tokens move or storage is written, so a call that fails with any code
 above leaves balances, positions, totals, pending withdrawals and configuration
-unchanged and can be retried with corrected inputs. See
-`docs/contracts/isolated-lending.md` for the rounding table and numeric limits.
+unchanged and can be retried with corrected inputs. All state-modifying entry
+points now require both a `LedgerContext` (network/version binding) and, where
+applicable, a configuration fingerprint. See
+`docs/contracts/isolated-lending.md` for the rounding table, numeric limits,
+and context binding.
 A failed `*_with_id` call does not consume its operation id; a duplicate of
 an applied request returns the stored receipt without changing state. See the
 "Operation identity and safe retries" section of the same document.
@@ -274,6 +287,7 @@ Source: `contracts/zap/src/lib.rs`
 | 4    | `Unauthorized`       | Caller is not admin          | Use the admin address                    |
 | 5    | `SlippageExceeded`   | Swap output below minimum    | Increase slippage tolerance              |
 | 6    | `SwapFailed`         | Underlying swap call failed  | Check pool liquidity and token approvals |
+| 7    | `OpAlreadySettled`   | `op_id` was already successfully completed | Use a new `op_id` for a new operation; check `get_op_status` first |
 | 4001 | `QuoteExpired`       | Ledger closed after the quote deadline (`zap_deposit_with_deadline`) | Refresh the quote and resubmit |
 
 ---
