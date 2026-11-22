@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen, within } from "@testing-library/react";
 import "@testing-library/jest-dom";
 import YieldCurveExplorer from "../YieldCurveExplorer";
+import { YieldDisplayOperationManager } from "../../../../../shared/types/yieldDataDisplayOperation";
 
 // Recharts' ResponsiveContainer requires ResizeObserver, which is not
 // implemented in jsdom. Provide a no-op shim before any component renders.
@@ -97,5 +98,39 @@ describe("YieldCurveExplorer", () => {
   it("renders the chart container", () => {
     render(<YieldCurveExplorer />);
     expect(screen.getByTestId("yield-curve-chart")).toBeInTheDocument();
+  });
+
+  it("does not apply a duplicate snapshot submission twice", () => {
+    const manager = new YieldDisplayOperationManager();
+    render(<YieldCurveExplorer operationManager={manager} />);
+
+    const commit = screen.getByTestId("commit-yield-snapshot");
+    fireEvent.click(commit);
+    const identityEl = screen.getByTestId("operation-identity");
+    const operationId = identityEl.getAttribute("data-operation-id");
+    expect(screen.getByTestId("operation-status")).toHaveTextContent("committed");
+
+    fireEvent.click(commit);
+    expect(screen.getByTestId("operation-identity").getAttribute("data-operation-id")).toBe(
+      operationId,
+    );
+    expect(screen.getByTestId("operation-status")).toHaveTextContent("replayed");
+    const record = manager.getOperation(operationId!);
+    expect(record?.status).toBe("committed");
+    expect(record?.replayedCount).toBe(1);
+  });
+
+  it("preserves the committed snapshot when assumptions are invalid", () => {
+    const manager = new YieldDisplayOperationManager();
+    render(<YieldCurveExplorer operationManager={manager} />);
+
+    const initial = screen.getByTestId("committed-snapshot").textContent ?? "";
+    fireEvent.change(screen.getByLabelText("Blend weight"), { target: { value: "10" } });
+    fireEvent.click(screen.getByTestId("commit-yield-snapshot"));
+
+    expect(screen.getByTestId("operation-status")).toHaveTextContent(
+      "YIELD_DISPLAY_VALIDATION_FAILED",
+    );
+    expect(screen.getByTestId("committed-snapshot").textContent).toBe(initial);
   });
 });

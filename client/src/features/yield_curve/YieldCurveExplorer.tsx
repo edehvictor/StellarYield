@@ -34,6 +34,11 @@ import type {
   Horizon,
   ScenarioName,
 } from "./types";
+import {
+  commitYieldDisplaySnapshot,
+  type CommittedYieldDisplayState,
+} from "./yieldDisplayOperation";
+import type { YieldDisplayOperationManager } from "../../../../shared/types/yieldDataDisplayOperation";
 
 const HORIZON_OPTIONS: Horizon[] = ["7d", "30d", "90d", "365d"];
 
@@ -84,10 +89,12 @@ function formatPct(value: number, decimals = 2): string {
 export interface YieldCurveExplorerProps {
   /** Optional preset legs; defaults to a Blend/Soroswap/DeFindex blend. */
   initialAllocations?: AllocationLeg[];
+  operationManager?: YieldDisplayOperationManager;
 }
 
 export default function YieldCurveExplorer({
   initialAllocations,
+  operationManager,
 }: YieldCurveExplorerProps = {}) {
   const [horizon, setHorizon] = useState<Horizon>("90d");
   const [compounding, setCompounding] = useState<CompoundFrequency>("daily");
@@ -116,6 +123,23 @@ export default function YieldCurveExplorer({
     if (validationErrors.length) return null;
     return projectYieldCurve(horizon, assumptions);
   }, [horizon, assumptions, validationErrors]);
+
+  const [committed, setCommitted] = useState<CommittedYieldDisplayState>(() => ({
+    result,
+    replayed: false,
+  }));
+
+  const applySnapshot = () => {
+    const next = commitYieldDisplaySnapshot({
+      horizon,
+      assumptions,
+      currentState: committed,
+      previousIdentity: committed.identity,
+      manager: operationManager,
+      execute: result ? () => result : undefined,
+    });
+    setCommitted({ ...next.state, replayed: Boolean(next.outcome.replayed) });
+  };
 
   const chartData = useMemo(() => {
     if (!result) return [];
@@ -354,6 +378,40 @@ export default function YieldCurveExplorer({
           </ul>
         </div>
       )}
+
+      <section
+        role="group"
+        aria-label="Yield display operation"
+        className="rounded-lg border border-slate-700 bg-slate-900/60 p-3 flex flex-wrap items-center gap-3 text-xs text-gray-400"
+        data-testid="yield-display-operation"
+      >
+        <button
+          type="button"
+          onClick={applySnapshot}
+          data-testid="commit-yield-snapshot"
+          className="px-3 py-1.5 rounded border border-blue-400 bg-blue-500/20 text-white text-sm"
+        >
+          Commit snapshot
+        </button>
+        <span
+          data-testid="operation-identity"
+          data-operation-id={committed.identity?.operationId ?? ""}
+        >
+          Operation: {committed.identity?.shortId ?? "—"}
+        </span>
+        <span data-testid="operation-status">
+          Status:{" "}
+          {committed.replayed
+            ? "replayed"
+            : committed.errorCode ?? (committed.effect ? "committed" : "uncommitted")}
+        </span>
+        <span data-testid="committed-snapshot">
+          Committed base value:{" "}
+          {committed.result
+            ? formatUsd(committed.result.scenarios.base.finalValueUsd)
+            : "—"}
+        </span>
+      </section>
 
       {result && (
         <>
