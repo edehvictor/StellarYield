@@ -670,6 +670,47 @@ export interface RestorePreambleInfo {
   transactionData: unknown;
 }
 
+export class DuplicateSubmissionError extends SorobanSdkError {
+  public readonly operationId: string;
+  public readonly status: "in_flight" | "committed";
+
+  constructor(operationId: string, status: "in_flight" | "committed", message?: string) {
+    super(
+      message ||
+        (status === "in_flight"
+          ? `Signer submission for operation '${operationId}' is already in progress`
+          : `Signer submission for operation '${operationId}' was already completed`),
+      "sign",
+      status === "in_flight"
+    );
+    this.operationId = operationId;
+    this.status = status;
+  }
+}
+
+export class SignerOperationConflictError extends SorobanSdkError {
+  public readonly operationId: string;
+
+  constructor(operationId: string, message?: string) {
+    super(
+      message ||
+        `Operation identity conflict: operation '${operationId}' was previously submitted with different transaction parameters`,
+      "sign",
+      false
+    );
+    this.operationId = operationId;
+  }
+}
+
+export class SignerValidationError extends SorobanSdkError {
+  public readonly operationId?: string;
+
+  constructor(message: string, operationId?: string) {
+    super(`Signer validation failed: ${message}`, "sign", true);
+    this.operationId = operationId;
+  }
+}
+
 export class RestoreRequiredError extends SorobanSdkError {
   public readonly minResourceFee: string;
   public readonly restorePreamble?: RestorePreambleInfo;
