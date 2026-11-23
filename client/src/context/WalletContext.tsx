@@ -8,7 +8,6 @@ import {
   loadStoredSession,
   WalletLifecycleError,
   isSessionExpired,
-  loadStoredSession,
   recoverSession,
 } from "../auth/session";
 import { getAdapter } from "../auth/walletAdapters";
