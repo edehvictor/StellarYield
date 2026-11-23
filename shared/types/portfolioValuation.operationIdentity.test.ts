@@ -7,7 +7,7 @@
  *  C. Safe retry behavior
  */
 
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, vi } from "vitest";
 import {
   canonicalizeValuationPayload,
   computeValuationPayloadFingerprint,
@@ -21,6 +21,7 @@ import {
 const BASE_PAYLOAD: PortfolioValuationPayload = {
   walletAddress: "0xABCDEF1234567890",
   currency: "USD",
+  context: { network: "testnet", ledgerSequence: 123456 },
   positions: [
     {
       asset: "USDC",
@@ -112,6 +113,17 @@ describe("canonicalizeValuationPayload", () => {
     expect(pos.currentValue).toBe(101.9877);
     expect(pos.apy).toBe(0.0333);
   });
+
+  it("normalizes and retains network and ledger context", () => {
+    const payload = {
+      ...BASE_PAYLOAD,
+      context: { network: " TESTNET ", ledgerSequence: 123456 },
+    };
+    expect(canonicalizeValuationPayload(payload).context).toEqual({
+      network: "testnet",
+      ledgerSequence: 123456,
+    });
+  });
 });
 
 // ─── computeValuationPayloadFingerprint ──────────────────────────────────────
@@ -132,6 +144,21 @@ describe("computeValuationPayloadFingerprint", () => {
     const r1 = computeValuationPayloadFingerprint(BASE_PAYLOAD);
     const r2 = computeValuationPayloadFingerprint(ALTERED_PAYLOAD);
     expect(r1.fingerprint).not.toBe(r2.fingerprint);
+  });
+
+  it("different network or ledger context produces a different fingerprint", () => {
+    const networkChanged = computeValuationPayloadFingerprint({
+      ...BASE_PAYLOAD,
+      context: { network: "mainnet", ledgerSequence: 123456 },
+    });
+    const ledgerChanged = computeValuationPayloadFingerprint({
+      ...BASE_PAYLOAD,
+      context: { network: "testnet", ledgerSequence: 123457 },
+    });
+    const baseline = computeValuationPayloadFingerprint(BASE_PAYLOAD);
+
+    expect(networkChanged.fingerprint).not.toBe(baseline.fingerprint);
+    expect(ledgerChanged.fingerprint).not.toBe(baseline.fingerprint);
   });
 
   it("shortId starts with 'vop-'", () => {
@@ -182,6 +209,7 @@ describe("ValuationOperationManager", () => {
       payload: BASE_PAYLOAD,
       operationIdentity: identity,
       currentState: state,
+      getCurrentContext: () => BASE_PAYLOAD.context,
       onSuccessStateUpdate: (s, summary) => ({
         balance: summary.pricedValueUsd,
         lastUpdated: new Date().toISOString(),
@@ -194,8 +222,10 @@ describe("ValuationOperationManager", () => {
     expect(result.summary).toBeDefined();
     expect(result.state.balance).not.toBe(INITIAL_STATE.balance);
     expect(result.effects).toHaveLength(1);
+    expect(result.effects?.[0].context).toEqual(BASE_PAYLOAD.context);
     expect(result.effects![0].type).toBe("PORTFOLIO_VALUATION_RECORDED");
     expect(manager.getOperation("op-normal-1")?.status).toBe("committed");
+    expect(manager.getOperation("op-normal-1")?.context).toEqual(BASE_PAYLOAD.context);
   });
 
   // ── 2. Duplicate submission — same operationId + same payload ──────────────
@@ -208,6 +238,7 @@ describe("ValuationOperationManager", () => {
       payload: BASE_PAYLOAD,
       operationIdentity: identity,
       currentState: state,
+      getCurrentContext: () => BASE_PAYLOAD.context,
     });
     expect(first.success).toBe(true);
 
@@ -216,6 +247,7 @@ describe("ValuationOperationManager", () => {
       payload: BASE_PAYLOAD,
       operationIdentity: identity,
       currentState: state,
+      getCurrentContext: () => BASE_PAYLOAD.context,
     });
 
     expect(second.success).toBe(true);
@@ -236,6 +268,7 @@ describe("ValuationOperationManager", () => {
       operationId: "op-inflight-1",
       payloadFingerprint: identity.payloadFingerprint,
       walletAddress: BASE_PAYLOAD.walletAddress,
+      context: BASE_PAYLOAD.context,
       status: "in_flight",
       createdAt: new Date().toISOString(),
       replayedCount: 0,
@@ -245,6 +278,7 @@ describe("ValuationOperationManager", () => {
       payload: BASE_PAYLOAD,
       operationIdentity: identity,
       currentState: state,
+      getCurrentContext: () => BASE_PAYLOAD.context,
     });
 
     expect(result.success).toBe(false);
@@ -264,6 +298,7 @@ describe("ValuationOperationManager", () => {
       payload: BASE_PAYLOAD,
       operationIdentity: identity,
       currentState: state,
+      getCurrentContext: () => BASE_PAYLOAD.context,
     });
 
     // Reuse same operationId with different payload
@@ -273,6 +308,7 @@ describe("ValuationOperationManager", () => {
       payload: ALTERED_PAYLOAD,
       operationIdentity: alteredIdentity,
       currentState: state,
+      getCurrentContext: () => BASE_PAYLOAD.context,
     });
 
     expect(result.success).toBe(false);
@@ -291,6 +327,7 @@ describe("ValuationOperationManager", () => {
       payload: BASE_PAYLOAD,
       operationIdentity: identity,
       currentState: state,
+      getCurrentContext: () => BASE_PAYLOAD.context,
       validate: () => "Validation rejected: positions do not meet minimum threshold",
     });
 
@@ -311,6 +348,7 @@ describe("ValuationOperationManager", () => {
       payload: BASE_PAYLOAD,
       operationIdentity: identity,
       currentState: state,
+      getCurrentContext: () => BASE_PAYLOAD.context,
       execute: async () => {
         throw new Error("Storage layer unavailable");
       },
@@ -337,6 +375,7 @@ describe("ValuationOperationManager", () => {
       payload: BASE_PAYLOAD,
       operationIdentity: failId,
       currentState: state,
+      getCurrentContext: () => BASE_PAYLOAD.context,
       execute: async () => {
         attemptCount++;
         throw new Error("Transient error");
@@ -351,6 +390,7 @@ describe("ValuationOperationManager", () => {
       payload: BASE_PAYLOAD,
       operationIdentity: retryId,
       currentState: state,
+      getCurrentContext: () => BASE_PAYLOAD.context,
       execute: async () => {
         attemptCount++;
         // succeeds this time
@@ -373,6 +413,7 @@ describe("ValuationOperationManager", () => {
       payload: BASE_PAYLOAD,
       operationIdentity: identity,
       currentState: state,
+      getCurrentContext: () => BASE_PAYLOAD.context,
       validate: () => false,
     });
 
@@ -391,6 +432,7 @@ describe("ValuationOperationManager", () => {
       operationId: "op-tamper-1",
       payloadFingerprint: "0000000000000000000000000000000000000000000000000000000000000000",
       walletAddress: BASE_PAYLOAD.walletAddress,
+      context: BASE_PAYLOAD.context,
       status: "committed",
       createdAt: new Date().toISOString(),
       replayedCount: 0,
@@ -401,6 +443,7 @@ describe("ValuationOperationManager", () => {
       payload: BASE_PAYLOAD,
       operationIdentity: identity,
       currentState: state,
+      getCurrentContext: () => BASE_PAYLOAD.context,
     });
 
     expect(result.success).toBe(false);
@@ -408,5 +451,70 @@ describe("ValuationOperationManager", () => {
     // State preserved
     expect(result.state).toEqual(state);
   });
-});
 
+  it("rejects a request read on a different network or ledger without changing state", async () => {
+    const mismatchedContexts = [
+      { network: "mainnet", ledgerSequence: BASE_PAYLOAD.context.ledgerSequence },
+      { network: "testnet", ledgerSequence: BASE_PAYLOAD.context.ledgerSequence + 1 },
+    ];
+
+    for (const [index, currentContext] of mismatchedContexts.entries()) {
+      const identity = createValuationOperationIdentity(BASE_PAYLOAD, `op-context-${index}`);
+      const execute = vi.fn();
+      const result = await manager.executeValuation<TestState, void>({
+        payload: BASE_PAYLOAD,
+        operationIdentity: identity,
+        currentState: state,
+        getCurrentContext: () => currentContext,
+        execute,
+      });
+
+      expect(result.success).toBe(false);
+      expect(result.errorCode).toBe("VALUATION_CONTEXT_MISMATCH");
+      expect(result.state).toEqual(INITIAL_STATE);
+      expect(execute).not.toHaveBeenCalled();
+      expect(manager.getOperation(identity.operationId)).toBeUndefined();
+    }
+  });
+
+  it("rejects a mid-execution ledger transition and safely retries in the original context", async () => {
+    const identity = createValuationOperationIdentity(BASE_PAYLOAD, "op-context-retry");
+    let activeContext = BASE_PAYLOAD.context;
+    let attemptCount = 0;
+    const result = await manager.executeValuation<TestState, void>({
+      payload: BASE_PAYLOAD,
+      operationIdentity: identity,
+      currentState: state,
+      getCurrentContext: () => activeContext,
+      execute: async (_summary, context) => {
+        expect(context).toEqual(BASE_PAYLOAD.context);
+        attemptCount += 1;
+        if (attemptCount === 1) {
+          activeContext = { ...BASE_PAYLOAD.context, ledgerSequence: 123457 };
+        }
+      },
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.errorCode).toBe("VALUATION_CONTEXT_MISMATCH");
+    expect(result.state).toEqual(INITIAL_STATE);
+    expect(manager.getOperation(identity.operationId)?.status).toBe("rejected");
+
+    activeContext = BASE_PAYLOAD.context;
+    const retry = await manager.executeValuation<TestState, void>({
+      payload: BASE_PAYLOAD,
+      operationIdentity: identity,
+      currentState: state,
+      getCurrentContext: () => activeContext,
+      onSuccessStateUpdate: (_current, summary) => ({
+        balance: summary.pricedValueUsd,
+        lastUpdated: "retried",
+      }),
+    });
+
+    expect(retry.success).toBe(true);
+    expect(retry.state.balance).not.toBe(INITIAL_STATE.balance);
+    expect(retry.effects?.[0].context).toEqual(BASE_PAYLOAD.context);
+    expect(manager.getOperation(identity.operationId)?.status).toBe("committed");
+  });
+});
