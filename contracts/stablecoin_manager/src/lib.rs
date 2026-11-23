@@ -6,12 +6,14 @@ use soroban_sdk::{
     Val, Vec,
 };
 
+mod clock;
 mod math;
 mod storage;
 
 #[cfg(test)]
 mod test;
 
+use clock::validate_observation;
 use math::{calculate_collateral_value, calculate_cr, calculate_debt, calculate_index};
 use storage::{Cdp, DataKey, SCALAR_18};
 use storage_helpers::{extend_instance_ttl_default, extend_persistent_ttl_default};
@@ -28,7 +30,11 @@ pub enum Error {
     PositionUnderMcr = 6,
     NoCdpFound = 7,
     InvalidRatio = 8,
+    /// The oracle observation is older than `clock::MAX_PRICE_AGE_SECS`.
     PriceStale = 9,
+    /// The oracle observation is stamped later than the ledger time allows
+    /// (`clock::MAX_PRICE_FUTURE_SKEW_SECS`). Never used to value collateral.
+    PriceFromFuture = 10,
 }
 
 #[contract]
@@ -333,9 +339,9 @@ impl StablecoinManager {
             env.invoke_contract(&oracle_addr, &Symbol::new(env, "get_price"), oracle_args);
 
         let (price, timestamp) = price_data.ok_or(Error::PriceStale)?;
-        if env.ledger().timestamp() > timestamp + 3600 {
-            return Err(Error::PriceStale);
-        }
+        // Reject both stale and future-dated observations before any value is
+        // computed, so a bad quote cannot change a collateral ratio.
+        validate_observation(env.ledger().timestamp(), timestamp)?;
 
         let collateral_val =
             calculate_collateral_value(cdp.collateral, total_assets, total_shares, price);

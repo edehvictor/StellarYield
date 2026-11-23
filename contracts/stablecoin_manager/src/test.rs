@@ -249,3 +249,272 @@ fn test_storage_ttl_extension() {
     // Call repay_s_usd to verify that read/write paths for CDP run successfully with TTL extension
     client.repay_s_usd(&user, &0, &0);
 }
+
+// ─────────────────────────────────────────────────────────────────────────
+// Oracle clock policy: future-dated, current and stale observations
+// ─────────────────────────────────────────────────────────────────────────
+//
+// Policy under test (see `clock.rs`): an observation is accepted when
+//   ledger_time - MAX_PRICE_AGE_SECS <= observed_at <= ledger_time + MAX_PRICE_FUTURE_SKEW_SECS
+// with both ends inclusive. Anything later is `PriceFromFuture`, anything older
+// is `PriceStale`. A rejected call must leave every balance exactly as it was.
+
+use crate::clock::{MAX_PRICE_AGE_SECS, MAX_PRICE_FUTURE_SKEW_SECS};
+use crate::Error;
+
+const NOW: u64 = 1_000_000;
+
+/// Oracle whose observation time the test controls. The price is fixed at
+/// $0.10 so only the timestamp varies between cases.
+///
+/// Lives in its own module: `#[contractimpl]` derives module-level names from
+/// function names, so two mock oracles that both define `get_price` cannot
+/// share a module with `MockOracle`.
+mod clock_oracle {
+    use soroban_sdk::{contract, contractimpl, symbol_short, Address, Env};
+
+    #[contract]
+    pub struct ClockOracle;
+
+    #[contractimpl]
+    impl ClockOracle {
+        pub fn set_observed_at(env: Env, observed_at: u64) {
+            env.storage()
+                .instance()
+                .set(&symbol_short!("obs"), &observed_at);
+        }
+
+        pub fn get_price(env: Env, _asset: Address) -> Option<(i128, u64)> {
+            let observed_at: u64 = env
+                .storage()
+                .instance()
+                .get(&symbol_short!("obs"))
+                .unwrap_or(env.ledger().timestamp());
+            Some((1_000_000, observed_at))
+        }
+    }
+}
+use clock_oracle::{ClockOracle, ClockOracleClient};
+
+struct ClockEnv {
+    env: Env,
+    client: StablecoinManagerClient<'static>,
+    s_usd: Address,
+    collateral: Address,
+    oracle: ClockOracleClient<'static>,
+}
+
+fn setup_clock_env() -> ClockEnv {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|l| l.timestamp = NOW);
+
+    let contract_id = env.register(StablecoinManager, ());
+    let client = StablecoinManagerClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let s_usd = env
+        .register_stellar_asset_contract_v2(contract_id.clone())
+        .address();
+    let collateral = env
+        .register_stellar_asset_contract_v2(Address::generate(&env))
+        .address();
+    let metrics_id = env.register(MockVault, ());
+    let oracle_id = env.register(ClockOracle, ());
+    let oracle = ClockOracleClient::new(&env, &oracle_id);
+
+    client.initialize(
+        &admin,
+        &s_usd,
+        &collateral,
+        &metrics_id,
+        &oracle_id,
+        &15000,
+        &11000,
+        &50_000_000_000_000_000i128,
+    );
+
+    ClockEnv {
+        env,
+        client,
+        s_usd,
+        collateral,
+        oracle,
+    }
+}
+
+/// Every balance a failed operation must leave untouched.
+#[derive(Debug, PartialEq, Eq)]
+struct Balances {
+    user_collateral: i128,
+    user_s_usd: i128,
+    contract_collateral: i128,
+}
+
+fn balances(t: &ClockEnv, user: &Address) -> Balances {
+    Balances {
+        user_collateral: token::Client::new(&t.env, &t.collateral).balance(user),
+        user_s_usd: token::Client::new(&t.env, &t.s_usd).balance(user),
+        contract_collateral: token::Client::new(&t.env, &t.collateral).balance(&t.client.address),
+    }
+}
+
+/// A user holding 100_000 collateral and no position yet.
+fn funded_user(t: &ClockEnv) -> Address {
+    let user = Address::generate(&t.env);
+    give_collateral(&t.env, &t.collateral, &user, 100_000);
+    user
+}
+
+#[test]
+fn clock_policy_constants_are_the_documented_values() {
+    // Documented in docs/contracts/stablecoin-manager-price-clock.md. Changing
+    // either one is a behaviour change and must update that document.
+    assert_eq!(MAX_PRICE_AGE_SECS, 3600);
+    assert_eq!(MAX_PRICE_FUTURE_SKEW_SECS, 0);
+}
+
+#[test]
+fn observation_at_ledger_time_is_accepted() {
+    let t = setup_clock_env();
+    let user = funded_user(&t);
+    t.oracle.set_observed_at(&NOW);
+
+    t.client.mint_s_usd(&user, &100_000, &5_000);
+
+    assert_eq!(balances(&t, &user).user_s_usd, 5_000);
+}
+
+#[test]
+fn observation_one_second_in_the_future_is_rejected() {
+    let t = setup_clock_env();
+    let user = funded_user(&t);
+    t.oracle
+        .set_observed_at(&(NOW + MAX_PRICE_FUTURE_SKEW_SECS + 1));
+    let before = balances(&t, &user);
+
+    let result = t.client.try_mint_s_usd(&user, &100_000, &5_000);
+
+    assert_eq!(result, Err(Ok(Error::PriceFromFuture)));
+    assert_eq!(
+        balances(&t, &user),
+        before,
+        "failed mint must not move funds"
+    );
+}
+
+#[test]
+fn observation_far_in_the_future_is_rejected() {
+    let t = setup_clock_env();
+    let user = funded_user(&t);
+    let before = balances(&t, &user);
+
+    // One day ahead, and u64::MAX: the old `timestamp + 3600` overflowed on the latter.
+    for observed_at in [NOW + 86_400, u64::MAX] {
+        t.oracle.set_observed_at(&observed_at);
+        let result = t.client.try_mint_s_usd(&user, &100_000, &5_000);
+        assert_eq!(
+            result,
+            Err(Ok(Error::PriceFromFuture)),
+            "observed_at={observed_at}"
+        );
+    }
+    assert_eq!(balances(&t, &user), before);
+}
+
+#[test]
+fn observation_exactly_at_max_age_is_accepted() {
+    let t = setup_clock_env();
+    let user = funded_user(&t);
+    t.oracle.set_observed_at(&(NOW - MAX_PRICE_AGE_SECS));
+
+    t.client.mint_s_usd(&user, &100_000, &5_000);
+
+    assert_eq!(balances(&t, &user).user_s_usd, 5_000);
+}
+
+#[test]
+fn observation_one_second_past_max_age_is_stale() {
+    let t = setup_clock_env();
+    let user = funded_user(&t);
+    t.oracle.set_observed_at(&(NOW - MAX_PRICE_AGE_SECS - 1));
+    let before = balances(&t, &user);
+
+    let result = t.client.try_mint_s_usd(&user, &100_000, &5_000);
+
+    assert_eq!(result, Err(Ok(Error::PriceStale)));
+    assert_eq!(
+        balances(&t, &user),
+        before,
+        "failed mint must not move funds"
+    );
+}
+
+#[test]
+fn rejected_future_price_leaves_an_existing_position_intact() {
+    let t = setup_clock_env();
+    let user = funded_user(&t);
+    t.oracle.set_observed_at(&NOW);
+    t.client.mint_s_usd(&user, &50_000, &2_000);
+    let before = balances(&t, &user);
+
+    t.oracle.set_observed_at(&(NOW + 1));
+    let result = t.client.try_mint_s_usd(&user, &50_000, &2_000);
+
+    assert_eq!(result, Err(Ok(Error::PriceFromFuture)));
+    assert_eq!(balances(&t, &user), before);
+
+    // The position is untouched: with a valid quote the same call succeeds and
+    // the totals are exactly "first mint + second mint", nothing lost or doubled.
+    t.oracle.set_observed_at(&NOW);
+    t.client.mint_s_usd(&user, &50_000, &2_000);
+    let after = balances(&t, &user);
+    assert_eq!(after.user_s_usd, 4_000);
+    assert_eq!(after.contract_collateral, 100_000);
+}
+
+#[test]
+fn collateral_withdrawal_is_rejected_on_a_future_price_and_changes_nothing() {
+    let t = setup_clock_env();
+    let user = funded_user(&t);
+    t.oracle.set_observed_at(&NOW);
+    t.client.mint_s_usd(&user, &100_000, &5_000);
+    let before = balances(&t, &user);
+
+    t.oracle.set_observed_at(&(NOW + 1));
+    let result = t.client.try_repay_s_usd(&user, &0, &1_000);
+
+    assert_eq!(result, Err(Ok(Error::PriceFromFuture)));
+    assert_eq!(balances(&t, &user), before);
+}
+
+#[test]
+fn liquidation_is_rejected_on_a_future_price_and_the_cdp_survives() {
+    let t = setup_clock_env();
+    let user = funded_user(&t);
+    let liquidator = Address::generate(&t.env);
+    t.oracle.set_observed_at(&NOW);
+    t.client.mint_s_usd(&user, &100_000, &5_000);
+    let before = balances(&t, &user);
+
+    t.oracle.set_observed_at(&(NOW + 1));
+    let result = t.client.try_liquidate(&liquidator, &user);
+
+    assert_eq!(result, Err(Ok(Error::PriceFromFuture)));
+    assert_eq!(balances(&t, &user), before);
+
+    // The CDP still exists: with a valid quote the call reaches the health
+    // check (healthy position -> Unauthorized) instead of NoCdpFound.
+    t.oracle.set_observed_at(&NOW);
+    assert_eq!(
+        t.client.try_liquidate(&liquidator, &user),
+        Err(Ok(Error::Unauthorized))
+    );
+}
+
+#[test]
+fn future_price_error_code_is_stable() {
+    // Integrators match on the numeric code; see ERROR_CODES.md.
+    assert_eq!(Error::PriceStale as u32, 9);
+    assert_eq!(Error::PriceFromFuture as u32, 10);
+}
