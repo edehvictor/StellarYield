@@ -185,6 +185,15 @@ const vaultData = await api.getVaultData('vault-contract-id');
   - `runWithSimulationConfig(options)`: Runs simulation against an immutable snapshot, detects configuration drift, and either rejects (`onStale: "reject"`) or transparently re-runs (`onStale: "refresh"`).
   - State & Balance Preservation: Validation and execution failures never modify existing balances or state; every failure maintains `statePreserved: true`.
 
+`ApiClient.simulateDeposit()` also checks the configuration after each request. With
+`onStale: "refresh"`, it retries under the latest snapshot up to `maxAttempts`
+(default 3, capped at 10); it never returns a response whose configuration changed
+in flight. On exhaustion, `StaleSimulationConfigError` includes the expected and
+actual fingerprints, completed `attempts`, and `preservedState` when supplied, so
+callers can refresh and retry with a known state snapshot. Successful responses
+include `simulationAttempts`. This retry is for read-only simulations and does not
+apply deposits or change balances.
+
 ## Deposit simulation fixtures
 
 Offline tests can import `depositSimulationScenarios` and `createDepositSimulation`

@@ -67,6 +67,8 @@ export interface DepositSimulationParams {
   configSnapshot?: SimulationConfigSnapshot;
   /** Policy when stale configuration is detected: "reject" (default) or "refresh". */
   onStale?: StaleSimulationConfigPolicy;
+  /** Maximum simulation requests when stale configuration is refreshed (default 3). */
+  maxAttempts?: number;
   /** Caller state or balance snapshot to preserve upon validation or execution failure. */
   stateSnapshot?: unknown;
 }
@@ -74,6 +76,8 @@ export interface DepositSimulationParams {
 const DEFAULT_TIMEOUT_MS = 15_000;
 const DEFAULT_MAX_RETRIES = 2;
 const DEFAULT_RETRY_DELAY_MS = 250;
+const DEFAULT_SIMULATION_MAX_ATTEMPTS = 3;
+const MAX_SIMULATION_ATTEMPTS = 10;
 const DEFAULT_RETRYABLE_STATUSES = [408, 429, 500, 502, 503, 504];
 const DEFAULT_CACHE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 const DEFAULT_MAX_PAGES = 50;
@@ -559,40 +563,45 @@ export class ApiClient {
     params: DepositSimulationParams,
     requestOptions?: ApiRequestOptions
   ): Promise<any> {
-    const liveSnapshot = this.getSimulationConfig();
-    const expectedFingerprint =
+    let expectedFingerprint =
       params.expectedConfigFingerprint ??
       (params.configSnapshot ? params.configSnapshot.fingerprint : undefined);
+    const refreshStaleConfig = params.onStale === "refresh";
+    const requestedAttempts = params.maxAttempts ?? DEFAULT_SIMULATION_MAX_ATTEMPTS;
+    const maxAttempts = refreshStaleConfig
+      ? Math.min(
+          MAX_SIMULATION_ATTEMPTS,
+          Math.max(
+            1,
+            Number.isFinite(requestedAttempts)
+              ? Math.floor(requestedAttempts)
+              : DEFAULT_SIMULATION_MAX_ATTEMPTS
+          )
+        )
+      : 1;
 
-    // If an expected fingerprint is specified, validate it against the live config
-    if (expectedFingerprint && liveSnapshot) {
-      if (expectedFingerprint !== liveSnapshot.fingerprint) {
-        if (params.onStale === "refresh" && this.simulationConfigReader) {
-          const refreshed = captureSimulationConfig(this.simulationConfigReader());
-          this.simulationConfigSnapshot = refreshed;
-          return this.simulateDeposit(
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      let liveSnapshot = this.getSimulationConfig();
+
+      if (expectedFingerprint && liveSnapshot && expectedFingerprint !== liveSnapshot.fingerprint) {
+        if (refreshStaleConfig && this.simulationConfigReader) {
+          liveSnapshot = captureSimulationConfig(this.simulationConfigReader());
+          this.simulationConfigSnapshot = liveSnapshot;
+          expectedFingerprint = liveSnapshot.fingerprint;
+        } else {
+          throw new StaleSimulationConfigError(
+            `Simulation configuration snapshot is stale (expected ${expectedFingerprint}, current ${liveSnapshot.fingerprint})`,
             {
-              ...params,
-              expectedConfigFingerprint: refreshed.fingerprint,
-              configSnapshot: refreshed,
-            },
-            requestOptions
+              expectedFingerprint,
+              actualFingerprint: liveSnapshot.fingerprint,
+              attempts: attempt,
+              statePreserved: true,
+              preservedState: params.stateSnapshot,
+            }
           );
         }
-
-        throw new StaleSimulationConfigError(
-          `Simulation configuration snapshot is stale (expected ${expectedFingerprint}, current ${liveSnapshot.fingerprint})`,
-          {
-            expectedFingerprint,
-            actualFingerprint: liveSnapshot.fingerprint,
-            statePreserved: true,
-            preservedState: params.stateSnapshot,
-          }
-        );
       }
-    }
 
-    try {
       const response = await this.request<any>(
         "/api/simulator/deposit",
         {
@@ -611,16 +620,10 @@ export class ApiClient {
       if (this.simulationConfigReader && liveSnapshot) {
         const afterLiveSnapshot = captureSimulationConfig(this.simulationConfigReader());
         if (afterLiveSnapshot.fingerprint !== liveSnapshot.fingerprint) {
-          if (params.onStale === "refresh") {
+          if (refreshStaleConfig && attempt < maxAttempts) {
             this.simulationConfigSnapshot = afterLiveSnapshot;
-            return this.simulateDeposit(
-              {
-                ...params,
-                expectedConfigFingerprint: afterLiveSnapshot.fingerprint,
-                configSnapshot: afterLiveSnapshot,
-              },
-              requestOptions
-            );
+            expectedFingerprint = afterLiveSnapshot.fingerprint;
+            continue;
           }
 
           throw new StaleSimulationConfigError(
@@ -628,6 +631,7 @@ export class ApiClient {
             {
               expectedFingerprint: liveSnapshot.fingerprint,
               actualFingerprint: afterLiveSnapshot.fingerprint,
+              attempts: attempt,
               statePreserved: true,
               preservedState: params.stateSnapshot,
             }
@@ -638,13 +642,17 @@ export class ApiClient {
       return {
         ...response,
         configFingerprint: liveSnapshot ? liveSnapshot.fingerprint : expectedFingerprint,
+        simulationAttempts: attempt,
       };
-    } catch (error) {
-      if (error instanceof StaleSimulationConfigError) {
-        throw error;
-      }
-      throw error;
     }
+
+    throw new StaleSimulationConfigError("Simulation configuration remained stale after retries", {
+      expectedFingerprint: expectedFingerprint ?? null,
+      actualFingerprint: this.getSimulationConfigFingerprint(),
+      attempts: maxAttempts,
+      statePreserved: true,
+      preservedState: params.stateSnapshot,
+    });
   }
 
   async getZapSupportedAssets(

@@ -18,6 +18,16 @@ import { exportService } from "../services/exportService";
 import { sendExportError, sendError } from "../utils/errorResponse";
 import { strategySnapshotVersioningService } from "../services/strategySnapshotVersioningService";
 import { strategyLifecycleAuditService } from "../services/strategyLifecycleAuditService";
+import {
+  getStrategyComparisonState,
+  getStrategyComparisonVersion,
+  updateStrategyComparisonState,
+  selectStrategyAndAllocate,
+  StrategyComparisonVersionConflictError,
+  StrategyComparisonValidationError,
+  STRATEGY_COMPARISON_VERSION_CONFLICT,
+  INVALID_STRATEGY_COMPARISON_STATE,
+} from "../services/strategyComparisonConcurrencyService";
 
 const router = Router();
 
@@ -325,6 +335,243 @@ router.get("/:strategyId/risk-explanation", (req: Request, res: Response) => {
     ...explanation,
     breakdown: result.breakdown,
   });
+});
+
+/**
+ * Reads expectedVersion from If-Match header or body (#1919).
+ */
+export function readComparisonExpectedVersion(req: Request): number | undefined {
+  const header = req.headers["if-match"];
+  const raw =
+    typeof header === "string" && header.trim() !== ""
+      ? header.trim().replace(/^W\//, "").replace(/^"(.*)"$/, "$1")
+      : (req.body as { expectedVersion?: unknown } | undefined)?.expectedVersion;
+
+  if (raw === undefined || raw === null) return undefined;
+  const value = typeof raw === "number" ? raw : Number(String(raw).trim());
+  if (!Number.isSafeInteger(value) || value < 0 || String(raw).trim() === "") {
+    throw new StrategyComparisonValidationError(
+      "If-Match / expectedVersion must be a non-negative integer version",
+    );
+  }
+  return value;
+}
+
+function readOperationIdentity(req: Request): string | undefined {
+  const header =
+    req.headers["x-operation-identity"] || req.headers["idempotency-key"];
+  if (typeof header === "string" && header.trim() !== "") {
+    return header.trim();
+  }
+  const bodyId = (req.body as { operationIdentity?: unknown } | undefined)?.operationIdentity;
+  if (typeof bodyId === "string" && bodyId.trim() !== "") {
+    return bodyId.trim();
+  }
+  return undefined;
+}
+
+/**
+ * GET /api/strategies/comparison/state/:walletAddress
+ *
+ * Returns current strategy comparison workspace state and its version
+ * with optimistic-concurrency headers.
+ */
+router.get("/comparison/state/:walletAddress", (req: Request, res: Response) => {
+  const { walletAddress } = req.params;
+  if (!walletAddress || walletAddress.trim() === "") {
+    res.status(400).json({ error: "walletAddress parameter is required." });
+    return;
+  }
+
+  const state = getStrategyComparisonState(walletAddress);
+  res.setHeader("ETag", `"${state.version}"`);
+  res.setHeader("X-Comparison-Version", String(state.version));
+  res.json({
+    state,
+    version: state.version,
+  });
+});
+
+/**
+ * PUT /api/strategies/comparison/state
+ *
+ * Updates strategy comparison state under optimistic concurrency.
+ * If expectedVersion is supplied and does not match current version,
+ * returns 409 STRATEGY_COMPARISON_VERSION_CONFLICT without mutating state.
+ */
+router.put("/comparison/state", (req: Request, res: Response) => {
+  const {
+    walletAddress,
+    selectedStrategyId,
+    pinnedStrategyIds,
+    customAssumptions,
+    allocatedBalances,
+  } = req.body || {};
+
+  if (!walletAddress || typeof walletAddress !== "string" || walletAddress.trim() === "") {
+    res.status(400).json({ error: "walletAddress is required in request body." });
+    return;
+  }
+
+  let expectedVersion: number | undefined;
+  try {
+    expectedVersion = readComparisonExpectedVersion(req);
+  } catch (err) {
+    if (err instanceof StrategyComparisonValidationError) {
+      res.status(400).json({ code: err.code, error: err.message });
+      return;
+    }
+    throw err;
+  }
+
+  const operationIdentity = readOperationIdentity(req);
+
+  try {
+    const { state, isReplay } = updateStrategyComparisonState(
+      walletAddress,
+      {
+        selectedStrategyId,
+        pinnedStrategyIds,
+        customAssumptions,
+        allocatedBalances,
+      },
+      {
+        expectedVersion,
+        operationIdentity,
+      },
+    );
+
+    res.setHeader("ETag", `"${state.version}"`);
+    res.setHeader("X-Comparison-Version", String(state.version));
+    if (isReplay) {
+      res.setHeader("X-Idempotent-Replayed", "true");
+    }
+
+    res.json({
+      state,
+      version: state.version,
+      isReplay,
+    });
+  } catch (err) {
+    if (err instanceof StrategyComparisonVersionConflictError) {
+      res.setHeader("ETag", `"${err.currentVersion}"`);
+      res.setHeader("X-Comparison-Version", String(err.currentVersion));
+      res.status(409).json({
+        code: err.code,
+        error: err.message,
+        expectedVersion: err.expectedVersion,
+        currentVersion: err.currentVersion,
+        state: err.currentState,
+      });
+      return;
+    }
+
+    if (err instanceof StrategyComparisonValidationError) {
+      res.status(400).json({
+        code: err.code,
+        error: err.message,
+        details: err.details,
+      });
+      return;
+    }
+
+    res.status(500).json({
+      code: "STRATEGY_COMPARISON_UPDATE_FAILED",
+      error: err instanceof Error ? err.message : "Failed to update strategy comparison state.",
+    });
+  }
+});
+
+/**
+ * POST /api/strategies/comparison/select
+ *
+ * Atomically selects a strategy and allocates funds under OCC.
+ */
+router.post("/comparison/select", (req: Request, res: Response) => {
+  const { walletAddress, strategyId, allocationUsd } = req.body || {};
+
+  if (!walletAddress || typeof walletAddress !== "string" || walletAddress.trim() === "") {
+    res.status(400).json({ error: "walletAddress is required." });
+    return;
+  }
+
+  if (!strategyId || typeof strategyId !== "string" || strategyId.trim() === "") {
+    res.status(400).json({ error: "strategyId is required." });
+    return;
+  }
+
+  const parsedAllocation = Number(allocationUsd);
+  if (!Number.isFinite(parsedAllocation) || parsedAllocation < 0) {
+    res.status(400).json({
+      code: INVALID_STRATEGY_COMPARISON_STATE,
+      error: "allocationUsd must be a non-negative finite number.",
+    });
+    return;
+  }
+
+  let expectedVersion: number | undefined;
+  try {
+    expectedVersion = readComparisonExpectedVersion(req);
+  } catch (err) {
+    if (err instanceof StrategyComparisonValidationError) {
+      res.status(400).json({ code: err.code, error: err.message });
+      return;
+    }
+    throw err;
+  }
+
+  const operationIdentity = readOperationIdentity(req);
+
+  try {
+    const { state, isReplay } = selectStrategyAndAllocate(
+      walletAddress,
+      strategyId,
+      parsedAllocation,
+      {
+        expectedVersion,
+        operationIdentity,
+      },
+    );
+
+    res.setHeader("ETag", `"${state.version}"`);
+    res.setHeader("X-Comparison-Version", String(state.version));
+    if (isReplay) {
+      res.setHeader("X-Idempotent-Replayed", "true");
+    }
+
+    res.json({
+      state,
+      version: state.version,
+      isReplay,
+    });
+  } catch (err) {
+    if (err instanceof StrategyComparisonVersionConflictError) {
+      res.setHeader("ETag", `"${err.currentVersion}"`);
+      res.setHeader("X-Comparison-Version", String(err.currentVersion));
+      res.status(409).json({
+        code: err.code,
+        error: err.message,
+        expectedVersion: err.expectedVersion,
+        currentVersion: err.currentVersion,
+        state: err.currentState,
+      });
+      return;
+    }
+
+    if (err instanceof StrategyComparisonValidationError) {
+      res.status(400).json({
+        code: err.code,
+        error: err.message,
+        details: err.details,
+      });
+      return;
+    }
+
+    res.status(500).json({
+      code: "STRATEGY_SELECTION_FAILED",
+      error: err instanceof Error ? err.message : "Failed to select strategy.",
+    });
+  }
 });
 
 export default router;
