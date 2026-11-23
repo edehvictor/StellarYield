@@ -42,7 +42,7 @@ export function getRiskConfig(level: RiskLevel): RiskLevelConfig {
 }
 
 export function getRiskExplanation(level: RiskLevel): string {
-    return RISK_EXPIANATIONS[level].explanation;
+    return RISK_EXPLANATIONS[level].explanation;
 }
 
 /**
@@ -271,7 +271,7 @@ export function evaluateTreasuryExposure(
     }, 0);
 
     const exposures: AssetExposureResult[] = inputs.map((item) => {
-        const config = ASSET_CLASS_LIMITS[item.assetClass];
+        const config = ASSET_CLASS_LIMITS[item.assetClass as AssetClass];
         const sharePct = totalValueUsd > 0 ? (item.valueUsd / totalValueUsd) * 100 : 0;
         const roundedShare = roundToTwoDecimals(sharePct);
 

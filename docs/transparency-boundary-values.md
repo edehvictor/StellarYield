@@ -1,16 +1,20 @@
-# Transparency boundary-value calculations
+# Transparency boundary-value calculations and external data hardening
 
-This document describes the rounding, checked arithmetic, and boundary
-handling applied to the transparency status surface (#1914).
+This document describes the rounding, checked arithmetic, boundary
+handling, and malformed external data validation applied to the
+transparency status surface (#1913, #1914).
 
 ## Scope
 
-- Server: `GET /api/transparency/summary` in `server/src/routes/transparency.ts`
-  and its helpers `roundToTwoDecimals`, `checkedAdd`, `checkedSum`,
-  `computeDeflationaryRatio`, and `assertValidHistoryPoint`.
-- Client: status normalization in
-  `client/src/pages/transparency/transparencyServiceHealth.ts` and display
-  formatting in `TransparencyDashboard.tsx`.
+- Server: `GET /api/transparency/summary` and `/api/transparency/failover-history`
+  in `server/src/routes/transparency.ts` and helpers `roundToTwoDecimals`,
+  `checkedAdd`, `checkedSum`, `computeDeflationaryRatio`,
+  `assertValidHistoryPoint`, `validateExternalHistory`, and
+  `buildTransparencySummary`.
+- Client: boundary validation and status normalization in
+  `client/src/pages/transparency/transparencyServiceHealth.ts`,
+  `client/src/pages/transparency/smokeResults.ts`, and display/retry
+  handling in `TransparencyDashboard.tsx`.
 
 ## Rounding rules
 
@@ -56,11 +60,54 @@ handling applied to the transparency status surface (#1914).
   `$0`, tokens as `0`, and the ratio as `0.00%`, with negatives clamped
   to zero and the ratio capped at 100%.
 
+## Malformed external data validation (#1913)
+
+- **Server boundary validation**:
+  - `assertValidHistoryPoint`, `validateExternalHistory`, and
+    `buildTransparencySummary` validate untrusted external inputs before any
+    state or cache mutation. History points require a valid `YYYY-MM-DD`
+    calendar date and finite non-negative `revenue` and `burned` numbers
+    within `MAX_TRANSPARENCY_VALUE`.
+  - Malformed external data throws a typed `TransparencyValidationError`
+    (subclass of `TransparencyCalculationError`) carrying a machine-readable
+    `code` (`MALFORMED_EXTERNAL_DATA`, `MALFORMED_HISTORY_POINT`,
+    `INVALID_QUERY_PARAMETER`, or `MALFORMED_INCIDENT_PAYLOAD`).
+  - Cached snapshots are defensively cloned on write and read, and the cache
+    is replaced only after full validation and aggregation succeed. When a
+    valid snapshot is already cached, a failed refresh preserves existing
+    state and balances. When no cached snapshot exists, `GET /api/transparency/summary`
+    returns HTTP 500 with `{ error, code }` and recovers on the next valid retry.
+- **Client boundary validation**:
+  - `validateTransparencySummaryPayload` validates `/api/transparency/summary`
+    responses at the boundary and throws `TransparencyExternalDataError`
+    (`code: "MALFORMED_SUMMARY_PAYLOAD" | "MALFORMED_HISTORY_ENTRY"`) without
+    mutating dashboard state. If a valid snapshot is already displayed, a
+    failed refresh preserves existing balances and chart history; on an
+    initial load failure, **Try Again** retries and renders once valid data
+    arrives.
+  - `validateFailoverIncidentsPayload` and `validateFailoverIncident`
+    validate `/api/transparency/failover-history` envelopes and entry fields
+    (`id`, `protocolId`, `protocolName`, `trigger`, `startedAt`, `resolved`,
+    `reasons`, optional `recoveredAt` and `durationMs`).
+  - `parseIndexerStatusPayload` and `parseRelayerStatusPayload` validate
+    `/api/indexer/status` and `/api/relayer/status` independently so a
+    malformed response from one endpoint never discards a valid status from
+    the other, and missing or non-boolean relayer fields never default to
+    `"healthy"`.
+  - `assessRegistryFromRecords` ignores metadata keys prefixed with `_` (such
+    as `_comment`) and degrades to `"unknown"` when network records or
+    contract addresses are malformed.
+  - `parseSmokeRunResult` and `parseSmokeHistory` validate check items and
+    timestamps from `localStorage` before updating smoke-test health.
+
 ## Tests
 
 - Server: `server/src/__tests__/transparency.test.ts` covers zero,
   minimum, maximum, and near-limit ratio calculations, overflow rejection,
-  non-finite rejection, and bounded aggregation output.
-- Client: `client/src/pages/transparency/transparencyServiceHealth.test.ts`
-  covers relayer boundary values at 0/50/100 and NaN/Infinity/out-of-range
-  inputs, subsystem sanitization, and idempotent safe retry.
+  non-finite rejection, malformed external data rejection, preservation of
+  cached balances, and safe retry recovery.
+- Client: `client/src/pages/transparency/transparencyServiceHealth.test.ts`,
+  `client/src/pages/transparency/smokeResults.test.ts`, and
+  `client/src/pages/transparency/TransparencyDashboard.test.tsx` cover
+  relayer boundary values, malformed summary/incident/health/smoke payloads,
+  preservation of existing balances on failed refresh, and idempotent retry.
