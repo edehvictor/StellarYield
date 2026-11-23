@@ -24,9 +24,26 @@ Payloads are canonicalized before hashing:
 1. Positions are sorted by `protocol` then `asset`.
 2. Numeric fields are rounded to 4 decimal places.
 3. Wallet addresses and currency codes are uppercased.
-4. The result is deterministically stringified and SHA-256 hashed.
+4. The normalized network and ledger sequence are included.
+5. The result is deterministically stringified and SHA-256 hashed.
 
 This ensures that identical payloads always produce the same fingerprint, regardless of field ordering or minor floating-point differences.
+
+## Network and Ledger Binding (#1868)
+
+Every `PortfolioValuationPayload` includes a `context` containing the network
+and ledger sequence used to read its positions. The context is normalized and
+included in the payload fingerprint, operation record, and committed effect.
+Reusing an operation ID with another network or ledger therefore conflicts
+instead of replaying a valuation from a different snapshot.
+
+`executeValuation` requires a `getCurrentContext` callback and rejects the
+request when its payload context does not match the active context. It checks
+again before executing and after awaiting the write callback, and passes the
+captured context into that callback so the write is bound to the same network
+and ledger as the read. A mismatch preserves the caller's state, produces no
+committed effect, and can be retried with the original context after the
+transition is resolved.
 
 ## Duplicate Handling
 
@@ -36,6 +53,7 @@ This ensures that identical payloads always produce the same fingerprint, regard
 | Replay (same ID + same fingerprint)  | `200 OK`, replayed result returned    | None        |
 | Concurrent duplicate (in-flight)     | `409 DUPLICATE_VALUATION_IN_PROGRESS` | None        |
 | Identity conflict (same ID, diff payload) | `409 OPERATION_IDENTITY_CONFLICT` | None        |
+| Network/ledger context mismatch     | `409 VALUATION_CONTEXT_MISMATCH`      | None        |
 | Validation failure                   | `422 VALIDATION_FAILED`               | None        |
 | Execution failure                    | `500 EXECUTION_FAILED`                | None        |
 
@@ -72,12 +90,14 @@ New error codes added to `PortfolioValuationErrorCode`:
 | `DUPLICATE_VALUATION_SUBMISSION` | This valuation request was already submitted. Showing previous result.                |
 | `VALUATION_IN_PROGRESS`          | A valuation is already in progress. Please wait before retrying.                      |
 | `VALUATION_IDENTITY_CONFLICT`    | Operation identity conflict: the submitted parameters do not match the original submission. |
+| `VALUATION_CONTEXT_MISMATCH`     | The portfolio network or ledger changed. Refresh the portfolio before retrying.       |
 
 ## API
 
 ### Types
 
 - `PortfolioValuationPayload` — submitted valuation input
+- `ValuationContext` — network and ledger sequence that scope the input and effect
 - `ValuationOperationIdentity` — immutable operation identity
 - `ValuationEffect` — committed atomic effect record
 - `ValuationOperationRecord` — full operation log entry
@@ -105,8 +125,8 @@ New error codes added to `PortfolioValuationErrorCode`:
 
 | File | Change |
 |------|--------|
-| `shared/types/portfolioValuation.ts` | Added operation identity types, fingerprinting, and `ValuationOperationManager` |
-| `shared/types/portfolioValuation.operationIdentity.test.ts` | Regression tests (20 tests) |
-| `client/src/portfolio/portfolioValuationErrors.ts` | Added 3 new error codes and classifier rules |
-| `client/src/portfolio/portfolioValuationErrors.test.ts` | Added 3 new error classification tests |
-| `docs/portfolio-valuation-duplicate-protection.md` | This documentation |
+| `shared/types/portfolioValuation.ts` | Context-bound operation identity, fingerprinting, and valuation execution |
+| `shared/types/portfolioValuation.operationIdentity.test.ts` | Regression tests for normal, failure, transition, and retry cases |
+| `client/src/portfolio/portfolioValuationErrors.ts` | Client error classification for context mismatches |
+| `client/src/portfolio/portfolioValuationErrors.test.ts` | Context mismatch classification regression |
+| `docs/portfolio-valuation-duplicate-protection.md` | Operation context and transition behavior |

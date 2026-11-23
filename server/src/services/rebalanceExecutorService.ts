@@ -25,6 +25,7 @@ import {
   type RelayAttemptRecord,
 } from '../relayer/nonceConflict';
 import { computeTransactionFingerprintForTx } from '../relayer/relayer';
+import { assertContractWriteInterfaceVersion } from './contractInterfaceVersionGate';
 
 // ── Execution failure classes ──────────────────────────────────────────────
 
@@ -243,6 +244,8 @@ export class RebalanceExecutorService {
         `Entry ${entry.id} is already being processed — duplicate worker activity detected`,
       );
     }
+
+    assertContractWriteInterfaceVersion("vault");
 
     const lockGen = lock(entry.id);
 

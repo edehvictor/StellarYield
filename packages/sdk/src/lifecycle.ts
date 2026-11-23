@@ -299,15 +299,18 @@ export class PreparedTransaction<T = unknown> {
 
   public async sign(
     signer: SignerAdapter,
-    expectation: LifecycleContextExpectation = {}
+    options?: {
+      operationId?: string;
+      validate?: () => boolean | string | void;
+      bypassIdempotency?: boolean;
+    }
   ): Promise<SignedTransaction<T>> {
-    // Validate the bound network/ledger/version context before the signer is
-    // asked to approve anything; failures leave the prepared transaction and
-    // existing balances untouched so a refreshed retry is safe.
-    this.assertContext(expectation, "sign");
     const signedXdr = await signer.signTransaction(this.xdr, {
       networkPassphrase: this.meta.networkPassphrase,
       contractId: this.meta.contractId,
+      operationId: options?.operationId,
+      validate: options?.validate,
+      bypassIdempotency: options?.bypassIdempotency,
     });
     return new SignedTransaction<T>(signedXdr, this.meta, this.xdr);
   }

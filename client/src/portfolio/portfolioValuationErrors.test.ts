@@ -85,6 +85,18 @@ describe("portfolioValuationErrors (#1660)", () => {
     expect(failure.retryable).toBe(true);
   });
 
+  it("classifies network or ledger transitions into VALUATION_CONTEXT_MISMATCH", () => {
+    const failure = describeValuationFailure(
+      new Error("Valuation context does not match the active network and ledger."),
+    );
+
+    expect(failure.code).toBe("VALUATION_CONTEXT_MISMATCH");
+    expect(failure.message).toBe(
+      "The portfolio network or ledger changed. Refresh the portfolio before retrying.",
+    );
+    expect(failure.retryable).toBe(true);
+  });
+
   it("preserves pre-typed PortfolioValuationError instances", () => {
     const typed = new PortfolioValuationError({
       code: "RATE_LIMITED",
