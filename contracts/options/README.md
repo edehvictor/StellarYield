@@ -9,12 +9,20 @@
 - `initialize(admin, oracle)`
 - `mint(minter, option_type, underlying_asset, quote_asset, strike_price, opening_time, expiration_time, collateral_amount)`
 - `exercise(exerciser, option_id, expected_config_fingerprint)` exercises all remaining collateral
+- `exercise_with_sequence(exerciser, option_id, expected_sequence, expected_config_fingerprint)` also checks the settlement sequence
 - `exercise_partial(exerciser, option_id, amount, expected_config_fingerprint)` exercises part of the collateral
 - `exercise_partial_checked(exerciser, option_id, amount, expected_exercised, expected_config_fingerprint)` retry-safe partial exercise (see Settlement Safety)
 - `get_settlement_state(option_id, expected_config_fingerprint)` reads settlement progress only under the captured deployment context
 - `get_config_snapshot()` / `get_config_fingerprint()` expose the deployment context and configuration settlement is validated against
 - `cancel(minter, option_id)` cancels an unexpired option and returns its unexercised collateral
 - `expire(option_id)`
+- `exercise_partial_with_sequence(exerciser, option_id, amount, expected_sequence, expected_config_fingerprint)` also checks the sequence
+- `exercise_partial_checked(exerciser, option_id, amount, expected_exercised, expected_sequence, expected_config_fingerprint)` retry-safe partial exercise (see Settlement Safety)
+- `get_settlement_sequence(option_id)` returns the sequence for the next settlement call
+- `get_settlement_state(option_id)` settlement progress: status, exercised amount, remaining amount
+- `get_config_snapshot()` / `get_config_fingerprint()` expose the configuration settlement is validated against
+- `cancel_with_sequence(minter, option_id, expected_sequence)` checks the sequence; `cancel` remains a compatibility wrapper
+- `expire_with_sequence(option_id, expected_sequence)` checks the sequence; `expire` remains a compatibility wrapper
 - `deposit(owner, asset, amount)` / `withdraw(owner, asset, amount)`
 - `get_free_collateral(owner, asset)` / `get_reserved_collateral(owner, asset)`
 - `get_premium(spot, strike, time_to_expiry_years, iv)`
@@ -45,6 +53,7 @@ fingerprint immediately.
 ## Errors
 
 `OptionsError` covers initialization, authorization, invalid option state, expiry windows, amount/price validation, `SettlementStateChanged` (22) for a retried checked settlement whose progress no longer matches, `WrongNetwork` (23), and `WrongVersion` (24).
+`OptionsError` includes `StaleConfig` (21), `SettlementStateChanged` (22), `ConcurrentModification` (23), and `ReentrantSettlement` (24), alongside initialization, authorization, option-state, expiry-window, amount, and price errors.
 
 ## Configuration Fingerprint
 
@@ -96,6 +105,15 @@ amount), by `cancel` (the unexercised amount while the option is active), and by
 free collateral, so it fails with `InsufficientFreeCollateral` rather than
 undercollateralize an open position.
 
+Settlement uses optimistic concurrency. Callers read the sequence, include it
+in `exercise_with_sequence`, `exercise_partial_with_sequence`,
+`cancel_with_sequence`, or `expire_with_sequence`, and retry with the new
+sequence after `ConcurrentModification`. The convenience `exercise`,
+`exercise_partial`, `cancel`, and `expire` wrappers read the current sequence
+inside the call. A per-option temporary lock also rejects re-entrant token
+callbacks. Failed validation and failed token transfers leave option state and
+balances unchanged by transaction rollback.
+
 Positions minted before reserve tracking existed have no recorded reserve;
 releasing their collateral saturates at zero. Their collateral was never in the
 free bucket, so it was never withdrawable.
@@ -129,6 +147,13 @@ read `get_settlement_state` with the current fingerprint and resume from the new
 `exercise_partial_checked` also validates the configuration fingerprint exactly
 like `exercise_partial`, and the state check runs after it. `exercise_partial`
 and `exercise` keep their existing behavior.
+Use `exercise_partial_checked(exerciser, option_id, amount, expected_exercised,
+expected_sequence, expected_config_fingerprint)` with the progress and sequence
+observed before the first attempt. If that attempt already landed, the retry
+fails with `SettlementStateChanged` and moves nothing; read
+`get_settlement_state` and resume from the new `exercised_amount`. The checked
+call also validates the configuration fingerprint, as do the other exercise
+entry points.
 
 ## Oracle Freshness Guard
 

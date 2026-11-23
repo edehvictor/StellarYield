@@ -26,6 +26,11 @@ use storage::{
     write_admin, write_cancelled, write_exercised_amount, write_free_collateral, write_network_id,
     write_option, write_option_counter, write_oracle, write_oracle_max_age,
     write_reserved_collateral, write_storage_version, OptionData, OptionType,
+    read_free_collateral, read_option, read_option_counter, read_oracle, read_oracle_max_age,
+    read_reserved_collateral, read_settlement_sequence, read_storage_version, release_reserved,
+    write_admin, write_cancelled, write_exercised_amount, write_free_collateral, write_option,
+    write_option_counter, write_oracle, write_oracle_max_age, write_reserved_collateral,
+    write_settlement_sequence, write_storage_version, OptionData, OptionType,
     CURRENT_STORAGE_VERSION,
 };
 
@@ -74,6 +79,10 @@ pub enum OptionsError {
     WrongNetwork = 23,
     /// The stored options context uses a version this code cannot safely interpret.
     WrongVersion = 24,
+    /// The option changed after the caller read it; retry with its new sequence.
+    ConcurrentModification = 23,
+    /// A token callback attempted to re-enter settlement for the same option.
+    ReentrantSettlement = 24,
 }
 
 /// Price source consulted when the oracle guard is enabled. `get_price`
@@ -333,36 +342,55 @@ impl OptionsContract {
 
         write_option(&env, counter, &option_data);
         write_option_counter(&env, counter);
+        write_settlement_sequence(&env, counter, 1);
 
         emit_created(&env, counter, &option_data);
 
         Ok(counter)
     }
 
-    /// Exercises the whole option.
-    ///
-    /// `expected_config_fingerprint` is the value `get_config_fingerprint`
-    /// returned when the caller prepared the settlement. If the configuration
-    /// changed since then, the call fails with `StaleConfig` before any state
-    /// or balance is touched.
+    /// Exercises the whole option with a configuration fingerprint.
     pub fn exercise(
         env: Env,
         exerciser: Address,
         option_id: u32,
         expected_config_fingerprint: BytesN<32>,
     ) -> Result<(), OptionsError> {
+        let expected_sequence = read_settlement_sequence(&env, option_id);
+        Self::exercise_with_sequence(
+            env,
+            exerciser,
+            option_id,
+            expected_sequence,
+            expected_config_fingerprint,
+        )
+    }
+
+    /// Exercises with both configuration and optimistic-concurrency checks.
+    pub fn exercise_with_sequence(
+        env: Env,
+        exerciser: Address,
+        option_id: u32,
+        expected_sequence: u64,
+        expected_config_fingerprint: BytesN<32>,
+    ) -> Result<(), OptionsError> {
         exerciser.require_auth();
         require_config(&env, &expected_config_fingerprint)?;
         let option = read_option(&env, option_id);
         Self::settle(&env, exerciser, option_id, option, None)
+        Self::settle(
+            &env,
+            exerciser,
+            option_id,
+            expected_sequence,
+            option,
+            None,
+            &expected_config_fingerprint,
+        )
     }
 
-    /// Exercises `amount` of the option's collateral. The matching reserve is
-    /// released; the rest stays reserved until the option is fully exercised or
-    /// expires.
-    ///
-    /// `expected_config_fingerprint` is validated exactly like it is in
-    /// `exercise`: a stale snapshot is rejected before any collateral moves.
+    /// Exercises `amount` of the option's collateral, validating configuration
+    /// and the settlement sequence before any collateral moves.
     pub fn exercise_partial(
         env: Env,
         exerciser: Address,
@@ -370,23 +398,49 @@ impl OptionsContract {
         amount: i128,
         expected_config_fingerprint: BytesN<32>,
     ) -> Result<(), OptionsError> {
+        let expected_sequence = read_settlement_sequence(&env, option_id);
+        Self::exercise_partial_with_sequence(
+            env,
+            exerciser,
+            option_id,
+            amount,
+            expected_sequence,
+            expected_config_fingerprint,
+        )
+    }
+
+    pub fn exercise_partial_with_sequence(
+        env: Env,
+        exerciser: Address,
+        option_id: u32,
+        amount: i128,
+        expected_sequence: u64,
+        expected_config_fingerprint: BytesN<32>,
+    ) -> Result<(), OptionsError> {
         exerciser.require_auth();
         require_config(&env, &expected_config_fingerprint)?;
         let option = read_option(&env, option_id);
         Self::settle(&env, exerciser, option_id, option, Some(amount))
+        Self::settle(
+            &env,
+            exerciser,
+            option_id,
+            expected_sequence,
+            option,
+            Some(amount),
+            &expected_config_fingerprint,
+        )
     }
 
-    /// Retry-safe partial exercise. Behaves like `exercise_partial` but only
-    /// proceeds when the option's cumulative exercised amount still equals
-    /// `expected_exercised` (see `get_settlement_state`). If an earlier attempt
-    /// already landed, a resubmission fails with `SettlementStateChanged` and
-    /// moves nothing, so a retry can never pay out twice.
+    /// Retry-safe partial exercise. A stale sequence, configuration, or
+    /// exercised amount refuses the retry before it can pay out twice.
     pub fn exercise_partial_checked(
         env: Env,
         exerciser: Address,
         option_id: u32,
         amount: i128,
         expected_exercised: i128,
+        expected_sequence: u64,
         expected_config_fingerprint: BytesN<32>,
     ) -> Result<(), OptionsError> {
         exerciser.require_auth();
@@ -406,10 +460,22 @@ impl OptionsContract {
         expected_config_fingerprint: BytesN<32>,
     ) -> Result<SettlementState, OptionsError> {
         require_config(&env, &expected_config_fingerprint)?;
+        Self::settle(
+            &env,
+            exerciser,
+            option_id,
+            expected_sequence,
+            option,
+            Some(amount),
+            &expected_config_fingerprint,
+        )
+    }
+
+    /// Settlement progress of an option, without mutating any state.
+    pub fn get_settlement_state(env: Env, option_id: u32) -> SettlementState {
         let option = read_option(&env, option_id);
         let exercised_amount = read_exercised_amount(&env, option_id);
         let open_remaining = (option.collateral_amount - exercised_amount).max(0);
-
         let (status, remaining_amount) = if read_cancelled(&env, option_id) {
             (SettlementStatus::Cancelled, 0)
         } else if option.expired {
@@ -430,7 +496,18 @@ impl OptionsContract {
 
     /// Cancels an unexpired option and returns only its unexercised collateral
     /// to the minter. The minter must authorize the cancellation.
+    /// Compatibility wrapper. New callers should use `cancel_with_sequence`.
     pub fn cancel(env: Env, minter: Address, option_id: u32) -> Result<(), OptionsError> {
+        let expected_sequence = read_settlement_sequence(&env, option_id);
+        Self::cancel_with_sequence(env, minter, option_id, expected_sequence)
+    }
+
+    pub fn cancel_with_sequence(
+        env: Env,
+        minter: Address,
+        option_id: u32,
+        expected_sequence: u64,
+    ) -> Result<(), OptionsError> {
         minter.require_auth();
         require_live_context(&env)?;
         let option = read_option(&env, option_id);
@@ -450,6 +527,7 @@ impl OptionsContract {
         if env.ledger().timestamp() > option.expiration_time {
             return Err(OptionsError::CancellationWindowClosed);
         }
+        Self::begin_settlement(&env, option_id, expected_sequence)?;
 
         let collateral_asset = match option.option_type {
             OptionType::Call => option.underlying_asset.clone(),
@@ -461,19 +539,30 @@ impl OptionsContract {
         // Commit state before the token leg; a failed transfer reverts all of it.
         release_reserved(&env, &minter, &collateral_asset, remaining);
         write_cancelled(&env, option_id);
+        Self::advance_settlement(&env, option_id)?;
         token::Client::new(&env, &collateral_asset).transfer(
             &env.current_contract_address(),
             &minter,
             &remaining,
         );
-
         emit_cancelled(&env, option_id, &option, remaining, exercised_amount);
+        Self::end_settlement(&env, option_id);
 
         Ok(())
     }
 
+    /// Compatibility wrapper. New callers should use `expire_with_sequence`.
     pub fn expire(env: Env, option_id: u32) -> Result<(), OptionsError> {
         require_live_context(&env)?;
+        let expected_sequence = read_settlement_sequence(&env, option_id);
+        Self::expire_with_sequence(env, option_id, expected_sequence)
+    }
+
+    pub fn expire_with_sequence(
+        env: Env,
+        option_id: u32,
+        expected_sequence: u64,
+    ) -> Result<(), OptionsError> {
         let mut option = read_option(&env, option_id);
 
         if read_cancelled(&env, option_id) {
@@ -488,6 +577,7 @@ impl OptionsContract {
         if current_time <= option.expiration_time {
             return Err(OptionsError::NotExpired);
         }
+        Self::begin_settlement(&env, option_id, expected_sequence)?;
 
         let collateral_asset = match option.option_type {
             OptionType::Call => option.underlying_asset.clone(),
@@ -502,11 +592,13 @@ impl OptionsContract {
         release_reserved(&env, &option.minter, &collateral_asset, remaining);
         option.expired = true;
         write_option(&env, option_id, &option);
+        Self::advance_settlement(&env, option_id)?;
 
         let client = token::Client::new(&env, &collateral_asset);
         client.transfer(&env.current_contract_address(), &option.minter, &remaining);
 
         emit_expired(&env, option_id, &option, remaining, exercised_amount);
+        Self::end_settlement(&env, option_id);
 
         Ok(())
     }
@@ -605,6 +697,11 @@ impl OptionsContract {
         }
     }
 
+    /// Returns the optimistic-concurrency sequence for settlement operations.
+    pub fn get_settlement_sequence(env: Env, option_id: u32) -> u64 {
+        read_settlement_sequence(&env, option_id)
+    }
+
     pub fn get_premium(
         env: Env,
         spot: i128,
@@ -624,6 +721,7 @@ impl OptionsContract {
         env: &Env,
         exerciser: Address,
         option_id: u32,
+        expected_sequence: u64,
         mut option: OptionData,
         amount: Option<i128>,
     ) -> Result<(), OptionsError> {
@@ -638,6 +736,7 @@ impl OptionsContract {
         if option.expired {
             return Err(OptionsError::AlreadyExpired);
         }
+        Self::begin_settlement(env, option_id, expected_sequence)?;
 
         let current_time = env.ledger().timestamp();
         if current_time < option.opening_time {
@@ -675,6 +774,7 @@ impl OptionsContract {
         // call, leaving balances, reserve, and progress exactly as they were.
         release_reserved(env, &option.minter, &collateral_asset, to_exercise);
         write_exercised_amount(env, option_id, new_exercised);
+        Self::advance_settlement(env, option_id)?;
         if fully_exercised {
             option.exercised = true;
             write_option(env, option_id, &option);
@@ -706,6 +806,44 @@ impl OptionsContract {
             );
         }
 
+        Self::end_settlement(env, option_id);
+
+        Ok(())
+    }
+
+    fn begin_settlement(
+        env: &Env,
+        option_id: u32,
+        expected_sequence: u64,
+    ) -> Result<(), OptionsError> {
+        if env
+            .storage()
+            .temporary()
+            .get(&storage::DataKey::SettlementLock(option_id))
+            .unwrap_or(false)
+        {
+            return Err(OptionsError::ReentrantSettlement);
+        }
+        if read_settlement_sequence(env, option_id) != expected_sequence {
+            return Err(OptionsError::ConcurrentModification);
+        }
+        env.storage()
+            .temporary()
+            .set(&storage::DataKey::SettlementLock(option_id), &true);
+        Ok(())
+    }
+
+    fn end_settlement(env: &Env, option_id: u32) {
+        env.storage()
+            .temporary()
+            .set(&storage::DataKey::SettlementLock(option_id), &false);
+    }
+
+    fn advance_settlement(env: &Env, option_id: u32) -> Result<(), OptionsError> {
+        let next = read_settlement_sequence(env, option_id)
+            .checked_add(1)
+            .ok_or(OptionsError::MathOverflow)?;
+        write_settlement_sequence(env, option_id, next);
         Ok(())
     }
 }

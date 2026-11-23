@@ -14,7 +14,10 @@ import {
 import { apiUrl } from '../../lib/api';
 import { useBackendStatus } from '../../hooks/useBackendStatus';
 import { BackendUnavailable } from '../../components/BackendUnavailable';
-
+import {
+  selectStrategySafely,
+  StrategyComparisonConflictError,
+} from '../../features/strategies/strategyComparisonConcurrencyApi';
 
 import {
   bpsToPercent,
@@ -44,11 +47,16 @@ export default function StrategyComparison() {
   const [data, setData] = useState<StrategyYield[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [comparisonVersion, setComparisonVersion] = useState<number>(1);
+  const [selectedStrategyId, setSelectedStrategyId] = useState<string | null>(null);
+  const [conflictNotice, setConflictNotice] = useState<string | null>(null);
+  const [isUpdatingSelection, setIsUpdatingSelection] = useState(false);
   const backendStatus = useBackendStatus();
 
   const fetchStrategies = async () => {
     try {
       setError(null);
+      setConflictNotice(null);
       setLoading(true);
       const res = await fetch(apiUrl('/api/yields'));
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -62,11 +70,52 @@ export default function StrategyComparison() {
       // Malformed entries are skipped; nothing is computed from them.
       const strategies = yields.filter(isComparableStrategy);
 
+      // Extract comparison version if returned by server headers (optional; guards missing headers in test mocks)
+      const versionHeader =
+        (res.headers?.get?.('X-Comparison-Version') ?? null) ||
+        (res.headers?.get?.('ETag') ?? null)?.replace(/^W\//, '').replace(/^"(.*)"$/, '$1');
+      if (versionHeader) {
+        const v = Number(versionHeader);
+        if (Number.isSafeInteger(v) && v > 0) {
+          setComparisonVersion(v);
+        }
+      }
+
       setData(strategies);
     } catch (err: unknown) {
       setError(getErrorMessage(err));
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handleSelectStrategy = async (strategyName: string) => {
+    try {
+      setConflictNotice(null);
+      setIsUpdatingSelection(true);
+      const stratId = strategyName.toLowerCase();
+      const wallet = "G_CURRENT_USER";
+
+      const res = await selectStrategySafely(wallet, stratId, 1000, {
+        expectedVersion: comparisonVersion,
+      });
+
+      setSelectedStrategyId(stratId);
+      setComparisonVersion(res.version);
+    } catch (err: unknown) {
+      if (err instanceof StrategyComparisonConflictError) {
+        setConflictNotice(
+          `Concurrent state change detected. Another session updated strategy workspace to v${err.currentVersion}. Synchronized safely without state corruption.`,
+        );
+        setComparisonVersion(err.currentVersion);
+        if (err.currentState?.selectedStrategyId) {
+          setSelectedStrategyId(err.currentState.selectedStrategyId);
+        }
+      } else {
+        setError(getErrorMessage(err));
+      }
+    } finally {
+      setIsUpdatingSelection(false);
     }
   };
 
@@ -94,7 +143,7 @@ export default function StrategyComparison() {
     );
   }
 
-  if (error) {
+  if (error && !data.length) {
     return (
       <div className="space-y-8 animate-in fade-in slide-in-from-bottom-4 duration-700">
         <header className="mb-6">
@@ -137,9 +186,17 @@ export default function StrategyComparison() {
               Strategy Comparison Workspace
             </h2>
           </div>
-          <p className="text-gray-400 ml-[52px]">
-            Side-by-side analysis of risk, liquidity, and rebalancing approaches.
-          </p>
+          <div className="flex items-center gap-3 ml-[52px]">
+            <p className="text-gray-400">
+              Side-by-side analysis of risk, liquidity, and rebalancing approaches.
+            </p>
+            <span
+              data-testid="comparison-version-badge"
+              className="text-xs px-2.5 py-0.5 rounded-full bg-indigo-500/15 border border-indigo-500/30 text-indigo-300 font-mono inline-flex items-center gap-1"
+            >
+              <Layers size={11} /> Workspace v{comparisonVersion}
+            </span>
+          </div>
         </div>
         <div className="flex flex-wrap gap-2">
           <button
@@ -180,6 +237,45 @@ export default function StrategyComparison() {
           </button>
         </div>
       </header>
+
+      {conflictNotice && (
+        <div
+          role="status"
+          data-testid="concurrent-conflict-notice"
+          className="p-4 rounded-xl bg-indigo-500/15 border border-indigo-500/30 flex items-center justify-between text-indigo-200 text-sm animate-in fade-in"
+        >
+          <div className="flex items-center gap-2">
+            <Activity size={18} className="text-indigo-400 flex-shrink-0" />
+            <span>{conflictNotice}</span>
+          </div>
+          <button
+            onClick={() => setConflictNotice(null)}
+            className="text-xs text-gray-400 hover:text-white ml-4"
+          >
+            Dismiss
+          </button>
+        </div>
+      )}
+
+      {error && data.length > 0 && (
+        <div
+          role="alert"
+          className="p-4 rounded-xl bg-amber-500/10 border border-amber-500/30 flex items-center justify-between text-amber-200 text-sm animate-in fade-in"
+        >
+          <div className="flex items-center gap-2">
+            <AlertTriangle size={18} className="text-amber-400 flex-shrink-0" />
+            <span>
+              Failed to refresh strategies: {error}. Existing strategy comparisons and balances remain preserved.
+            </span>
+          </div>
+          <button
+            onClick={fetchStrategies}
+            className="px-3 py-1 bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 rounded text-xs font-semibold ml-4"
+          >
+            Retry
+          </button>
+        </div>
+      )}
 
       {loading ? (
         renderSkeleton()
@@ -294,8 +390,20 @@ export default function StrategyComparison() {
                   </div>
 
                   {/* Actions */}
-                  <button className="w-full btn-primary py-3 rounded-xl hover:scale-[1.02] transition-transform font-bold tracking-wide mt-2">
-                    Select Strategy
+                  <button
+                    type="button"
+                    onClick={() => handleSelectStrategy(strategy.protocolName)}
+                    disabled={isUpdatingSelection}
+                    aria-pressed={selectedStrategyId === strategy.protocolName.toLowerCase()}
+                    className={`w-full py-3 rounded-xl transition-all font-bold tracking-wide mt-2 ${
+                      selectedStrategyId === strategy.protocolName.toLowerCase()
+                        ? 'bg-emerald-600 hover:bg-emerald-500 text-white shadow-lg shadow-emerald-600/30'
+                        : 'btn-primary hover:scale-[1.02]'
+                    }`}
+                  >
+                    {selectedStrategyId === strategy.protocolName.toLowerCase()
+                      ? '✓ Strategy Selected'
+                      : 'Select Strategy'}
                   </button>
                 </div>
               </div>

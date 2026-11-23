@@ -35,7 +35,7 @@ import {
 
 // ── Configuration ───────────────────────────────────────────────────────
 
-export const RPC_URL = import.meta.env.VITE_SOROBAN_RPC_URL ?? "https://soroban-testnet.stellar.org";
+export const RPC_URL = getRpcUrl();
 export const RPC_FALLBACK_URLS: string[] = (
   (import.meta.env.VITE_SOROBAN_RPC_FALLBACK_URLS as string | undefined) ?? ""
 )
@@ -58,9 +58,6 @@ export function rotateToFallbackRpc(): string {
   return getActiveRpcUrl();
 }
 
-export const NETWORK_PASSPHRASE =
-  import.meta.env.VITE_NETWORK_PASSPHRASE ?? "Test SDF Network ; September 2015";
-export const RPC_URL = getRpcUrl();
 export const NETWORK_PASSPHRASE = getNetworkPassphrase();
 
 const POLL_INTERVAL_MS = 2_000;

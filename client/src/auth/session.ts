@@ -158,12 +158,19 @@ interface ChallengeResponse {
   challenge: string;
   walletAddressType: "account" | "contract";
   acceptedSignerTypes: string[];
+  authConfigFingerprint?: string;
 }
 
 interface VerifyResponse {
   verified: boolean;
   walletAddressType: "account" | "contract";
   acceptedSignerTypes: string[];
+  authConfigFingerprint?: string;
+}
+
+interface VerifyAttemptResult {
+  status: VerificationStatus;
+  authConfigFingerprint?: string;
 }
 
 const providerLabels: Record<WalletProviderId, string> = {
@@ -272,14 +279,20 @@ export async function recoverSession(): Promise<SessionRecoveryResult> {
       return { status: "degraded", session: recovered };
     }
   } else {
-    // Smart wallet — re-verify against backend if credentials are present
-    const newStatus = await verifySmartWalletSession(session);
-    recovered.verificationStatus = newStatus;
-    if (newStatus === "verified") {
+    // Smart wallet — re-verify against backend if credentials are present.
+    // If the wallet auth configuration snapshot is stale, verification refreshes
+    // and retries once; failures preserve the recovered session state as degraded.
+    const verification = await verifySmartWalletSession(session);
+    recovered.verificationStatus = verification.status;
+    if (verification.authConfigFingerprint) {
+      recovered.authConfigFingerprint = verification.authConfigFingerprint;
+    }
+    if (verification.status === "verified") {
       recovered.lastVerifiedAt = new Date().toISOString();
       recovered.providerAvailable = true;
     } else {
       recovered.providerAvailable = false;
+      recovered.lastActivityAt = new Date().toISOString();
       saveSession(recovered);
       return { status: "degraded", session: recovered };
     }
@@ -290,15 +303,41 @@ export async function recoverSession(): Promise<SessionRecoveryResult> {
   return { status: "recovered", session: recovered };
 }
 
+/**
+ * Elapsed milliseconds since an ISO timestamp, or `null` when the timestamp is
+ * not a finite date (corrupted storage, tampered value).
+ *
+ * Negative values (timestamp in the future because of clock skew) are clamped
+ * to zero so skew never makes a session look older than it is.
+ */
+function elapsedSince(timestamp: string): number | null {
+  const parsed = new Date(timestamp).getTime();
+  if (!Number.isFinite(parsed)) return null;
+  const elapsed = Date.now() - parsed;
+  return elapsed < 0 ? 0 : elapsed;
+}
+
+/**
+ * Boundary semantics: a session whose age is exactly `SESSION_TTL_MS` is still
+ * valid; it expires one millisecond later. A missing `connectedAt` is treated
+ * as not expired (legacy sessions), but an unparseable `connectedAt` fails
+ * closed and is treated as expired.
+ */
 export function isSessionExpired(session: WalletSession): boolean {
   if (!session.connectedAt) return false;
-  const age = Date.now() - new Date(session.connectedAt).getTime();
+  const age = elapsedSince(session.connectedAt);
+  if (age === null) return true;
   return age > SESSION_TTL_MS;
 }
 
+/**
+ * Boundary semantics: idle time exactly `STALE_THRESHOLD_MS` is still fresh.
+ * A missing or unparseable `lastActivityAt` fails closed and is stale.
+ */
 export function isSessionStale(session: WalletSession): boolean {
   if (!session.lastActivityAt) return true;
-  const idle = Date.now() - new Date(session.lastActivityAt).getTime();
+  const idle = elapsedSince(session.lastActivityAt);
+  if (idle === null) return true;
   return idle > STALE_THRESHOLD_MS;
 }
 
@@ -351,77 +390,131 @@ async function deriveSmartWalletAddress(input: string) {
   return StrKey.encodeContract(Buffer.from(digest));
 }
 
+function isStaleWalletAuthConfigResponse(
+  response: Response,
+  payload: unknown,
+): boolean {
+  if (response.status !== 409) {
+    return false;
+  }
+  return (
+    typeof payload === "object" &&
+    payload !== null &&
+    "code" in payload &&
+    (payload as { code?: unknown }).code === "STALE_WALLET_AUTH_CONFIG"
+  );
+}
+
+async function requestSmartWalletChallenge(
+  session: WalletSession,
+): Promise<ChallengeResponse> {
+  const challengeResponse = await fetch(`${getApiBaseUrl()}/api/auth/challenge`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      walletAddress: session.walletAddress,
+      sessionKeyAddress: session.sessionKeyAddress,
+      providerId: session.providerId,
+      loginHint: session.loginHint,
+    }),
+  });
+
+  if (!challengeResponse.ok) {
+    throw new Error("Unable to create auth challenge.");
+  }
+
+  const challengePayload = (await challengeResponse.json()) as Partial<ChallengeResponse>;
+  if (
+    typeof challengePayload.challenge !== "string" ||
+    !challengePayload.challenge.trim()
+  ) {
+    throw new Error("Unable to create auth challenge.");
+  }
+
+  return challengePayload as ChallengeResponse;
+}
+
 async function verifySmartWalletSession(
   session: WalletSession,
-): Promise<VerificationStatus> {
+): Promise<VerifyAttemptResult> {
   if (!session.sessionKeyAddress || !session.sessionSecret) {
-    return "degraded";
+    return { status: "degraded", authConfigFingerprint: session.authConfigFingerprint };
   }
 
   try {
-    const challengeResponse = await fetch(`${getApiBaseUrl()}/api/auth/challenge`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        walletAddress: session.walletAddress,
-        sessionKeyAddress: session.sessionKeyAddress,
-        providerId: session.providerId,
-        loginHint: session.loginHint,
-      }),
-    });
-
-    if (!challengeResponse.ok) {
-      throw new Error("Unable to create auth challenge.");
-    }
-
-    const challengePayload =
-      (await challengeResponse.json()) as Partial<ChallengeResponse>;
-    if (
-      typeof challengePayload.challenge !== "string" ||
-      !challengePayload.challenge.trim()
-    ) {
-      throw new Error();
-    }
     const signer = Keypair.fromSecret(session.sessionSecret);
-    const signature = bytesToBase64(
-      signer.sign(Buffer.from(challengePayload.challenge, "utf8")),
-    );
+    let challengePayload = await requestSmartWalletChallenge(session);
 
-    const verificationResponse = await fetch(
-      `${getApiBaseUrl()}/api/auth/verify`,
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const signature = bytesToBase64(
+        signer.sign(Buffer.from(challengePayload.challenge, "utf8")),
+      );
+
+      const verificationResponse = await fetch(
+        `${getApiBaseUrl()}/api/auth/verify`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            walletAddress: session.walletAddress,
+            sessionKeyAddress: session.sessionKeyAddress,
+            challenge: challengePayload.challenge,
+            signature,
+          }),
         },
-        body: JSON.stringify({
-          walletAddress: session.walletAddress,
-          sessionKeyAddress: session.sessionKeyAddress,
-          challenge: challengePayload.challenge,
-          signature,
-        }),
-      },
-    );
+      );
 
-    if (!verificationResponse.ok) {
-      throw new Error("Unable to verify smart wallet session.");
+      let verificationPayload: Partial<VerifyResponse> & { code?: string } = {};
+      try {
+        verificationPayload = (await verificationResponse.json()) as Partial<VerifyResponse> & {
+          code?: string;
+        };
+      } catch {
+        verificationPayload = {};
+      }
+
+      if (
+        isStaleWalletAuthConfigResponse(verificationResponse, verificationPayload) &&
+        attempt === 0
+      ) {
+        // Safe retry: refresh work with a current configuration snapshot and
+        // preserve existing session state on validation failure.
+        challengePayload = await requestSmartWalletChallenge(session);
+        continue;
+      }
+
+      if (!verificationResponse.ok) {
+        throw new Error("Unable to verify smart wallet session.");
+      }
+
+      if (typeof verificationPayload.verified !== "boolean") {
+        throw new Error("Unable to verify smart wallet session.");
+      }
+
+      const authConfigFingerprint =
+        (typeof verificationPayload.authConfigFingerprint === "string" &&
+          verificationPayload.authConfigFingerprint) ||
+        (typeof challengePayload.authConfigFingerprint === "string" &&
+          challengePayload.authConfigFingerprint) ||
+        session.authConfigFingerprint;
+
+      return {
+        status: verificationPayload.verified ? "verified" : "degraded",
+        authConfigFingerprint,
+      };
     }
 
-    const verificationPayload =
-      (await verificationResponse.json()) as Partial<VerifyResponse>;
-    if (typeof verificationPayload.verified !== "boolean") {
-      throw new Error();
-    }
-
-    return verificationPayload.verified ? "verified" : "degraded";
+    return { status: "degraded", authConfigFingerprint: session.authConfigFingerprint };
   } catch {
     console.warn("[wallet] lifecycle diagnostic", {
       stage: "backend_verification",
       remediation: WALLET_LIFECYCLE_DIAGNOSTICS.backend_verification.remediation,
     });
-    return "degraded";
+    return { status: "degraded", authConfigFingerprint: session.authConfigFingerprint };
   }
 }
 
@@ -509,10 +602,17 @@ export async function connectWalletSession(
     providerAvailable: true,
   };
 
-  session.verificationStatus = await verifySmartWalletSession(session);
-  if (session.verificationStatus === "verified") {
+  const verification = await verifySmartWalletSession(session);
+  session.verificationStatus = verification.status;
+  if (verification.authConfigFingerprint) {
+    session.authConfigFingerprint = verification.authConfigFingerprint;
+  }
+  if (verification.status === "verified") {
     session.lastVerifiedAt = new Date().toISOString();
   }
+  // Persist the session snapshot only after verification/refresh completes.
+  // Stale wallet-auth config responses trigger a fresh challenge retry above and
+  // never mutate previously persisted wallet sessions during this connect flow.
   saveSession(session);
   return session;
 }
