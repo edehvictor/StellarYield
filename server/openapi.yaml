@@ -2566,7 +2566,9 @@ paths:
               schema:
                 $ref: '#/components/schemas/Alert'
         '400':
-          description: Invalid alert parameters
+          description: >-
+            Invalid alert parameters; malformed initial preferences return
+            `INVALID_ALERT_PREFERENCES` and do not create an alert.
         '409':
           description: >-
             `OPERATION_IDENTITY_CONFLICT` (identity reused with different parameters) or
@@ -2683,8 +2685,9 @@ paths:
                 $ref: '#/components/schemas/AlertPreferences'
         '400':
           description: >-
-            Invalid preference parameters, a malformed If-Match / expectedVersion
-            (`INVALID_EXPECTED_VERSION`), or a malformed context (`INVALID_ALERT_CONTEXT`)
+            Invalid preference fields (`INVALID_ALERT_PREFERENCES`), a malformed
+            If-Match / expectedVersion (`INVALID_EXPECTED_VERSION`), or a malformed
+            context (`INVALID_ALERT_CONTEXT`). Invalid writes leave the stored record unchanged.
         '409':
           description: >-
             `OPERATION_IDENTITY_CONFLICT` (identity reused with different parameters),
