@@ -44,6 +44,18 @@ rather than discarding it. Verified smart-wallet sessions persist the bound
 `authConfigFingerprint` so stale snapshots can be detected and refreshed on
 subsequent lifecycle operations.
 
+## Concurrent session mutations
+
+Connect and recovery capture the persisted session revision before performing
+asynchronous provider or backend work. They commit only if that revision is
+still current; a stale connection fails with the safe `session_conflict`
+diagnostic, while stale recovery returns `status: "superseded"` and the latest
+stored session instead of restoring an outdated snapshot. Disconnect is an
+asynchronous serialized mutation and advances the revision before removing the
+session, so an in-flight recovery cannot undo it. Session commits use the
+browser Web Locks API when available and an in-page queue otherwise. After a
+conflict, callers can retry from the latest persisted state.
+
 ## Session and challenge boundary semantics (#1882)
 
 - Client: a session whose age equals `SESSION_TTL_MS` is still valid and expires 1ms later. Idle time equal to `STALE_THRESHOLD_MS` is still fresh. Future timestamps (clock skew) are clamped to zero age. An unparseable `connectedAt` or `lastActivityAt` fails closed (expired / stale). Checks are pure and never mutate the session, so retrying is safe.

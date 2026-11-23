@@ -18,7 +18,7 @@ export interface WalletContextValue {
   isFreighterInstalled: boolean | null;
   errorMessage: string | null;
   connectWallet: (options?: ConnectWalletOptions) => Promise<boolean>;
-  disconnectWallet: () => void;
+  disconnectWallet: () => Promise<void>;
   clearError: () => void;
   /**
    * Sign a Soroban transaction XDR using the currently connected wallet.
