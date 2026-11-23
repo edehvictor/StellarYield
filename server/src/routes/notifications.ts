@@ -8,6 +8,7 @@ import {
   type WatchlistDigestPreference,
 } from "../services/digest";
 import { recordUserPreferenceChange } from "../services/userPreferenceAuditService";
+import { sortNotificationsDeterministically } from "../utils/deterministicSort";
 
 const router = Router();
 const prisma = new PrismaClient();
@@ -30,7 +31,15 @@ router.put(
   validateWalletAddress,
   (req: Request, res: Response) => {
     const { walletAddress } = req.params;
-    const body = req.body as Partial<WatchlistDigestPreference>;
+    const operationIdentity =
+      (req.headers["x-operation-identity"] as string | undefined) ??
+      (req.headers["idempotency-key"] as string | undefined) ??
+      (req.body?.operationIdentity as string | undefined);
+
+    const body = req.body as Partial<WatchlistDigestPreference> & {
+      operationIdentity?: string;
+      reason?: string;
+    };
     const scheduleMode =
       body.scheduleMode as WatchlistDigestPreference["scheduleMode"];
 
@@ -65,32 +74,56 @@ router.put(
         )
       : [];
 
-    const before = getWatchlistDigestPreference(walletAddress);
-    const after = saveWatchlistDigestPreference(walletAddress, {
-      enabled: body.enabled,
-      scheduleMode,
-      eventThreshold: Number(body.eventThreshold ?? 2),
-      watchedVaultIds,
-      minApyDeltaPct: Number(body.minApyDeltaPct ?? 0.5),
-      minRiskDelta: Number(body.minRiskDelta ?? 5),
-      maxFreshnessHours: Number(body.maxFreshnessHours ?? 12),
-    });
+    try {
+      const before = getWatchlistDigestPreference(walletAddress);
+      const saved = saveWatchlistDigestPreference(
+        walletAddress,
+        {
+          enabled: body.enabled,
+          scheduleMode,
+          eventThreshold: Number(body.eventThreshold ?? 2),
+          watchedVaultIds,
+          minApyDeltaPct: Number(body.minApyDeltaPct ?? 0.5),
+          minRiskDelta: Number(body.minRiskDelta ?? 5),
+          maxFreshnessHours: Number(body.maxFreshnessHours ?? 12),
+        },
+        operationIdentity,
+      );
 
-    const actor =
-      ((req as unknown as { user?: { id?: string } }).user?.id as string) ||
-      walletAddress;
-    recordUserPreferenceChange({
-      walletAddress,
-      category: "digest_preference",
-      actor,
-      source: "api",
-      before,
-      after,
-      reason:
-        typeof body.reason === "string" ? body.reason : undefined,
-    });
+      if ((saved as any).__replayed) {
+        res.setHeader("X-Idempotent-Replayed", "true");
+        delete (saved as any).__replayed;
+      } else {
+        const actor =
+          ((req as unknown as { user?: { id?: string } }).user?.id as string) ||
+          walletAddress;
+        recordUserPreferenceChange({
+          walletAddress,
+          category: "digest_preference",
+          actor,
+          source: "api",
+          before,
+          after: saved,
+          reason: typeof body.reason === "string" ? body.reason : undefined,
+        });
+      }
 
-    res.json(after);
+      res.json(saved);
+    } catch (err: any) {
+      if (
+        err.code === "OPERATION_IDENTITY_CONFLICT" ||
+        err.message?.includes("Operation identity has already been used")
+      ) {
+        sendError(res, 409, "OPERATION_IDENTITY_CONFLICT", err.message);
+        return;
+      }
+      sendError(
+        res,
+        500,
+        "SAVE_DIGEST_PREFERENCES_FAILED",
+        "Failed to save digest preferences.",
+      );
+    }
   },
 );
 
@@ -103,9 +136,9 @@ router.get(
     try {
       const notifications = await prisma.notification.findMany({
         where: { walletAddress },
-        orderBy: { createdAt: "desc" },
+        orderBy: [{ createdAt: "desc" }, { id: "asc" }],
       });
-      res.json(notifications);
+      res.json(sortNotificationsDeterministically(notifications));
     } catch {
       sendError(
         res,

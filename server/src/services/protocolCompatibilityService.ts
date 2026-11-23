@@ -104,6 +104,7 @@ export interface CompatibilityIssue {
   fallbackReasonCode?: FallbackReasonCode;
   /** Human-readable sentence explaining the downgrade reason. */
   fallbackReason?: string;
+  /** Set when the issue comes from two registry sources that disagree. */
   registryConflict?: RegistryConflict;
 }
 
@@ -526,10 +527,6 @@ export class ProtocolCompatibilityEngine {
           affectedStrategies: await this.getAffectedStrategies(protocolName, requirements.component),
           fallbackReasonCode,
           fallbackReason,
-          affectedStrategies: await this.getAffectedStrategies(
-            protocolName,
-            requirements.component,
-          ),
         });
       }
 
@@ -550,14 +547,6 @@ export class ProtocolCompatibilityEngine {
           affectedStrategies: await this.getAffectedStrategies(protocolName, requirements.component),
           fallbackReasonCode,
           fallbackReason,
-          issue: "Critical features unavailable",
-          impact:
-            featuresCheck.missingFeatures.join(", ") + " are not available",
-          recommendation: "Upgrade protocol or use alternative implementation",
-          affectedStrategies: await this.getAffectedStrategies(
-            protocolName,
-            requirements.component,
-          ),
         });
       }
 
@@ -580,13 +569,6 @@ export class ProtocolCompatibilityEngine {
           affectedStrategies: await this.getAffectedStrategies(protocolName, requirements.component),
           fallbackReasonCode,
           fallbackReason,
-          issue: "Breaking changes detected",
-          impact: breakingChangesCheck.changes.join(", "),
-          recommendation: "Review and update integration code",
-          affectedStrategies: await this.getAffectedStrategies(
-            protocolName,
-            requirements.component,
-          ),
         });
       }
     } catch (error) {

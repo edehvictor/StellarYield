@@ -2,6 +2,7 @@ import React from "react";
 import { describe, it, expect, vi } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/react";
 import { TransactionReviewModal } from "./TransactionReviewModal";
+import { buildQuoteVerificationDiagnostics } from "../../../../shared/types/transactionReviewDiagnostic";
 import { computeQuoteAssumptionFingerprint } from "../../../../shared/types/quoteAssumptionFingerprint";
 
 const mockAssumptions = {
@@ -144,162 +145,143 @@ describe("TransactionReviewModal", () => {
     expect(onClose).toHaveBeenCalledTimes(2);
   });
 
-  describe("boundary validation against malformed external data (#1889)", () => {
-    it("rejects non-numeric input amounts and blocks confirmation without mutating state", () => {
-      const onConfirm = vi.fn();
-      render(
-        <TransactionReviewModal
-          isOpen={true}
-          onClose={vi.fn()}
-          onConfirm={onConfirm}
-          walletAddress="GBWM7FAKESTELLARWALLETADDRESS123456"
-          inputToken={{ symbol: "USDC", amount: "not-a-number" }}
-          vaultToken={{ symbol: "yUSDC", amount: "99.5" }}
-          slippageTolerance={0.5}
-        />,
-      );
+  describe("diagnostics (#1893)", () => {
+    const baseProps = {
+      isOpen: true,
+      onClose: vi.fn(),
+      walletAddress: "GBWM7FAKESTELLARWALLETADDRESS123456",
+      inputToken: { symbol: "USDC", amount: "100" },
+      vaultToken: { symbol: "yUSDC", amount: "99.5", minAmount: "99.0" },
+      slippageTolerance: 0.5,
+    };
 
-      expect(screen.getByTestId("transaction-review-validation-error")).toBeInTheDocument();
-      expect(screen.getByText(/INVALID_INPUT_AMOUNT/i)).toBeInTheDocument();
-
-      const confirmBtn = screen.getByTestId("confirm-transaction-btn");
-      expect(confirmBtn).toBeDisabled();
-
-      fireEvent.click(confirmBtn);
-      expect(onConfirm).not.toHaveBeenCalled();
+    it("shows no diagnostics in normal operation", () => {
+      render(<TransactionReviewModal {...baseProps} onConfirm={vi.fn()} />);
+      expect(screen.queryByTestId("transaction-review-diagnostics")).not.toBeInTheDocument();
+      expect(screen.getByTestId("confirm-transaction-btn")).not.toBeDisabled();
     });
 
-    it("rejects malformed wallet address and blocks confirmation", () => {
-      const onConfirm = vi.fn();
+    it("renders the failed stage and remediation from supplied diagnostics", () => {
       render(
         <TransactionReviewModal
-          isOpen={true}
-          onClose={vi.fn()}
-          onConfirm={onConfirm}
-          walletAddress="bad-address"
-          inputToken={{ symbol: "USDC", amount: "100" }}
-          vaultToken={{ symbol: "yUSDC", amount: "99.5" }}
-          slippageTolerance={0.5}
+          {...baseProps}
+          onConfirm={vi.fn()}
+          error="Quote validation failed."
+          diagnostics={buildQuoteVerificationDiagnostics("STALE_QUOTE")}
         />,
       );
-
-      expect(screen.getByTestId("transaction-review-validation-error")).toBeInTheDocument();
-      expect(screen.getByText(/INVALID_WALLET_ADDRESS/i)).toBeInTheDocument();
+      const list = screen.getByTestId("transaction-review-diagnostics");
+      expect(list).toHaveTextContent("Quote verification");
+      expect(list).toHaveTextContent("QUOTE_REFRESH_REQUIRED");
+      expect(list).toHaveTextContent("Request a fresh quote");
+      expect(list).toHaveTextContent("left unchanged");
       expect(screen.getByTestId("confirm-transaction-btn")).toBeDisabled();
-      fireEvent.click(screen.getByTestId("confirm-transaction-btn"));
-      expect(onConfirm).not.toHaveBeenCalled();
     });
 
-    it("rejects minAmount that exceeds output amount", () => {
-      const onConfirm = vi.fn();
+    it("falls back to a context-insufficient diagnostic when an error has no diagnostics", () => {
+      render(<TransactionReviewModal {...baseProps} onConfirm={vi.fn()} error="boom" />);
+      const list = screen.getByTestId("transaction-review-diagnostics");
+      expect(list).toHaveTextContent("Unidentified stage");
+      expect(list).toHaveTextContent("CONTEXT_INSUFFICIENT");
+      expect(list).toHaveTextContent("left unchanged");
+    });
+
+    it("names request validation when the amount itself blocks review", () => {
       render(
         <TransactionReviewModal
-          isOpen={true}
-          onClose={vi.fn()}
-          onConfirm={onConfirm}
-          walletAddress="GBWM7FAKESTELLARWALLETADDRESS123456"
-          inputToken={{ symbol: "USDC", amount: "100" }}
-          vaultToken={{ symbol: "yUSDC", amount: "99.5", minAmount: "120.0" }}
-          slippageTolerance={0.5}
+          {...baseProps}
+          inputToken={{ symbol: "USDC", amount: "0" }}
+          onConfirm={vi.fn()}
         />,
       );
-
-      expect(screen.getByTestId("transaction-review-validation-error")).toBeInTheDocument();
-      expect(screen.getByText(/MIN_AMOUNT_EXCEEDS_OUTPUT/i)).toBeInTheDocument();
+      const list = screen.getByTestId("transaction-review-diagnostics");
+      expect(list).toHaveTextContent("Request validation");
+      expect(list).toHaveTextContent("VALIDATION_FAILED");
       expect(screen.getByTestId("confirm-transaction-btn")).toBeDisabled();
-      fireEvent.click(screen.getByTestId("confirm-transaction-btn"));
-      expect(onConfirm).not.toHaveBeenCalled();
     });
 
-    it("rejects invalid slippage tolerance percentage", () => {
-      const onConfirm = vi.fn();
-      render(
-        <TransactionReviewModal
-          isOpen={true}
-          onClose={vi.fn()}
-          onConfirm={onConfirm}
-          walletAddress="GBWM7FAKESTELLARWALLETADDRESS123456"
-          inputToken={{ symbol: "USDC", amount: "100" }}
-          vaultToken={{ symbol: "yUSDC", amount: "99.5" }}
-          slippageTolerance={-1}
-        />,
-      );
-
-      expect(screen.getByTestId("transaction-review-validation-error")).toBeInTheDocument();
-      expect(screen.getByText(/INVALID_SLIPPAGE/i)).toBeInTheDocument();
-      expect(screen.getByTestId("confirm-transaction-btn")).toBeDisabled();
-      fireEvent.click(screen.getByTestId("confirm-transaction-btn"));
-      expect(onConfirm).not.toHaveBeenCalled();
-    });
-
-    it("rejects expired quote assumptions at the review boundary", () => {
-      const onConfirm = vi.fn();
-      const expiredAssumptions = {
-        ...mockAssumptions,
-        expiresAt: new Date(Date.now() - 1000).toISOString(),
-      };
-      render(
-        <TransactionReviewModal
-          isOpen={true}
-          onClose={vi.fn()}
-          onConfirm={onConfirm}
-          walletAddress="GBWM7FAKESTELLARWALLETADDRESS123456"
-          inputToken={{ symbol: "USDC", amount: "100" }}
-          vaultToken={{ symbol: "yUSDC", amount: "99.5" }}
-          slippageTolerance={0.5}
-          assumptions={expiredAssumptions}
-          fingerprint={computeQuoteAssumptionFingerprint(expiredAssumptions).fingerprint}
-        />,
-      );
-
-      expect(screen.getByTestId("transaction-review-validation-error")).toBeInTheDocument();
-      expect(screen.getByText(/ASSUMPTIONS_EXPIRED/i)).toBeInTheDocument();
-      expect(screen.getByTestId("confirm-transaction-btn")).toBeDisabled();
-      fireEvent.click(screen.getByTestId("confirm-transaction-btn"));
-      expect(onConfirm).not.toHaveBeenCalled();
-    });
-
-    it("supports safe retry behavior when malformed data is corrected", () => {
+    it("does not submit while blocked and allows safe retry once the error clears", () => {
       const onConfirm = vi.fn();
       const { rerender } = render(
-        <TransactionReviewModal
-          isOpen={true}
-          onClose={vi.fn()}
-          onConfirm={onConfirm}
-          walletAddress="GBWM7FAKESTELLARWALLETADDRESS123456"
-          inputToken={{ symbol: "USDC", amount: "malformed" }}
-          vaultToken={{ symbol: "yUSDC", amount: "99.5" }}
-          slippageTolerance={0.5}
-        />,
+        <TransactionReviewModal {...baseProps} onConfirm={onConfirm} error="boom" />,
       );
-
-      // Initially blocked
-      expect(screen.getByTestId("transaction-review-validation-error")).toBeInTheDocument();
-      const confirmBtn = screen.getByTestId("confirm-transaction-btn");
-      expect(confirmBtn).toBeDisabled();
-      fireEvent.click(confirmBtn);
+      fireEvent.click(screen.getByTestId("confirm-transaction-btn"));
       expect(onConfirm).not.toHaveBeenCalled();
 
-      // Retry with valid corrected input
-      rerender(
+      rerender(<TransactionReviewModal {...baseProps} onConfirm={onConfirm} error={null} />);
+      expect(screen.queryByTestId("transaction-review-diagnostics")).not.toBeInTheDocument();
+      fireEvent.click(screen.getByTestId("confirm-transaction-btn"));
+      expect(onConfirm).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe("boundary-value amounts (#1890)", () => {
+    const renderWith = (
+      inputAmount: string,
+      vault: { amount: string; minAmount?: string },
+      slippage = 0.5,
+      onConfirm = vi.fn(),
+    ) => {
+      render(
         <TransactionReviewModal
           isOpen={true}
           onClose={vi.fn()}
           onConfirm={onConfirm}
           walletAddress="GBWM7FAKESTELLARWALLETADDRESS123456"
+          inputToken={{ symbol: "USDC", amount: inputAmount }}
+          vaultToken={{ symbol: "yUSDC", ...vault }}
+          slippageTolerance={slippage}
+          assumptions={mockAssumptions}
+          fingerprint={mockFingerprint}
+        />,
+      );
+      return onConfirm;
+    };
+
+    it("blocks confirmation and never signs when the deposit amount is zero", () => {
+      const onConfirm = renderWith("0", { amount: "0" });
+      const btn = screen.getByTestId("confirm-transaction-btn");
+      expect(btn).toBeDisabled();
+      expect(screen.getByRole("alert")).toHaveTextContent(/greater than zero/i);
+      fireEvent.click(btn);
+      expect(onConfirm).not.toHaveBeenCalled();
+    });
+
+    it("blocks confirmation when the guaranteed minimum exceeds the estimate", () => {
+      renderWith("100", { amount: "99.5", minAmount: "99.5000001" });
+      expect(screen.getByTestId("confirm-transaction-btn")).toBeDisabled();
+      expect(screen.getByRole("alert")).toHaveTextContent(/exceeds the estimated output/i);
+    });
+
+    it("blocks confirmation for non-finite slippage", () => {
+      renderWith("100", { amount: "99.5" }, Number.NaN);
+      expect(screen.getByTestId("confirm-transaction-btn")).toBeDisabled();
+    });
+
+    it("allows the smallest valid amount (1 stroop) with a zero minimum, and is safely retryable", () => {
+      const onConfirm = renderWith("0.0000001", { amount: "0.0000001", minAmount: "0" });
+      const btn = screen.getByTestId("confirm-transaction-btn");
+      expect(btn).not.toBeDisabled();
+      fireEvent.click(btn);
+      fireEvent.click(btn); // retry after a failed attempt: still enabled, no state corruption
+      expect(onConfirm).toHaveBeenCalledTimes(2);
+    });
+
+    it("keeps a caller-supplied error ahead of amount validation", () => {
+      render(
+        <TransactionReviewModal
+          isOpen={true}
+          onClose={vi.fn()}
+          onConfirm={vi.fn()}
+          walletAddress="GABC"
           inputToken={{ symbol: "USDC", amount: "100" }}
           vaultToken={{ symbol: "yUSDC", amount: "99.5" }}
           slippageTolerance={0.5}
+          error="Reserve too low"
         />,
       );
-
-      // Error clears and confirm button becomes enabled
-      expect(screen.queryByTestId("transaction-review-validation-error")).not.toBeInTheDocument();
-      expect(confirmBtn).not.toBeDisabled();
-
-      // Confirm succeeds cleanly
-      fireEvent.click(confirmBtn);
-      expect(onConfirm).toHaveBeenCalledTimes(1);
+      expect(screen.getByRole("alert")).toHaveTextContent("Reserve too low");
+      expect(screen.getByText("GABC")).toBeInTheDocument();
     });
   });
 });

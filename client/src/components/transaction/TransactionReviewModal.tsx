@@ -8,7 +8,13 @@ import {
   ExternalLink,
   Wallet,
 } from "lucide-react";
+import {
+  buildTransactionReviewFailureDiagnostics,
+  getTransactionReviewStageLabel,
+  type TransactionReviewDiagnostic,
+} from "../../../../shared/types/transactionReviewDiagnostic";
 import { QuoteAssumptionFingerprintDisplay } from "./QuoteAssumptionFingerprintDisplay";
+import { shortenAddress, validateReviewAmounts } from "./reviewAmounts";
 import type { QuoteAssumptions } from "../../../../shared/types/quoteAssumptionFingerprint";
 import {
   validateTransactionReview,
@@ -37,7 +43,12 @@ export interface TransactionReviewModalProps {
   isStale?: boolean;
   onRefreshQuote?: () => void;
   error?: string | null;
-  onValidationError?: (error: TransactionReviewValidationError) => void;
+  /**
+   * Privacy-safe stage diagnostics for the failure. When `error` is set and no
+   * diagnostics are supplied, a `CONTEXT_INSUFFICIENT` diagnostic is shown so
+   * the user still gets a remediation path and a state-preserved statement.
+   */
+  diagnostics?: readonly TransactionReviewDiagnostic[] | null;
 }
 
 export function TransactionReviewModal({
@@ -55,7 +66,7 @@ export function TransactionReviewModal({
   isStale = false,
   onRefreshQuote,
   error = null,
-  onValidationError,
+  diagnostics = null,
 }: TransactionReviewModalProps) {
   // Boundary validation against malformed external data (#1889)
   const validationResult = useMemo(() => {
@@ -103,27 +114,18 @@ export function TransactionReviewModal({
 
   if (!isOpen) return null;
 
-  const formattedAddress =
-    typeof walletAddress === "string" && walletAddress.trim().length >= 10
-      ? `${walletAddress.trim().slice(0, 6)}…${walletAddress.trim().slice(-4)}`
-      : "Invalid account";
-
-  const displayInputAmount = validationResult.valid
-    ? validationResult.sanitized.inputToken.amount
-    : String(inputToken?.amount ?? "");
-  const displayInputSymbol = validationResult.valid
-    ? validationResult.sanitized.inputToken.symbol
-    : String(inputToken?.symbol ?? "");
-
-  const displayVaultAmount = validationResult.valid
-    ? validationResult.sanitized.vaultToken.amount
-    : String(vaultToken?.amount ?? "");
-  const displayVaultSymbol = validationResult.valid
-    ? validationResult.sanitized.vaultToken.symbol
-    : String(vaultToken?.symbol ?? "");
-  const displayMinAmount = validationResult.valid
-    ? validationResult.sanitized.vaultToken.minAmount
-    : vaultToken?.minAmount ? String(vaultToken.minAmount) : undefined;
+  const amountCheck = validateReviewAmounts({ inputToken, vaultToken, slippageTolerance });
+  const amountError = amountCheck.valid ? null : amountCheck.reason;
+  const displayError = error ?? amountError;
+  const canConfirm = !isSubmitting && !isStale && !displayError;
+  const shownDiagnostics: readonly TransactionReviewDiagnostic[] =
+    diagnostics && diagnostics.length > 0
+      ? diagnostics
+      : error
+        ? buildTransactionReviewFailureDiagnostics("CONTEXT_INSUFFICIENT", { stage: "unknown" })
+        : amountError
+          ? buildTransactionReviewFailureDiagnostics("VALIDATION_FAILED", { stage: "request-validation" })
+          : [];
 
   return (
     <div
@@ -166,8 +168,8 @@ export function TransactionReviewModal({
               <Wallet className="h-3.5 w-3.5 text-gray-400" />
               Connected Account
             </span>
-            <span className="font-mono text-gray-200" data-testid="review-connected-account">
-              {formattedAddress}
+            <span className="font-mono text-gray-200">
+              {shortenAddress(walletAddress)}
             </span>
           </div>
 
@@ -229,7 +231,7 @@ export function TransactionReviewModal({
           )}
 
           {/* Error Message if Present */}
-          {error && (
+          {displayError && (
             <div
               className="flex items-start gap-2 rounded-xl border border-red-500/30 bg-red-500/10 p-3 text-xs text-red-200"
               role="alert"
@@ -237,9 +239,27 @@ export function TransactionReviewModal({
               <AlertTriangle className="h-4 w-4 shrink-0 text-red-400 mt-0.5" />
               <div>
                 <p className="font-semibold text-red-300">Submission blocked</p>
-                <p>{error}</p>
+                <p>{displayError}</p>
               </div>
             </div>
+          )}
+
+          {shownDiagnostics.length > 0 && (
+            <ul
+              data-testid="transaction-review-diagnostics"
+              aria-label="Transaction review diagnostics"
+              className="space-y-2 rounded-xl border border-amber-500/20 bg-amber-500/5 p-3"
+            >
+              {shownDiagnostics.map((d) => (
+                <li key={`${d.code}-${d.stage}`} className="text-xs text-gray-300">
+                  <p className="font-medium text-amber-200">
+                    {getTransactionReviewStageLabel(d.stage)} · {d.code}
+                  </p>
+                  <p className="mt-0.5">{d.summary}</p>
+                  <p className="mt-0.5 text-gray-400">Next: {d.remediation}</p>
+                </li>
+              ))}
+            </ul>
           )}
         </div>
 
