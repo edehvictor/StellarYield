@@ -377,7 +377,16 @@ export default function AlertsModal({
         }),
       );
 
-      setAlerts((prev) => (prev.some((a) => a.id === created.id) ? prev : [created, ...prev]));
+      setAlerts((prev) =>
+        (prev.some((a) => a.id === created.id) ? prev : [created, ...prev]).sort(
+          (a, b) => {
+            const ta = new Date(a.createdAt).getTime();
+            const tb = new Date(b.createdAt).getTime();
+            if (tb !== ta) return tb - ta;
+            return a.id.localeCompare(b.id);
+          },
+        ),
+      );
       setForm(DEFAULT_FORM);
     } catch (err) {
       checkpoint.status = "failed";
@@ -446,19 +455,18 @@ export default function AlertsModal({
 
   const handleSaveDigestPreferences = async () => {
     if (digestSaving) return;
-    clearDigestError();
 
+    // Stable per-attempt identity so an interrupted save is not applied twice
+    // when the user retries from the optimistic-update retry path.
     if (!digestOperationIdRef.current) {
       digestOperationIdRef.current = `op-digest-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
     }
     const operationIdentity = digestOperationIdRef.current;
 
-    const preferencesWithOverrides: WatchlistDigestPreference = {
+    const preferencesWithOverrides = {
       ...digestPreferences,
       channelOverrides: channelOverrides.watchlist,
-      operationIdentity,
     };
-
     await optimisticDigestUpdate(preferencesWithOverrides, async () => {
       const saved = await saveDigestPreference(
         walletAddress,

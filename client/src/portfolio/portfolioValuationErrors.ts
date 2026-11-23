@@ -10,7 +10,11 @@ export type PortfolioValuationErrorCode =
   | "VALUATION_REFRESH_FAILED"
   | "PRICE_FEED_UNAVAILABLE"
   | "NETWORK_ERROR"
-  | "RATE_LIMITED";
+  | "RATE_LIMITED"
+  | "DUPLICATE_VALUATION_SUBMISSION"
+  | "VALUATION_IN_PROGRESS"
+  | "VALUATION_IDENTITY_CONFLICT"
+  | "VALUATION_CONTEXT_MISMATCH";
 
 export interface PortfolioValuationFailure {
   /** Stable machine-readable code. */
@@ -46,6 +50,14 @@ const KNOWN_ERROR_MESSAGES: Record<PortfolioValuationErrorCode, string> = {
     "Network connectivity lost. Retaining active portfolio view.",
   RATE_LIMITED:
     "Valuation provider rate limit reached. Please wait a moment before refreshing.",
+  DUPLICATE_VALUATION_SUBMISSION:
+    "This valuation request was already submitted. Showing previous result.",
+  VALUATION_IN_PROGRESS:
+    "A valuation is already in progress. Please wait before retrying.",
+  VALUATION_IDENTITY_CONFLICT:
+    "Operation identity conflict: the submitted parameters do not match the original submission.",
+  VALUATION_CONTEXT_MISMATCH:
+    "The portfolio network or ledger changed. Refresh the portfolio before retrying.",
 };
 
 /**
@@ -71,6 +83,14 @@ export function describeValuationFailure(error: unknown): PortfolioValuationFail
 
   if (rawMessage.includes("rate limit") || rawMessage.includes("429")) {
     code = "RATE_LIMITED";
+  } else if (rawMessage.includes("duplicate") || rawMessage.includes("already submitted")) {
+    code = "DUPLICATE_VALUATION_SUBMISSION";
+  } else if (rawMessage.includes("in progress") || rawMessage.includes("in_flight")) {
+    code = "VALUATION_IN_PROGRESS";
+  } else if (rawMessage.includes("identity conflict") || rawMessage.includes("do not match")) {
+    code = "VALUATION_IDENTITY_CONFLICT";
+  } else if (rawMessage.includes("valuation context") || rawMessage.includes("ledger changed")) {
+    code = "VALUATION_CONTEXT_MISMATCH";
   } else if (rawMessage.includes("network") || rawMessage.includes("fetch failed") || rawMessage.includes("failed to fetch")) {
     code = "NETWORK_ERROR";
   } else if (rawMessage.includes("oracle") || rawMessage.includes("price") || rawMessage.includes("quote")) {

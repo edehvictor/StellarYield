@@ -73,6 +73,11 @@ Source: `contracts/stableswap/src/lib.rs`
 | 14   | `WrongVersion`          | Stored state or the caller's context is not at the pool context version this code understands | Refresh with `get_pool_context()`; upgrade the contract if the stored version is newer |
 | 15   | `DuplicateOperation`    | `operation_id` was already consumed by a successful call of the same kind from the same sender | Treat the earlier submission as landed (check `is_operation_consumed`); use a fresh id for a new intent |
 
+Use `preview_swap` / `preview_add_liquidity` / `preview_remove_liquidity` to get a
+privacy-safe `Diagnostic` (failed stage, error code, remediation path) without
+mutating state. See `contracts/stableswap/README.md` for the stage and
+remediation enums.
+
 `stableswap` uses checked arithmetic and documented floor rounding for every
 invariant, fee, deposit and withdrawal calculation. Boundary values (zero,
 minimum one-unit reserves, maximum `i128` inputs) either produce a defined

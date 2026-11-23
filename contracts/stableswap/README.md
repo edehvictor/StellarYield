@@ -14,6 +14,49 @@
 - `swap(sender, token_in, amount_in, min_out, expected_context, operation_id)`
 - `is_operation_consumed(sender, kind, operation_id)` (`kind` is `add_liq`, `rem_liq` or `swap`)
 - pool views and pricing helpers
+- `preview_swap(sender, token_in, amount_in, min_out, expected_context, operation_id) -> Diagnostic` (read-only dry run)
+- `preview_add_liquidity(sender, amount0, amount1, min_mint_amount, expected_context, operation_id) -> Diagnostic` (read-only dry run)
+- `preview_remove_liquidity(sender, lp_amount, min_amount0, min_amount1, expected_context, operation_id) -> Diagnostic` (read-only dry run)
+
+## Diagnostics
+
+`add_liquidity`, `remove_liquidity` and `swap` validate and compute everything
+**before** any token transfer or storage write. A failed call therefore leaves
+reserves, LP supply, LP balances, token balances and the operation id unchanged,
+and can be retried with corrected arguments.
+
+The `preview_*` calls run exactly the same validation (they share the planner
+with the real call) without requiring auth or mutating state, and return:
+
+```text
+Diagnostic { ok: bool, stage: FailureStage, error_code: u32, remediation: RemediationPath }
+```
+
+| `FailureStage`    | Meaning                                              |
+| ----------------- | ---------------------------------------------------- |
+| `None`            | No failure                                           |
+| `PoolState`       | Not initialized / no usable liquidity                |
+| `Context`         | Network, deployment or version context mismatch      |
+| `Replay`          | `operation_id` already consumed                      |
+| `InputValidation` | Bad amount, unknown token or LP amount above balance |
+| `FeeComputation`  | Dynamic fee computation failed                       |
+| `Invariant`       | D / y or share math failed or overflowed             |
+| `Slippage`        | Result below the caller's minimum                    |
+
+| `RemediationPath` | Suggested action                                     |
+| ----------------- | ---------------------------------------------------- |
+| `None`            | Nothing to do                                        |
+| `InitializePool`  | Initialize the pool first                            |
+| `FixInput`        | Correct arguments and retry                          |
+| `AddLiquidity`    | Add liquidity or use a smaller size                  |
+| `ReduceAmount`    | Reduce the amount and retry                          |
+| `RelaxSlippage`   | Loosen `min_out` / `min_mint_amount` / `min_amount*` |
+| `ContactAdmin`    | Not caller-fixable                                   |
+| `RefreshContext`  | Re-read `get_pool_context()` and retry               |
+| `CheckOperation`  | Check `is_operation_consumed` before resubmitting    |
+
+Diagnostics are privacy-safe: they contain only these enums and the numeric
+`StableSwapError` code - never addresses, amounts, reserves or balances.
 
 ## Events
 
