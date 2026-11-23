@@ -9,3 +9,4 @@ export type {
   DataFreshness,
 } from "./types";
 export * from "./strategyComparisonMath";
+export * from "./strategyComparisonConcurrencyApi";
