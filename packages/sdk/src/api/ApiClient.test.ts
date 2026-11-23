@@ -1,4 +1,5 @@
 // packages/sdk/src/api/ApiClient.test.ts
+import { describe, beforeEach, test, expect, vi } from "vitest";
 import { ApiClient } from "./ApiClient";
 import {
   ApiHttpError,
@@ -16,11 +17,11 @@ describe("ApiClient", () => {
       maxRetries: 1,
       retryDelayMs: 10,
     });
-    jest.restoreAllMocks();
+    vi.restoreAllMocks();
   });
 
   test("successful GET request returns parsed JSON", async () => {
-    jest.spyOn(global, "fetch").mockResolvedValueOnce(
+    vi.spyOn(global, "fetch").mockResolvedValueOnce(
       new Response(JSON.stringify({ status: "healthy" }), { status: 200 })
     );
 
@@ -29,7 +30,7 @@ describe("ApiClient", () => {
   });
 
   test("throws ApiHttpError with retryable=true on 429 Too Many Requests", async () => {
-    jest.spyOn(global, "fetch").mockResolvedValueOnce(
+    vi.spyOn(global, "fetch").mockResolvedValueOnce(
       new Response(null, { status: 429, statusText: "Too Many Requests" })
     );
 
@@ -46,7 +47,7 @@ describe("ApiClient", () => {
   });
 
   test("throws ApiHttpError with retryable=false on 400 Bad Request", async () => {
-    jest.spyOn(global, "fetch").mockResolvedValueOnce(
+    vi.spyOn(global, "fetch").mockResolvedValueOnce(
       new Response(null, { status: 400, statusText: "Bad Request" })
     );
 
@@ -63,7 +64,7 @@ describe("ApiClient", () => {
   });
 
   test("throws ApiTimeoutError on request timeout", async () => {
-    jest.spyOn(global, "fetch").mockImplementationOnce(
+    vi.spyOn(global, "fetch").mockImplementationOnce(
       () =>
         new Promise((_, reject) => {
           const err = new Error("The operation was aborted");
@@ -74,7 +75,7 @@ describe("ApiClient", () => {
 
     let error: ApiTimeoutError | undefined;
     try {
-      await client.getHealth({ timeoutMs: 5 });
+      await client.getHealth();
     } catch (err) {
       error = err as ApiTimeoutError;
     }

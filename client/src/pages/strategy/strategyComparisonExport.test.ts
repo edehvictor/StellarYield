@@ -117,3 +117,49 @@ describe('strategy comparison export', () => {
     expect(json.fields).toEqual([...STRATEGY_COMPARISON_EXPORT_FIELDS]);
   });
 });
+
+describe('strategy comparison export — boundary values (#1922)', () => {
+  const base = strategies[0];
+
+  it('exports zero and maximum fees with a checked fee-drag sum', () => {
+    const [zero] = buildStrategyComparisonExportRows(
+      [{ ...base, managementFeeBps: 0, performanceFeeBps: 0, tvl: 0, liquidityUsd: 0, riskScore: 0 }],
+      generatedAt,
+    );
+    expect(zero.fee_drag_bps).toBe(0);
+    expect(zero.tvl_usd).toBe(0);
+    expect(zero.risk_score).toBe(0);
+
+    const [max] = buildStrategyComparisonExportRows(
+      [{ ...base, managementFeeBps: 10_000, performanceFeeBps: 10_000, riskScore: 100 }],
+      generatedAt,
+    );
+    expect(max.fee_drag_bps).toBe(20_000);
+    expect(max.risk_score).toBe(100);
+  });
+
+  it('rounds exported numbers half-up to two decimals', () => {
+    const [row] = buildStrategyComparisonExportRows(
+      [{ ...base, apy: 6.455, totalApy: 8.675, tvl: 1_000.005 }],
+      generatedAt,
+    );
+    expect(row.apy).toBe(6.46);
+    expect(row.total_apy).toBe(8.68);
+    expect(row.tvl_usd).toBe(1_000.01);
+  });
+
+  it('drops rows past a limit and leaves the input untouched', () => {
+    const input: StrategyYield[] = [
+      base,
+      { ...base, protocolName: 'Soroswap', managementFeeBps: 10_001 },
+      { ...base, protocolName: 'DeFindex', liquidityUsd: -1 },
+      { ...base, protocolName: 'Blend', riskScore: 101 },
+      { ...base, protocolName: 'Blend', tvl: Number.POSITIVE_INFINITY },
+    ];
+    const snapshot = JSON.stringify(input);
+    const rows = buildStrategyComparisonExportRows(input, generatedAt);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].protocol_name).toBe('Blend');
+    expect(JSON.stringify(input)).toBe(snapshot);
+  });
+});

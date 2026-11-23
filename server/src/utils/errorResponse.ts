@@ -17,9 +17,13 @@ export function sendError(
   message: string,
   details?: unknown,
   requestId?: string,
-  recoverable?: boolean
+  recoverable?: boolean,
+  diagnostics?: unknown[]
 ): void {
   const errorResponse: ErrorResponse = { error, message };
+  if (diagnostics !== undefined) {
+    errorResponse.diagnostics = diagnostics;
+  }
   if (requestId !== undefined) {
     errorResponse.requestId = requestId;
   }

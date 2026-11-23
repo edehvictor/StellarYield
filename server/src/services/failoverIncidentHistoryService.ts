@@ -29,10 +29,16 @@ let _incidents: FailoverIncident[] = [];
 let _nextId = 1;
 
 export class FailoverIncidentValidationError extends Error {
+  readonly code = "MALFORMED_INCIDENT_PAYLOAD";
+
   constructor(message: string) {
     super(message);
     this.name = "FailoverIncidentValidationError";
   }
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function parseTimestamp(value: string, field: string): number {
@@ -48,7 +54,10 @@ function validateIncidentInput(params: {
   protocolName: string;
   reasons: string[];
   startedAt?: string;
-}): string {
+}): { protocolId: string; protocolName: string; reasons: string[]; startedAt: string } {
+  if (!isPlainObject(params)) {
+    throw new FailoverIncidentValidationError("incident payload must be an object.");
+  }
   if (typeof params.protocolId !== "string" || typeof params.protocolName !== "string" ||
       !params.protocolId.trim() || !params.protocolName.trim()) {
     throw new FailoverIncidentValidationError("protocolId and protocolName must not be empty.");
@@ -62,7 +71,12 @@ function validateIncidentInput(params: {
   }
   const startedAt = params.startedAt ?? new Date().toISOString();
   parseTimestamp(startedAt, "startedAt");
-  return startedAt;
+  return {
+    protocolId: params.protocolId.trim(),
+    protocolName: params.protocolName.trim(),
+    reasons: params.reasons.map((reason) => reason.trim()),
+    startedAt,
+  };
 }
 
 function triggerFromReasons(reasons: string[]): FailoverIncidentTrigger {
@@ -83,14 +97,14 @@ export const failoverIncidentHistoryService = {
     reasons: string[];
     startedAt?: string;
   }): FailoverIncident {
-    const startedAt = validateIncidentInput(params);
+    const validated = validateIncidentInput(params);
     const incident: FailoverIncident = {
       id: String(_nextId),
-      protocolId: params.protocolId.trim(),
-      protocolName: params.protocolName.trim(),
-      trigger: triggerFromReasons(params.reasons),
-      reasons: [...params.reasons],
-      startedAt,
+      protocolId: validated.protocolId,
+      protocolName: validated.protocolName,
+      trigger: triggerFromReasons(validated.reasons),
+      reasons: [...validated.reasons],
+      startedAt: validated.startedAt,
       resolved: false,
     };
     _incidents.push(incident);
@@ -103,7 +117,7 @@ export const failoverIncidentHistoryService = {
    * Returns the updated incident, or null if none was open.
    */
   resolveIncident(protocolId: string, recoveredAt?: string): FailoverIncident | null {
-    if (!protocolId.trim()) {
+    if (typeof protocolId !== "string" || !protocolId.trim()) {
       throw new FailoverIncidentValidationError("protocolId must not be empty.");
     }
     if (recoveredAt !== undefined && typeof recoveredAt !== "string") {
@@ -141,8 +155,12 @@ export const failoverIncidentHistoryService = {
    * Return all incidents, newest first. Optionally filter by protocolId.
    */
   getHistory(protocolId?: string): FailoverIncident[] {
-    const list = protocolId
-      ? _incidents.filter((i) => i.protocolId === protocolId)
+    if (protocolId !== undefined && (typeof protocolId !== "string" || !protocolId.trim())) {
+      throw new FailoverIncidentValidationError("protocolId filter must be a non-empty string.");
+    }
+    const normalizedId = protocolId?.trim();
+    const list = normalizedId
+      ? _incidents.filter((i) => i.protocolId === normalizedId)
       : _incidents;
     return list.slice().reverse().map((incident) => ({ ...incident, reasons: [...incident.reasons] }));
   },
