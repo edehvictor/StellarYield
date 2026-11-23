@@ -1,11 +1,18 @@
 import { describe, it, expect } from "vitest";
 import {
+  assessRegistryFromRecords,
   mapIndexerStatus,
   mapRelayerStatus,
   mapRegistryHealth,
   mapSmokeTestStatus,
+  parseIndexerStatusPayload,
+  parseRelayerStatusPayload,
   sanitizeSubsystemState,
   summarizeTransparencyHealth,
+  TransparencyExternalDataError,
+  validateFailoverIncident,
+  validateFailoverIncidentsPayload,
+  validateTransparencySummaryPayload,
 } from "./transparencyServiceHealth";
 
 describe("transparencyServiceHealth mappers", () => {
@@ -160,5 +167,146 @@ describe("summarizeTransparencyHealth", () => {
     const summary = summarizeTransparencyHealth({ indexer: "healthy" });
     expect(summary.subsystems.relayer).toBe("unknown");
     expect(summary.overall).toBe("degraded");
+  });
+});
+
+describe("malformed external data hardening (#1913)", () => {
+  it("validateTransparencySummaryPayload accepts valid payloads and returns an unmutated clone", () => {
+    const raw = {
+      totalRevenueLumens: 372000,
+      totalBurnedTokens: 96000,
+      deflationaryRatio: 32,
+      history: [{ date: "2026-04-01", revenue: 12000, burned: 3200 }],
+    };
+    const snapshot = structuredClone(raw);
+    const result = validateTransparencySummaryPayload(raw);
+
+    expect(result).toEqual(raw);
+    expect(result).not.toBe(raw);
+    expect(result.history[0]).not.toBe(raw.history[0]);
+    expect(raw).toEqual(snapshot);
+  });
+
+  it("validateTransparencySummaryPayload rejects malformed summary payloads with typed TransparencyExternalDataError without mutating input", () => {
+    const malformedCases: unknown[] = [
+      null,
+      undefined,
+      "not-an-object",
+      [],
+      { totalRevenueLumens: "372000", totalBurnedTokens: 96000, deflationaryRatio: 32, history: [] },
+      { totalRevenueLumens: -1, totalBurnedTokens: 96000, deflationaryRatio: 32, history: [] },
+      { totalRevenueLumens: 100, totalBurnedTokens: 50, deflationaryRatio: 101, history: [] },
+      { totalRevenueLumens: 100, totalBurnedTokens: 50, deflationaryRatio: 20, history: "bad" },
+      {
+        totalRevenueLumens: 100,
+        totalBurnedTokens: 50,
+        deflationaryRatio: 20,
+        history: [{ date: "not-a-date", revenue: 100, burned: 50 }],
+      },
+      {
+        totalRevenueLumens: 100,
+        totalBurnedTokens: 50,
+        deflationaryRatio: 20,
+        history: [{ date: "2026-02-31", revenue: 100, burned: 50 }],
+      },
+      {
+        totalRevenueLumens: 100,
+        totalBurnedTokens: 50,
+        deflationaryRatio: 20,
+        history: [{ date: "2026-04-01", revenue: "100", burned: 50 }],
+      },
+    ];
+
+    for (const bad of malformedCases) {
+      const before = typeof bad === "object" && bad !== null ? structuredClone(bad) : bad;
+      expect(() => validateTransparencySummaryPayload(bad)).toThrow(TransparencyExternalDataError);
+      if (typeof bad === "object" && bad !== null) {
+        expect(bad).toEqual(before);
+      }
+    }
+  });
+
+  it("validateFailoverIncidentsPayload validates envelopes, filters malformed records, and rejects completely invalid lists", () => {
+    const validIncident = {
+      id: "1",
+      protocolId: "blend",
+      protocolName: "Blend",
+      trigger: "stale_data",
+      reasons: ["data is stale"],
+      startedAt: "2026-05-01T10:00:00.000Z",
+      resolved: false,
+    };
+
+    expect(validateFailoverIncidentsPayload({ incidents: [] })).toEqual([]);
+    expect(
+      validateFailoverIncidentsPayload({
+        incidents: [validIncident, { id: "2", trigger: null, reasons: "bad" }],
+      }),
+    ).toEqual([validIncident]);
+
+    expect(() => validateFailoverIncidentsPayload(null)).toThrow(TransparencyExternalDataError);
+    expect(() => validateFailoverIncidentsPayload({ incidents: "not-an-array" })).toThrow(
+      TransparencyExternalDataError,
+    );
+    expect(() =>
+      validateFailoverIncidentsPayload({
+        incidents: [{ id: "bad", protocolId: "x", protocolName: "X", trigger: 123 }],
+      }),
+    ).toThrow(TransparencyExternalDataError);
+    expect(validateFailoverIncident({ ...validIncident, durationMs: -5 })).toBeNull();
+    expect(validateFailoverIncident({ ...validIncident, recoveredAt: "invalid-date" })).toBeNull();
+  });
+
+  it("parseIndexerStatusPayload and parseRelayerStatusPayload safely handle envelopes and malformed fields", () => {
+    expect(parseIndexerStatusPayload({ status: "healthy" })).toBe("healthy");
+    expect(parseIndexerStatusPayload({ success: true, data: { status: "degraded" } })).toBe(
+      "degraded",
+    );
+    expect(parseIndexerStatusPayload({ success: false, data: { status: "healthy" } })).toBe(
+      "unknown",
+    );
+    expect(parseIndexerStatusPayload(null)).toBe("unknown");
+    expect(parseIndexerStatusPayload({ status: 123 })).toBe("unknown");
+
+    expect(
+      parseRelayerStatusPayload({ isOnline: true, failureCount: 0, successRate: 100 }),
+    ).toBe("healthy");
+    // Missing failureCount/successRate or non-boolean isOnline must never default to healthy
+    expect(parseRelayerStatusPayload({ isOnline: true })).toBe("degraded");
+    expect(
+      parseRelayerStatusPayload({
+        isOnline: "false" as unknown as boolean,
+        failureCount: 0,
+        successRate: 100,
+      }),
+    ).toBe("unknown");
+    expect(parseRelayerStatusPayload(null)).toBe("unknown");
+    expect(mapRelayerStatus(null as never)).toBe("unknown");
+  });
+
+  it("assessRegistryFromRecords, mapRegistryHealth, and mapSmokeTestStatus reject malformed inputs safely", () => {
+    expect(assessRegistryFromRecords(null as never, {} as never)).toBe("unknown");
+    expect(
+      assessRegistryFromRecords(
+        {
+          _comment: "metadata comment" as unknown as Record<string, string>,
+          testnet: { vault: "GABC" },
+        },
+        {
+          _comment: "older comment" as unknown as Record<string, string>,
+          testnet: { vault: "GABC" },
+        },
+      ),
+    ).toBe("healthy");
+    expect(
+      assessRegistryFromRecords(
+        { testnet: { vault: 123 as unknown as string } },
+        { testnet: { vault: "GABC" } },
+      ),
+    ).toBe("unknown");
+    expect(mapRegistryHealth(null as never)).toBe("unknown");
+    expect(mapSmokeTestStatus("invalid" as never)).toBe("unknown");
+    expect(mapSmokeTestStatus("pass", [{ status: "corrupt" as never }])).toBe("unknown");
+    expect(summarizeTransparencyHealth(null as never).overall).toBe("degraded");
   });
 });

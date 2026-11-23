@@ -114,16 +114,20 @@ export default function YieldCalculator() {
       month: point.period,
       year: point.year,
       label: point.period % 12 === 0 ? `Year ${point.year}` : `M${point.period % 12}`,
-      compound: Math.round(point.compoundValue),
-      simple: Math.round(point.simpleValue),
-      principal: Math.round(point.principalOnly),
+      compound: Number.isFinite(point.compoundValue) ? Math.round(point.compoundValue) : 0,
+      simple: Number.isFinite(point.simpleValue) ? Math.round(point.simpleValue) : 0,
+      principal: Number.isFinite(point.principalOnly) ? Math.round(point.principalOnly) : 0,
     }));
   }, [filteredProjections]);
 
   function handleYearsChange(e: React.ChangeEvent<HTMLInputElement>) {
     const newYears = Number(e.target.value);
-    setYears(newYears);
-    setSelectedTimeframe(timeframeForYears(newYears));
+    if (!Number.isFinite(newYears)) {
+      return;
+    }
+    const clampedYears = Math.max(1, Math.min(30, Math.round(newYears)));
+    setYears(clampedYears);
+    setSelectedTimeframe(timeframeForYears(clampedYears));
   }
 
   if (errors.length > 0) {
@@ -168,7 +172,10 @@ export default function YieldCalculator() {
               max="100000"
               step="1000"
               value={principal}
-              onChange={(e) => setPrincipal(Number(e.target.value))}
+              onChange={(e) => {
+                const next = Number(e.target.value);
+                if (Number.isFinite(next)) setPrincipal(next);
+              }}
               className="flex-1 h-2 bg-slate-700 rounded-lg appearance-none cursor-pointer slider"
             />
             <span className="text-white font-mono min-w-[100px] text-right">
@@ -190,7 +197,10 @@ export default function YieldCalculator() {
               max="10000"
               step="100"
               value={monthlyContribution}
-              onChange={(e) => setMonthlyContribution(Number(e.target.value))}
+              onChange={(e) => {
+                const next = Number(e.target.value);
+                if (Number.isFinite(next)) setMonthlyContribution(next);
+              }}
               className="flex-1 h-2 bg-slate-700 rounded-lg appearance-none cursor-pointer slider"
             />
             <span className="text-white font-mono min-w-[100px] text-right">
@@ -224,7 +234,10 @@ export default function YieldCalculator() {
               max="30"
               step="0.1"
               value={apy}
-              onChange={(e) => setApy(Number(e.target.value))}
+              onChange={(e) => {
+                const next = Number(e.target.value);
+                if (Number.isFinite(next)) setApy(next);
+              }}
               className="flex-1 h-2 bg-slate-700 rounded-lg appearance-none cursor-pointer slider"
             />
             <span className="text-white font-mono min-w-[60px] text-right">
@@ -327,7 +340,10 @@ export default function YieldCalculator() {
             <YAxis
               stroke="#9ca3af"
               tick={{ fill: '#9ca3af', fontSize: 12 }}
-              tickFormatter={(value) => `$${(value / 1000).toFixed(0)}k`}
+              tickFormatter={(value) => {
+                if (!Number.isFinite(value)) return "—";
+                return `$${(value / 1000).toFixed(0)}k`;
+              }}
             />
             <Tooltip content={<CustomTooltip />} />
             <Legend />
