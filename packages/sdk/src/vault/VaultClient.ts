@@ -24,7 +24,16 @@ import {
 import { rpc } from "@stellar/stellar-sdk";
 import { toTokenUnits } from "../types";
 import type { TokenAmount, VaultConfig } from "../types";
-import { validateEndpointUrl, normalizeEndpointUrl } from "../endpoint";
+import {
+  EndpointConfigState,
+  validateEndpointUrl,
+  normalizeEndpointUrl,
+  type EndpointConfigSnapshot,
+  type EndpointConfigUpdateOptions,
+  type EndpointConfigUpdateResult,
+  type EndpointValidationResult,
+  type SafeEndpointConfigUpdateOptions,
+} from "../endpoint";
 import { buildSdkFailureDiagnostics } from "../diagnostics";
 
 /**
@@ -79,35 +88,62 @@ interface PreparedRequest {
   identity?: OperationIdentityOptions;
 }
 
+export interface VaultEndpointConfig {
+  rpcUrl: string;
+}
+
+function validateVaultEndpointConfig(config: VaultEndpointConfig): EndpointValidationResult {
+  const validation = validateEndpointUrl(config.rpcUrl);
+  if (validation.valid) {
+    return { valid: true, errors: [], diagnostics: [] };
+  }
+  return {
+    valid: false,
+    errors: [validation.error ?? "Invalid rpcUrl"],
+    diagnostics: buildSdkFailureDiagnostics("VALIDATION_FAILED", {
+      stage: "endpoint-configuration",
+      summary: `RPC endpoint configuration invalid: ${validation.error}`,
+      remediation: "Provide a valid Soroban RPC endpoint URL; existing state was preserved.",
+      retryable: false,
+    }),
+  };
+}
+
 export class VaultClient {
   public readonly generatedClient: GeneratedVaultClient;
   public readonly contractId: string;
   public readonly networkPassphrase: string;
-  public readonly rpcUrl: string;
   public readonly specHash: string;
   public readonly configFingerprint?: string;
+  private readonly endpointState: EndpointConfigState<VaultEndpointConfig>;
 
   constructor(config: VaultConfig) {
-    const rpcValidation = validateEndpointUrl(config.rpcUrl);
+    const rpcValidation = validateVaultEndpointConfig({ rpcUrl: config.rpcUrl });
     if (!rpcValidation.valid) {
-      const diagnostics = buildSdkFailureDiagnostics("VALIDATION_FAILED", {
-        stage: "endpoint-configuration",
-        summary: `RPC endpoint configuration invalid: ${rpcValidation.error}`,
-        remediation: "Provide a valid Soroban RPC endpoint URL; existing state was preserved.",
-        retryable: false,
-      });
       throw new SdkEndpointError(
-        `Invalid RPC endpoint URL: ${rpcValidation.error}`,
-        diagnostics,
-        [rpcValidation.error ?? "Invalid rpcUrl"],
+        `Invalid RPC endpoint URL: ${rpcValidation.errors.join("; ")}`,
+        rpcValidation.diagnostics,
+        rpcValidation.errors,
         "simulate",
         false
       );
     }
 
+    const rpcUrl = normalizeEndpointUrl(config.rpcUrl);
+    this.endpointState = new EndpointConfigState<VaultEndpointConfig>(
+      { rpcUrl },
+      {
+        validate: validateVaultEndpointConfig,
+        normalize: (candidate) => ({
+          ...candidate,
+          rpcUrl: normalizeEndpointUrl(candidate.rpcUrl),
+        }),
+        label: "RPC endpoint",
+      }
+    );
+
     this.contractId = config.contractId;
     this.networkPassphrase = config.networkPassphrase;
-    this.rpcUrl = normalizeEndpointUrl(config.rpcUrl);
     this.specHash = config.specHash || YIELD_VAULT_SPEC_HASH;
     this.configFingerprint = config.configFingerprint;
 
@@ -118,34 +154,39 @@ export class VaultClient {
     this.generatedClient = new GeneratedVaultClient({
       contractId: this.contractId,
       networkPassphrase: this.networkPassphrase,
-      rpcUrl: this.rpcUrl,
+      rpcUrl,
     });
 
     this.initMethods();
   }
 
-  /**
-   * Reconfigures the RPC endpoint URL safely.
-   * If validation fails, throws SdkEndpointError and preserves existing configuration.
-   */
-  public configureEndpoint(rpcUrl: string): void {
-    const rpcValidation = validateEndpointUrl(rpcUrl);
-    if (!rpcValidation.valid) {
-      const diagnostics = buildSdkFailureDiagnostics("VALIDATION_FAILED", {
-        stage: "endpoint-configuration",
-        summary: `RPC endpoint configuration invalid: ${rpcValidation.error}`,
-        remediation: "Provide a valid Soroban RPC endpoint URL; existing state was preserved.",
-        retryable: false,
-      });
-      throw new SdkEndpointError(
-        `Invalid RPC endpoint URL: ${rpcValidation.error}`,
-        diagnostics,
-        [rpcValidation.error ?? "Invalid rpcUrl"],
-        "simulate",
-        false
-      );
-    }
-    (this as any).rpcUrl = normalizeEndpointUrl(rpcUrl);
+  public get rpcUrl(): string {
+    return this.endpointState.read().config.rpcUrl;
+  }
+
+  public configureEndpoint(
+    rpcUrl: string,
+    options?: EndpointConfigUpdateOptions
+  ): EndpointConfigSnapshot<VaultEndpointConfig> {
+    return this.endpointState.commit({ rpcUrl }, options);
+  }
+
+  public async updateEndpointConfigSafely(
+    options: SafeEndpointConfigUpdateOptions<VaultEndpointConfig>
+  ): Promise<EndpointConfigUpdateResult<VaultEndpointConfig>> {
+    return this.endpointState.updateSafely(options);
+  }
+
+  public getEndpointConfigState(): EndpointConfigSnapshot<VaultEndpointConfig> {
+    return this.endpointState.read();
+  }
+
+  public getEndpointConfigVersion(): number {
+    return this.endpointState.getVersion();
+  }
+
+  public isEndpointConfigUpdateInFlight(): boolean {
+    return this.endpointState.isUpdateInFlight();
   }
 
   private initMethods() {

@@ -93,6 +93,49 @@ export class SdkEndpointError extends SorobanSdkError {
   }
 }
 
+export class EndpointConfigVersionConflictError extends SdkEndpointError {
+  public readonly code = "ENDPOINT_CONFIG_VERSION_CONFLICT" as const;
+  public readonly expectedVersion: number;
+  public readonly currentVersion: number;
+  public readonly currentConfig: Readonly<Record<string, unknown>>;
+
+  constructor(details: {
+    expectedVersion: number;
+    currentVersion: number;
+    currentConfig: Readonly<Record<string, unknown>>;
+  }) {
+    const diagnostics = buildSdkFailureDiagnostics("CONFIG_VERSION_CONFLICT", {
+      stage: "endpoint-configuration",
+      summary: "Endpoint configuration changed concurrently; the conditional update was rejected.",
+      remediation:
+        "Reload the current endpoint configuration version and retry; existing state and balances were preserved.",
+      retryable: true,
+    });
+    super(
+      `Endpoint configuration version conflict (expected ${details.expectedVersion}, current ${details.currentVersion}).`,
+      diagnostics,
+      [],
+      "simulate",
+      true
+    );
+    this.name = "EndpointConfigVersionConflictError";
+    this.expectedVersion = details.expectedVersion;
+    this.currentVersion = details.currentVersion;
+    this.currentConfig = details.currentConfig;
+  }
+}
+
+export function isEndpointConfigVersionConflictError(
+  error: unknown
+): error is EndpointConfigVersionConflictError {
+  return (
+    error instanceof EndpointConfigVersionConflictError ||
+    (typeof error === "object" &&
+      error !== null &&
+      (error as { code?: unknown }).code === "ENDPOINT_CONFIG_VERSION_CONFLICT")
+  );
+}
+
 export interface DiagnosticContext {
   stage: SdkErrorPhase;
   remediation: string;

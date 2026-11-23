@@ -22,9 +22,14 @@ import {
   SdkEndpointError,
 } from "../errors";
 import {
+  EndpointConfigState,
   validateEndpointConfig,
   normalizeEndpointUrl,
   resolveSafeDiagnostics,
+  type EndpointConfigSnapshot,
+  type EndpointConfigUpdateOptions,
+  type EndpointConfigUpdateResult,
+  type SafeEndpointConfigUpdateOptions,
 } from "../endpoint";
 import { StaleSimulationConfigError } from "../errors";
 import {
@@ -199,11 +204,7 @@ function createLinkedAbort(
  * without retries and surface {@link ApiCancelledError}.
  */
 export class ApiClient {
-  private config: ApiConfig;
-  private readonly timeoutMs: number;
-  private readonly maxRetries: number;
-  private readonly retryDelayMs: number;
-  private readonly retryableStatuses: Set<number>;
+  private readonly endpointState: EndpointConfigState<ApiConfig>;
   private simulationConfigSnapshot: SimulationConfigSnapshot | null = null;
   private simulationConfigReader?: () => SimulationConfig;
 
@@ -218,41 +219,49 @@ export class ApiClient {
         false
       );
     }
-    this.config = {
-      ...config,
-      baseUrl: normalizeEndpointUrl(config.baseUrl),
-    };
-    this.timeoutMs = config.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-    this.maxRetries = config.maxRetries ?? DEFAULT_MAX_RETRIES;
-    this.retryDelayMs = config.retryDelayMs ?? DEFAULT_RETRY_DELAY_MS;
-    this.retryableStatuses = new Set(config.retryableStatuses ?? DEFAULT_RETRYABLE_STATUSES);
+    this.endpointState = new EndpointConfigState<ApiConfig>(
+      { ...config, baseUrl: normalizeEndpointUrl(config.baseUrl) },
+      {
+        validate: validateEndpointConfig,
+        normalize: (candidate) => ({
+          ...candidate,
+          baseUrl: normalizeEndpointUrl(candidate.baseUrl),
+        }),
+      }
+    );
   }
 
-  /**
-   * Updates endpoint configuration dynamically.
-   * If validation fails, throws SdkEndpointError and leaves existing configuration
-   * and state unchanged.
-   */
-  public configureEndpoint(config: Partial<SdkEndpointConfig>): void {
-    const candidate = { ...this.config, ...config };
-    const validation = validateEndpointConfig(candidate);
-    if (!validation.valid) {
-      throw new SdkEndpointError(
-        `Invalid endpoint configuration update: ${validation.errors.join("; ")}`,
-        validation.diagnostics,
-        validation.errors,
-        "simulate",
-        false
-      );
-    }
-    this.config = {
-      ...candidate,
-      baseUrl: normalizeEndpointUrl(candidate.baseUrl),
-    };
+  private get config(): ApiConfig {
+    return this.endpointState.read().config;
+  }
+
+  public configureEndpoint(
+    config: Partial<SdkEndpointConfig>,
+    options?: EndpointConfigUpdateOptions
+  ): EndpointConfigSnapshot<ApiConfig> {
+    return this.endpointState.commit(config, options);
+  }
+
+  public async updateEndpointConfigSafely(
+    options: SafeEndpointConfigUpdateOptions<ApiConfig>
+  ): Promise<EndpointConfigUpdateResult<ApiConfig>> {
+    return this.endpointState.updateSafely(options);
+  }
+
+  public getEndpointConfigState(): EndpointConfigSnapshot<ApiConfig> {
+    return this.endpointState.read();
+  }
+
+  public getEndpointConfigVersion(): number {
+    return this.endpointState.getVersion();
+  }
+
+  public isEndpointConfigUpdateInFlight(): boolean {
+    return this.endpointState.isUpdateInFlight();
   }
 
   public getConfig(): Readonly<ApiConfig> {
-    return { ...this.config };
+    return this.endpointState.read().config;
   }
 
   public setSimulationConfig(config: SimulationConfig): SimulationConfigSnapshot {
@@ -324,24 +333,29 @@ export class ApiClient {
     const mayRetry =
       isIdempotentMethod(method) || requestOptions?.retrySafe === true;
     const externalSignal = requestOptions?.signal;
+    const config = this.config;
+    const timeoutMs = config.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+    const maxRetries = config.maxRetries ?? DEFAULT_MAX_RETRIES;
+    const retryDelayMs = config.retryDelayMs ?? DEFAULT_RETRY_DELAY_MS;
+    const retryableStatuses = new Set(config.retryableStatuses ?? DEFAULT_RETRYABLE_STATUSES);
 
     this.throwIfCancelled(path, externalSignal);
 
     let lastError: Error | undefined;
 
-    for (let attempt = 0; attempt <= this.maxRetries; attempt++) {
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
       this.throwIfCancelled(path, externalSignal);
 
-      const linked = createLinkedAbort(this.timeoutMs, externalSignal);
+      const linked = createLinkedAbort(timeoutMs, externalSignal);
 
       try {
-        const response = await fetch(`${this.config.baseUrl}${path}`, {
+        const response = await fetch(`${config.baseUrl}${path}`, {
           ...options,
           signal: linked.signal,
         });
 
         if (!response.ok) {
-          const retryable = this.retryableStatuses.has(response.status);
+          const retryable = retryableStatuses.has(response.status);
 
           let responseBody: unknown = undefined;
           try {
@@ -369,9 +383,9 @@ export class ApiClient {
             err = new ApiHttpError(path, response.status, response.statusText, retryable, diagnostics);
           }
 
-          if (mayRetry && retryable && attempt < this.maxRetries) {
+          if (mayRetry && retryable && attempt < maxRetries) {
             lastError = err as Error;
-            await sleep(this.retryDelayMs * Math.pow(2, attempt), externalSignal);
+            await sleep(retryDelayMs * Math.pow(2, attempt), externalSignal);
             continue;
           }
           throw err;
@@ -387,14 +401,19 @@ export class ApiClient {
           throw new ApiCancelledError(path);
         }
 
-        const normalized = this.normalizeFetchError(path, err, linked.wasCallerCancel());
+        const normalized = this.normalizeFetchError(
+          path,
+          err,
+          linked.wasCallerCancel(),
+          timeoutMs
+        );
         if (normalized instanceof ApiCancelledError) {
           throw normalized;
         }
-        if (mayRetry && normalized.retryable && attempt < this.maxRetries) {
+        if (mayRetry && normalized.retryable && attempt < maxRetries) {
           lastError = normalized;
           try {
-            await sleep(this.retryDelayMs * Math.pow(2, attempt), externalSignal);
+            await sleep(retryDelayMs * Math.pow(2, attempt), externalSignal);
           } catch {
             throw new ApiCancelledError(path);
           }
@@ -412,7 +431,8 @@ export class ApiClient {
   private normalizeFetchError(
     path: string,
     err: unknown,
-    callerCancelled: boolean
+    callerCancelled: boolean,
+    timeoutMs: number
   ): ApiTimeoutError | ApiNetworkError | ApiCancelledError {
     if (
       err instanceof ApiTimeoutError ||
@@ -436,7 +456,7 @@ export class ApiClient {
       message.includes("timeout") ||
       message.includes("timed out")
     ) {
-      return new ApiTimeoutError(path, this.timeoutMs);
+      return new ApiTimeoutError(path, timeoutMs);
     }
 
     return new ApiNetworkError(path, err);
