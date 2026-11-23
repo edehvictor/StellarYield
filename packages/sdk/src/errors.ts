@@ -413,6 +413,8 @@ export class StaleSimulationConfigError extends SorobanSdkError {
   public readonly code = "SIMULATION_CONFIG_STALE" as const;
   public readonly expectedFingerprint: string | null;
   public readonly actualFingerprint: string | null;
+  /** Number of simulation attempts completed before the stale result. */
+  public readonly attempts: number;
   public readonly statePreserved: boolean;
   public readonly preservedState?: unknown;
 
@@ -421,6 +423,7 @@ export class StaleSimulationConfigError extends SorobanSdkError {
     details: {
       expectedFingerprint?: string | null;
       actualFingerprint?: string | null;
+      attempts?: number;
       statePreserved?: boolean;
       preservedState?: unknown;
     } = {}
@@ -429,6 +432,7 @@ export class StaleSimulationConfigError extends SorobanSdkError {
     this.name = "StaleSimulationConfigError";
     this.expectedFingerprint = details.expectedFingerprint ?? null;
     this.actualFingerprint = details.actualFingerprint ?? null;
+    this.attempts = details.attempts ?? 1;
     this.statePreserved = details.statePreserved ?? true;
     this.preservedState = details.preservedState;
   }
