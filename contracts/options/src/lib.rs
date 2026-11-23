@@ -3,7 +3,7 @@
 
 use soroban_sdk::{
     contract, contractclient, contracterror, contractimpl, contracttype, symbol_short, token,
-    xdr::ToXdr, Address, Bytes, BytesN, Env,
+    xdr::ToXdr, Address, Bytes, BytesN, Env, String,
 };
 
 /// Domain separator for the configuration fingerprint (versioned).
@@ -145,6 +145,50 @@ pub struct SettlementState {
     pub exercised_amount: i128,
     /// Collateral still backing the option (zero once it is closed).
     pub remaining_amount: i128,
+}
+
+/// Stage of the settlement pipeline where a failure was diagnosed. The stage
+/// identifies *where* in the settlement flow an error occurred so callers and
+/// off-chain monitors can determine the correct remediation without inspecting
+/// private data (addresses, amounts, or asset identifiers).
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u32)]
+pub enum SettlementStage {
+    /// Configuration fingerprint or oracle guard check.
+    ConfigValidation = 1,
+    /// Cancelled / exercised / expired or authorization check.
+    StatusCheck = 2,
+    /// Settlement sequence or reentrancy guard.
+    ConcurrencyCheck = 3,
+    /// Opening / expiration time-window check.
+    TimeWindowCheck = 4,
+    /// Amount, collateral, or arithmetic validation.
+    AmountValidation = 5,
+    /// State commit before the token transfer.
+    StateCommit = 6,
+    /// Token transfer leg.
+    Transfer = 7,
+    /// Post-transfer finalization.
+    Finalize = 8,
+}
+
+/// Privacy-safe diagnostic for a settlement failure (#1751).
+///
+/// Contains no addresses, amounts, or asset identifiers — only the option id,
+/// the stage that most likely failed, the error code, and a generic
+/// remediation hint the caller can follow to retry safely. Callers obtain this
+/// from [`OptionsContract::get_settlement_diagnostic`] after a settlement call
+/// returns an error.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SettlementDiagnostic {
+    pub option_id: u32,
+    pub stage: SettlementStage,
+    /// Numeric [`OptionsError`] code (the `u32` discriminant).
+    pub error_code: u32,
+    /// Generic, privacy-safe remediation guidance.
+    pub remediation: String,
 }
 
 #[contract]
@@ -439,6 +483,33 @@ impl OptionsContract {
             status,
             exercised_amount,
             remaining_amount,
+        }
+    }
+
+    /// Privacy-safe diagnostic for a settlement failure (#1751).
+    ///
+    /// After a settlement call (`exercise`, `exercise_partial`,
+    /// `exercise_partial_checked`, `cancel`, or `expire`) returns an error,
+    /// call this with the `option_id` and the error code to obtain a
+    /// [`SettlementDiagnostic`] that identifies the stage that most likely
+    /// failed and a generic remediation path.
+    ///
+    /// The diagnostic is privacy-safe: it contains no addresses, amounts, or
+    /// asset identifiers — only the option id, the stage, the error code, and
+    /// a short remediation string. State and balances are never mutated by
+    /// this read-only function.
+    pub fn get_settlement_diagnostic(
+        env: Env,
+        option_id: u32,
+        error: OptionsError,
+    ) -> SettlementDiagnostic {
+        let stage = diagnose_stage(error);
+        let remediation = remediation_text(&env, error);
+        SettlementDiagnostic {
+            option_id,
+            stage,
+            error_code: error as u32,
+            remediation,
         }
     }
 
@@ -846,4 +917,126 @@ fn require_fresh_observation(env: &Env, asset: &Address, max_age: u64) -> Result
         return Err(OptionsError::StaleOracleObservation);
     }
     Ok(())
+}
+
+/// Maps a settlement [`OptionsError`] to the [`SettlementStage`] where it most
+/// likely occurred. The mapping is deterministic and based solely on the error
+/// code — it does not read private data.
+fn diagnose_stage(error: OptionsError) -> SettlementStage {
+    match error {
+        // Configuration and oracle-guard checks happen before any position
+        // validation or collateral movement.
+        OptionsError::StaleConfig
+        | OptionsError::NotInitialized
+        | OptionsError::AlreadyInitialized
+        | OptionsError::InvalidMaxAge
+        | OptionsError::OracleObservationMissing
+        | OptionsError::StaleOracleObservation
+        | OptionsError::InvalidPrice => SettlementStage::ConfigValidation,
+
+        // Status and authorization checks (cancelled / exercised / expired /
+        // unauthorized) happen after config validation but before the
+        // concurrency lock.
+        OptionsError::Unauthorized
+        | OptionsError::InvalidOption
+        | OptionsError::AlreadyExercised
+        | OptionsError::AlreadyExpired
+        | OptionsError::AlreadyCancelled => SettlementStage::StatusCheck,
+
+        // Concurrency checks (sequence mismatch, reentrancy guard,
+        // settlement-state-changed) happen inside begin_settlement / checked.
+        OptionsError::ConcurrentModification
+        | OptionsError::ReentrantSettlement
+        | OptionsError::SettlementStateChanged => SettlementStage::ConcurrencyCheck,
+
+        // Time-window checks happen after the concurrency lock is acquired.
+        OptionsError::TooEarly
+        | OptionsError::ExerciseWindowClosed
+        | OptionsError::NotExpired
+        | OptionsError::CancellationWindowClosed => SettlementStage::TimeWindowCheck,
+
+        // Amount, collateral, and arithmetic validation happens after the
+        // time-window check but before any state is committed.
+        OptionsError::ZeroAmount
+        | OptionsError::ExceedsCollateral
+        | OptionsError::InsufficientFreeCollateral
+        | OptionsError::MathOverflow
+        | OptionsError::InvalidExerciseWindow => SettlementStage::AmountValidation,
+    }
+}
+
+/// Returns a short, privacy-safe remediation string for a settlement error.
+/// The string contains no addresses, amounts, or asset identifiers — only a
+/// generic action the caller can take to fix the issue and retry safely.
+fn remediation_text(env: &Env, error: OptionsError) -> String {
+    match error {
+        OptionsError::AlreadyInitialized => String::from_str(env, "Contract already initialized"),
+        OptionsError::NotInitialized => {
+            String::from_str(env, "Call initialize() before settlement")
+        }
+        OptionsError::Unauthorized => {
+            String::from_str(env, "Caller is not authorized for this operation")
+        }
+        OptionsError::InvalidOption => String::from_str(env, "Option id does not exist"),
+        OptionsError::NotExpired => {
+            String::from_str(env, "Wait until after expiration_time then call expire()")
+        }
+        OptionsError::AlreadyExercised => String::from_str(
+            env,
+            "Option fully exercised; no further settlement possible",
+        ),
+        OptionsError::AlreadyExpired => String::from_str(
+            env,
+            "Option already expired; no further settlement possible",
+        ),
+        OptionsError::ZeroAmount => String::from_str(env, "Provide a positive exercise amount"),
+        OptionsError::InvalidPrice => {
+            String::from_str(env, "Oracle returned invalid price; fix oracle and retry")
+        }
+        OptionsError::TooEarly => String::from_str(env, "Wait until opening_time to exercise"),
+        OptionsError::ExerciseWindowClosed => String::from_str(
+            env,
+            "Exercise window closed; call expire() to return collateral",
+        ),
+        OptionsError::InvalidExerciseWindow => {
+            String::from_str(env, "opening_time must be strictly before expiration_time")
+        }
+        OptionsError::InsufficientFreeCollateral => {
+            String::from_str(env, "Deposit more collateral or reduce withdrawal amount")
+        }
+        OptionsError::ExceedsCollateral => {
+            String::from_str(env, "Reduce amount to at most remaining collateral")
+        }
+        OptionsError::MathOverflow => String::from_str(env, "Amount too large; reduce and retry"),
+        OptionsError::OracleObservationMissing => {
+            String::from_str(env, "Oracle has no observation; provide one and retry")
+        }
+        OptionsError::StaleOracleObservation => {
+            String::from_str(env, "Oracle observation is stale; update and retry")
+        }
+        OptionsError::InvalidMaxAge => {
+            String::from_str(env, "Oracle max age must be greater than zero")
+        }
+        OptionsError::CancellationWindowClosed => {
+            String::from_str(env, "Cancellation window closed; call expire() instead")
+        }
+        OptionsError::AlreadyCancelled => {
+            String::from_str(env, "Option cancelled; no further settlement possible")
+        }
+        OptionsError::StaleConfig => String::from_str(
+            env,
+            "Refresh fingerprint with get_config_fingerprint() and retry",
+        ),
+        OptionsError::SettlementStateChanged => String::from_str(
+            env,
+            "Read get_settlement_state() and resume from new exercised_amount",
+        ),
+        OptionsError::ConcurrentModification => String::from_str(
+            env,
+            "Read get_settlement_sequence() and retry with new value",
+        ),
+        OptionsError::ReentrantSettlement => {
+            String::from_str(env, "Settlement in progress; wait and retry")
+        }
+    }
 }

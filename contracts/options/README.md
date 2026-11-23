@@ -15,6 +15,7 @@
 - `exercise_partial_checked(exerciser, option_id, amount, expected_exercised, expected_sequence, expected_config_fingerprint)` retry-safe partial exercise (see Settlement Safety)
 - `get_settlement_sequence(option_id)` returns the sequence for the next settlement call
 - `get_settlement_state(option_id)` settlement progress: status, exercised amount, remaining amount
+- `get_settlement_diagnostic(option_id, error)` privacy-safe diagnostic for a settlement failure: maps the error to the failed stage and a remediation path (see Settlement Diagnostics)
 - `get_config_snapshot()` / `get_config_fingerprint()` expose the configuration settlement is validated against
 - `cancel_with_sequence(minter, option_id, expected_sequence)` checks the sequence; `cancel` remains a compatibility wrapper
 - `expire_with_sequence(option_id, expected_sequence)` checks the sequence; `expire` remains a compatibility wrapper
@@ -48,6 +49,10 @@ fingerprint immediately.
 ## Errors
 
 `OptionsError` includes `StaleConfig` (21), `SettlementStateChanged` (22), `ConcurrentModification` (23), and `ReentrantSettlement` (24), alongside initialization, authorization, option-state, expiry-window, amount, and price errors.
+
+`SettlementStage` (enum, 8 variants) and `SettlementDiagnostic` (struct:
+option_id, stage, error_code, remediation) support privacy-safe failure
+diagnostics — see [Settlement Diagnostics](#settlement-diagnostics).
 
 ## Configuration Fingerprint
 
@@ -130,6 +135,38 @@ fails with `SettlementStateChanged` and moves nothing; read
 `get_settlement_state` and resume from the new `exercised_amount`. The checked
 call also validates the configuration fingerprint, as do the other exercise
 entry points.
+
+## Settlement Diagnostics
+
+When a settlement call returns an error, `get_settlement_diagnostic(option_id,
+error)` maps the error to the settlement stage that most likely failed and a
+generic remediation path. The diagnostic is **privacy-safe**: it contains no
+addresses, amounts, or asset identifiers — only the option id, the stage, the
+numeric error code, and a short remediation string.
+
+The `SettlementStage` enum identifies where in the pipeline the failure
+occurred:
+
+| Stage | Description | Typical errors |
+|-------|-------------|----------------|
+| `ConfigValidation` | Configuration fingerprint or oracle guard | `StaleConfig`, `NotInitialized`, `OracleObservationMissing` |
+| `StatusCheck` | Cancelled / exercised / expired / authorization | `AlreadyExercised`, `AlreadyCancelled`, `Unauthorized` |
+| `ConcurrencyCheck` | Settlement sequence or reentrancy guard | `ConcurrentModification`, `SettlementStateChanged`, `ReentrantSettlement` |
+| `TimeWindowCheck` | Opening / expiration time window | `TooEarly`, `ExerciseWindowClosed`, `NotExpired` |
+| `AmountValidation` | Amount, collateral, or arithmetic | `ZeroAmount`, `ExceedsCollateral`, `MathOverflow` |
+| `StateCommit` | State commit before token transfer | `MathOverflow` (during sequence advance) |
+| `Transfer` | Token transfer leg | (reverted by transaction rollback) |
+| `Finalize` | Post-transfer finalization | (reverted by transaction rollback) |
+
+Each error maps to a deterministic remediation string. For example,
+`StaleConfig` produces `"Refresh fingerprint with get_config_fingerprint() and
+retry"`, and `ConcurrentModification` produces `"Read get_settlement_sequence()
+and retry with new value"`.
+
+Because Soroban reverts all state changes on error, a failed settlement leaves
+balances, reserves, and settlement progress exactly as they were. The caller
+can call `get_settlement_diagnostic` to understand which stage failed and what
+to do, then retry the same operation with corrected parameters.
 
 ## Oracle Freshness Guard
 
