@@ -11,6 +11,7 @@ import * as StellarSdk from "@stellar/stellar-sdk";
 import freighter from "@stellar/freighter-api";
 import { RPC_URL, NETWORK_PASSPHRASE } from "../../services/soroban";
 import { getContractId, validateContractRegistryEntry } from "../../services/contractRegistry";
+import { getNetworkPassphrase, getRpcUrl } from "../../lib/networkEnv";
 
 export interface VestingSchedule {
     /** Total tokens allocated to this address (stroops). */
@@ -180,16 +181,45 @@ export interface ClaimResult {
 }
 
 /**
- * Builds, signs via Freighter, and submits a `claim_vested` transaction
- * for the given wallet address.
+ * Immutable identity of the configuration used to prepare a vesting claim.
+ * The configured RPC URL is included, but active RPC failover is not: switching
+ * to another endpoint on the same network does not change contract identity.
+ */
+export interface VestingClaimConfiguration {
+    readonly contractId: string;
+    readonly networkPassphrase: string;
+    readonly rpcUrl: string;
+    readonly fingerprint: string;
+}
+
+export function captureVestingClaimConfiguration(): Readonly<VestingClaimConfiguration> {
+    const contractId = getContractId("vesting");
+    const networkPassphrase = getNetworkPassphrase();
+    const rpcUrl = getRpcUrl();
+    // JSON encoding avoids ambiguous concatenation of configuration values.
+    const fingerprint = JSON.stringify([contractId, networkPassphrase, rpcUrl]);
+    return Object.freeze({ contractId, networkPassphrase, rpcUrl, fingerprint });
+}
+
+function isCurrentConfiguration(snapshot: VestingClaimConfiguration): boolean {
+    return captureVestingClaimConfiguration().fingerprint === snapshot.fingerprint;
+}
+
+const STALE_CONFIGURATION_ERROR =
+    "Vesting configuration changed during this claim. No transaction was submitted. Refresh and retry.";
+
+/**
+ * Builds, signs and submits a claim only while its configuration fingerprint
+ * remains current. A stale attempt is rejected before submission; a new call
+ * captures a fresh configuration snapshot.
  *
- * @param walletAddress - The beneficiary account ID.
- * @returns A `ClaimResult` indicating success or a user-friendly error.
+ * This is a client-side pre-submission guard, not an atomic on-chain lock.
  */
 export async function claimVested(walletAddress: string): Promise<ClaimResult> {
-    const vestingContractId = getContractId("vesting");
+    let snapshot: Readonly<VestingClaimConfiguration>;
     try {
-        validateContractRegistryEntry("vesting", vestingContractId);
+        snapshot = captureVestingClaimConfiguration();
+        validateContractRegistryEntry("vesting", snapshot.contractId);
     } catch (err) {
         return {
             success: false,
@@ -197,14 +227,29 @@ export async function claimVested(walletAddress: string): Promise<ClaimResult> {
         };
     }
 
+    const rejectIfStale = (): ClaimResult | null =>
+        isCurrentConfiguration(snapshot)
+            ? null
+            : { success: false, error: STALE_CONFIGURATION_ERROR };
+
     try {
-        const server = new StellarSdk.rpc.Server(RPC_URL);
-        const contract = new StellarSdk.Contract(vestingContractId);
+        // The signing network is fixed for the lifetime of this module.
+        // Refuse to sign if a runtime configuration change makes it disagree.
+        if (snapshot.networkPassphrase !== NETWORK_PASSPHRASE ||
+            snapshot.rpcUrl !== RPC_URL) {
+            return { success: false, error: STALE_CONFIGURATION_ERROR };
+        }
+
+        const server = new StellarSdk.rpc.Server(snapshot.rpcUrl);
+        const contract = new StellarSdk.Contract(snapshot.contractId);
 
         const account = await server.getAccount(walletAddress);
+        const staleAfterAccount = rejectIfStale();
+        if (staleAfterAccount) return staleAfterAccount;
+
         const builtTx = new StellarSdk.TransactionBuilder(account, {
             fee: StellarSdk.BASE_FEE,
-            networkPassphrase: NETWORK_PASSPHRASE,
+            networkPassphrase: snapshot.networkPassphrase,
         })
             .addOperation(
                 contract.call(
@@ -215,8 +260,10 @@ export async function claimVested(walletAddress: string): Promise<ClaimResult> {
             .setTimeout(30)
             .build();
 
-        // Simulate to get footprint / auth
         const sim = await server.simulateTransaction(builtTx);
+        const staleAfterSimulation = rejectIfStale();
+        if (staleAfterSimulation) return staleAfterSimulation;
+
         if (StellarSdk.rpc.Api.isSimulationError(sim)) {
             return {
                 success: false,
@@ -224,14 +271,18 @@ export async function claimVested(walletAddress: string): Promise<ClaimResult> {
             };
         }
 
-        const prepared = StellarSdk.rpc.assembleTransaction(
-            builtTx,
-            sim,
-        ).build();
+        const prepared = StellarSdk.rpc.assembleTransaction(builtTx, sim).build();
+        const staleBeforeSigning = rejectIfStale();
+        if (staleBeforeSigning) return staleBeforeSigning;
 
         const signResult = await freighter.signTransaction(prepared.toXDR(), {
-            networkPassphrase: NETWORK_PASSPHRASE,
+            networkPassphrase: snapshot.networkPassphrase,
         });
+
+        // Crucial boundary: never submit a signed transaction prepared against
+        // a configuration that changed while the wallet dialog was open.
+        const staleBeforeSubmission = rejectIfStale();
+        if (staleBeforeSubmission) return staleBeforeSubmission;
 
         if (signResult.error) {
             return { success: false, error: signResult.error.message };
@@ -239,11 +290,10 @@ export async function claimVested(walletAddress: string): Promise<ClaimResult> {
 
         const signedTx = StellarSdk.TransactionBuilder.fromXDR(
             signResult.signedTxXdr,
-            NETWORK_PASSPHRASE,
+            snapshot.networkPassphrase,
         );
 
         const sendResult = await server.sendTransaction(signedTx);
-
         if (sendResult.status === "ERROR") {
             return {
                 success: false,
@@ -251,7 +301,6 @@ export async function claimVested(walletAddress: string): Promise<ClaimResult> {
             };
         }
 
-        // Poll for confirmation
         const pollStart = Date.now();
         while (Date.now() - pollStart < 30_000) {
             const statusResult = await server.getTransaction(sendResult.hash);
@@ -261,15 +310,19 @@ export async function claimVested(walletAddress: string): Promise<ClaimResult> {
             if (statusResult.status === StellarSdk.rpc.Api.GetTransactionStatus.FAILED) {
                 return {
                     success: false,
-                    error:
-                        statusResult.resultXdr?.toString() ?? "Transaction failed on-chain",
+                    error: statusResult.resultXdr?.toString() ?? "Transaction failed on-chain",
                     hash: sendResult.hash,
                 };
             }
             await new Promise((r) => setTimeout(r, 2_000));
         }
 
-        return { success: false, error: "Transaction polling timed out." };
+        // A timeout is not proof of failure: expose the hash for reconciliation.
+        return {
+            success: false,
+            hash: sendResult.hash,
+            error: "Transaction confirmation is pending. Check its hash before retrying.",
+        };
     } catch (err) {
         return {
             success: false,
