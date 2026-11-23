@@ -102,3 +102,39 @@ describe("sortStrategies — volatility and liquidity", () => {
     expect(sorted[sorted.length - 1].id).toBe("none");
   });
 });
+
+describe("sortStrategies — boundary values (#1922)", () => {
+  it("sorts NaN and infinite values to the bottom instead of scrambling the order", () => {
+    const input = [
+      makeStrategy("nan", Number.NaN, 5),
+      makeStrategy("a", 5, 7),
+      makeStrategy("inf", Number.POSITIVE_INFINITY, 5),
+      makeStrategy("b", 12, 6),
+    ];
+    const desc = sortStrategies(input, "apy", "desc").map((s) => s.id);
+    const asc = sortStrategies(input, "apy", "asc").map((s) => s.id);
+    expect(desc.slice(0, 2)).toEqual(["b", "a"]);
+    expect(asc.slice(0, 2)).toEqual(["a", "b"]);
+    expect(desc.slice(2).sort()).toEqual(["inf", "nan"]);
+  });
+
+  it("orders zero and the safe-integer maximum like any other value", () => {
+    const input = [
+      makeStrategy("zero", 5, 5, null, 0),
+      makeStrategy("max", 5, 5, null, Number.MAX_SAFE_INTEGER),
+      makeStrategy("mid", 5, 5, null, 1_000_000),
+    ];
+    expect(sortStrategies(input, "liquidityUsd", "desc").map((s) => s.id)).toEqual([
+      "max",
+      "mid",
+      "zero",
+    ]);
+  });
+
+  it("does not mutate the input when values are malformed", () => {
+    const input = [makeStrategy("nan", Number.NaN, null), makeStrategy("a", 5, 7)];
+    const before = input.map((s) => s.id);
+    sortStrategies(input, "riskScore");
+    expect(input.map((s) => s.id)).toEqual(before);
+  });
+});

@@ -88,6 +88,17 @@ describe("Soroban SDK Bindings & Lifecycle", () => {
     });
   });
 
+  it("provides privacy-safe stage and remediation context for contract failures", () => {
+    const error = parseContractError(new Error("Error(Contract, #5)"), "secret-xdr");
+    expect(error).toMatchObject({
+      diagnosticContext: {
+        stage: "submit",
+        remediation: "inspect the transaction status before retrying",
+      },
+    });
+    expect(JSON.stringify(error.diagnosticContext)).not.toContain("secret-xdr");
+  });
+
   describe("Signer Adapters", () => {
     it("ServerKeypairSigner signs unsigned XDR envelope", async () => {
       const signer = new ServerKeypairSigner(sourceKeypair);

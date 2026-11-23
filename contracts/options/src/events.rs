@@ -9,7 +9,7 @@
 //! `fill` means a partial exercise consumed part of the remaining collateral;
 //! `exercise` means the position was fully exercised.
 
-use soroban_sdk::{contracttype, symbol_short, Address, Env, Symbol};
+use soroban_sdk::{contracttype, symbol_short, Address, BytesN, Env, Symbol};
 
 use crate::storage::{OptionData, OptionType};
 
@@ -158,6 +158,16 @@ pub fn emit_expired(
         0,
     );
     emit(env, symbol_short!("expire"), event);
+}
+
+/// Emits the `config` event after an admin change to the configuration, so
+/// clients can invalidate any cached fingerprint immediately. Topics are
+/// `(config,)` and the payload is `(admin, new_fingerprint)`.
+pub fn emit_config_updated(env: &Env, admin: &Address, fingerprint: &BytesN<32>) {
+    env.events().publish(
+        (symbol_short!("config"),),
+        (admin.clone(), fingerprint.clone()),
+    );
 }
 
 /// Emits the `cancel` event after the unexercised collateral is returned.

@@ -50,6 +50,41 @@ describe("portfolioValuationErrors (#1660)", () => {
     expect(failure.retryable).toBe(true);
   });
 
+  // ── Duplicate submission protection error codes (#1864) ──────────────────
+
+  it("classifies duplicate submission errors into DUPLICATE_VALUATION_SUBMISSION", () => {
+    const error = new Error("Duplicate: this valuation was already submitted.");
+    const failure = describeValuationFailure(error);
+
+    expect(failure.code).toBe("DUPLICATE_VALUATION_SUBMISSION");
+    expect(failure.message).toBe(
+      "This valuation request was already submitted. Showing previous result.",
+    );
+    expect(failure.retryable).toBe(true);
+  });
+
+  it("classifies in-progress errors into VALUATION_IN_PROGRESS", () => {
+    const error = new Error("Valuation operation is already in progress.");
+    const failure = describeValuationFailure(error);
+
+    expect(failure.code).toBe("VALUATION_IN_PROGRESS");
+    expect(failure.message).toBe(
+      "A valuation is already in progress. Please wait before retrying.",
+    );
+    expect(failure.retryable).toBe(true);
+  });
+
+  it("classifies identity conflict errors into VALUATION_IDENTITY_CONFLICT", () => {
+    const error = new Error("Operation identity conflict: parameters do not match initial submission.");
+    const failure = describeValuationFailure(error);
+
+    expect(failure.code).toBe("VALUATION_IDENTITY_CONFLICT");
+    expect(failure.message).toBe(
+      "Operation identity conflict: the submitted parameters do not match the original submission.",
+    );
+    expect(failure.retryable).toBe(true);
+  });
+
   it("preserves pre-typed PortfolioValuationError instances", () => {
     const typed = new PortfolioValuationError({
       code: "RATE_LIMITED",

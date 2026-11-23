@@ -11,6 +11,7 @@
   ],
   "decisions": [],
   "anomalies": [],
+  "replayAnomalies": [],
   "replayAnomalies": [
     {
       "type": "duplicate_transaction_hash",
@@ -25,6 +26,7 @@
     "eventCount": 6,
     "decisionCount": 0,
     "anomalyCount": 0,
+    "replayAnomalyCount": 0
     "replayAnomalyCount": 1
   }
 }

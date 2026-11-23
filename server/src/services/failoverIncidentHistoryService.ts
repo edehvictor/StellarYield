@@ -28,6 +28,57 @@ export interface FailoverIncident {
 let _incidents: FailoverIncident[] = [];
 let _nextId = 1;
 
+export class FailoverIncidentValidationError extends Error {
+  readonly code = "MALFORMED_INCIDENT_PAYLOAD";
+
+  constructor(message: string) {
+    super(message);
+    this.name = "FailoverIncidentValidationError";
+  }
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function parseTimestamp(value: string, field: string): number {
+  const timestamp = typeof value === "string" ? Date.parse(value) : Number.NaN;
+  if (!Number.isFinite(timestamp) || !/^\d{4}-\d\d-\d\dT/.test(value)) {
+    throw new FailoverIncidentValidationError(`${field} must be a valid ISO-8601 timestamp.`);
+  }
+  return timestamp;
+}
+
+function validateIncidentInput(params: {
+  protocolId: string;
+  protocolName: string;
+  reasons: string[];
+  startedAt?: string;
+}): { protocolId: string; protocolName: string; reasons: string[]; startedAt: string } {
+  if (!isPlainObject(params)) {
+    throw new FailoverIncidentValidationError("incident payload must be an object.");
+  }
+  if (typeof params.protocolId !== "string" || typeof params.protocolName !== "string" ||
+      !params.protocolId.trim() || !params.protocolName.trim()) {
+    throw new FailoverIncidentValidationError("protocolId and protocolName must not be empty.");
+  }
+  if (!Array.isArray(params.reasons) || params.reasons.length === 0 ||
+      params.reasons.some((reason) => typeof reason !== "string" || !reason.trim())) {
+    throw new FailoverIncidentValidationError("reasons must contain at least one non-empty string.");
+  }
+  if (params.startedAt !== undefined && typeof params.startedAt !== "string") {
+    throw new FailoverIncidentValidationError("startedAt must be a valid ISO-8601 timestamp.");
+  }
+  const startedAt = params.startedAt ?? new Date().toISOString();
+  parseTimestamp(startedAt, "startedAt");
+  return {
+    protocolId: params.protocolId.trim(),
+    protocolName: params.protocolName.trim(),
+    reasons: params.reasons.map((reason) => reason.trim()),
+    startedAt,
+  };
+}
+
 function triggerFromReasons(reasons: string[]): FailoverIncidentTrigger {
   const joined = reasons.join(" ").toLowerCase();
   if (joined.includes("stale")) return "stale_data";
@@ -46,17 +97,19 @@ export const failoverIncidentHistoryService = {
     reasons: string[];
     startedAt?: string;
   }): FailoverIncident {
+    const validated = validateIncidentInput(params);
     const incident: FailoverIncident = {
-      id: String(_nextId++),
-      protocolId: params.protocolId,
-      protocolName: params.protocolName,
-      trigger: triggerFromReasons(params.reasons),
-      reasons: params.reasons,
-      startedAt: params.startedAt ?? new Date().toISOString(),
+      id: String(_nextId),
+      protocolId: validated.protocolId,
+      protocolName: validated.protocolName,
+      trigger: triggerFromReasons(validated.reasons),
+      reasons: [...validated.reasons],
+      startedAt: validated.startedAt,
       resolved: false,
     };
     _incidents.push(incident);
-    return incident;
+    _nextId += 1;
+    return { ...incident, reasons: [...incident.reasons] };
   },
 
   /**
@@ -64,28 +117,52 @@ export const failoverIncidentHistoryService = {
    * Returns the updated incident, or null if none was open.
    */
   resolveIncident(protocolId: string, recoveredAt?: string): FailoverIncident | null {
+    if (typeof protocolId !== "string" || !protocolId.trim()) {
+      throw new FailoverIncidentValidationError("protocolId must not be empty.");
+    }
+    if (recoveredAt !== undefined && typeof recoveredAt !== "string") {
+      throw new FailoverIncidentValidationError("recoveredAt must be a valid ISO-8601 timestamp.");
+    }
+    const recoveryTs = recoveredAt ?? new Date().toISOString();
+    const recoveryTime = parseTimestamp(recoveryTs, "recoveredAt");
     const incident = _incidents
       .slice()
       .reverse()
-      .find((i) => i.protocolId === protocolId && !i.resolved);
-    if (!incident) return null;
+      .find((i) => i.protocolId === protocolId.trim() && !i.resolved);
+    if (!incident) {
+      // A retried request after a lost response is successful if it repeats
+      // the same recovery timestamp. Different timestamps remain a conflict.
+      const completed = _incidents
+        .slice()
+        .reverse()
+        .find((i) => i.protocolId === protocolId.trim() && i.resolved);
+      if (completed?.recoveredAt === recoveryTs) return { ...completed, reasons: [...completed.reasons] };
+      return null;
+    }
 
-    const recoveryTs = recoveredAt ?? new Date().toISOString();
-    incident.recoveredAt = recoveryTs;
-    incident.durationMs =
-      new Date(recoveryTs).getTime() - new Date(incident.startedAt).getTime();
-    incident.resolved = true;
-    return incident;
+    const startedTime = parseTimestamp(incident.startedAt, "startedAt");
+    if (recoveryTime < startedTime) {
+      throw new FailoverIncidentValidationError("recoveredAt must be at or after startedAt.");
+    }
+
+    const durationMs = recoveryTime - startedTime;
+    // Prepare all completion fields before mutating the stored open incident.
+    Object.assign(incident, { recoveredAt: recoveryTs, durationMs, resolved: true });
+    return { ...incident, reasons: [...incident.reasons] };
   },
 
   /**
    * Return all incidents, newest first. Optionally filter by protocolId.
    */
   getHistory(protocolId?: string): FailoverIncident[] {
-    const list = protocolId
-      ? _incidents.filter((i) => i.protocolId === protocolId)
+    if (protocolId !== undefined && (typeof protocolId !== "string" || !protocolId.trim())) {
+      throw new FailoverIncidentValidationError("protocolId filter must be a non-empty string.");
+    }
+    const normalizedId = protocolId?.trim();
+    const list = normalizedId
+      ? _incidents.filter((i) => i.protocolId === normalizedId)
       : _incidents;
-    return list.slice().reverse();
+    return list.slice().reverse().map((incident) => ({ ...incident, reasons: [...incident.reasons] }));
   },
 
   /** Reset store (test hook). */

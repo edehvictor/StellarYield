@@ -3,12 +3,15 @@ import { isConnected } from "@stellar/freighter-api";
 import {
   clearStoredSession,
   connectWalletSession,
-  isSessionExpired,
+  getWalletLifecycleDiagnostic,
+  getWalletLifecycleStageDiagnostic,
   loadStoredSession,
+  WalletLifecycleError,
+  isSessionExpired,
   recoverSession,
 } from "../auth/session";
 import { getAdapter } from "../auth/walletAdapters";
-import type { ConnectWalletOptions, ExtensionWalletProviderId, WalletSession } from "../auth/types";
+import type { ConnectWalletOptions, WalletSession } from "../auth/types";
 import { WalletContext } from "./WalletContextObject";
 
 import {
@@ -55,8 +58,12 @@ export function WalletProvider({ children }: { children: ReactNode }) {
         }
 
         setIsFreighterInstalled(true);
-      } catch (error) {
-        console.error("Unable to inspect Freighter connection", error);
+      } catch {
+        const diagnostic = getWalletLifecycleStageDiagnostic("provider_availability");
+        console.warn("[wallet] lifecycle diagnostic", {
+          stage: diagnostic.stage,
+          remediation: diagnostic.remediation,
+        });
         setIsFreighterInstalled(false);
       }
     }
@@ -77,12 +84,12 @@ export function WalletProvider({ children }: { children: ReactNode }) {
       setSession(nextSession);
       return true;
     } catch (error) {
-      console.error("Wallet connection failed", error);
-      setErrorMessage(
-        error instanceof Error
-          ? error.message
-          : "Wallet connection failed. Please try again.",
-      );
+      const diagnostic = getWalletLifecycleDiagnostic(error);
+      console.error("[wallet] lifecycle diagnostic", {
+        stage: diagnostic.stage,
+        remediation: diagnostic.remediation,
+      });
+      setErrorMessage(diagnostic.message);
       return false;
     } finally {
       setIsConnecting(false);
@@ -131,18 +138,24 @@ export function WalletProvider({ children }: { children: ReactNode }) {
 
   async function signTransaction(xdr: string, networkPassphrase: string): Promise<string> {
     if (!session) {
-      throw new Error("No wallet connected.");
+      throw new WalletLifecycleError("transaction_signing");
     }
-    const EXTENSION_PROVIDERS: ExtensionWalletProviderId[] = ["freighter", "xbull", "albedo"];
-    if ((EXTENSION_PROVIDERS as string[]).includes(session.providerId)) {
-      const adapter = getAdapter(session.providerId as ExtensionWalletProviderId);
+    if (
+      session.providerId === "freighter" ||
+      session.providerId === "xbull" ||
+      session.providerId === "albedo"
+    ) {
+      const adapter = getAdapter(session.providerId);
       if (!adapter) {
-        throw new Error(`No adapter for provider: ${session.providerId}`);
+        throw new WalletLifecycleError("transaction_signing");
       }
-      return adapter.signTransaction(xdr, networkPassphrase);
+      try {
+        return await adapter.signTransaction(xdr, networkPassphrase);
+      } catch {
+        throw new WalletLifecycleError("transaction_signing");
+      }
     }
-    // Smart wallet (email / google / github) sessions don't support direct signing
-    throw new Error("signTransaction is not supported for smart wallet sessions.");
+    throw new WalletLifecycleError("transaction_signing");
   }
 
   const value = useMemo(

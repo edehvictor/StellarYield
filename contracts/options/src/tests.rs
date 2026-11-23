@@ -169,7 +169,7 @@ fn test_exercise_rejected_before_opening_time() {
     mint_tokens(&env, &quote, &exerciser, 200_000_000);
 
     // Ledger is at 0 — before opening_time of 500
-    let result = client.try_exercise(&exerciser, &option_id);
+    let result = client.try_exercise(&exerciser, &option_id, &client.get_config_fingerprint());
     assert_eq!(result, Err(Ok(crate::OptionsError::TooEarly)));
 }
 
@@ -183,7 +183,7 @@ fn test_exercise_rejected_one_ledger_before_opening() {
 
     // Set timestamp to one unit before opening_time
     env.ledger().set_timestamp(499);
-    let result = client.try_exercise(&exerciser, &option_id);
+    let result = client.try_exercise(&exerciser, &option_id, &client.get_config_fingerprint());
     assert_eq!(result, Err(Ok(crate::OptionsError::TooEarly)));
 }
 
@@ -199,7 +199,7 @@ fn test_exercise_succeeds_at_opening_time_boundary() {
 
     // Exactly at opening_time = 500
     env.ledger().set_timestamp(500);
-    client.exercise(&exerciser, &option_id);
+    client.exercise(&exerciser, &option_id, &client.get_config_fingerprint());
 
     let client_u = soroban_sdk::token::Client::new(&env, &underlying);
 
@@ -219,7 +219,7 @@ fn test_exercise_succeeds_at_expiration_time_boundary() {
 
     // Exactly at expiration_time = 1000 (still within window)
     env.ledger().set_timestamp(1000);
-    client.exercise(&exerciser, &option_id);
+    client.exercise(&exerciser, &option_id, &client.get_config_fingerprint());
 
     let client_u = soroban_sdk::token::Client::new(&env, &underlying);
 
@@ -238,7 +238,7 @@ fn test_exercise_succeeds_mid_window() {
 
     // Mid-window at 750
     env.ledger().set_timestamp(750);
-    client.exercise(&exerciser, &option_id);
+    client.exercise(&exerciser, &option_id, &client.get_config_fingerprint());
 
     let client_u = soroban_sdk::token::Client::new(&env, &underlying);
 
@@ -259,7 +259,7 @@ fn test_exercise_rejected_after_expiration_time() {
 
     // Past expiration_time = 1000
     env.ledger().set_timestamp(1001);
-    let result = client.try_exercise(&exerciser, &option_id);
+    let result = client.try_exercise(&exerciser, &option_id, &client.get_config_fingerprint());
     assert_eq!(result, Err(Ok(crate::OptionsError::ExerciseWindowClosed)));
 }
 
@@ -275,11 +275,56 @@ fn test_repeated_exercise_rejected() {
 
     // First exercise in valid window
     env.ledger().set_timestamp(750);
-    client.exercise(&exerciser, &option_id);
+    client.exercise(&exerciser, &option_id, &client.get_config_fingerprint());
 
     // Second attempt — must be rejected even while still in window
-    let result = client.try_exercise(&exerciser, &option_id);
+    let result = client.try_exercise(&exerciser, &option_id, &client.get_config_fingerprint());
     assert_eq!(result, Err(Ok(crate::OptionsError::AlreadyExercised)));
+}
+
+#[test]
+fn test_settlement_sequence_rejects_stale_state_and_allows_retry() {
+    let (env, client, _, _, underlying, quote) = setup_env();
+    let (option_id, _) = mint_call_option(&env, &client, &underlying, &quote);
+    let exerciser = Address::generate(&env);
+    mint_tokens(&env, &quote, &exerciser, 200_000_000);
+    env.ledger().set_timestamp(750);
+
+    assert_eq!(client.get_settlement_sequence(&option_id), 1);
+    client.exercise_partial_with_sequence(
+        &exerciser,
+        &option_id,
+        &4_000_000,
+        &1,
+        &client.get_config_fingerprint(),
+    );
+    assert_eq!(client.get_settlement_sequence(&option_id), 2);
+
+    let underlying_client = soroban_sdk::token::Client::new(&env, &underlying);
+    let balance_before_retry = underlying_client.balance(&exerciser);
+    let stale = client.try_exercise_partial_with_sequence(
+        &exerciser,
+        &option_id,
+        &1_000_000,
+        &1,
+        &client.get_config_fingerprint(),
+    );
+    assert_eq!(stale, Err(Ok(crate::OptionsError::ConcurrentModification)));
+    assert_eq!(underlying_client.balance(&exerciser), balance_before_retry);
+    assert_eq!(client.get_settlement_sequence(&option_id), 2);
+
+    client.exercise_partial_with_sequence(
+        &exerciser,
+        &option_id,
+        &1_000_000,
+        &2,
+        &client.get_config_fingerprint(),
+    );
+    assert_eq!(
+        underlying_client.balance(&exerciser),
+        balance_before_retry + 1_000_000
+    );
+    assert_eq!(client.get_settlement_sequence(&option_id), 3);
 }
 
 // ── Expire ────────────────────────────────────────────────────────────────
@@ -339,7 +384,7 @@ fn test_storage_migration_preserves_open_and_exercised_positions() {
         &5_000_000_i128,
     );
     env.ledger().set_timestamp(1000);
-    client.exercise(&exerciser, &exercised_id);
+    client.exercise(&exerciser, &exercised_id, &client.get_config_fingerprint());
 
     // A pre-migration deployment has no version marker, but live positions are
     // already persisted under Option(id) and must remain addressable.
@@ -387,7 +432,7 @@ fn test_expire_exercised_option_rejected() {
     mint_tokens(&env, &quote, &exerciser, 200_000_000);
 
     env.ledger().set_timestamp(750);
-    client.exercise(&exerciser, &option_id);
+    client.exercise(&exerciser, &option_id, &client.get_config_fingerprint());
 
     // Can't expire an already-exercised option
     env.ledger().set_timestamp(1001);
@@ -418,7 +463,7 @@ fn test_exercise_put_in_valid_window() {
     mint_tokens(&env, &underlying, &exerciser, 200_000_000);
 
     env.ledger().set_timestamp(750);
-    client.exercise(&exerciser, &option_id);
+    client.exercise(&exerciser, &option_id, &client.get_config_fingerprint());
 
     let client_q = soroban_sdk::token::Client::new(&env, &quote);
     // Exerciser receives quote collateral
@@ -437,7 +482,7 @@ fn test_storage_ttl_extension() {
 
     // Exercise within valid window — verifies TTL extension calls run successfully
     env.ledger().set_timestamp(750);
-    client.exercise(&exerciser, &option_id);
+    client.exercise(&exerciser, &option_id, &client.get_config_fingerprint());
 }
 
 // ── Collateral reserve: free vs reserved ──────────────────────────────────
@@ -606,7 +651,12 @@ fn test_partial_exercise_releases_only_the_exercised_reserve() {
     let token_u = soroban_sdk::token::Client::new(&env, &underlying);
 
     env.ledger().set_timestamp(750);
-    client.exercise_partial(&exerciser, &option_id, &4_000_000);
+    client.exercise_partial(
+        &exerciser,
+        &option_id,
+        &4_000_000,
+        &client.get_config_fingerprint(),
+    );
 
     // 4M of the 10M left the contract; the other 6M stays reserved.
     assert_eq!(token_u.balance(&exerciser), 4_000_000);
@@ -622,7 +672,12 @@ fn test_partial_exercise_releases_only_the_exercised_reserve() {
     );
 
     // The option is still open and can be partially exercised again.
-    client.exercise_partial(&exerciser, &option_id, &1_000_000);
+    client.exercise_partial(
+        &exerciser,
+        &option_id,
+        &1_000_000,
+        &client.get_config_fingerprint(),
+    );
     assert_eq!(
         client.get_reserved_collateral(&minter, &underlying),
         5_000_000
@@ -637,7 +692,7 @@ fn test_partial_exercise_settles_one_base_unit_exactly() {
     let token = soroban_sdk::token::Client::new(&env, &underlying);
 
     env.ledger().set_timestamp(750);
-    client.exercise_partial(&exerciser, &option_id, &1);
+    client.exercise_partial(&exerciser, &option_id, &1, &client.get_config_fingerprint());
 
     assert_eq!(token.balance(&exerciser), 1);
     assert_eq!(token.balance(&client.address), 9_999_999);
@@ -660,7 +715,11 @@ fn test_cancel_returns_unfilled_collateral_and_releases_reserve() {
     assert_eq!(client.get_reserved_collateral(&minter, &underlying), 0);
     assert!(!client.get_option_collateral_health(&option_id).active);
     assert_eq!(
-        client.try_exercise(&Address::generate(&env), &option_id),
+        client.try_exercise(
+            &Address::generate(&env),
+            &option_id,
+            &client.get_config_fingerprint()
+        ),
         Err(Ok(crate::OptionsError::AlreadyCancelled))
     );
 }
@@ -690,7 +749,12 @@ fn test_cancel_after_partial_exercise_returns_only_remaining_collateral() {
     let token = soroban_sdk::token::Client::new(&env, &underlying);
 
     env.ledger().set_timestamp(750);
-    client.exercise_partial(&exerciser, &option_id, &4_000_000);
+    client.exercise_partial(
+        &exerciser,
+        &option_id,
+        &4_000_000,
+        &client.get_config_fingerprint(),
+    );
     client.cancel(&minter, &option_id);
 
     assert_eq!(token.balance(&exerciser), 4_000_000);
@@ -749,18 +813,33 @@ fn test_partial_exercise_rejects_zero_and_excess_amounts() {
 
     env.ledger().set_timestamp(750);
     assert_eq!(
-        client.try_exercise_partial(&exerciser, &option_id, &0),
+        client.try_exercise_partial(&exerciser, &option_id, &0, &client.get_config_fingerprint()),
         Err(Ok(crate::OptionsError::ZeroAmount))
     );
     assert_eq!(
-        client.try_exercise_partial(&exerciser, &option_id, &10_000_001),
+        client.try_exercise_partial(
+            &exerciser,
+            &option_id,
+            &10_000_001,
+            &client.get_config_fingerprint()
+        ),
         Err(Ok(crate::OptionsError::ExceedsCollateral))
     );
 
     // After a partial exercise only the remainder can be exercised.
-    client.exercise_partial(&exerciser, &option_id, &7_000_000);
+    client.exercise_partial(
+        &exerciser,
+        &option_id,
+        &7_000_000,
+        &client.get_config_fingerprint(),
+    );
     assert_eq!(
-        client.try_exercise_partial(&exerciser, &option_id, &3_000_001),
+        client.try_exercise_partial(
+            &exerciser,
+            &option_id,
+            &3_000_001,
+            &client.get_config_fingerprint()
+        ),
         Err(Ok(crate::OptionsError::ExceedsCollateral))
     );
 }
@@ -774,12 +853,22 @@ fn test_partial_exercise_respects_exercise_window() {
 
     env.ledger().set_timestamp(499);
     assert_eq!(
-        client.try_exercise_partial(&exerciser, &option_id, &1_000_000),
+        client.try_exercise_partial(
+            &exerciser,
+            &option_id,
+            &1_000_000,
+            &client.get_config_fingerprint()
+        ),
         Err(Ok(crate::OptionsError::TooEarly))
     );
     env.ledger().set_timestamp(1001);
     assert_eq!(
-        client.try_exercise_partial(&exerciser, &option_id, &1_000_000),
+        client.try_exercise_partial(
+            &exerciser,
+            &option_id,
+            &1_000_000,
+            &client.get_config_fingerprint()
+        ),
         Err(Ok(crate::OptionsError::ExerciseWindowClosed))
     );
 }
@@ -792,9 +881,14 @@ fn test_finishing_partial_exercise_closes_position_and_clears_reserve() {
     mint_tokens(&env, &quote, &exerciser, 200_000_000);
 
     env.ledger().set_timestamp(750);
-    client.exercise_partial(&exerciser, &option_id, &4_000_000);
+    client.exercise_partial(
+        &exerciser,
+        &option_id,
+        &4_000_000,
+        &client.get_config_fingerprint(),
+    );
     // A full exercise now settles just the remaining 6M.
-    client.exercise(&exerciser, &option_id);
+    client.exercise(&exerciser, &option_id, &client.get_config_fingerprint());
 
     assert_eq!(client.get_reserved_collateral(&minter, &underlying), 0);
     let token_u = soroban_sdk::token::Client::new(&env, &underlying);
@@ -802,7 +896,7 @@ fn test_finishing_partial_exercise_closes_position_and_clears_reserve() {
     assert_eq!(token_u.balance(&client.address), 0);
 
     assert_eq!(
-        client.try_exercise(&exerciser, &option_id),
+        client.try_exercise(&exerciser, &option_id, &client.get_config_fingerprint()),
         Err(Ok(crate::OptionsError::AlreadyExercised))
     );
     assert_eq!(
@@ -826,7 +920,12 @@ fn test_expire_after_partial_exercise_returns_only_remaining_collateral() {
     let token_u = soroban_sdk::token::Client::new(&env, &underlying);
 
     env.ledger().set_timestamp(750);
-    client.exercise_partial(&exerciser, &option_id, &4_000_000);
+    client.exercise_partial(
+        &exerciser,
+        &option_id,
+        &4_000_000,
+        &client.get_config_fingerprint(),
+    );
 
     env.ledger().set_timestamp(1001);
     client.expire(&option_id);
@@ -1272,7 +1371,12 @@ mod payout_conservation {
                 break;
             }
             let amount = ((collateral / 100) * split as i128).max(1).min(remaining);
-            client.exercise_partial(&position.exerciser, &position.option_id, &amount);
+            client.exercise_partial(
+                &position.exerciser,
+                &position.option_id,
+                &amount,
+                &client.get_config_fingerprint(),
+            );
             expected_buyer += amount;
         }
         expected_buyer
@@ -1288,9 +1392,11 @@ mod payout_conservation {
         ) {
             let position = open_position(collateral, is_put, STRIKE);
             position.enter_exercise_window();
-            position
-                .client
-                .exercise(&position.exerciser, &position.option_id);
+            position.client.exercise(
+                &position.exerciser,
+                &position.option_id,
+                &position.client.get_config_fingerprint(),
+            );
 
             // A full exercise pays the buyer the entire escrow: the maximum
             // payout permitted by the collateral.
@@ -1366,9 +1472,11 @@ mod payout_conservation {
             prop_assert_eq!(premium, 0);
 
             position.enter_exercise_window();
-            position
-                .client
-                .exercise(&position.exerciser, &position.option_id);
+            position.client.exercise(
+                &position.exerciser,
+                &position.option_id,
+                &position.client.get_config_fingerprint(),
+            );
             position.assert_conserved(collateral);
         }
     }
@@ -1378,9 +1486,12 @@ mod payout_conservation {
         for collateral in [1i128, 9, 10, 999_999_999, 1_000_000_000] {
             let position = open_position(collateral, false, STRIKE);
             position.enter_exercise_window();
-            position
-                .client
-                .exercise_partial(&position.exerciser, &position.option_id, &1);
+            position.client.exercise_partial(
+                &position.exerciser,
+                &position.option_id,
+                &1,
+                &position.client.get_config_fingerprint(),
+            );
 
             let expected_buyer = 1;
             if expected_buyer < collateral {
@@ -1501,7 +1612,12 @@ mod versioned_lifecycle_events {
         assert_eq!(create.option_id, option_id);
 
         env.ledger().set_timestamp(750);
-        client.exercise_partial(&exerciser, &option_id, &4_000_000);
+        client.exercise_partial(
+            &exerciser,
+            &option_id,
+            &4_000_000,
+            &client.get_config_fingerprint(),
+        );
 
         let (fill_kind, version, fill) = single_event(&env);
         assert_eq!(fill_kind, symbol_short!("fill"));
@@ -1513,7 +1629,7 @@ mod versioned_lifecycle_events {
         assert_eq!(fill.exercised_amount, 4_000_000);
         assert_eq!(fill.remaining_collateral, 6_000_000);
 
-        client.exercise(&exerciser, &option_id);
+        client.exercise(&exerciser, &option_id, &client.get_config_fingerprint());
 
         let (exercise_kind, version, exercise) = single_event(&env);
         assert_eq!(exercise_kind, symbol_short!("exercise"));
@@ -1536,7 +1652,7 @@ mod versioned_lifecycle_events {
         let _ = single_event(&env);
 
         env.ledger().set_timestamp(750);
-        client.exercise(&exerciser, &option_id);
+        client.exercise(&exerciser, &option_id, &client.get_config_fingerprint());
 
         let (kind, version, event) = single_event(&env);
         assert_eq!(kind, symbol_short!("exercise"));
@@ -1559,7 +1675,12 @@ mod versioned_lifecycle_events {
         assert_eq!(create_kind, symbol_short!("create"));
 
         env.ledger().set_timestamp(750);
-        client.exercise_partial(&exerciser, &option_id, &4_000_000);
+        client.exercise_partial(
+            &exerciser,
+            &option_id,
+            &4_000_000,
+            &client.get_config_fingerprint(),
+        );
         let (fill_kind, _, _) = single_event(&env);
         assert_eq!(fill_kind, symbol_short!("fill"));
 
@@ -1588,7 +1709,12 @@ mod versioned_lifecycle_events {
         assert_eq!(create_kind, symbol_short!("create"));
 
         env.ledger().set_timestamp(750);
-        client.exercise_partial(&exerciser, &option_id, &4_000_000);
+        client.exercise_partial(
+            &exerciser,
+            &option_id,
+            &4_000_000,
+            &client.get_config_fingerprint(),
+        );
         let (fill_kind, _, _) = single_event(&env);
         assert_eq!(fill_kind, symbol_short!("fill"));
 
@@ -1603,5 +1729,587 @@ mod versioned_lifecycle_events {
         assert_eq!(event.amount, 6_000_000);
         assert_eq!(event.exercised_amount, 4_000_000);
         assert_eq!(event.remaining_collateral, 0);
+    }
+}
+
+// ── Configuration fingerprint on settlement (#1744) ───────────────────────
+
+mod settlement_config_fingerprint {
+    use super::*;
+    use soroban_sdk::{symbol_short, testutils::Events as _, BytesN, Symbol, TryFromVal};
+
+    /// The latest `config` event payload, if the last invocation emitted one.
+    fn last_config_event(env: &Env) -> Option<(Address, BytesN<32>)> {
+        let mut found = None;
+        for (_, topics, data) in env.events().all().iter() {
+            if topics.len() != 1 {
+                continue;
+            }
+            let Some(first) = topics.get(0) else { continue };
+            let Ok(kind) = Symbol::try_from_val(env, &first) else {
+                continue;
+            };
+            if kind != symbol_short!("config") {
+                continue;
+            }
+            found = Some(<(Address, BytesN<32>)>::try_from_val(env, &data).unwrap());
+        }
+        found
+    }
+
+    #[test]
+    fn fingerprint_is_stable_across_position_state_changes() {
+        let (env, client, _, _, underlying, quote) = setup_env();
+        let before = client.get_config_fingerprint();
+
+        // Minting, depositing and exercising change balances and positions, not
+        // configuration, so a captured fingerprint must stay valid.
+        let (option_id, _) = mint_call_option(&env, &client, &underlying, &quote);
+        assert_eq!(client.get_config_fingerprint(), before);
+
+        env.ledger().set_timestamp(750);
+        let exerciser = Address::generate(&env);
+        client.exercise_partial(&exerciser, &option_id, &1_000_000, &before);
+        assert_eq!(client.get_config_fingerprint(), before);
+    }
+
+    #[test]
+    fn fingerprint_matches_the_configuration_snapshot() {
+        let (env, client, admin, oracle, _, _) = setup_env();
+        let snapshot = client.get_config_snapshot();
+        assert_eq!(snapshot.admin, admin);
+        assert_eq!(snapshot.oracle, oracle);
+        assert_eq!(snapshot.oracle_max_age, None);
+        assert_eq!(snapshot.storage_version, 0);
+
+        // Any configuration change produces a different fingerprint; reverting
+        // the change restores it, so the fingerprint is a pure function of the
+        // snapshot rather than of call order.
+        let initial = client.get_config_fingerprint();
+        client.set_oracle_max_age(&MAX_AGE);
+        assert_eq!(client.get_config_snapshot().oracle_max_age, Some(MAX_AGE));
+        let guarded = client.get_config_fingerprint();
+        assert_ne!(guarded, initial);
+
+        client.clear_oracle_max_age();
+        assert_eq!(client.get_config_fingerprint(), initial);
+
+        client.migrate();
+        assert_eq!(client.get_config_snapshot().storage_version, 1);
+        assert_ne!(client.get_config_fingerprint(), initial);
+        let _ = env;
+    }
+
+    #[test]
+    fn settlement_succeeds_with_the_current_fingerprint() {
+        let (env, client, _, _, underlying, quote) = setup_env();
+        let (option_id, minter) = mint_call_option(&env, &client, &underlying, &quote);
+        let exerciser = Address::generate(&env);
+        let token = soroban_sdk::token::Client::new(&env, &underlying);
+
+        env.ledger().set_timestamp(750);
+        client.exercise(&exerciser, &option_id, &client.get_config_fingerprint());
+
+        assert_eq!(token.balance(&exerciser), 10_000_000);
+        assert_eq!(token.balance(&client.address), 0);
+        assert_eq!(client.get_reserved_collateral(&minter, &underlying), 0);
+    }
+
+    #[test]
+    fn stale_fingerprint_rejects_settlement_and_preserves_state() {
+        let (env, client, _, _, underlying, quote) = setup_env();
+        let (option_id, minter) = mint_call_option(&env, &client, &underlying, &quote);
+        let exerciser = Address::generate(&env);
+        let token = soroban_sdk::token::Client::new(&env, &underlying);
+
+        // The caller snapshots the configuration, then an admin change lands.
+        let captured = client.get_config_fingerprint();
+        client.set_oracle_max_age(&MAX_AGE);
+        assert_ne!(client.get_config_fingerprint(), captured);
+
+        env.ledger().set_timestamp(750);
+        assert_eq!(
+            client.try_exercise(&exerciser, &option_id, &captured),
+            Err(Ok(crate::OptionsError::StaleConfig))
+        );
+
+        // The rejected settlement moved nothing: balances, reserve, exercised
+        // amount and the position record are all untouched.
+        assert_eq!(token.balance(&exerciser), 0);
+        assert_eq!(token.balance(&client.address), 10_000_000);
+        assert_eq!(
+            client.get_reserved_collateral(&minter, &underlying),
+            10_000_000
+        );
+        assert_eq!(client.get_free_collateral(&minter, &underlying), 0);
+        let (exercised_amount, option, cancelled) = env.as_contract(&client.address, || {
+            (
+                crate::storage::read_exercised_amount(&env, option_id),
+                crate::storage::read_option(&env, option_id),
+                crate::storage::read_cancelled(&env, option_id),
+            )
+        });
+        assert_eq!(exercised_amount, 0);
+        assert!(!option.exercised);
+        assert!(!cancelled);
+        assert!(client.get_option_collateral_health(&option_id).active);
+
+        // Retrying with a refreshed fingerprint settles exactly once.
+        client.exercise(&exerciser, &option_id, &client.get_config_fingerprint());
+        assert_eq!(token.balance(&exerciser), 10_000_000);
+        assert_eq!(token.balance(&client.address), 0);
+        assert_eq!(client.get_reserved_collateral(&minter, &underlying), 0);
+        assert_eq!(
+            client.try_exercise(&exerciser, &option_id, &client.get_config_fingerprint()),
+            Err(Ok(crate::OptionsError::AlreadyExercised))
+        );
+    }
+
+    #[test]
+    fn stale_fingerprint_rejects_partial_settlement_and_allows_safe_retry() {
+        let (env, client, _, _, underlying, quote) = setup_env();
+        let (option_id, minter) = mint_call_option(&env, &client, &underlying, &quote);
+        let exerciser = Address::generate(&env);
+        let token = soroban_sdk::token::Client::new(&env, &underlying);
+
+        let captured = client.get_config_fingerprint();
+        client.migrate();
+
+        env.ledger().set_timestamp(750);
+        assert_eq!(
+            client.try_exercise_partial(&exerciser, &option_id, &4_000_000, &captured),
+            Err(Ok(crate::OptionsError::StaleConfig))
+        );
+        // Nothing was paid out and no reserve was released.
+        assert_eq!(token.balance(&exerciser), 0);
+        assert_eq!(
+            client.get_reserved_collateral(&minter, &underlying),
+            10_000_000
+        );
+
+        // A retry under the refreshed configuration settles the same amount.
+        client.exercise_partial(
+            &exerciser,
+            &option_id,
+            &4_000_000,
+            &client.get_config_fingerprint(),
+        );
+        assert_eq!(token.balance(&exerciser), 4_000_000);
+        assert_eq!(
+            client.get_reserved_collateral(&minter, &underlying),
+            6_000_000
+        );
+    }
+
+    #[test]
+    fn config_fingerprint_functions_require_initialization() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let client = OptionsContractClient::new(&env, &env.register(OptionsContract, ()));
+
+        assert_eq!(
+            client.try_get_config_fingerprint(),
+            Err(Ok(crate::OptionsError::NotInitialized))
+        );
+        assert_eq!(
+            client.try_get_config_snapshot(),
+            Err(Ok(crate::OptionsError::NotInitialized))
+        );
+    }
+
+    #[test]
+    fn admin_config_change_announces_the_new_fingerprint() {
+        let (env, client, admin, _, _, _) = setup_env();
+        client.set_oracle_max_age(&MAX_AGE);
+
+        let (actor, fingerprint) = last_config_event(&env).expect("config event expected");
+        assert_eq!(actor, admin);
+        assert_eq!(fingerprint, client.get_config_fingerprint());
+
+        client.clear_oracle_max_age();
+        let (actor, fingerprint) = last_config_event(&env).expect("config event expected");
+        assert_eq!(actor, admin);
+        assert_eq!(fingerprint, client.get_config_fingerprint());
+    }
+}
+
+// ── Settlement hardening: partial completion and retry (#1749) ───────────────
+
+mod settlement_retry {
+    use super::*;
+    use crate::{OptionsError, SettlementState, SettlementStatus};
+    use soroban_sdk::token;
+
+    /// Simulates a failing token leg by draining the contract's escrow so the
+    /// next payout transfer cannot succeed. Returns the amount drained.
+    fn drain_escrow(
+        env: &Env,
+        client: &OptionsContractClient,
+        asset: &Address,
+        sink: &Address,
+    ) -> i128 {
+        let token = token::Client::new(env, asset);
+        let balance = token.balance(&client.address);
+        env.as_contract(&client.address, || {
+            token.transfer(&client.address, sink, &balance);
+        });
+        balance
+    }
+
+    fn restore_escrow(
+        env: &Env,
+        client: &OptionsContractClient,
+        asset: &Address,
+        sink: &Address,
+        amount: i128,
+    ) {
+        token::Client::new(env, asset).transfer(sink, &client.address, &amount);
+    }
+
+    #[test]
+    fn settlement_state_tracks_the_full_lifecycle() {
+        let (env, client, _, _, underlying, quote) = setup_env();
+        let (option_id, _) = mint_call_option(&env, &client, &underlying, &quote);
+        let exerciser = Address::generate(&env);
+
+        assert_eq!(
+            client.get_settlement_state(&option_id),
+            SettlementState {
+                status: SettlementStatus::Open,
+                exercised_amount: 0,
+                remaining_amount: 10_000_000,
+            }
+        );
+
+        env.ledger().set_timestamp(750);
+        client.exercise_partial(
+            &exerciser,
+            &option_id,
+            &4_000_000,
+            &client.get_config_fingerprint(),
+        );
+        assert_eq!(
+            client.get_settlement_state(&option_id),
+            SettlementState {
+                status: SettlementStatus::PartiallyExercised,
+                exercised_amount: 4_000_000,
+                remaining_amount: 6_000_000,
+            }
+        );
+
+        client.exercise(&exerciser, &option_id, &client.get_config_fingerprint());
+        assert_eq!(
+            client.get_settlement_state(&option_id),
+            SettlementState {
+                status: SettlementStatus::Exercised,
+                exercised_amount: 10_000_000,
+                remaining_amount: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn settlement_state_reports_expired_and_cancelled() {
+        let (env, client, _, _, underlying, quote) = setup_env();
+        let (expiring, _) = mint_call_option(&env, &client, &underlying, &quote);
+        let (cancelled, minter) = mint_call_option(&env, &client, &underlying, &quote);
+
+        client.cancel(&minter, &cancelled);
+        assert_eq!(
+            client.get_settlement_state(&cancelled).status,
+            SettlementStatus::Cancelled
+        );
+
+        env.ledger().set_timestamp(1001);
+        client.expire(&expiring);
+        let state = client.get_settlement_state(&expiring);
+        assert_eq!(state.status, SettlementStatus::Expired);
+        assert_eq!(state.remaining_amount, 0);
+    }
+
+    #[test]
+    fn failed_exercise_leaves_state_and_balances_untouched_then_retry_succeeds() {
+        let (env, client, _, _, underlying, quote) = setup_env();
+        let (option_id, minter) = mint_call_option(&env, &client, &underlying, &quote);
+        let exerciser = Address::generate(&env);
+        let sink = Address::generate(&env);
+        let token_u = token::Client::new(&env, &underlying);
+
+        env.ledger().set_timestamp(750);
+        let drained = drain_escrow(&env, &client, &underlying, &sink);
+        let before = client.get_settlement_state(&option_id);
+
+        assert!(client
+            .try_exercise_partial(
+                &exerciser,
+                &option_id,
+                &4_000_000,
+                &client.get_config_fingerprint()
+            )
+            .is_err());
+
+        // Nothing moved, no progress recorded, reserve intact.
+        assert_eq!(client.get_settlement_state(&option_id), before);
+        assert_eq!(token_u.balance(&exerciser), 0);
+        assert_eq!(
+            client.get_reserved_collateral(&minter, &underlying),
+            10_000_000
+        );
+
+        // Once the leg can succeed, the same call completes exactly once.
+        restore_escrow(&env, &client, &underlying, &sink, drained);
+        client.exercise_partial(
+            &exerciser,
+            &option_id,
+            &4_000_000,
+            &client.get_config_fingerprint(),
+        );
+        assert_eq!(token_u.balance(&exerciser), 4_000_000);
+        assert_eq!(
+            client.get_settlement_state(&option_id).exercised_amount,
+            4_000_000
+        );
+        assert_eq!(
+            client.get_reserved_collateral(&minter, &underlying),
+            6_000_000
+        );
+    }
+
+    #[test]
+    fn failed_full_exercise_does_not_mark_option_exercised() {
+        let (env, client, _, _, underlying, quote) = setup_env();
+        let (option_id, _) = mint_call_option(&env, &client, &underlying, &quote);
+        let exerciser = Address::generate(&env);
+        let sink = Address::generate(&env);
+
+        env.ledger().set_timestamp(750);
+        let drained = drain_escrow(&env, &client, &underlying, &sink);
+        assert!(client
+            .try_exercise(&exerciser, &option_id, &client.get_config_fingerprint())
+            .is_err());
+        assert_eq!(
+            client.get_settlement_state(&option_id).status,
+            SettlementStatus::Open
+        );
+
+        restore_escrow(&env, &client, &underlying, &sink, drained);
+        client.exercise(&exerciser, &option_id, &client.get_config_fingerprint());
+        assert_eq!(
+            client.get_settlement_state(&option_id).status,
+            SettlementStatus::Exercised
+        );
+    }
+
+    #[test]
+    fn failed_expire_is_rolled_back_and_can_be_retried() {
+        let (env, client, _, _, underlying, quote) = setup_env();
+        let (option_id, minter) = mint_call_option(&env, &client, &underlying, &quote);
+        let sink = Address::generate(&env);
+        let token_u = token::Client::new(&env, &underlying);
+
+        env.ledger().set_timestamp(1001);
+        let drained = drain_escrow(&env, &client, &underlying, &sink);
+        assert!(client.try_expire(&option_id).is_err());
+
+        // Not marked expired, reserve not released, minter not paid.
+        assert_eq!(
+            client.get_settlement_state(&option_id).status,
+            SettlementStatus::Open
+        );
+        assert_eq!(
+            client.get_reserved_collateral(&minter, &underlying),
+            10_000_000
+        );
+        assert_eq!(token_u.balance(&minter), 10_000_000);
+
+        restore_escrow(&env, &client, &underlying, &sink, drained);
+        client.expire(&option_id);
+        assert_eq!(token_u.balance(&minter), 20_000_000);
+        assert_eq!(client.get_reserved_collateral(&minter, &underlying), 0);
+        assert_eq!(
+            client.try_expire(&option_id),
+            Err(Ok(OptionsError::AlreadyExpired))
+        );
+    }
+
+    #[test]
+    fn failed_cancel_is_rolled_back_and_can_be_retried() {
+        let (env, client, _, _, underlying, quote) = setup_env();
+        let (option_id, minter) = mint_call_option(&env, &client, &underlying, &quote);
+        let sink = Address::generate(&env);
+        let token_u = token::Client::new(&env, &underlying);
+
+        let drained = drain_escrow(&env, &client, &underlying, &sink);
+        assert!(client.try_cancel(&minter, &option_id).is_err());
+        assert_eq!(
+            client.get_settlement_state(&option_id).status,
+            SettlementStatus::Open
+        );
+        assert_eq!(
+            client.get_reserved_collateral(&minter, &underlying),
+            10_000_000
+        );
+
+        restore_escrow(&env, &client, &underlying, &sink, drained);
+        client.cancel(&minter, &option_id);
+        assert_eq!(token_u.balance(&minter), 20_000_000);
+        assert_eq!(
+            client.try_cancel(&minter, &option_id),
+            Err(Ok(OptionsError::AlreadyCancelled))
+        );
+    }
+
+    #[test]
+    fn rejected_validation_changes_nothing() {
+        let (env, client, _, _, underlying, quote) = setup_env();
+        let (option_id, minter) = mint_call_option(&env, &client, &underlying, &quote);
+        let exerciser = Address::generate(&env);
+        let token_u = token::Client::new(&env, &underlying);
+
+        env.ledger().set_timestamp(750);
+        assert_eq!(
+            client.try_exercise_partial(
+                &exerciser,
+                &option_id,
+                &10_000_001,
+                &client.get_config_fingerprint()
+            ),
+            Err(Ok(OptionsError::ExceedsCollateral))
+        );
+        assert_eq!(
+            client.try_exercise_partial(
+                &exerciser,
+                &option_id,
+                &0,
+                &client.get_config_fingerprint()
+            ),
+            Err(Ok(OptionsError::ZeroAmount))
+        );
+
+        assert_eq!(client.get_settlement_state(&option_id).exercised_amount, 0);
+        assert_eq!(token_u.balance(&client.address), 10_000_000);
+        assert_eq!(
+            client.get_reserved_collateral(&minter, &underlying),
+            10_000_000
+        );
+    }
+
+    #[test]
+    fn checked_exercise_pays_once_when_the_same_request_is_retried() {
+        let (env, client, _, _, underlying, quote) = setup_env();
+        let (option_id, minter) = mint_call_option(&env, &client, &underlying, &quote);
+        let exerciser = Address::generate(&env);
+        let token_u = token::Client::new(&env, &underlying);
+
+        env.ledger().set_timestamp(750);
+        client.exercise_partial_checked(
+            &exerciser,
+            &option_id,
+            &4_000_000,
+            &0,
+            &1,
+            &client.get_config_fingerprint(),
+        );
+
+        // The client never saw the first result and resubmits the identical call.
+        assert_eq!(
+            client.try_exercise_partial_checked(
+                &exerciser,
+                &option_id,
+                &4_000_000,
+                &0,
+                &1,
+                &client.get_config_fingerprint()
+            ),
+            Err(Ok(OptionsError::SettlementStateChanged))
+        );
+
+        assert_eq!(token_u.balance(&exerciser), 4_000_000);
+        assert_eq!(
+            client.get_settlement_state(&option_id).exercised_amount,
+            4_000_000
+        );
+        assert_eq!(
+            client.get_reserved_collateral(&minter, &underlying),
+            6_000_000
+        );
+
+        // Resuming from the persisted progress continues normally.
+        client.exercise_partial_checked(
+            &exerciser,
+            &option_id,
+            &6_000_000,
+            &4_000_000,
+            &2,
+            &client.get_config_fingerprint(),
+        );
+        assert_eq!(
+            client.get_settlement_state(&option_id).status,
+            SettlementStatus::Exercised
+        );
+        assert_eq!(token_u.balance(&exerciser), 10_000_000);
+        assert_eq!(client.get_reserved_collateral(&minter, &underlying), 0);
+    }
+
+    #[test]
+    fn checked_exercise_after_full_settlement_is_refused() {
+        let (env, client, _, _, underlying, quote) = setup_env();
+        let (option_id, _) = mint_call_option(&env, &client, &underlying, &quote);
+        let exerciser = Address::generate(&env);
+        let token_u = token::Client::new(&env, &underlying);
+
+        env.ledger().set_timestamp(750);
+        client.exercise_partial_checked(
+            &exerciser,
+            &option_id,
+            &10_000_000,
+            &0,
+            &1,
+            &client.get_config_fingerprint(),
+        );
+        assert_eq!(
+            client.try_exercise_partial_checked(
+                &exerciser,
+                &option_id,
+                &10_000_000,
+                &0,
+                &1,
+                &client.get_config_fingerprint()
+            ),
+            Err(Ok(OptionsError::SettlementStateChanged))
+        );
+        assert_eq!(token_u.balance(&exerciser), 10_000_000);
+    }
+
+    #[test]
+    fn checked_exercise_still_enforces_normal_validation() {
+        let (env, client, _, _, underlying, quote) = setup_env();
+        let (option_id, minter) = mint_call_option(&env, &client, &underlying, &quote);
+        let exerciser = Address::generate(&env);
+
+        env.ledger().set_timestamp(750);
+        assert_eq!(
+            client.try_exercise_partial_checked(
+                &exerciser,
+                &option_id,
+                &10_000_001,
+                &0,
+                &1,
+                &client.get_config_fingerprint()
+            ),
+            Err(Ok(OptionsError::ExceedsCollateral))
+        );
+        client.cancel(&minter, &option_id);
+        assert_eq!(
+            client.try_exercise_partial_checked(
+                &exerciser,
+                &option_id,
+                &1,
+                &0,
+                &1,
+                &client.get_config_fingerprint()
+            ),
+            Err(Ok(OptionsError::AlreadyCancelled))
+        );
     }
 }
