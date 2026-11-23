@@ -573,6 +573,207 @@ paths:
                 items:
                   $ref: '#/components/schemas/HistoricalApyPoint'
 
+  /api/strategies/comparison/state/{walletAddress}:
+    get:
+      summary: Get strategy comparison workspace state
+      description: Returns the current strategy comparison workspace state and its version for optimistic concurrency control.
+      tags:
+        - Strategies
+      parameters:
+        - name: walletAddress
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Stellar wallet address
+      responses:
+        '200':
+          description: Strategy comparison workspace state retrieved successfully
+          headers:
+            ETag:
+              description: Current workspace version quoted, e.g. "3"
+              schema:
+                type: string
+            X-Comparison-Version:
+              description: Current workspace version as an integer
+              schema:
+                type: integer
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  state:
+                    $ref: '#/components/schemas/StrategyComparisonState'
+                  version:
+                    type: integer
+
+  /api/strategies/comparison/state:
+    put:
+      summary: Update strategy comparison workspace state
+      description: >-
+        Updates comparison workspace state with optimistic concurrency control and idempotency deduplication.
+        Send expectedVersion via If-Match header or JSON body. If another write committed first, returns 409 conflict.
+      tags:
+        - Strategies
+      parameters:
+        - name: If-Match
+          in: header
+          required: false
+          description: Expected workspace version, e.g. "3". "0" means create only.
+          schema:
+            type: string
+        - name: X-Operation-Identity
+          in: header
+          required: false
+          schema:
+            type: string
+        - name: Idempotency-Key
+          in: header
+          required: false
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - walletAddress
+              properties:
+                walletAddress:
+                  type: string
+                selectedStrategyId:
+                  type: string
+                  nullable: true
+                pinnedStrategyIds:
+                  type: array
+                  items:
+                    type: string
+                customAssumptions:
+                  $ref: '#/components/schemas/StrategyComparisonAssumptions'
+                allocatedBalances:
+                  type: object
+                  additionalProperties:
+                    type: number
+                expectedVersion:
+                  type: integer
+                  minimum: 0
+                operationIdentity:
+                  type: string
+      responses:
+        '200':
+          description: Strategy comparison workspace updated or replayed
+          headers:
+            ETag:
+              schema:
+                type: string
+            X-Comparison-Version:
+              schema:
+                type: integer
+            X-Idempotent-Replayed:
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  state:
+                    $ref: '#/components/schemas/StrategyComparisonState'
+                  version:
+                    type: integer
+                  isReplay:
+                    type: boolean
+        '400':
+          description: Invalid strategy comparison state (e.g. fee > 10000 bps or negative balance)
+        '409':
+          description: Concurrent write conflict (STRATEGY_COMPARISON_VERSION_CONFLICT)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StrategyComparisonVersionConflict'
+
+  /api/strategies/comparison/select:
+    post:
+      summary: Select strategy and allocate balance
+      description: >-
+        Atomically selects a strategy and allocates balance under optimistic concurrency control.
+      tags:
+        - Strategies
+      parameters:
+        - name: If-Match
+          in: header
+          required: false
+          schema:
+            type: string
+        - name: X-Operation-Identity
+          in: header
+          required: false
+          schema:
+            type: string
+        - name: Idempotency-Key
+          in: header
+          required: false
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - walletAddress
+                - strategyId
+                - allocationUsd
+              properties:
+                walletAddress:
+                  type: string
+                strategyId:
+                  type: string
+                allocationUsd:
+                  type: number
+                  minimum: 0
+                expectedVersion:
+                  type: integer
+                  minimum: 0
+                operationIdentity:
+                  type: string
+      responses:
+        '200':
+          description: Strategy selected and balance allocated
+          headers:
+            ETag:
+              schema:
+                type: string
+            X-Comparison-Version:
+              schema:
+                type: integer
+            X-Idempotent-Replayed:
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  state:
+                    $ref: '#/components/schemas/StrategyComparisonState'
+                  version:
+                    type: integer
+                  isReplay:
+                    type: boolean
+        '400':
+          description: Invalid request parameters
+        '409':
+          description: Concurrent write conflict (STRATEGY_COMPARISON_VERSION_CONFLICT)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StrategyComparisonVersionConflict'
+
   /api/users/{walletAddress}/pnl:
     get:
       summary: Get user's PnL data
@@ -6712,3 +6913,76 @@ Incident:
           cpuUsagePct: 12.5
           memoryUsageMb: 512
         exportUrl: "/api/audit-monitoring/export"
+
+    StrategyComparisonAssumptions:
+      type: object
+      properties:
+        protocolFeeBps:
+          type: number
+          minimum: 0
+          maximum: 10000
+        vaultFeeBps:
+          type: number
+          minimum: 0
+          maximum: 10000
+        rebalanceCostBps:
+          type: number
+          minimum: 0
+          maximum: 10000
+        slippageBps:
+          type: number
+          minimum: 0
+          maximum: 10000
+
+    StrategyComparisonState:
+      type: object
+      required:
+        - walletAddress
+        - pinnedStrategyIds
+        - customAssumptions
+        - allocatedBalances
+        - updatedAt
+        - version
+      properties:
+        walletAddress:
+          type: string
+        selectedStrategyId:
+          type: string
+          nullable: true
+        pinnedStrategyIds:
+          type: array
+          items:
+            type: string
+        customAssumptions:
+          $ref: '#/components/schemas/StrategyComparisonAssumptions'
+        allocatedBalances:
+          type: object
+          additionalProperties:
+            type: number
+        updatedAt:
+          type: string
+          format: date-time
+        version:
+          type: integer
+          minimum: 0
+
+    StrategyComparisonVersionConflict:
+      type: object
+      required:
+        - code
+        - error
+        - expectedVersion
+        - currentVersion
+        - state
+      properties:
+        code:
+          type: string
+          example: STRATEGY_COMPARISON_VERSION_CONFLICT
+        error:
+          type: string
+        expectedVersion:
+          type: integer
+        currentVersion:
+          type: integer
+        state:
+          $ref: '#/components/schemas/StrategyComparisonState'

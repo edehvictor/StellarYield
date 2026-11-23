@@ -43,3 +43,8 @@ verification failures keep the restored session in a degraded, retryable state
 rather than discarding it. Verified smart-wallet sessions persist the bound
 `authConfigFingerprint` so stale snapshots can be detected and refreshed on
 subsequent lifecycle operations.
+
+## Session and challenge boundary semantics (#1882)
+
+- Client: a session whose age equals `SESSION_TTL_MS` is still valid and expires 1ms later. Idle time equal to `STALE_THRESHOLD_MS` is still fresh. Future timestamps (clock skew) are clamped to zero age. An unparseable `connectedAt` or `lastActivityAt` fails closed (expired / stale). Checks are pure and never mutate the session, so retrying is safe.
+- Server: an auth challenge is valid through its expiry instant (inclusive) and is rejected if its expiry is more than the 5 minute challenge TTL in the future ("Challenge expiry is outside the allowed window."). Rejected challenges are not consumed by the replay cache.
