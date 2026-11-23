@@ -173,6 +173,42 @@ describe("ValuationOperationManager", () => {
     state = { ...INITIAL_STATE };
   });
 
+  it("rejects a concurrent retry while the first valuation is still executing", async () => {
+    let releaseExecution!: () => void;
+    const executionReleased = new Promise<void>((resolve) => {
+      releaseExecution = resolve;
+    });
+    const identity = createValuationOperationIdentity(BASE_PAYLOAD, "op-concurrent-1863");
+
+    const first = manager.executeValuation<TestState, void>({
+      payload: BASE_PAYLOAD,
+      operationIdentity: identity,
+      currentState: state,
+      execute: async () => executionReleased,
+      onSuccessStateUpdate: (current, summary) => ({
+        ...current,
+        balance: current.balance + summary.totalValueUsd,
+      }),
+    });
+
+    await Promise.resolve();
+    const retry = await manager.executeValuation<TestState, void>({
+      payload: BASE_PAYLOAD,
+      operationIdentity: identity,
+      currentState: { ...state, balance: 9_999 },
+    });
+
+    expect(retry).toMatchObject({
+      success: false,
+      errorCode: "DUPLICATE_VALUATION_IN_PROGRESS",
+      isRecoverable: true,
+      state: { balance: 9_999 },
+    });
+
+    releaseExecution();
+    await expect(first).resolves.toMatchObject({ success: true });
+  });
+
   // ── 1. Normal operation ────────────────────────────────────────────────────
 
   it("1. executes a normal valuation successfully and updates state", async () => {
