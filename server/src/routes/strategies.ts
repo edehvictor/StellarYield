@@ -24,6 +24,7 @@ import {
   updateStrategyComparisonState,
   selectStrategyAndAllocate,
   StrategyComparisonVersionConflictError,
+  StrategyComparisonOperationIdentityConflictError,
   StrategyComparisonValidationError,
   STRATEGY_COMPARISON_VERSION_CONFLICT,
   INVALID_STRATEGY_COMPARISON_STATE,
@@ -453,6 +454,11 @@ router.put("/comparison/state", (req: Request, res: Response) => {
       isReplay,
     });
   } catch (err) {
+    if (err instanceof StrategyComparisonOperationIdentityConflictError) {
+      res.status(409).json({ code: err.code, error: err.message });
+      return;
+    }
+
     if (err instanceof StrategyComparisonVersionConflictError) {
       res.setHeader("ETag", `"${err.currentVersion}"`);
       res.setHeader("X-Comparison-Version", String(err.currentVersion));
@@ -545,6 +551,11 @@ router.post("/comparison/select", (req: Request, res: Response) => {
       isReplay,
     });
   } catch (err) {
+    if (err instanceof StrategyComparisonOperationIdentityConflictError) {
+      res.status(409).json({ code: err.code, error: err.message });
+      return;
+    }
+
     if (err instanceof StrategyComparisonVersionConflictError) {
       res.setHeader("ETag", `"${err.currentVersion}"`);
       res.setHeader("X-Comparison-Version", String(err.currentVersion));

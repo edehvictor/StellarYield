@@ -36,6 +36,14 @@ export class StrategyComparisonConflictError extends Error {
   }
 }
 
+export class StrategyComparisonOperationIdentityConflictError extends Error {
+  readonly code = "STRATEGY_COMPARISON_OPERATION_IDENTITY_CONFLICT";
+  constructor(message: string) {
+    super(message);
+    this.name = "StrategyComparisonOperationIdentityConflictError";
+  }
+}
+
 function readVersionFromResponse(res: Response): number {
   const raw =
     res.headers.get("X-Comparison-Version") ??
@@ -112,6 +120,11 @@ export async function saveComparisonStateVersioned(
       currentVersion?: number;
       state?: StrategyComparisonState;
     };
+    if (body.code === "STRATEGY_COMPARISON_OPERATION_IDENTITY_CONFLICT") {
+      throw new StrategyComparisonOperationIdentityConflictError(
+        body.error ?? "Operation identity was already used for a different comparison update.",
+      );
+    }
     if (body.code === "STRATEGY_COMPARISON_VERSION_CONFLICT" && body.state) {
       throw new StrategyComparisonConflictError(
         body.error ?? "Strategy comparison state changed concurrently.",
@@ -179,6 +192,11 @@ export async function selectStrategySafely(
       currentVersion?: number;
       state?: StrategyComparisonState;
     };
+    if (body.code === "STRATEGY_COMPARISON_OPERATION_IDENTITY_CONFLICT") {
+      throw new StrategyComparisonOperationIdentityConflictError(
+        body.error ?? "Operation identity was already used for a different comparison update.",
+      );
+    }
     if (body.code === "STRATEGY_COMPARISON_VERSION_CONFLICT" && body.state) {
       throw new StrategyComparisonConflictError(
         body.error ?? "Strategy state changed concurrently.",

@@ -1,3 +1,5 @@
+import { isDeepStrictEqual } from "node:util";
+
 /**
  * Strategy Comparison Concurrency & State Management Service (#1919)
  *
@@ -31,11 +33,18 @@ export interface UpdateComparisonStateInput {
 
 export interface StrategyComparisonOperationRecord {
   operationIdentity: string;
+  operationPayload: StrategyComparisonOperationPayload;
   result: StrategyComparisonState;
   createdAt: number;
 }
 
+export type StrategyComparisonOperationPayload =
+  | { type: "update"; input: UpdateComparisonStateInput }
+  | { type: "select"; strategyId: string; allocationUsd: number };
+
 export const STRATEGY_COMPARISON_VERSION_CONFLICT = "STRATEGY_COMPARISON_VERSION_CONFLICT";
+export const STRATEGY_COMPARISON_OPERATION_IDENTITY_CONFLICT =
+  "STRATEGY_COMPARISON_OPERATION_IDENTITY_CONFLICT";
 export const INVALID_STRATEGY_COMPARISON_STATE = "INVALID_STRATEGY_COMPARISON_STATE";
 
 /**
@@ -67,9 +76,17 @@ export class StrategyComparisonValidationError extends Error {
   }
 }
 
+export class StrategyComparisonOperationIdentityConflictError extends Error {
+  readonly code = STRATEGY_COMPARISON_OPERATION_IDENTITY_CONFLICT;
+  constructor() {
+    super("Operation identity was already used for a different comparison update.");
+    this.name = "StrategyComparisonOperationIdentityConflictError";
+  }
+}
+
 // In-memory state store indexed by normalized wallet address
 const comparisonStateStore = new Map<string, StrategyComparisonState>();
-// In-memory idempotency store indexed by operation identity
+// In-memory idempotency store indexed by wallet and operation identity
 const comparisonOperationStore = new Map<string, StrategyComparisonOperationRecord>();
 
 function normalizeWallet(wallet: string): string {
@@ -150,6 +167,7 @@ export function validateComparisonStateInput(input: UpdateComparisonStateInput):
 export interface UpdateComparisonStateOptions {
   expectedVersion?: number;
   operationIdentity?: string;
+  operationPayload?: StrategyComparisonOperationPayload;
   sideEffect?: (next: StrategyComparisonState, previous: StrategyComparisonState) => void;
 }
 
@@ -169,12 +187,19 @@ export function updateStrategyComparisonState(
   options: UpdateComparisonStateOptions = {},
 ): { state: StrategyComparisonState; isReplay: boolean } {
   const normalized = normalizeWallet(walletAddress);
-  const { expectedVersion, operationIdentity, sideEffect } = options;
+  const { expectedVersion, operationIdentity, operationPayload, sideEffect } = options;
+  const requestPayload =
+    operationPayload ?? ({ type: "update", input } satisfies StrategyComparisonOperationPayload);
+  const comparablePayload = JSON.parse(JSON.stringify(requestPayload)) as StrategyComparisonOperationPayload;
 
   // 1. Idempotent deduplication check
   if (operationIdentity) {
-    const existingOp = comparisonOperationStore.get(operationIdentity);
+    const operationKey = JSON.stringify([normalized, operationIdentity]);
+    const existingOp = comparisonOperationStore.get(operationKey);
     if (existingOp) {
+      if (!isDeepStrictEqual(existingOp.operationPayload, comparablePayload)) {
+        throw new StrategyComparisonOperationIdentityConflictError();
+      }
       return {
         state: JSON.parse(JSON.stringify(existingOp.result)),
         isReplay: true,
@@ -229,8 +254,9 @@ export function updateStrategyComparisonState(
 
     // Record idempotency operation only after successful commit
     if (operationIdentity) {
-      comparisonOperationStore.set(operationIdentity, {
+      comparisonOperationStore.set(JSON.stringify([normalized, operationIdentity]), {
         operationIdentity,
+        operationPayload: comparablePayload,
         result: JSON.parse(JSON.stringify(nextState)),
         createdAt: Date.now(),
       });
@@ -272,7 +298,10 @@ export function selectStrategyAndAllocate(
       selectedStrategyId: strategyId,
       allocatedBalances: updatedBalances,
     },
-    options,
+    {
+      ...options,
+      operationPayload: { type: "select", strategyId, allocationUsd },
+    },
   );
 }
 

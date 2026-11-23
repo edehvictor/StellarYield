@@ -98,6 +98,7 @@ export default function StrategyComparison() {
 
       const res = await selectStrategySafely(wallet, stratId, 1000, {
         expectedVersion: comparisonVersion,
+        operationIdentity: `strategy-select-${crypto.randomUUID()}`,
       });
 
       setSelectedStrategyId(stratId);

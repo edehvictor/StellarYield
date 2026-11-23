@@ -18,6 +18,7 @@ import {
   selectStrategySafely,
   updateComparisonSafely,
   StrategyComparisonConflictError,
+  StrategyComparisonOperationIdentityConflictError,
   type StrategyComparisonState,
 } from '../strategyComparisonConcurrencyApi';
 
@@ -150,6 +151,39 @@ describe('strategyComparisonConcurrencyApi', () => {
 
   // ─── 3. Conflict detection ──────────────────────────────────────────────────
   describe('conflict detection (409)', () => {
+    it('throws a typed error when an operation identity is reused for different input', async () => {
+      global.fetch = vi.fn().mockResolvedValue(
+        makeResponse(
+          {
+            code: 'STRATEGY_COMPARISON_OPERATION_IDENTITY_CONFLICT',
+            error: 'Operation identity was already used for a different comparison update.',
+          },
+          { status: 409 },
+        ),
+      );
+
+      await expect(
+        saveComparisonStateVersioned(
+          'GWALLET123',
+          { selectedStrategyId: 'soroswap' },
+          { operationIdentity: 'op-reused' },
+        ),
+      ).rejects.toBeInstanceOf(StrategyComparisonOperationIdentityConflictError);
+    });
+
+    it('throws the same typed error for a strategy selection', async () => {
+      global.fetch = vi.fn().mockResolvedValue(
+        makeResponse(
+          { code: 'STRATEGY_COMPARISON_OPERATION_IDENTITY_CONFLICT', error: 'Identity conflict' },
+          { status: 409 },
+        ),
+      );
+
+      await expect(
+        selectStrategySafely('GWALLET123', 'blend', 1000, { operationIdentity: 'op-reused' }),
+      ).rejects.toBeInstanceOf(StrategyComparisonOperationIdentityConflictError);
+    });
+
     it('throws StrategyComparisonConflictError with currentVersion and currentState on 409', async () => {
       const serverState = makeState({ version: 4, selectedStrategyId: 'soroswap' });
       global.fetch = vi.fn().mockResolvedValue(
