@@ -4,6 +4,8 @@ Alert preferences are stored per wallet + vault. Two tabs, two devices, or a
 revert racing an edit could previously overwrite each other silently (last
 write wins). Since #1903 every preference record carries a **version** and
 writes can be made conditional on it (optimistic concurrency).
+Each committed snapshot also carries a SHA-256 configuration fingerprint, so
+clients can reject stale preference configuration before applying a change.
 
 ## Versions
 
@@ -31,6 +33,20 @@ The version check, the write, the version bump and the audit record run as one
 synchronous step in the service, so no other request can interleave between
 the check and the write. If recording the audit entry fails, the previous
 preferences and version are restored before the error is returned.
+
+## Immutable configuration fingerprints (#1902)
+
+Reads expose `X-Preferences-Fingerprint` (and the wallet/vault response also
+includes `configurationFingerprint`). The fingerprint is derived from the
+canonical preference fields, including notification overrides and precedence,
+so object key order cannot change it. Send it as
+`If-Preferences-Fingerprint` or `configurationFingerprint` in the request body.
+
+If another write has changed the snapshot, the server returns `409
+PREFERENCE_FINGERPRINT_CONFLICT` with the current preferences, version, and
+fingerprint. No preference, audit, version, or balance state is changed. The
+client safe-update helper refreshes the returned snapshot and retries; failed
+validation, execution, or audit writes leave the previous snapshot intact.
 
 ## Network / ledger context (#1908)
 

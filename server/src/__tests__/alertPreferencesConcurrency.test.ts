@@ -13,6 +13,9 @@ import {
   clearAlertOperationStore,
   getAlertPreferences,
   getAlertPreferencesVersion,
+  getAlertPreferencesFingerprint,
+  PreferenceFingerprintConflictError,
+  computeAlertPreferencesFingerprint,
   resetAlertPreferencesStore,
   revertAlertPreferences,
   setAlertPreferences,
@@ -39,6 +42,43 @@ beforeEach(() => {
 });
 
 describe("alertsService versioning", () => {
+  it("rejects stale immutable configuration snapshots and allows a safe retry", () => {
+    const first = setAlertPreferences(WALLET, VAULT, prefs(10));
+    const snapshot = getAlertPreferencesFingerprint(WALLET, VAULT);
+    expect(snapshot).toBe(computeAlertPreferencesFingerprint(prefs(10)));
+
+    const second = setAlertPreferences(WALLET, VAULT, prefs(20));
+    const secondFingerprint = getAlertPreferencesFingerprint(WALLET, VAULT);
+    expect(secondFingerprint).toBe(computeAlertPreferencesFingerprint(prefs(20)));
+
+    expect(() =>
+      setAlertPreferences(WALLET, VAULT, prefs(30), undefined, 2, undefined, snapshot ?? undefined),
+    ).toThrow(PreferenceFingerprintConflictError);
+    expect(getAlertPreferencesVersion(WALLET, VAULT)).toBe(2);
+    expect(getAlertPreferencesFingerprint(WALLET, VAULT)).toBe(second.fingerprint);
+    expect(getAlertPreferences(WALLET, VAULT)).toEqual(prefs(20));
+
+    const retry = setAlertPreferences(
+      WALLET,
+      VAULT,
+      prefs(30),
+      undefined,
+      2,
+      undefined,
+      secondFingerprint ?? undefined,
+    );
+    expect(retry.version).toBe(3);
+    expect(getAlertPreferencesFingerprint(WALLET, VAULT)).toBe(computeAlertPreferencesFingerprint(prefs(30)));
+    expect(first.version).not.toBe(retry.version);
+  });
+
+  it("produces the same fingerprint regardless of optional field order", () => {
+    const precedence = ["global", "channel"] as ("global" | "channel")[];
+    const a = { ...prefs(10), precedence };
+    const b = { precedence, ...prefs(10) };
+    expect(computeAlertPreferencesFingerprint(a)).toBe(computeAlertPreferencesFingerprint(b));
+  });
+
   it("starts at version 0 and increments once per committed write", () => {
     expect(getAlertPreferencesVersion(WALLET, VAULT)).toBe(0);
     expect(setAlertPreferences(WALLET, VAULT, prefs(10)).version).toBe(1);

@@ -108,6 +108,8 @@ export interface VersionedAlertPreferences {
   preferences: AlertPreferences;
   /** 0 when the wallet+vault has no preferences yet. */
   version: number;
+  /** Immutable hash of the exact preference snapshot read from the server. */
+  configurationFingerprint: string | null;
 }
 
 /**
@@ -120,9 +122,23 @@ export class AlertPreferencesConflictError extends Error {
     message: string,
     readonly currentVersion: number,
     readonly currentPreferences: AlertPreferences | null,
+    readonly currentFingerprint: string | null = null,
   ) {
     super(message);
     this.name = "AlertPreferencesConflictError";
+  }
+}
+
+export class AlertPreferencesFingerprintConflictError extends Error {
+  readonly code = "PREFERENCE_FINGERPRINT_CONFLICT";
+  constructor(
+    message: string,
+    readonly currentFingerprint: string | null,
+    readonly currentVersion: number,
+    readonly currentPreferences: AlertPreferences | null,
+  ) {
+    super(message);
+    this.name = "AlertPreferencesFingerprintConflictError";
   }
 }
 
@@ -156,6 +172,7 @@ async function throwPreferenceError(res: Response): Promise<never> {
     currentVersion?: number;
     preferences?: AlertPreferences | null;
     currentContext?: ServerAlertPreferenceContext;
+    currentFingerprint?: string | null;
   };
   if (body.code === "PREFERENCE_CONTEXT_CONFLICT") {
     throw new AlertPreferencesContextConflictError(
@@ -167,6 +184,15 @@ async function throwPreferenceError(res: Response): Promise<never> {
   if (body.code === "PREFERENCE_VERSION_CONFLICT") {
     throw new AlertPreferencesConflictError(
       body.error ?? "Alert preferences changed elsewhere. Reload and try again.",
+      typeof body.currentVersion === "number" ? body.currentVersion : readVersion(res),
+      body.preferences ?? null,
+      body.currentFingerprint ?? res.headers.get("X-Preferences-Fingerprint"),
+    );
+  }
+  if (body.code === "PREFERENCE_FINGERPRINT_CONFLICT") {
+    throw new AlertPreferencesFingerprintConflictError(
+      body.error ?? "Alert preferences changed elsewhere. Refresh and try again.",
+      body.currentFingerprint ?? res.headers.get("X-Preferences-Fingerprint"),
       typeof body.currentVersion === "number" ? body.currentVersion : readVersion(res),
       body.preferences ?? null,
     );
@@ -188,7 +214,11 @@ export async function fetchAlertPreferencesVersioned(
   if (res.status === 409) await throwPreferenceError(res);
   if (!res.ok) throw new Error("Failed to fetch alert preferences");
   const preferences = (await res.json()) as AlertPreferences;
-  return { preferences, version: readVersion(res) };
+  return {
+    preferences,
+    version: readVersion(res),
+    configurationFingerprint: res.headers.get("X-Preferences-Fingerprint"),
+  };
 }
 
 export async function fetchAlertPreferences(
@@ -212,10 +242,11 @@ export async function saveAlertPreferencesVersioned(
   options: {
     operationIdentity?: string;
     expectedVersion?: number;
+    expectedFingerprint?: string | null;
     context?: AlertPreferenceContext;
   } = {},
 ): Promise<VersionedAlertPreferences> {
-  const { operationIdentity, expectedVersion } = options;
+  const { operationIdentity, expectedVersion, expectedFingerprint } = options;
   const context = options.context ?? buildAlertPreferenceContext(vaultId);
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
@@ -226,6 +257,7 @@ export async function saveAlertPreferencesVersioned(
     headers["Idempotency-Key"] = operationIdentity;
   }
   if (expectedVersion !== undefined) headers["If-Match"] = `"${expectedVersion}"`;
+  if (expectedFingerprint) headers["If-Preferences-Fingerprint"] = expectedFingerprint;
   const res = await fetch(`${ALERTS_BASE}/preferences`, {
     method: "PUT",
     headers,
@@ -235,6 +267,7 @@ export async function saveAlertPreferencesVersioned(
       preferences,
       operationIdentity,
       context,
+      configurationFingerprint: expectedFingerprint,
     }),
   });
   if (res.status === 409) await throwPreferenceError(res);
@@ -243,7 +276,11 @@ export async function saveAlertPreferencesVersioned(
     throw new Error(body.error ?? "Failed to save alert preferences");
   }
   const saved = (await res.json()) as AlertPreferences;
-  return { preferences: saved, version: readVersion(res) };
+  return {
+    preferences: saved,
+    version: readVersion(res),
+    configurationFingerprint: res.headers.get("X-Preferences-Fingerprint"),
+  };
 }
 
 export async function saveAlertPreferences(
@@ -280,17 +317,28 @@ export async function updateAlertPreferencesSafely(
   const current = await fetchAlertPreferencesVersioned(walletAddress, vaultId, { context });
   let base: AlertPreferences | null = current?.preferences ?? null;
   let version = current?.version ?? 0;
+  let configurationFingerprint = current?.configurationFingerprint ?? null;
   for (let attempt = 1; ; attempt++) {
     try {
       return await saveAlertPreferencesVersioned(walletAddress, vaultId, change(base), {
         expectedVersion: version,
+        expectedFingerprint: configurationFingerprint,
         context,
         operationIdentity: `op-prefs-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`,
       });
     } catch (error) {
-      if (!(error instanceof AlertPreferencesConflictError) || attempt >= maxAttempts) throw error;
-      base = error.currentPreferences;
-      version = error.currentVersion;
+      if (error instanceof AlertPreferencesConflictError) {
+        base = error.currentPreferences;
+        version = error.currentVersion;
+        configurationFingerprint = error.currentFingerprint;
+      } else if (error instanceof AlertPreferencesFingerprintConflictError) {
+        base = error.currentPreferences;
+        version = error.currentVersion;
+        configurationFingerprint = error.currentFingerprint;
+      } else {
+        throw error;
+      }
+      if (attempt >= maxAttempts) throw error;
     }
   }
 }
