@@ -177,17 +177,84 @@ export interface ClaimResult {
     success: boolean;
     hash?: string;
     error?: string;
+    /** True when a submitted transaction may still complete on-chain. */
+    pending?: boolean;
 }
 
+/** Deduplicate concurrent claims within this JavaScript runtime. */
+const inFlightClaims = new Map<string, Promise<ClaimResult>>();
+
+/** Retain hashes whose final on-chain outcome has not been established. */
+const unresolvedClaims = new Map<string, string>();
+
 /**
- * Builds, signs via Freighter, and submits a `claim_vested` transaction
- * for the given wallet address.
+ * Builds, signs via Freighter, and submits a claim_vested transaction.
  *
- * @param walletAddress - The beneficiary account ID.
- * @returns A `ClaimResult` indicating success or a user-friendly error.
+ * Concurrent calls for the same wallet and contract share one operation.
+ * An unresolved transaction must be reconciled before another is submitted.
+ *
+ * This client-side protection does not replace on-chain concurrency controls.
  */
 export async function claimVested(walletAddress: string): Promise<ClaimResult> {
+    const contractId = getContractId("vesting");
+    const key = `${NETWORK_PASSPHRASE}:${contractId ?? ""}:${walletAddress}`;
+
+    const active = inFlightClaims.get(key);
+    if (active) return active;
+
+    const operation = (async (): Promise<ClaimResult> => {
+        const pendingHash = unresolvedClaims.get(key);
+
+        if (pendingHash) {
+            try {
+                const rpc = new StellarSdk.rpc.Server(RPC_URL);
+                const status = await rpc.getTransaction(pendingHash);
+
+                if (status.status === StellarSdk.rpc.Api.GetTransactionStatus.SUCCESS) {
+                    unresolvedClaims.delete(key);
+                    return { success: true, hash: pendingHash };
+                }
+
+                if (status.status === StellarSdk.rpc.Api.GetTransactionStatus.FAILED) {
+                    unresolvedClaims.delete(key);
+                    return {
+                        success: false,
+                        hash: pendingHash,
+                        error: "Previous claim failed on-chain; retry is safe.",
+                    };
+                }
+            } catch {
+                // An RPC error does not prove that the transaction failed.
+            }
+
+            return {
+                success: false,
+                pending: true,
+                hash: pendingHash,
+                error: "Previous claim outcome is unknown. Check its transaction hash before retrying.",
+            };
+        }
+
+        return executeClaimVested(walletAddress, key);
+    })();
+
+    inFlightClaims.set(key, operation);
+
+    try {
+        return await operation;
+    } finally {
+        if (inFlightClaims.get(key) === operation) {
+            inFlightClaims.delete(key);
+        }
+    }
+}
+
+async function executeClaimVested(
+    walletAddress: string,
+    key: string,
+): Promise<ClaimResult> {
     const vestingContractId = getContractId("vesting");
+
     try {
         validateContractRegistryEntry("vesting", vestingContractId);
     } catch (err) {
@@ -202,6 +269,7 @@ export async function claimVested(walletAddress: string): Promise<ClaimResult> {
         const contract = new StellarSdk.Contract(vestingContractId);
 
         const account = await server.getAccount(walletAddress);
+
         const builtTx = new StellarSdk.TransactionBuilder(account, {
             fee: StellarSdk.BASE_FEE,
             networkPassphrase: NETWORK_PASSPHRASE,
@@ -215,8 +283,9 @@ export async function claimVested(walletAddress: string): Promise<ClaimResult> {
             .setTimeout(30)
             .build();
 
-        // Simulate to get footprint / auth
+        // Simulate to obtain the transaction footprint and authorization.
         const sim = await server.simulateTransaction(builtTx);
+
         if (StellarSdk.rpc.Api.isSimulationError(sim)) {
             return {
                 success: false,
@@ -234,7 +303,10 @@ export async function claimVested(walletAddress: string): Promise<ClaimResult> {
         });
 
         if (signResult.error) {
-            return { success: false, error: signResult.error.message };
+            return {
+                success: false,
+                error: signResult.error.message,
+            };
         }
 
         const signedTx = StellarSdk.TransactionBuilder.fromXDR(
@@ -251,29 +323,60 @@ export async function claimVested(walletAddress: string): Promise<ClaimResult> {
             };
         }
 
-        // Poll for confirmation
+        // Do not submit another claim while the outcome is unknown.
+        unresolvedClaims.set(key, sendResult.hash);
+
         const pollStart = Date.now();
+
         while (Date.now() - pollStart < 30_000) {
             const statusResult = await server.getTransaction(sendResult.hash);
-            if (statusResult.status === StellarSdk.rpc.Api.GetTransactionStatus.SUCCESS) {
-                return { success: true, hash: sendResult.hash };
-            }
-            if (statusResult.status === StellarSdk.rpc.Api.GetTransactionStatus.FAILED) {
+
+            if (
+                statusResult.status ===
+                StellarSdk.rpc.Api.GetTransactionStatus.SUCCESS
+            ) {
+                unresolvedClaims.delete(key);
+
                 return {
-                    success: false,
-                    error:
-                        statusResult.resultXdr?.toString() ?? "Transaction failed on-chain",
+                    success: true,
                     hash: sendResult.hash,
                 };
             }
-            await new Promise((r) => setTimeout(r, 2_000));
+
+            if (
+                statusResult.status ===
+                StellarSdk.rpc.Api.GetTransactionStatus.FAILED
+            ) {
+                unresolvedClaims.delete(key);
+
+                return {
+                    success: false,
+                    error:
+                        statusResult.resultXdr?.toString() ??
+                        "Transaction failed on-chain",
+                    hash: sendResult.hash,
+                };
+            }
+
+            await new Promise((resolve) => setTimeout(resolve, 2_000));
         }
 
-        return { success: false, error: "Transaction polling timed out." };
+        return {
+            success: false,
+            pending: true,
+            hash: sendResult.hash,
+            error: "Transaction confirmation timed out; check the hash before retrying.",
+        };
     } catch (err) {
         return {
             success: false,
             error: err instanceof Error ? err.message : "Unknown error",
+            ...(unresolvedClaims.has(key)
+                ? {
+                    pending: true,
+                    hash: unresolvedClaims.get(key),
+                }
+                : {}),
         };
     }
 }
@@ -285,6 +388,7 @@ export function formatTokens(stroops: bigint, symbol = "YIELD"): string {
     const whole = stroops / 10_000_000n;
     const frac = stroops % 10_000_000n;
     const fracStr = frac.toString().padStart(7, "0").replace(/0+$/, "");
+
     return fracStr
         ? `${whole.toString()}.${fracStr} ${symbol}`
         : `${whole.toString()} ${symbol}`;
@@ -293,6 +397,7 @@ export function formatTokens(stroops: bigint, symbol = "YIELD"): string {
 /** Returns the percentage of tokens vested out of total allocation (0–100). */
 export function vestedPercent(schedule: VestingSchedule): number {
     if (schedule.totalAllocation === 0n) return 0;
+
     return Number(
         (schedule.vestedAmount * 100n) / schedule.totalAllocation,
     );
@@ -301,6 +406,7 @@ export function vestedPercent(schedule: VestingSchedule): number {
 /** Returns the percentage of tokens already claimed out of total allocation. */
 export function claimedPercent(schedule: VestingSchedule): number {
     if (schedule.totalAllocation === 0n) return 0;
+
     return Number(
         (schedule.claimedAmount * 100n) / schedule.totalAllocation,
     );
