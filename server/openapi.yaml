@@ -5114,6 +5114,138 @@ paths:
         '500':
           description: Failed to compute recommendation
 
+  /api/governance/config-snapshot:
+    post:
+      summary: Compute a governance configuration snapshot fingerprint
+      description: |
+        Returns the canonical signer/threshold/contract snapshot and its
+        immutable, domain-separated SHA-256 fingerprint (#1894). Use the
+        fingerprint to bind forecasts and quorum checks, and call this endpoint
+        again to refresh work after a configuration change. Read-only.
+      tags:
+        - Governance
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GovernanceConfigSnapshot'
+      responses:
+        '200':
+          description: Canonical snapshot and fingerprint
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  snapshot:
+                    $ref: '#/components/schemas/GovernanceConfigSnapshot'
+                  fingerprint:
+                    type: string
+                    pattern: '^[0-9a-f]{64}$'
+                  shortFingerprint:
+                    type: string
+                  canonicalPayload:
+                    type: string
+        '400':
+          description: INVALID_GOVERNANCE_CONFIG — the snapshot is malformed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GovernanceConfigError'
+
+  /api/governance/forecast:
+    post:
+      summary: Forecast the impact of a governance proposal
+      description: |
+        Estimates the impact of a governance parameter change on yield,
+        exposure, and fees. Read-only. When `configSnapshot` and
+        `expectedConfigFingerprint` are supplied together, the request is bound
+        to that exact configuration: a stale or malformed fingerprint returns
+        HTTP 409/400 before any forecast is computed (#1894).
+      tags:
+        - Governance
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - proposalType
+                - parameters
+                - baseline
+              properties:
+                proposalType:
+                  type: string
+                  enum: [fee_change, allocation_limit, strategy_param, reward_change]
+                parameters:
+                  type: object
+                  additionalProperties:
+                    type: number
+                baseline:
+                  type: object
+                  required: [yieldPct, exposurePct, feeRatePct, tvlUsd]
+                  properties:
+                    yieldPct:
+                      type: number
+                    exposurePct:
+                      type: number
+                    feeRatePct:
+                      type: number
+                    tvlUsd:
+                      type: number
+                    riskScore:
+                      type: number
+                    vaultCount:
+                      type: number
+                configSnapshot:
+                  $ref: '#/components/schemas/GovernanceConfigSnapshot'
+                expectedConfigFingerprint:
+                  type: string
+                  pattern: '^[0-9a-f]{64}$'
+      responses:
+        '200':
+          description: Forecast result, optionally bound with configFingerprint
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  proposalType:
+                    type: string
+                  parameters:
+                    type: object
+                  baseline:
+                    type: object
+                  forecast:
+                    type: object
+                  impactSummary:
+                    type: object
+                  warnings:
+                    type: array
+                    items:
+                      type: string
+                  disclaimer:
+                    type: string
+                  configSnapshot:
+                    $ref: '#/components/schemas/GovernanceConfigSnapshot'
+                  configFingerprint:
+                    type: string
+                    pattern: '^[0-9a-f]{64}$'
+        '400':
+          description: Invalid request or INVALID_GOVERNANCE_CONFIG
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GovernanceConfigError'
+        '409':
+          description: STALE_GOVERNANCE_CONFIG — refresh the snapshot and retry
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GovernanceConfigError'
+
   /api/governance/quorum-progress:
     post:
       summary: Compute multi-sig signer quorum progress
@@ -5121,6 +5253,10 @@ paths:
         Deterministic quorum progress for a multi-sig operation: signed count,
         required threshold, remaining signatures, progress percentage, met flag,
         and per-signer status. Read-only (#1310).
+
+        Optionally bind the calculation to an immutable governance configuration
+        fingerprint (#1894). A stale or malformed `expectedConfigFingerprint`
+        returns HTTP 409/400 without producing a quorum result.
       tags:
         - Governance
       requestBody:
@@ -5147,6 +5283,13 @@ paths:
                 threshold:
                   type: number
                   description: Required signature threshold
+                contractId:
+                  type: string
+                  description: Governance/vault contract the signer set applies to
+                expectedConfigFingerprint:
+                  type: string
+                  pattern: '^[0-9a-f]{64}$'
+                  description: Fingerprint captured when the work was prepared
       responses:
         '200':
           description: Quorum progress
@@ -5165,6 +5308,9 @@ paths:
                     type: integer
                   met:
                     type: boolean
+                  configFingerprint:
+                    type: string
+                    pattern: '^[0-9a-f]{64}$'
                   perSigner:
                     type: array
                     items:
@@ -5175,7 +5321,17 @@ paths:
                         signed:
                           type: boolean
         '400':
-          description: Invalid request body
+          description: Invalid request body or INVALID_GOVERNANCE_CONFIG
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GovernanceConfigError'
+        '409':
+          description: STALE_GOVERNANCE_CONFIG — refresh the snapshot and retry
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GovernanceConfigError'
 
   /api/preferences/audit/{walletAddress}:
     get:
