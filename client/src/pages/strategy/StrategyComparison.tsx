@@ -17,6 +17,11 @@ import { apiUrl } from '../../lib/api';
 import { useBackendStatus } from '../../hooks/useBackendStatus';
 import { BackendUnavailable } from '../../components/BackendUnavailable';
 import {
+  selectStrategySafely,
+  StrategyComparisonConflictError,
+} from '../../features/strategies/strategyComparisonConcurrencyApi';
+
+import {
   bpsToPercent,
   formatApy,
   formatComparisonCurrency,
@@ -45,21 +50,16 @@ export default function StrategyComparison() {
   const [data, setData] = useState<StrategyYield[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [configFingerprint, setConfigFingerprint] = useState<string | null>(null);
-  const [isStaleConfig, setIsStaleConfig] = useState(false);
-  const [validationWarning, setValidationWarning] = useState<string | null>(null);
+  const [comparisonVersion, setComparisonVersion] = useState<number>(1);
   const [selectedStrategyId, setSelectedStrategyId] = useState<string | null>(null);
-  const [actionNotice, setActionNotice] = useState<{ type: 'error' | 'success'; message: string } | null>(null);
-  
-  // Ref to track confirmed fingerprint across async calls
-  const confirmedFingerprintRef = useRef<string | null>(null);
+  const [conflictNotice, setConflictNotice] = useState<string | null>(null);
+  const [isUpdatingSelection, setIsUpdatingSelection] = useState(false);
   const backendStatus = useBackendStatus();
 
   const fetchStrategies = async () => {
     try {
       setError(null);
-      setValidationWarning(null);
-      setActionNotice(null);
+      setConflictNotice(null);
       setLoading(true);
 
       const res = await fetch(apiUrl('/api/yields'));
@@ -74,6 +74,17 @@ export default function StrategyComparison() {
       // Malformed entries are skipped; nothing is computed from them.
       const strategies = yields.filter(isComparableStrategy);
 
+      // Extract comparison version if returned by server headers (optional; guards missing headers in test mocks)
+      const versionHeader =
+        (res.headers?.get?.('X-Comparison-Version') ?? null) ||
+        (res.headers?.get?.('ETag') ?? null)?.replace(/^W\//, '').replace(/^"(.*)"$/, '$1');
+      if (versionHeader) {
+        const v = Number(versionHeader);
+        if (Number.isSafeInteger(v) && v > 0) {
+          setComparisonVersion(v);
+        }
+      }
+
       setData(strategies);
     } catch (err: unknown) {
       const msg = getErrorMessage(err);
@@ -87,6 +98,36 @@ export default function StrategyComparison() {
       });
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handleSelectStrategy = async (strategyName: string) => {
+    try {
+      setConflictNotice(null);
+      setIsUpdatingSelection(true);
+      const stratId = strategyName.toLowerCase();
+      const wallet = "G_CURRENT_USER";
+
+      const res = await selectStrategySafely(wallet, stratId, 1000, {
+        expectedVersion: comparisonVersion,
+      });
+
+      setSelectedStrategyId(stratId);
+      setComparisonVersion(res.version);
+    } catch (err: unknown) {
+      if (err instanceof StrategyComparisonConflictError) {
+        setConflictNotice(
+          `Concurrent state change detected. Another session updated strategy workspace to v${err.currentVersion}. Synchronized safely without state corruption.`,
+        );
+        setComparisonVersion(err.currentVersion);
+        if (err.currentState?.selectedStrategyId) {
+          setSelectedStrategyId(err.currentState.selectedStrategyId);
+        }
+      } else {
+        setError(getErrorMessage(err));
+      }
+    } finally {
+      setIsUpdatingSelection(false);
     }
   };
 
@@ -178,16 +219,12 @@ export default function StrategyComparison() {
             <p className="text-gray-400">
               Side-by-side analysis of risk, liquidity, and rebalancing approaches.
             </p>
-            {configFingerprint && (
-              <span
-                data-testid="config-fingerprint-badge"
-                className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-mono bg-white/5 text-gray-300 border border-white/10"
-                title={`Snapshot Fingerprint: ${configFingerprint}`}
-              >
-                <ShieldCheck size={12} className="text-emerald-400" />
-                {formatShortFingerprint(configFingerprint)}
-              </span>
-            )}
+            <span
+              data-testid="comparison-version-badge"
+              className="text-xs px-2.5 py-0.5 rounded-full bg-indigo-500/15 border border-indigo-500/30 text-indigo-300 font-mono inline-flex items-center gap-1"
+            >
+              <Layers size={11} /> Workspace v{comparisonVersion}
+            </span>
           </div>
         </div>
         <div className="flex flex-wrap gap-2">
@@ -230,58 +267,42 @@ export default function StrategyComparison() {
         </div>
       </header>
 
-      {/* Stale Configuration Warning Banner */}
-      {isStaleConfig && (
+      {conflictNotice && (
         <div
-          data-testid="stale-config-warning"
-          className="p-4 rounded-2xl bg-amber-500/10 border border-amber-500/30 text-amber-200 flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-lg shadow-amber-500/5 animate-in fade-in"
+          role="status"
+          data-testid="concurrent-conflict-notice"
+          className="p-4 rounded-xl bg-indigo-500/15 border border-indigo-500/30 flex items-center justify-between text-indigo-200 text-sm animate-in fade-in"
         >
-          <div className="flex items-center gap-3">
-            <AlertTriangle size={20} className="text-amber-400 shrink-0" />
-            <div>
-              <p className="font-semibold text-sm">Strategy Configuration Snapshot Stale</p>
-              <p className="text-xs text-amber-300/80">
-                Underlying strategy configuration has changed. Existing comparisons and balances are preserved. Refresh to update safely.
-              </p>
-            </div>
+          <div className="flex items-center gap-2">
+            <Activity size={18} className="text-indigo-400 flex-shrink-0" />
+            <span>{conflictNotice}</span>
           </div>
           <button
-            onClick={fetchStrategies}
-            disabled={loading}
-            className="px-3 py-1.5 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 text-amber-200 text-xs font-semibold border border-amber-500/40 transition-colors shrink-0"
+            onClick={() => setConflictNotice(null)}
+            className="text-xs text-gray-400 hover:text-white ml-4"
           >
-            Refresh Configuration
+            Dismiss
           </button>
         </div>
       )}
 
-      {/* Non-destructive Validation Warning Banner */}
-      {validationWarning && (
+      {error && data.length > 0 && (
         <div
-          data-testid="validation-warning-banner"
-          className="p-4 rounded-2xl bg-rose-500/10 border border-rose-500/30 text-rose-200 flex items-center gap-3 shadow-lg shadow-rose-500/5 animate-in fade-in"
+          role="alert"
+          className="p-4 rounded-xl bg-amber-500/10 border border-amber-500/30 flex items-center justify-between text-amber-200 text-sm animate-in fade-in"
         >
-          <AlertTriangle size={18} className="text-rose-400 shrink-0" />
-          <p className="text-xs font-medium">{validationWarning}</p>
-        </div>
-      )}
-
-      {/* Action Notice (Selection Success / Failure) */}
-      {actionNotice && (
-        <div
-          data-testid="action-notice"
-          className={`p-4 rounded-2xl border text-xs font-medium flex items-center gap-3 animate-in fade-in ${
-            actionNotice.type === 'error'
-              ? 'bg-rose-500/10 border-rose-500/30 text-rose-200'
-              : 'bg-emerald-500/10 border-emerald-500/30 text-emerald-200'
-          }`}
-        >
-          {actionNotice.type === 'error' ? (
-            <AlertTriangle size={16} className="text-rose-400 shrink-0" />
-          ) : (
-            <Check size={16} className="text-emerald-400 shrink-0" />
-          )}
-          <p>{actionNotice.message}</p>
+          <div className="flex items-center gap-2">
+            <AlertTriangle size={18} className="text-amber-400 flex-shrink-0" />
+            <span>
+              Failed to refresh strategies: {error}. Existing strategy comparisons and balances remain preserved.
+            </span>
+          </div>
+          <button
+            onClick={fetchStrategies}
+            className="px-3 py-1 bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 rounded text-xs font-semibold ml-4"
+          >
+            Retry
+          </button>
         </div>
       )}
 
@@ -409,14 +430,19 @@ export default function StrategyComparison() {
 
                   {/* Actions */}
                   <button
-                    onClick={() => handleSelectStrategy(strategy)}
+                    type="button"
+                    onClick={() => handleSelectStrategy(strategy.protocolName)}
+                    disabled={isUpdatingSelection}
+                    aria-pressed={selectedStrategyId === strategy.protocolName.toLowerCase()}
                     className={`w-full py-3 rounded-xl transition-all font-bold tracking-wide mt-2 ${
-                      isSelected
-                        ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40'
+                      selectedStrategyId === strategy.protocolName.toLowerCase()
+                        ? 'bg-emerald-600 hover:bg-emerald-500 text-white shadow-lg shadow-emerald-600/30'
                         : 'btn-primary hover:scale-[1.02]'
                     }`}
                   >
-                    {isSelected ? 'Strategy Selected ✓' : 'Select Strategy'}
+                    {selectedStrategyId === strategy.protocolName.toLowerCase()
+                      ? '✓ Strategy Selected'
+                      : 'Select Strategy'}
                   </button>
                 </div>
               </div>

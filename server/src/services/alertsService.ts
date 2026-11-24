@@ -39,6 +39,7 @@ import {
   resolveContextForRead,
   resolveContextForWrite,
 } from "./alertPreferenceContext";
+import { sortNotificationsDeterministically } from "../utils/deterministicSort";
 
 const prisma = new PrismaClient();
 
@@ -440,10 +441,11 @@ export async function createAlert(input: CreateAlertInput) {
 
 /** List all non-deleted alerts for a wallet address. */
 export async function listAlerts(walletAddress: string) {
-  return prisma.userAlert.findMany({
+  const alerts = await prisma.userAlert.findMany({
     where: { walletAddress, status: { not: "deleted" } },
-    orderBy: { createdAt: "desc" },
+    orderBy: [{ createdAt: "desc" }, { id: "asc" }],
   });
+  return sortNotificationsDeterministically(alerts);
 }
 
 /** Soft-delete an alert (sets status to "deleted"). */
