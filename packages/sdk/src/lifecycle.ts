@@ -10,6 +10,11 @@ import {
   type SdkErrorPhase,
 } from "./errors";
 import { YIELD_VAULT_SPEC_HASH } from "./generated/yield_vault";
+import type { NetworkName } from "./network";
+import {
+  assertPreparedTransactionContext,
+  type SimulationContextInput,
+} from "./simulationContext";
 
 export type TransactionState =
   | "CREATED"
@@ -240,7 +245,19 @@ export interface PreparedTransactionMeta<T> {
   idempotencyKey?: string;
   specHash?: string;
   configFingerprint?: string;
+  /** Canonical network id the transaction was simulated for, when known (#1857). */
+  network?: NetworkName;
 }
+
+/**
+ * Context a caller is in *now*, checked before signing or submitting (#1857).
+ *
+ * Identity fields must equal what the transaction was simulated for, and
+ * `ledger` (the current ledger) must lie within
+ * `[meta.latestLedger, meta.validUntilLedger]`. A mismatch throws
+ * {@link SimulationContextMismatchError} before the signer or RPC is called.
+ */
+export type TransactionContextExpectation = SimulationContextInput;
 
 export class PreparedTransaction<T = unknown> {
   public readonly state: TransactionState = "SIMULATED";
@@ -256,6 +273,15 @@ export class PreparedTransaction<T = unknown> {
 
   public toXDR(): string {
     return this.xdr;
+  }
+
+  /**
+   * Throws {@link SimulationContextMismatchError} if this transaction was not
+   * simulated for `current` network / contract / version, or if
+   * `current.ledger` is outside its validity window (#1857).
+   */
+  public assertContext(current: TransactionContextExpectation): void {
+    assertPreparedTransactionContext(this.meta, current, { phase: "sign" });
   }
 
   /** Stable operation identity carried into submit-time duplicate checks. */
@@ -303,8 +329,13 @@ export class PreparedTransaction<T = unknown> {
       operationId?: string;
       validate?: () => boolean | string | void;
       bypassIdempotency?: boolean;
+      /** Reject before the signer is invoked if the live context has changed (#1857). */
+      expectedContext?: TransactionContextExpectation;
     }
   ): Promise<SignedTransaction<T>> {
+    if (options?.expectedContext) {
+      assertPreparedTransactionContext(this.meta, options.expectedContext, { phase: "sign" });
+    }
     const signedXdr = await signer.signTransaction(this.xdr, {
       networkPassphrase: this.meta.networkPassphrase,
       contractId: this.meta.contractId,
@@ -396,13 +427,18 @@ export class SignedTransaction<T = unknown> {
    */
   public async submit(
     serverOrUrl: rpc.Server | { rpcUrl: string } | string,
-    expectation: LifecycleContextExpectation = {}
+    options?: {
+      /**
+       * Reject before any duplicate lookup or RPC call if the live network,
+       * contract, version, or ledger no longer matches this transaction
+       * (#1857). Nothing is recorded, so a corrected retry is safe.
+       */
+      expectedContext?: TransactionContextExpectation;
+    }
   ): Promise<SubmittedTransaction<T>> {
-    // A network/ledger/version mismatch is rejected before the duplicate guard
-    // is consulted or anything reaches the network. The registered operation
-    // identity and vault balances stay exactly as they were, so the caller can
-    // refresh its context and retry this transaction.
-    this.assertContext(expectation, "submit");
+    if (options?.expectedContext) {
+      assertPreparedTransactionContext(this.meta, options.expectedContext, { phase: "submit" });
+    }
     const operationId = this.resolveOperationId();
     const existingHash = lookupSubmittedOperation(operationId);
     if (existingHash) {

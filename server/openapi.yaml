@@ -557,6 +557,74 @@ paths:
         '500':
           description: Failed to fetch yield data (`YIELD_FETCH_FAILED`, `recoverable` true). Safe to retry.
 
+  /api/strategies/config-snapshot:
+    get:
+      summary: Get strategy comparison configuration snapshot
+      description: Returns the active immutable configuration snapshot and its SHA-256 fingerprint (#1918)
+      tags:
+        - Strategies
+      responses:
+        '200':
+          description: Strategy comparison configuration snapshot
+          headers:
+            X-Strategy-Config-Fingerprint:
+              schema:
+                type: string
+              description: SHA-256 configuration fingerprint
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StrategyComparisonConfigSnapshotResponse'
+
+  /api/strategies/compare:
+    post:
+      summary: Compare strategies against configuration snapshot
+      description: Compares strategies while enforcing snapshot fingerprint validity (#1918)
+      tags:
+        - Strategies
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                expectedConfigFingerprint:
+                  type: string
+                  description: Expected SHA-256 configuration snapshot fingerprint
+                strategyIds:
+                  type: array
+                  items:
+                    type: string
+                  description: Optional list of strategy identifiers to compare
+      responses:
+        '200':
+          description: Comparison completed successfully
+          headers:
+            X-Strategy-Config-Fingerprint:
+              schema:
+                type: string
+              description: Active configuration fingerprint
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  strategies:
+                    type: array
+                    items:
+                      type: object
+                  configFingerprint:
+                    type: string
+                  comparedAt:
+                    type: string
+        '409':
+          description: Stale strategy configuration snapshot detected
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StrategyComparisonStaleErrorResponse'
+
   /api/yields/history:
     get:
       summary: Get historical APY data
@@ -5391,6 +5459,46 @@ components:
         type: string
         pattern: '^[A-Za-z0-9._:-]{1,255}$'
   schemas:
+    StrategyComparisonConfigSnapshotResponse:
+      type: object
+      required:
+        - config
+        - configFingerprint
+        - shortFingerprint
+        - generatedAt
+      properties:
+        config:
+          type: object
+          description: Canonical configuration parameters
+        configFingerprint:
+          type: string
+          description: 64-character SHA-256 hex digest
+        shortFingerprint:
+          type: string
+          description: Human-readable short fingerprint
+        generatedAt:
+          type: string
+          format: date-time
+
+    StrategyComparisonStaleErrorResponse:
+      type: object
+      required:
+        - error
+        - code
+        - isRecoverable
+        - currentFingerprint
+      properties:
+        error:
+          type: string
+        code:
+          type: string
+          enum: [STALE_STRATEGY_CONFIG, INVALID_FINGERPRINT]
+        isRecoverable:
+          type: boolean
+        currentFingerprint:
+          type: string
+        currentConfig:
+          type: object
     ExposureHeatmapAxisEntry:
       type: object
       properties:
