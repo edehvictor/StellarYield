@@ -17,6 +17,8 @@ import {
   clearComparisonOperationStore,
   StrategyComparisonVersionConflictError,
   StrategyComparisonValidationError,
+  StrategyComparisonExecutionError,
+  getStrategyComparisonDiagnostic,
   STRATEGY_COMPARISON_VERSION_CONFLICT,
   INVALID_STRATEGY_COMPARISON_STATE,
 } from "../services/strategyComparisonConcurrencyService";
@@ -119,7 +121,7 @@ describe("Strategy Comparison Concurrency Service (#1919)", () => {
           },
         },
       ),
-    ).toThrow("RPC transaction simulation failed: insufficient liquidity");
+    ).toThrow(StrategyComparisonExecutionError);
 
     // Verify atomic rollback restored previous state and version
     const restored = getStrategyComparisonState(WALLET);
@@ -313,3 +315,42 @@ describe("Strategy Comparison Concurrency HTTP Routes (#1919)", () => {
   });
 });
 
+
+
+describe("Privacy-safe comparison diagnostics (#1925)", () => {
+  it("redacts execution details, rolls back, and permits a safe retry", () => {
+    const initial = updateStrategyComparisonState(WALLET, {
+      allocatedBalances: { blend: 3000 }, selectedStrategyId: "blend",
+    }).state;
+    const updates = { selectedStrategyId: "soroswap", allocatedBalances: { soroswap: 3000 } };
+    const options = { expectedVersion: initial.version, operationIdentity: "diagnostic-retry" };
+    let failure: unknown;
+    try {
+      updateStrategyComparisonState(WALLET, updates, {
+        ...options, sideEffect: () => { throw new Error("private-rpc-token-123"); },
+      });
+    } catch (error) { failure = error; }
+    expect(failure).toBeInstanceOf(StrategyComparisonExecutionError);
+    const diagnostic = getStrategyComparisonDiagnostic(failure);
+    expect(diagnostic).toMatchObject({ code: "STRATEGY_COMPARISON_EXECUTION_FAILED", stage: "execution", retryable: true });
+    expect(diagnostic.remediation).toBeTruthy();
+    expect(JSON.stringify(diagnostic)).not.toContain("private-rpc-token-123");
+    expect(getStrategyComparisonState(WALLET)).toEqual(initial);
+    const retried = updateStrategyComparisonState(WALLET, updates, options);
+    expect(retried.isReplay).toBe(false);
+    expect(retried.state.version).toBe(initial.version + 1);
+    expect(retried.state.allocatedBalances.soroswap).toBe(3000);
+  });
+  it("returns actionable validation diagnostics without echoing submitted values", async () => {
+    const app = createTestApp();
+    const initial = updateStrategyComparisonState(WALLET, { allocatedBalances: { blend: 1000 } }).state;
+    const response = await request(app).post("/api/strategies/comparison/select").send({
+      walletAddress: WALLET, strategyId: "private-input-123", allocationUsd: -1,
+    });
+    expect(response.status).toBe(400);
+    expect(response.body).toMatchObject({ code: INVALID_STRATEGY_COMPARISON_STATE, stage: "validation", retryable: false });
+    expect(response.body.remediation).toBeTruthy();
+    expect(JSON.stringify(response.body)).not.toContain("private-input-123");
+    expect(getStrategyComparisonState(WALLET)).toEqual(initial);
+  });
+});

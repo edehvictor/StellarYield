@@ -10,14 +10,14 @@ import {
   TrendingUp,
   Percent,
   Download,
-  ShieldCheck,
   Check,
 } from 'lucide-react';
 import { apiUrl } from '../../lib/api';
 import { useBackendStatus } from '../../hooks/useBackendStatus';
 import { BackendUnavailable } from '../../components/BackendUnavailable';
 import {
-  selectStrategySafely,
+  fetchComparisonStateVersioned,
+ selectStrategySafely,
   StrategyComparisonConflictError,
 } from '../../features/strategies/strategyComparisonConcurrencyApi';
 
@@ -32,7 +32,6 @@ import {
   type StrategyComparisonExportFormat,
   type StrategyYield,
 } from './strategyComparisonExport';
-import { formatShortFingerprint } from '../../../../shared/types/strategyComparisonConfigFingerprint';
 
 const STRATEGY_THEMES: Record<string, { bg: string; text: string; shadow: string }> = {
   Blend: { bg: 'from-violet-500/20 to-indigo-600/20', text: 'text-indigo-400', shadow: 'shadow-indigo-500/20' },
@@ -40,115 +39,78 @@ const STRATEGY_THEMES: Record<string, { bg: string; text: string; shadow: string
   DeFindex: { bg: 'from-amber-500/20 to-orange-600/20', text: 'text-amber-400', shadow: 'shadow-amber-500/20' },
 };
 
-function getErrorMessage(error: unknown): string {
-  return error instanceof Error && error.message
-    ? error.message
-    : 'Failed to fetch strategies';
-}
-
 export default function StrategyComparison() {
   const [data, setData] = useState<StrategyYield[]>([]);
   const [loading, setLoading] = useState(true);
+  const [validationWarning, setValidationWarning] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [comparisonVersion, setComparisonVersion] = useState<number>(1);
+  const [comparisonVersion, setComparisonVersion] = useState<number>(0);
   const [selectedStrategyId, setSelectedStrategyId] = useState<string | null>(null);
   const [conflictNotice, setConflictNotice] = useState<string | null>(null);
   const [isUpdatingSelection, setIsUpdatingSelection] = useState(false);
   const backendStatus = useBackendStatus();
 
-  const fetchStrategies = async () => {
-    try {
-      setError(null);
-      setConflictNotice(null);
-      setLoading(true);
+  const refreshSequence = useRef(0);
+ const selectionPending = useRef(false);
+ const fetchStrategies = async () => {
+   const sequence = ++refreshSequence.current;
+   let stage = 'retrieval';
+   setError(null);
+   setValidationWarning(null);
+   setLoading(true);
+   try {
+     const res = await fetch(apiUrl('/api/yields'));
+     if (!res.ok) throw new Error();
+     stage = 'validation';
+     const yields: unknown = await res.json();
+     if (!Array.isArray(yields)) throw new Error();
+     const strategies = yields.filter(isComparableStrategy);
+     if (sequence !== refreshSequence.current) return;
+     if (!strategies.length && data.length) throw new Error();
+     if (strategies.length !== yields.length) {
+       setValidationWarning("Validation failed for some strategy rows. Invalid rows were excluded. Refresh analysis to retry.");
+     }
+     setData(strategies);
+   } catch {
+     if (sequence === refreshSequence.current) {
+       setError(stage === 'validation'
+         ? 'Validation failed: strategy data is incomplete or invalid. Refresh analysis to retry.'
+         : 'The backend service is currently disconnected or unavailable. Please try again later.');
+     }
+   } finally {
+     if (sequence === refreshSequence.current) setLoading(false);
+   }
+ };
 
-      const res = await fetch(apiUrl('/api/yields'));
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const yields: unknown = await res.json();
-      // A payload that is not a list is a failed fetch: keep the strategies
-      // already on screen untouched and show the retry state.
-      if (!Array.isArray(yields)) throw new Error('Malformed strategy payload');
+ const handleSelectStrategy = async (strategyName: string) => {
+   if (selectionPending.current || loading || error) return;
+   selectionPending.current = true;
+   setIsUpdatingSelection(true);
+   setConflictNotice(null);
+   try {
+     const wallet = 'G_CURRENT_USER';
+     const snapshot = await fetchComparisonStateVersioned(wallet);
+     const result = await selectStrategySafely(wallet, strategyName.toLowerCase(), 1000, {
+       expectedVersion: snapshot.version,
+     });
+     setSelectedStrategyId(result.state.selectedStrategyId);
+     setComparisonVersion(result.version);
+   } catch (err: unknown) {
+     if (err instanceof StrategyComparisonConflictError) {
+       setConflictNotice('Concurrency check failed. Workspace changed. Review the current selection and retry.');
+       setComparisonVersion(err.currentVersion);
+       setSelectedStrategyId(err.currentState.selectedStrategyId);
+     } else {
+       setConflictNotice('Selection could not be confirmed. Refresh analysis and review the workspace before retrying.');
+     }
+   } finally {
+     selectionPending.current = false;
+     setIsUpdatingSelection(false);
+   }
+ };
 
-      // Validate untrusted fields at the boundary (#1922): finite numbers,
-      // non-negative USD amounts, a 0-100 risk score and 0-10,000 bps fees.
-      // Malformed entries are skipped; nothing is computed from them.
-      const strategies = yields.filter(isComparableStrategy);
-
-      // Extract comparison version if returned by server headers (optional; guards missing headers in test mocks)
-      const versionHeader =
-        (res.headers?.get?.('X-Comparison-Version') ?? null) ||
-        (res.headers?.get?.('ETag') ?? null)?.replace(/^W\//, '').replace(/^"(.*)"$/, '$1');
-      if (versionHeader) {
-        const v = Number(versionHeader);
-        if (Number.isSafeInteger(v) && v > 0) {
-          setComparisonVersion(v);
-        }
-      }
-
-      setData(strategies);
-    } catch (err: unknown) {
-      const msg = getErrorMessage(err);
-      setData((prevData) => {
-        if (prevData.length > 0) {
-          setValidationWarning(`Strategy refresh failed (${msg}). Retaining existing strategy data.`);
-          return prevData;
-        }
-        setError(msg);
-        return [];
-      });
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const handleSelectStrategy = async (strategyName: string) => {
-    try {
-      setConflictNotice(null);
-      setIsUpdatingSelection(true);
-      const stratId = strategyName.toLowerCase();
-      const wallet = "G_CURRENT_USER";
-
-      const res = await selectStrategySafely(wallet, stratId, 1000, {
-        expectedVersion: comparisonVersion,
-      });
-
-      setSelectedStrategyId(stratId);
-      setComparisonVersion(res.version);
-    } catch (err: unknown) {
-      if (err instanceof StrategyComparisonConflictError) {
-        setConflictNotice(
-          `Concurrent state change detected. Another session updated strategy workspace to v${err.currentVersion}. Synchronized safely without state corruption.`,
-        );
-        setComparisonVersion(err.currentVersion);
-        if (err.currentState?.selectedStrategyId) {
-          setSelectedStrategyId(err.currentState.selectedStrategyId);
-        }
-      } else {
-        setError(getErrorMessage(err));
-      }
-    } finally {
-      setIsUpdatingSelection(false);
-    }
-  };
-
-  const handleExport = (format: StrategyComparisonExportFormat) => {
+ const handleExport = (format: StrategyComparisonExportFormat) => {
     downloadStrategyComparisonExport(data, format);
-  };
-
-  const handleSelectStrategy = (strategy: StrategyYield) => {
-    if (isStaleConfig) {
-      setActionNotice({
-        type: 'error',
-        message: 'Cannot select strategy: configuration snapshot is stale. Please refresh configuration to continue.',
-      });
-      return;
-    }
-
-    setSelectedStrategyId(strategy.protocolName);
-    setActionNotice({
-      type: 'success',
-      message: `Selected ${strategy.protocolName} strategy with verified configuration snapshot.`,
-    });
   };
 
   useEffect(() => {
@@ -179,7 +141,7 @@ export default function StrategyComparison() {
         </header>
         <BackendUnavailable 
           featureName="Strategy Comparison"
-          reason="The backend service is currently disconnected or unavailable. Please try again later."
+          reason={error}
           onRetry={fetchStrategies}
         />
       </div>
@@ -294,7 +256,7 @@ export default function StrategyComparison() {
           <div className="flex items-center gap-2">
             <AlertTriangle size={18} className="text-amber-400 flex-shrink-0" />
             <span>
-              Failed to refresh strategies: {error}. Existing strategy comparisons and balances remain preserved.
+              {error} Existing displayed comparisons remain preserved.
             </span>
           </div>
           <button
@@ -303,6 +265,12 @@ export default function StrategyComparison() {
           >
             Retry
           </button>
+        </div>
+      )}
+
+      {validationWarning && !loading && (
+        <div role="alert" className="p-4 rounded-xl bg-amber-500/10 text-amber-200">
+          {validationWarning}
         </div>
       )}
 
@@ -324,7 +292,7 @@ export default function StrategyComparison() {
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 relative">
           {data.map((strategy, i) => {
             const theme = STRATEGY_THEMES[strategy.protocolName] || { bg: 'bg-white/5', text: 'text-gray-400', shadow: '' };
-            const isSelected = selectedStrategyId === strategy.protocolName;
+            const isSelected = selectedStrategyId === strategy.protocolName.toLowerCase();
             return (
               <div
                 key={strategy.protocolName}
@@ -384,7 +352,7 @@ export default function StrategyComparison() {
                       </span>
                       <span className="text-white font-bold text-sm flex items-center gap-1">
                         <TrendingUp size={14} className="text-cyan-400"/>
-                        {strategy.capitalEfficiencyPct || 100}%
+                        {strategy.capitalEfficiencyPct ?? 100}%
                       </span>
                     </div>
                   </div>
@@ -400,7 +368,7 @@ export default function StrategyComparison() {
                           Liquidity Check
                         </span>
                         <span className="text-white font-bold text-lg">
-                          {formatComparisonCurrency(strategy.liquidityUsd || strategy.tvl)}
+                          {formatComparisonCurrency(strategy.liquidityUsd ?? strategy.tvl)}
                         </span>
                       </div>
                     </div>
@@ -411,7 +379,6 @@ export default function StrategyComparison() {
                     <div className="flex items-center gap-2 text-gray-400 text-xs font-semibold uppercase tracking-wider mb-3">
                       <TrendingDown size={14} className="text-red-400" /> Embedded Fees
                     </div>
-                    
                     <div className="space-y-3">
                       <div className="flex justify-between items-center">
                         <span className="text-sm text-gray-300">Management</span>
@@ -432,7 +399,7 @@ export default function StrategyComparison() {
                   <button
                     type="button"
                     onClick={() => handleSelectStrategy(strategy.protocolName)}
-                    disabled={isUpdatingSelection}
+                    disabled={isUpdatingSelection || loading || Boolean(error)}
                     aria-pressed={selectedStrategyId === strategy.protocolName.toLowerCase()}
                     className={`w-full py-3 rounded-xl transition-all font-bold tracking-wide mt-2 ${
                       selectedStrategyId === strategy.protocolName.toLowerCase()

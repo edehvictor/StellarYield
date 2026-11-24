@@ -20,35 +20,56 @@ import { strategySnapshotVersioningService } from "../services/strategySnapshotV
 import { strategyLifecycleAuditService } from "../services/strategyLifecycleAuditService";
 import {
   getStrategyComparisonState,
-  getStrategyComparisonVersion,
   updateStrategyComparisonState,
   selectStrategyAndAllocate,
   StrategyComparisonVersionConflictError,
   StrategyComparisonValidationError,
-  STRATEGY_COMPARISON_VERSION_CONFLICT,
-  INVALID_STRATEGY_COMPARISON_STATE,
+  getStrategyComparisonDiagnostic,
 } from "../services/strategyComparisonConcurrencyService";
+import {
+  DEFAULT_STRATEGY_COMPARISON_CONFIG,
+  computeStrategyComparisonConfigFingerprint,
+  verifyStrategyComparisonConfigFingerprint,
+  type StrategyComparisonConfig,
+} from "../../../shared/types/strategyComparisonConfigFingerprint";
 
 const router = Router();
+
+function sendComparisonFailure(res: Response, error: unknown, executionCode?: string): void {
+  const diagnostic = getStrategyComparisonDiagnostic(error);
+  const payload = { ...diagnostic, error: diagnostic.message };
+  if (error instanceof StrategyComparisonVersionConflictError) {
+    res.setHeader("ETag", `"${error.currentVersion}"`);
+    res.setHeader("X-Comparison-Version", String(error.currentVersion));
+    res.status(409).json({ ...payload, expectedVersion: error.expectedVersion,
+      currentVersion: error.currentVersion, state: error.currentState });
+    return;
+  }
+  if (error instanceof StrategyComparisonValidationError) {
+    res.status(400).json(payload);
+    return;
+  }
+  res.status(500).json({ ...payload, code: executionCode ?? diagnostic.code });
+}
+
+function rejectComparisonInput(res: Response, message: string): void {
+  const diagnostic = getStrategyComparisonDiagnostic(new StrategyComparisonValidationError(message));
+  res.status(400).json({ ...diagnostic, message, error: message });
+}
 
 const VALID_TIME_WINDOWS: TimeWindow[] = ["24h", "7d", "30d", "all"];
 const CACHE_TTL = 60_000;
 let cache: { data: unknown; ts: number; configFingerprint: string } | null = null;
-
 let activeComparisonConfig: StrategyComparisonConfig = { ...DEFAULT_STRATEGY_COMPARISON_CONFIG };
-
 export function getActiveComparisonConfig(): StrategyComparisonConfig {
   return activeComparisonConfig;
 }
-
 export function setActiveComparisonConfig(config: StrategyComparisonConfig): void {
   activeComparisonConfig = config;
 }
-
 export function resetActiveComparisonConfig(): void {
   activeComparisonConfig = { ...DEFAULT_STRATEGY_COMPARISON_CONFIG };
 }
-
 /**
  * Build a health snapshot for the configured protocols. In production this
  * would be fed by `strategyHealthService` and the indexer; here we derive a
@@ -64,7 +85,6 @@ async function buildHealthSnapshot(now: number): Promise<Map<string, ProtocolHea
       p.protocolName,
       "api",
     );
-
     let status: ProtocolHealthStatus = "healthy";
     if (score.status === "unreliable") {
       status = "down";
@@ -73,7 +93,6 @@ async function buildHealthSnapshot(now: number): Promise<Map<string, ProtocolHea
     } else if (score.status === "medium") {
       status = "degraded";
     }
-
     snapshot.set(p.protocolName.toLowerCase(), {
       id: p.protocolName.toLowerCase(),
       name: p.protocolName,
@@ -85,7 +104,6 @@ async function buildHealthSnapshot(now: number): Promise<Map<string, ProtocolHea
   }
   return snapshot;
 }
-
 function buildStrategies(): StrategyInput[] {
   const now = new Date().toISOString();
   return PROTOCOLS.map((p) => {
@@ -106,7 +124,6 @@ function buildStrategies(): StrategyInput[] {
     };
   });
 }
-
 /**
  * GET /api/strategies/leaderboard
  * Returns strategies ranked by risk-adjusted yield.
@@ -121,12 +138,9 @@ router.get("/leaderboard", async (req: Request, res: Response) => {
     res.status(400).json({ error: "timeWindow must be one of: 24h, 7d, 30d, all" });
     return;
   }
-
   const strategyType = (req.query.strategyType as string) || "all";
-
   const currentFpResult = computeStrategyComparisonConfigFingerprint(activeComparisonConfig);
   const currentConfigFingerprint = currentFpResult.fingerprint;
-
   const now = Date.now();
   if (
     process.env.NODE_ENV !== "test" &&
@@ -140,21 +154,17 @@ router.get("/leaderboard", async (req: Request, res: Response) => {
     res.json(cache.data);
     return;
   }
-
   let strategies = buildStrategies();
   strategies = filterByTimeWindow(strategies, timeWindow as TimeWindow);
-
   if (strategyType !== "all") {
     strategies = strategies.filter((s) => s.strategyType === strategyType);
   }
-
   // Apply protocol failover BEFORE ranking so excluded protocols never
   // surface as recommendations. The `failover` block in the response
   // documents every exclusion and recovery for transparency.
   const healthSnapshot = await buildHealthSnapshot(now);
   const failover = failoverRegistry.apply(strategies, healthSnapshot);
   const ranked = rankStrategies(failover.included);
-
   const warnings: string[] = [];
   for (const ev of failover.evaluations) {
     if (ev.severity === "warn") {
@@ -163,7 +173,6 @@ router.get("/leaderboard", async (req: Request, res: Response) => {
       warnings.push(`Yield source ${ev.protocolName} is unhealthy/stale and was excluded: ${ev.reasons.join(", ")}`);
     }
   }
-
   const response = {
     items: ranked,
     filters: { timeWindow, strategyType },
@@ -177,15 +186,12 @@ router.get("/leaderboard", async (req: Request, res: Response) => {
     },
     warnings,
   };
-
   if (timeWindow === "all" && strategyType === "all") {
     cache = { data: response, ts: now, configFingerprint: currentConfigFingerprint };
   }
-
   res.setHeader("X-Strategy-Config-Fingerprint", currentConfigFingerprint);
   res.json(response);
 });
-
 /**
  * GET /api/strategies/config-snapshot
  *
@@ -202,7 +208,6 @@ router.get("/config-snapshot", (_req: Request, res: Response) => {
     generatedAt: fpResult.computedAt,
   });
 });
-
 /**
  * POST /api/strategies/compare
  *
@@ -211,9 +216,14 @@ router.get("/config-snapshot", (_req: Request, res: Response) => {
  * fingerprint, rejects with 409 STALE_STRATEGY_CONFIG without mutating state.
  */
 router.post("/compare", async (req: Request, res: Response) => {
+  try {
   const { expectedConfigFingerprint, strategyIds } = req.body || {};
+  if ((expectedConfigFingerprint !== undefined && typeof expectedConfigFingerprint !== "string") ||
+      (strategyIds !== undefined && (!Array.isArray(strategyIds) || strategyIds.some((id: unknown) => typeof id !== "string" || !id.trim())))) {
+    rejectComparisonInput(res, "Invalid strategy comparison filters or configuration fingerprint.");
+    return;
+  }
   const currentFpResult = computeStrategyComparisonConfigFingerprint(activeComparisonConfig);
-
   if (expectedConfigFingerprint) {
     const verification = verifyStrategyComparisonConfigFingerprint(
       activeComparisonConfig,
@@ -222,7 +232,10 @@ router.post("/compare", async (req: Request, res: Response) => {
     if (!verification.valid) {
       res.setHeader("X-Strategy-Config-Fingerprint", currentFpResult.fingerprint);
       res.status(409).json({
-        error: verification.message,
+        error: "Strategy comparison configuration is stale.",
+        stage: "conflict",
+        remediation: "Refresh the configuration snapshot and retry.",
+        retryable: true,
         code: verification.code,
         isRecoverable: true,
         currentFingerprint: currentFpResult.fingerprint,
@@ -231,21 +244,21 @@ router.post("/compare", async (req: Request, res: Response) => {
       return;
     }
   }
-
   let strategies = buildStrategies();
   if (Array.isArray(strategyIds) && strategyIds.length > 0) {
     const ids = new Set(strategyIds.map((id: string) => String(id).toLowerCase()));
     strategies = strategies.filter((s) => ids.has(s.id.toLowerCase()));
   }
-
   res.setHeader("X-Strategy-Config-Fingerprint", currentFpResult.fingerprint);
   res.json({
     strategies,
     configFingerprint: currentFpResult.fingerprint,
     comparedAt: new Date().toISOString(),
   });
+  } catch (err) {
+    sendComparisonFailure(res, err, "STRATEGY_COMPARISON_FAILED");
+  }
 });
-
 /**
  * GET /api/strategies/failover
  * Returns the most recent failover decisions and currently-excluded
@@ -258,7 +271,6 @@ router.get("/failover", (req: Request, res: Response) => {
     decisions: failoverRegistry.recentDecisions(limit),
   });
 });
-
 /**
  * GET /api/strategies/rotation
  * Returns the current rotation state and the most recent rotation
@@ -271,7 +283,6 @@ router.get("/rotation", (req: Request, res: Response) => {
     decisions: rotationRegistry.recentDecisions(limit),
   });
 });
-
 /**
  * GET /api/strategies/export
  * Exports a full snapshot bundle of current opportunity data.
@@ -280,7 +291,6 @@ router.get("/export", async (req: Request, res: Response) => {
   try {
     const bundle = await exportService.generateSnapshotBundle(req.query);
     const filename = `stellar-yield-snapshot-${new Date().toISOString().split('T')[0]}.json`;
-
     res.setHeader('Content-Type', 'application/json');
     res.setHeader('Content-Disposition', `attachment; filename=${filename}`);
     res.json(bundle);
@@ -289,7 +299,6 @@ router.get("/export", async (req: Request, res: Response) => {
     sendExportError(res, error);
   }
 });
-
 /**
  * GET /api/strategies/export/preview
  * Returns only the metadata for the current export bundle.
@@ -304,7 +313,6 @@ router.get("/export/preview", async (req: Request, res: Response) => {
     sendExportError(res, error);
   }
 });
-
 /**
  * GET /api/strategies/:strategyId/snapshots/:targetVersion/rollback-preview
  *
@@ -321,14 +329,11 @@ router.get(
   async (req: Request, res: Response) => {
     const { strategyId, targetVersion } = req.params;
     const version = Number(targetVersion);
-
     if (!Number.isInteger(version) || version < 1) {
       res.status(400).json({ error: "targetVersion must be a positive integer." });
       return;
     }
-
     const rollbackReason = req.query.reason as string | undefined;
-
     try {
       const preview = await strategySnapshotVersioningService.previewRollback(
         strategyId,
@@ -346,7 +351,6 @@ router.get(
     }
   },
 );
-
 /**
  * GET /api/strategies/:strategyId/lifecycle
  *
@@ -360,7 +364,6 @@ router.get(
 router.get("/:strategyId/lifecycle", (req: Request, res: Response) => {
   const { strategyId } = req.params;
   const correlationId = req.query.correlationId as string | undefined;
-
   if (correlationId) {
     const summary = strategyLifecycleAuditService.getCorrelationSummary(correlationId);
     // Guard: only return events that belong to the requested strategy.
@@ -375,7 +378,6 @@ router.get("/:strategyId/lifecycle", (req: Request, res: Response) => {
     });
     return;
   }
-
   const events = strategyLifecycleAuditService.getHistory(strategyId);
   res.json({
     strategyId,
@@ -385,7 +387,6 @@ router.get("/:strategyId/lifecycle", (req: Request, res: Response) => {
     total: events.length,
   });
 });
-
 /**
  * GET /api/strategies/:strategyId/risk-explanation
  *
@@ -397,12 +398,10 @@ router.get("/:strategyId/lifecycle", (req: Request, res: Response) => {
 router.get("/:strategyId/risk-explanation", (req: Request, res: Response) => {
   const { strategyId } = req.params;
   const protocol = PROTOCOLS.find((p) => p.protocolName.toLowerCase() === strategyId.toLowerCase());
-
   if (!protocol) {
     sendError(res, 404, "STRATEGY_NOT_FOUND", `No strategy found with id "${strategyId}"`, undefined, undefined, false);
     return;
   }
-
   const input = {
     tvlUsd: protocol.baseTvlUsd,
     ilVolatilityPct: protocol.volatilityPct,
@@ -410,14 +409,12 @@ router.get("/:strategyId/risk-explanation", (req: Request, res: Response) => {
   };
   const result = calculateRiskScore(input);
   const explanation = explainRiskScore(result, input);
-
   res.json({
     strategyId: protocol.protocolName.toLowerCase(),
     ...explanation,
     breakdown: result.breakdown,
   });
 });
-
 /**
  * Reads expectedVersion from If-Match header or body (#1919).
  */
@@ -427,7 +424,6 @@ export function readComparisonExpectedVersion(req: Request): number | undefined 
     typeof header === "string" && header.trim() !== ""
       ? header.trim().replace(/^W\//, "").replace(/^"(.*)"$/, "$1")
       : (req.body as { expectedVersion?: unknown } | undefined)?.expectedVersion;
-
   if (raw === undefined || raw === null) return undefined;
   const value = typeof raw === "number" ? raw : Number(String(raw).trim());
   if (!Number.isSafeInteger(value) || value < 0 || String(raw).trim() === "") {
@@ -437,7 +433,6 @@ export function readComparisonExpectedVersion(req: Request): number | undefined 
   }
   return value;
 }
-
 function readOperationIdentity(req: Request): string | undefined {
   const header =
     req.headers["x-operation-identity"] || req.headers["idempotency-key"];
@@ -450,7 +445,6 @@ function readOperationIdentity(req: Request): string | undefined {
   }
   return undefined;
 }
-
 /**
  * GET /api/strategies/comparison/state/:walletAddress
  *
@@ -458,200 +452,58 @@ function readOperationIdentity(req: Request): string | undefined {
  * with optimistic-concurrency headers.
  */
 router.get("/comparison/state/:walletAddress", (req: Request, res: Response) => {
-  const { walletAddress } = req.params;
-  if (!walletAddress || walletAddress.trim() === "") {
-    res.status(400).json({ error: "walletAddress parameter is required." });
-    return;
+  try {
+    const state = getStrategyComparisonState(req.params.walletAddress);
+    res.setHeader("ETag", `"${state.version}"`);
+    res.setHeader("X-Comparison-Version", String(state.version));
+    res.json({ state, version: state.version });
+  } catch (err) {
+    sendComparisonFailure(res, err, "STRATEGY_COMPARISON_FETCH_FAILED");
   }
-
-  const state = getStrategyComparisonState(walletAddress);
-  res.setHeader("ETag", `"${state.version}"`);
-  res.setHeader("X-Comparison-Version", String(state.version));
-  res.json({
-    state,
-    version: state.version,
-  });
 });
 
-/**
- * PUT /api/strategies/comparison/state
- *
- * Updates strategy comparison state under optimistic concurrency.
- * If expectedVersion is supplied and does not match current version,
- * returns 409 STRATEGY_COMPARISON_VERSION_CONFLICT without mutating state.
- */
 router.put("/comparison/state", (req: Request, res: Response) => {
-  const {
-    walletAddress,
-    selectedStrategyId,
-    pinnedStrategyIds,
-    customAssumptions,
-    allocatedBalances,
-  } = req.body || {};
-
-  if (!walletAddress || typeof walletAddress !== "string" || walletAddress.trim() === "") {
-    res.status(400).json({ error: "walletAddress is required in request body." });
-    return;
-  }
-
-  let expectedVersion: number | undefined;
   try {
-    expectedVersion = readComparisonExpectedVersion(req);
-  } catch (err) {
-    if (err instanceof StrategyComparisonValidationError) {
-      res.status(400).json({ code: err.code, error: err.message });
+    const { walletAddress, selectedStrategyId, pinnedStrategyIds, customAssumptions, allocatedBalances } = req.body || {};
+    if (typeof walletAddress !== "string" || !walletAddress.trim()) {
+      rejectComparisonInput(res, "walletAddress is required in request body.");
       return;
     }
-    throw err;
-  }
-
-  const operationIdentity = readOperationIdentity(req);
-
-  try {
-    const { state, isReplay } = updateStrategyComparisonState(
-      walletAddress,
-      {
-        selectedStrategyId,
-        pinnedStrategyIds,
-        customAssumptions,
-        allocatedBalances,
-      },
-      {
-        expectedVersion,
-        operationIdentity,
-      },
-    );
-
+    const { state, isReplay } = updateStrategyComparisonState(walletAddress,
+      { selectedStrategyId, pinnedStrategyIds, customAssumptions, allocatedBalances },
+      { expectedVersion: readComparisonExpectedVersion(req), operationIdentity: readOperationIdentity(req) });
     res.setHeader("ETag", `"${state.version}"`);
     res.setHeader("X-Comparison-Version", String(state.version));
-    if (isReplay) {
-      res.setHeader("X-Idempotent-Replayed", "true");
-    }
-
-    res.json({
-      state,
-      version: state.version,
-      isReplay,
-    });
+    if (isReplay) res.setHeader("X-Idempotent-Replayed", "true");
+    res.json({ state, version: state.version, isReplay });
   } catch (err) {
-    if (err instanceof StrategyComparisonVersionConflictError) {
-      res.setHeader("ETag", `"${err.currentVersion}"`);
-      res.setHeader("X-Comparison-Version", String(err.currentVersion));
-      res.status(409).json({
-        code: err.code,
-        error: err.message,
-        expectedVersion: err.expectedVersion,
-        currentVersion: err.currentVersion,
-        state: err.currentState,
-      });
-      return;
-    }
-
-    if (err instanceof StrategyComparisonValidationError) {
-      res.status(400).json({
-        code: err.code,
-        error: err.message,
-        details: err.details,
-      });
-      return;
-    }
-
-    res.status(500).json({
-      code: "STRATEGY_COMPARISON_UPDATE_FAILED",
-      error: err instanceof Error ? err.message : "Failed to update strategy comparison state.",
-    });
+    sendComparisonFailure(res, err, "STRATEGY_COMPARISON_UPDATE_FAILED");
   }
 });
 
-/**
- * POST /api/strategies/comparison/select
- *
- * Atomically selects a strategy and allocates funds under OCC.
- */
 router.post("/comparison/select", (req: Request, res: Response) => {
-  const { walletAddress, strategyId, allocationUsd } = req.body || {};
-
-  if (!walletAddress || typeof walletAddress !== "string" || walletAddress.trim() === "") {
-    res.status(400).json({ error: "walletAddress is required." });
-    return;
-  }
-
-  if (!strategyId || typeof strategyId !== "string" || strategyId.trim() === "") {
-    res.status(400).json({ error: "strategyId is required." });
-    return;
-  }
-
-  const parsedAllocation = Number(allocationUsd);
-  if (!Number.isFinite(parsedAllocation) || parsedAllocation < 0) {
-    res.status(400).json({
-      code: INVALID_STRATEGY_COMPARISON_STATE,
-      error: "allocationUsd must be a non-negative finite number.",
-    });
-    return;
-  }
-
-  let expectedVersion: number | undefined;
   try {
-    expectedVersion = readComparisonExpectedVersion(req);
-  } catch (err) {
-    if (err instanceof StrategyComparisonValidationError) {
-      res.status(400).json({ code: err.code, error: err.message });
+    const { walletAddress, strategyId, allocationUsd } = req.body || {};
+    if (typeof walletAddress !== "string" || !walletAddress.trim()) {
+      rejectComparisonInput(res, "walletAddress is required.");
       return;
     }
-    throw err;
-  }
-
-  const operationIdentity = readOperationIdentity(req);
-
-  try {
-    const { state, isReplay } = selectStrategyAndAllocate(
-      walletAddress,
-      strategyId,
-      parsedAllocation,
-      {
-        expectedVersion,
-        operationIdentity,
-      },
-    );
-
+    if (typeof strategyId !== "string" || !strategyId.trim()) {
+      rejectComparisonInput(res, "strategyId is required.");
+      return;
+    }
+    if (typeof allocationUsd !== "number" || !Number.isFinite(allocationUsd) || allocationUsd < 0) {
+      rejectComparisonInput(res, "allocationUsd must be a non-negative finite number.");
+      return;
+    }
+    const { state, isReplay } = selectStrategyAndAllocate(walletAddress, strategyId, allocationUsd,
+      { expectedVersion: readComparisonExpectedVersion(req), operationIdentity: readOperationIdentity(req) });
     res.setHeader("ETag", `"${state.version}"`);
     res.setHeader("X-Comparison-Version", String(state.version));
-    if (isReplay) {
-      res.setHeader("X-Idempotent-Replayed", "true");
-    }
-
-    res.json({
-      state,
-      version: state.version,
-      isReplay,
-    });
+    if (isReplay) res.setHeader("X-Idempotent-Replayed", "true");
+    res.json({ state, version: state.version, isReplay });
   } catch (err) {
-    if (err instanceof StrategyComparisonVersionConflictError) {
-      res.setHeader("ETag", `"${err.currentVersion}"`);
-      res.setHeader("X-Comparison-Version", String(err.currentVersion));
-      res.status(409).json({
-        code: err.code,
-        error: err.message,
-        expectedVersion: err.expectedVersion,
-        currentVersion: err.currentVersion,
-        state: err.currentState,
-      });
-      return;
-    }
-
-    if (err instanceof StrategyComparisonValidationError) {
-      res.status(400).json({
-        code: err.code,
-        error: err.message,
-        details: err.details,
-      });
-      return;
-    }
-
-    res.status(500).json({
-      code: "STRATEGY_SELECTION_FAILED",
-      error: err instanceof Error ? err.message : "Failed to select strategy.",
-    });
+    sendComparisonFailure(res, err, "STRATEGY_SELECTION_FAILED");
   }
 });
 
