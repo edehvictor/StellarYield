@@ -48,6 +48,15 @@ import DepositRouteMaterialImpactWarning from "./DepositRouteMaterialImpactWarni
 import { useDepositImpact } from "./useDepositImpact";
 import type { QuoteSnapshot } from "./useDepositImpact";
 import { getVaultSlippage, setVaultSlippage, resetVaultSlippage } from "../../lib/preferences";
+import { explorerAccountUrl } from "../../lib/networkEnv";
+import { useProtectedWalletAction } from "../../hooks/useProtectedWalletAction";
+import SessionExpiredRecovery from "../../components/wallet/SessionExpiredRecovery";
+import {
+  saveDepositDraft,
+  clearDepositDraft,
+  reconcileDepositDraft,
+  type DepositDraftState,
+} from "./depositDraft";
 import { apiFetch, apiUrl } from "../../lib/api";
 import {
   clearDepositDraft,
@@ -66,13 +75,6 @@ const MIN_SLIPPAGE = 0.1;
 const MAX_SLIPPAGE = 15;
 const FALLBACK_SOURCE = "fallback_rate";
 const SUPPORT_URL = "https://github.com/edehvictor/StellarYield/issues";
-
-function explorerAccountUrl(walletAddress: string | null): string {
-  const passphrase = import.meta.env.VITE_NETWORK_PASSPHRASE ?? "";
-  const isMainnet = passphrase.includes("mainnet") || passphrase.includes("Public Global");
-  const base = `https://stellar.expert/explorer/${isMainnet ? "public" : "testnet"}`;
-  return walletAddress ? `${base}/account/${walletAddress}` : base;
-}
 
 export default function ZapDepositPanel({ walletAddress }: ZapDepositPanelProps) {
   const useApiAssets = shouldLoadZapMetadataFromApi();

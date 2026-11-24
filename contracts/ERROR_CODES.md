@@ -73,6 +73,11 @@ Source: `contracts/stableswap/src/lib.rs`
 | 14   | `WrongVersion`          | Stored state or the caller's context is not at the pool context version this code understands | Refresh with `get_pool_context()`; upgrade the contract if the stored version is newer |
 | 15   | `DuplicateOperation`    | `operation_id` was already consumed by a successful call of the same kind from the same sender | Treat the earlier submission as landed (check `is_operation_consumed`); use a fresh id for a new intent |
 
+Use `preview_swap` / `preview_add_liquidity` / `preview_remove_liquidity` to get a
+privacy-safe `Diagnostic` (failed stage, error code, remediation path) without
+mutating state. See `contracts/stableswap/README.md` for the stage and
+remediation enums.
+
 `stableswap` uses checked arithmetic and documented floor rounding for every
 invariant, fee, deposit and withdrawal calculation. Boundary values (zero,
 minimum one-unit reserves, maximum `i128` inputs) either produce a defined
@@ -109,6 +114,7 @@ Source: `contracts/isolated_lending/src/lib.rs`
 | 16   | `WrongNetwork`           | Context names a different network than the live ledger or stored binding | Refresh with `get_ledger_context()` and retry on the correct network |
 | 17   | `WrongContract`          | Context names a different pair deployment address | Use the context from `get_ledger_context()` for this exact pair |
 | 18   | `WrongVersion`           | Context storage version does not match the stored version | Refresh with `get_ledger_context()` after migration |
+| 19   | `InvalidOracleQuote`     | Oracle quote has an invalid price, confidence or future ledger | Publish a valid quote from the configured oracle |
 
 `isolated_lending` uses checked arithmetic and documented floor rounding for
 values, limits, interest, fees and liquidation payouts (the close-factor cap is

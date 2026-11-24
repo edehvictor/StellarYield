@@ -15,14 +15,62 @@ import {
   type SignerQuorumInput,
 } from "../services/signerQuorumService";
 import {
-  computeGovernanceConfigFingerprint,
-  validateGovernanceConfigSnapshot,
-  verifyGovernanceConfigFingerprint,
-  type GovernanceConfigSnapshot,
-} from "../../../shared/types/governanceConfigSnapshot";
-import { sendError } from "../utils/errorResponse";
+  buildGovernanceFailureDiagnostics,
+  type GovernanceDiagnostic,
+  type GovernanceDiagnosticCode,
+  type GovernanceStage,
+} from "../../../shared/types/governanceDiagnostic";
 
 const router = Router();
+
+interface GovernanceFailureOptions {
+  /** Names of invalid request fields. Never contains submitted values. */
+  fields?: string[];
+  affectedStages?: GovernanceStage[];
+  retryable?: boolean;
+  preserveState?: boolean;
+  /** Additional non-sensitive response fields (for example `valid: false`). */
+  extra?: Record<string, unknown>;
+}
+
+/**
+ * Send a privacy-safe governance failure.
+ *
+ * The response names the failed stage and a remediation path using fixed
+ * templates from `shared/types/governanceDiagnostic.ts`. Raw error text, request
+ * bodies, XDR, wallet addresses, and stack traces are never echoed. Every
+ * failure also states that existing proposal, signature, and balance state was
+ * preserved, because none of these routes writes state before validating.
+ */
+function sendGovernanceFailure(
+  res: Response,
+  statusCode: number,
+  code: GovernanceDiagnosticCode,
+  stage: GovernanceStage,
+  options: GovernanceFailureOptions = {},
+): void {
+  const diagnostics: GovernanceDiagnostic[] = buildGovernanceFailureDiagnostics(
+    code,
+    {
+      stage,
+      affectedStages: options.affectedStages,
+      retryable: options.retryable,
+      preserveState: options.preserveState,
+    },
+  );
+
+  res.status(statusCode).json({
+    error: code,
+    message: diagnostics[0].summary,
+    stage,
+    retryable: diagnostics[0].retryable,
+    diagnostics,
+    ...(options.fields && options.fields.length > 0
+      ? { fields: options.fields }
+      : {}),
+    ...(options.extra ?? {}),
+  });
+}
 
 // #935 — forecast is compute-heavy; rate-limit to prevent burst abuse.
 const forecastLimiter = rateLimit({
@@ -144,75 +192,57 @@ router.get("/forecast", (_req: Request, res: Response) => {
 });
 
 router.post("/forecast", forecastLimiter, (req: Request, res: Response) => {
-  const {
-    proposalType,
-    parameters,
-    baseline,
-    configSnapshot,
-    expectedConfigFingerprint,
-  } = req.body as Partial<GovernanceForecastInput> & {
-    configSnapshot?: unknown;
-    expectedConfigFingerprint?: unknown;
-  };
+  const body =
+    req.body && typeof req.body === "object" && !Array.isArray(req.body)
+      ? (req.body as Partial<GovernanceForecastInput>)
+      : {};
+  const { proposalType, parameters, baseline } = body;
 
+  const invalidFields: string[] = [];
   if (!proposalType || !VALID_PROPOSAL_TYPES.includes(proposalType)) {
-    res.status(400).json({
-      error: `proposalType must be one of: ${VALID_PROPOSAL_TYPES.join(", ")}`,
-    });
-    return;
+    invalidFields.push("proposalType");
   }
-
-  if (!parameters || typeof parameters !== "object") {
-    res.status(400).json({ error: "parameters must be an object" });
-    return;
+  if (
+    !parameters ||
+    typeof parameters !== "object" ||
+    Array.isArray(parameters)
+  ) {
+    invalidFields.push("parameters");
+  }
+  if (
+    !baseline ||
+    typeof baseline !== "object" ||
+    !Number.isFinite(baseline.yieldPct) ||
+    !Number.isFinite(baseline.exposurePct) ||
+    !Number.isFinite(baseline.feeRatePct) ||
+    !Number.isFinite(baseline.tvlUsd)
+  ) {
+    invalidFields.push("baseline");
   }
 
   if (
-    !baseline ||
-    typeof baseline.yieldPct !== "number" ||
-    typeof baseline.exposurePct !== "number" ||
-    typeof baseline.feeRatePct !== "number" ||
-    typeof baseline.tvlUsd !== "number"
+    invalidFields.length > 0 ||
+    !proposalType ||
+    !parameters ||
+    !baseline
   ) {
-    res.status(400).json({
-      error: "baseline must include yieldPct, exposurePct, feeRatePct, and tvlUsd as numbers",
+    sendGovernanceFailure(res, 400, "VALIDATION_FAILED", "request-validation", {
+      fields: invalidFields,
     });
     return;
   }
 
-  const hasConfigClaim =
-    configSnapshot !== undefined || expectedConfigFingerprint !== undefined;
-  let binding: Extract<ConfigBinding, { ok: true }> | undefined;
-  if (hasConfigClaim) {
-    if (configSnapshot === undefined || expectedConfigFingerprint === undefined) {
-      sendError(
-        res,
-        400,
-        "INVALID_GOVERNANCE_CONFIG",
-        "configSnapshot and expectedConfigFingerprint must be supplied together.",
-      );
-      return;
-    }
-
-    const bound = bindGovernanceConfig(configSnapshot, expectedConfigFingerprint);
-    if (!bound.ok) {
-      sendConfigBindingError(res, bound);
-      return;
-    }
-    binding = bound;
-  }
-
-  const result = forecastGovernanceProposal({ proposalType, parameters, baseline });
-  if (binding) {
-    res.json({
-      ...result,
-      configSnapshot: binding.snapshot,
-      configFingerprint: binding.fingerprint,
+  try {
+    const result = forecastGovernanceProposal({
+      proposalType,
+      parameters: parameters as Record<string, number>,
+      baseline,
     });
-    return;
+    res.json(result);
+  } catch {
+    // Never echo the thrown error: it may contain input values or stack frames.
+    sendGovernanceFailure(res, 500, "STAGE_UNAVAILABLE", "forecast");
   }
-
-  res.json(result);
 });
 
 const MAX_ATTACHMENTS_PER_PROPOSAL = 20;
@@ -225,56 +255,41 @@ const MAX_ATTACHMENTS_PER_PROPOSAL = 20;
  * progressPct, met, perSigner) without touching the chain. Read-only (#1310).
  */
 router.post("/quorum-progress", (req: Request, res: Response) => {
-  const body = (req.body ?? {}) as Partial<SignerQuorumInput> & {
-    contractId?: unknown;
-    expectedConfigFingerprint?: unknown;
-  };
+  const body =
+    req.body && typeof req.body === "object" && !Array.isArray(req.body)
+      ? (req.body as Partial<SignerQuorumInput>)
+      : {};
 
-  if (!Array.isArray(body.signers)) {
-    sendError(res, 400, "INVALID_REQUEST", "signers must be an array of public keys.");
-    return;
-  }
-  if (!Array.isArray(body.signatures)) {
-    sendError(res, 400, "INVALID_REQUEST", "signatures must be an array of public keys.");
-    return;
-  }
+  const invalidFields: string[] = [];
+  if (!Array.isArray(body.signers)) invalidFields.push("signers");
+  if (!Array.isArray(body.signatures)) invalidFields.push("signatures");
   if (typeof body.threshold !== "number" || !Number.isFinite(body.threshold)) {
-    sendError(res, 400, "INVALID_REQUEST", "threshold must be a number.");
+    invalidFields.push("threshold");
+  }
+
+  if (
+    invalidFields.length > 0 ||
+    !Array.isArray(body.signers) ||
+    !Array.isArray(body.signatures) ||
+    typeof body.threshold !== "number" ||
+    !Number.isFinite(body.threshold)
+  ) {
+    sendGovernanceFailure(res, 400, "VALIDATION_FAILED", "request-validation", {
+      fields: invalidFields,
+    });
     return;
   }
 
-  const signers = body.signers.filter((s): s is string => typeof s === "string");
-  const signatures = body.signatures.filter((s): s is string => typeof s === "string");
-  const configSnapshot: GovernanceConfigSnapshot = {
-    signers,
-    threshold: body.threshold,
-    contractId: typeof body.contractId === "string" ? body.contractId : "",
-  };
-
-  let binding: Extract<ConfigBinding, { ok: true }> | undefined;
-  if (body.expectedConfigFingerprint !== undefined) {
-    const bound = bindGovernanceConfig(
-      configSnapshot,
-      body.expectedConfigFingerprint,
-    );
-    if (!bound.ok) {
-      sendConfigBindingError(res, bound);
-      return;
-    }
-    binding = bound;
+  try {
+    const progress = computeSignerQuorumProgress({
+      signers: body.signers.filter((s): s is string => typeof s === "string"),
+      signatures: body.signatures.filter((s): s is string => typeof s === "string"),
+      threshold: body.threshold,
+    });
+    res.json(progress);
+  } catch {
+    sendGovernanceFailure(res, 500, "STAGE_UNAVAILABLE", "quorum");
   }
-
-  const progress = computeSignerQuorumProgress({
-    signers,
-    signatures,
-    threshold: body.threshold,
-  });
-  res.json({
-    ...progress,
-    configFingerprint:
-      binding?.fingerprint ??
-      computeGovernanceConfigFingerprint(configSnapshot).fingerprint,
-  });
 });
 
 /**
@@ -290,67 +305,106 @@ router.post("/quorum-progress", (req: Request, res: Response) => {
  * for content it didn't actually submit.
  */
 router.post("/proposals/attachments/validate", (req: Request, res: Response) => {
-  const { attachments } = req.body as { attachments?: unknown };
+  const { attachments } = (req.body ?? {}) as { attachments?: unknown };
 
   if (!Array.isArray(attachments) || attachments.length === 0) {
-    res.status(400).json({
-      valid: false,
-      errors: [{ index: -1, field: "attachments", message: "attachments must be a non-empty array." }],
+    sendGovernanceFailure(res, 400, "CONTEXT_INSUFFICIENT", "attachments", {
+      fields: ["attachments"],
+      extra: {
+        valid: false,
+        errors: [
+          {
+            index: -1,
+            field: "attachments",
+            message: "attachments must be a non-empty array.",
+          },
+        ],
+      },
     });
     return;
   }
 
   if (attachments.length > MAX_ATTACHMENTS_PER_PROPOSAL) {
-    res.status(400).json({
-      valid: false,
-      errors: [
-        {
-          index: -1,
-          field: "attachments",
-          message: `A proposal may have at most ${MAX_ATTACHMENTS_PER_PROPOSAL} attachments.`,
-        },
-      ],
+    sendGovernanceFailure(res, 400, "VALIDATION_FAILED", "attachments", {
+      fields: ["attachments"],
+      extra: {
+        valid: false,
+        errors: [
+          {
+            index: -1,
+            field: "attachments",
+            message: `A proposal may have at most ${MAX_ATTACHMENTS_PER_PROPOSAL} attachments.`,
+          },
+        ],
+      },
     });
     return;
   }
 
-  const candidates = attachments as Partial<ProposalAttachmentInput>[];
-  const { valid, errors } = validateProposalAttachments(candidates);
+  try {
+    const candidates = attachments as Partial<ProposalAttachmentInput>[];
+    const { valid, errors } = validateProposalAttachments(candidates);
 
-  // Defense in depth: recompute the digest for transaction_payload
-  // attachments from the XDR they claim to hash, independent of whatever
-  // sha256 the client submitted.
-  const hashErrors = candidates.flatMap((attachment, index) => {
-    if (attachment.kind !== "transaction_payload" || !attachment.xdr) return [];
-    const recomputed = createHash("sha256").update(attachment.xdr, "utf8").digest("hex");
-    if (attachment.sha256 && recomputed !== attachment.sha256) {
-      return [
-        {
-          index,
-          kind: attachment.kind,
-          field: "sha256",
-          message: "sha256 does not match the SHA-256 digest of the provided xdr.",
-        },
-      ];
+    // Defense in depth: recompute the digest for transaction_payload
+    // attachments from the XDR they claim to hash, independent of whatever
+    // sha256 the client submitted. Malformed XDR is reported as a field error
+    // rather than allowed to throw an opaque 500.
+    const hashErrors = candidates.flatMap((attachment, index) => {
+      if (attachment.kind !== "transaction_payload") return [];
+      if (attachment.xdr === undefined || attachment.xdr === null) return [];
+      if (typeof attachment.xdr !== "string") {
+        return [
+          {
+            index,
+            kind: attachment.kind,
+            field: "xdr",
+            message: "xdr must be a string.",
+          },
+        ];
+      }
+      if (!attachment.xdr) return [];
+
+      const recomputed = createHash("sha256")
+        .update(attachment.xdr, "utf8")
+        .digest("hex");
+      if (attachment.sha256 && recomputed !== attachment.sha256) {
+        return [
+          {
+            index,
+            kind: attachment.kind,
+            field: "sha256",
+            message: "sha256 does not match the SHA-256 digest of the provided xdr.",
+          },
+        ];
+      }
+      return [];
+    });
+
+    const allErrors = [...errors, ...hashErrors];
+    if (allErrors.length > 0) {
+      sendGovernanceFailure(res, 400, "VALIDATION_FAILED", "attachments", {
+        fields: [...new Set(allErrors.map((error) => error.field))],
+        extra: { valid: false, errors: allErrors },
+      });
+      return;
     }
-    return [];
-  });
 
-  const allErrors = [...errors, ...hashErrors];
-  if (allErrors.length > 0) {
-    res.status(400).json({ valid: false, errors: allErrors });
-    return;
+    res.json({
+      valid: true,
+      errors: [],
+      attachments: candidates.map((attachment) => ({
+        kind: attachment.kind,
+        filename: attachment.filename,
+        sha256: attachment.sha256,
+      })),
+    });
+  } catch {
+    // Validation is read-only; a failure here must not be reported as a
+    // successful or partially-applied proposal submission.
+    sendGovernanceFailure(res, 500, "STAGE_UNAVAILABLE", "attachments", {
+      extra: { valid: false, errors: [] },
+    });
   }
-
-  res.json({
-    valid: true,
-    errors: [],
-    attachments: candidates.map((attachment) => ({
-      kind: attachment.kind,
-      filename: attachment.filename,
-      sha256: attachment.sha256,
-    })),
-  });
 });
 
 export default router;

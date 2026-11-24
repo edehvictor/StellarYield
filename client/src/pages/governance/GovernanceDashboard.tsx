@@ -19,8 +19,11 @@ export default function GovernanceDashboard() {
     signerRotationAudit,
     addTransaction,
     addSignature,
-    markExecuted,
-    refreshTransactionConfig,
+    beginExecution,
+    recordExecutionSubmitted,
+    failExecution,
+    completeExecution,
+    rollbackExecution,
     updateConfig,
   } = useGovernanceStore();
 
@@ -297,7 +300,11 @@ export default function GovernanceDashboard() {
               key={tx.id}
               transaction={tx}
               onSign={addSignature}
-              onExecute={markExecuted}
+              onBeginExecute={beginExecution}
+              onExecutionSubmitted={recordExecutionSubmitted}
+              onExecutionFailed={failExecution}
+              onExecutionRolledBack={rollbackExecution}
+              onExecute={completeExecution}
               config={config}
               onRefreshConfig={refreshTransactionConfig}
             />
@@ -314,7 +321,11 @@ export default function GovernanceDashboard() {
               key={tx.id}
               transaction={tx}
               onSign={addSignature}
-              onExecute={markExecuted}
+              onBeginExecute={beginExecution}
+              onExecutionSubmitted={recordExecutionSubmitted}
+              onExecutionFailed={failExecution}
+              onExecutionRolledBack={rollbackExecution}
+              onExecute={completeExecution}
               config={config}
               onRefreshConfig={refreshTransactionConfig}
             />
@@ -333,7 +344,11 @@ export default function GovernanceDashboard() {
               key={tx.id}
               transaction={tx}
               onSign={addSignature}
-              onExecute={markExecuted}
+              onBeginExecute={beginExecution}
+              onExecutionSubmitted={recordExecutionSubmitted}
+              onExecutionFailed={failExecution}
+              onExecutionRolledBack={rollbackExecution}
+              onExecute={completeExecution}
               config={config}
               onRefreshConfig={refreshTransactionConfig}
             />

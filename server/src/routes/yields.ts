@@ -10,22 +10,66 @@ import { formatParityReport } from "../utils/yieldNormalization";
 import { calculateNetYield } from "../services/netYieldEngine";
 import { yieldReliabilityEngine } from "../services/yieldReliabilityService";
 import { getFeeHistory } from "../services/protocolFeeHistoryService";
+import {
+  OpportunityRankingService,
+  type RankingWeights,
+} from "../services/opportunityRankingService";
+import { getAssetConfigVersion } from "../services/zapQuote";
 
 const yieldsRouter = Router();
 
+/** Inclusive bounds for a fee/cost assumption in basis points (0% to 100%). */
+export const MIN_ASSUMPTION_BPS = 0;
+export const MAX_ASSUMPTION_BPS = 10_000;
+
+/**
+ * Parses an optional basis-point assumption from the query string (#1922).
+ * - absent, empty or non-numeric → `undefined` (the engine default applies)
+ * - a finite number within [0, 10,000] → that number
+ * - a finite number outside the range, or ±Infinity → `null` (rejected, 400)
+ * In-range values above the engine's own 3,000 bps ceiling are still clamped
+ * by `calculateNetYield`, as before.
+ */
+export function parseAssumptionBps(value: unknown): number | null | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== "string" || value.trim() === "") return undefined;
+  const parsed = Number(value);
+  if (Number.isNaN(parsed)) return undefined;
+  if (!Number.isFinite(parsed)) return null;
+  if (parsed < MIN_ASSUMPTION_BPS || parsed > MAX_ASSUMPTION_BPS) return null;
+  return parsed;
+}
+
 yieldsRouter.get("/", async (_req, res) => {
   try {
-    const { data: yields, cacheStatus } = await getYieldDataWithCacheStatus();
-    const parseBps = (value: unknown): number | undefined => {
-      const parsed = Number(value);
-      return Number.isFinite(parsed) ? parsed : undefined;
-    };
+    // Strategy comparison assumptions (#1922): checked before any yield data
+    // is read, so a rejected request computes and caches nothing.
     const assumptions = {
-      protocolFeeBps: parseBps(_req.query.protocolFeeBps),
-      vaultFeeBps: parseBps(_req.query.vaultFeeBps),
-      rebalanceCostBps: parseBps(_req.query.rebalanceCostBps),
-      slippageBps: parseBps(_req.query.slippageBps),
+      protocolFeeBps: parseAssumptionBps(_req.query.protocolFeeBps),
+      vaultFeeBps: parseAssumptionBps(_req.query.vaultFeeBps),
+      rebalanceCostBps: parseAssumptionBps(_req.query.rebalanceCostBps),
+      slippageBps: parseAssumptionBps(_req.query.slippageBps),
     };
+    const outOfRange = (Object.entries(assumptions) as Array<[string, number | null | undefined]>)
+      .filter(([, value]) => value === null)
+      .map(([name]) => name);
+    if (outOfRange.length > 0) {
+      sendError(
+        res,
+        400,
+        "INVALID_ASSUMPTION",
+        `${outOfRange.join(", ")} must be between ${MIN_ASSUMPTION_BPS} and ${MAX_ASSUMPTION_BPS} bps.`,
+        { fields: outOfRange },
+      );
+      return;
+    }
+    const checkedAssumptions = {
+      protocolFeeBps: assumptions.protocolFeeBps ?? undefined,
+      vaultFeeBps: assumptions.vaultFeeBps ?? undefined,
+      rebalanceCostBps: assumptions.rebalanceCostBps ?? undefined,
+      slippageBps: assumptions.slippageBps ?? undefined,
+    };
+    const { data: yields, cacheStatus } = await getYieldDataWithCacheStatus();
     const hasCustomAssumptions = Object.values(assumptions).some((value) => value != null);
     const payload = await Promise.all(yields.map(async (entry) => {
       const providerId = `${entry.protocolName.toLowerCase()}_api`;
@@ -40,9 +84,12 @@ yieldsRouter.get("/", async (_req, res) => {
       const ageSeconds = Number.isFinite(lastFetchMs)
         ? Math.max(0, Math.round((Date.now() - lastFetchMs) / 1000))
         : Number.POSITIVE_INFINITY;
+      const freshness = Number.isFinite(score.metrics.freshness)
+        ? score.metrics.freshness
+        : 0;
 
       // 30 minutes stale window
-      if (ageSeconds > 30 * 60 || score.metrics.freshness < 0.5) {
+      if (ageSeconds > 30 * 60 || freshness < 0.5) {
         isStale = true;
       }
 
@@ -58,7 +105,7 @@ yieldsRouter.get("/", async (_req, res) => {
 
       const netYield = calculateNetYield(
         entry.totalApy,
-        hasCustomAssumptions ? assumptions : undefined,
+        hasCustomAssumptions ? checkedAssumptions : undefined,
       );
       // Recent protocol fee changes (#1147), newest-first. Sourced from
       // protocolFeeHistoryService, which records a snapshot whenever the
@@ -78,6 +125,7 @@ yieldsRouter.get("/", async (_req, res) => {
         reliabilityStatus: score.status,
         warnings,
         feeHistory,
+        configFingerprint: fpResult.fingerprint,
       };
     }));
     res.setHeader(
@@ -85,14 +133,29 @@ yieldsRouter.get("/", async (_req, res) => {
       `public, max-age=${CURRENT_YIELDS_TTL_SECONDS}, stale-while-revalidate=30`,
     );
     res.setHeader("X-Cache-Status", cacheStatus);
+    // Immutable configuration fingerprint (#stale-config): clients use this
+    // to detect when the asset configuration snapshot has changed between
+    // the quote that was shown and the one that would be executed. When the
+    // fingerprint received with a quote no longer matches the one on the
+    // current response the client must refresh before submitting.
+    const configVersion = getAssetConfigVersion();
+    res.setHeader("X-Config-Version", configVersion);
     res.json(payload);
   } catch (error) {
     console.error("Failed to serve /api/yields.", error);
-    sendError(res, 500, "YIELD_FETCH_FAILED", "Unable to fetch yield data right now.");
-    res.status(500).json({
-      error: "Unable to fetch yield data right now.",
-      requestId: (_req as unknown as { requestId?: string }).requestId,
-    });
+    // One response only: a second write after sendError threw
+    // ERR_HTTP_HEADERS_SENT and hid the original failure (#1922).
+    if (!res.headersSent) {
+      sendError(
+        res,
+        500,
+        "YIELD_FETCH_FAILED",
+        "Unable to fetch yield data right now.",
+        undefined,
+        (_req as unknown as { requestId?: string }).requestId,
+        true,
+      );
+    }
   }
 });
 

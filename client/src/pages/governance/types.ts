@@ -8,14 +8,12 @@ export interface SignerQuorumProgress {
   perSigner: { address: string; signed: boolean }[];
 }
 
+import type { GovernanceExecutionState } from "./governanceOperation";
+
 export interface PendingTransaction {
   id: string;
-  /**
-   * Immutable governance configuration fingerprint the proposal was prepared
-   * under (#1894). Proposals without this, or with a stale value, must be
-   * refreshed before they can be signed or executed.
-   */
-  configFingerprint?: string;
+  /** Durable execution checkpoint; survives reloads so retries can resume safely (#1899). */
+  operation?: GovernanceExecutionState;
   description: string;
   method: string;
   args: string[];

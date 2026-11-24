@@ -104,6 +104,8 @@ export interface CompatibilityIssue {
   fallbackReasonCode?: FallbackReasonCode;
   /** Human-readable sentence explaining the downgrade reason. */
   fallbackReason?: string;
+  /** Set when the issue comes from two registry sources that disagree. */
+  registryConflict?: RegistryConflict;
 }
 
 /**
