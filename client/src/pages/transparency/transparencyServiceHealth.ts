@@ -25,6 +25,7 @@ import {
   type TransparencyDiagnosticSeverity,
   type TransparencyStage,
 } from "../../../../shared/types/transparencyDiagnostic";
+import { configFingerprintsMatch, isConfigFingerprint } from "../../../../shared/types/configFingerprint";
 
 export type SubsystemState = "healthy" | "degraded" | "failed" | "unknown";
 
@@ -35,6 +36,19 @@ export interface TransparencyHealthInput {
   relayer: SubsystemState;
   registry: SubsystemState;
   smokeTest: SubsystemState;
+}
+
+/**
+ * Configuration identity for a health rollup.
+ *
+ * `configFingerprint` is the fingerprint the current signals were reported
+ * under; `previousConfigFingerprint` is the one the reusable signals were
+ * reported under. When both are present and differ, the previous signals were
+ * observed against a different configuration and must not be reused.
+ */
+export interface TransparencyHealthConfig {
+  configFingerprint?: string;
+  previousConfigFingerprint?: string;
 }
 
 export interface TransparencyHealthSummary {
@@ -50,6 +64,10 @@ export interface TransparencyHealthSummary {
   reusedSubsystems: Array<keyof TransparencyHealthInput>;
   /** Privacy-safe diagnostics naming the failed stage and remediation path. */
   diagnostics: TransparencyDiagnostic[];
+  /** Config fingerprint the observed signals were reported under, when known. */
+  configFingerprint?: string;
+  /** True when last known-good signals were rejected because the config changed. */
+  configStale: boolean;
 }
 
 export interface TransparencyHistoryPoint {
@@ -69,6 +87,8 @@ export interface TransparencySummaryPayload {
   status?: TransparencySummaryStatus;
   /** Privacy-safe diagnostics naming the failed stage and remediation path. */
   diagnostics?: TransparencyDiagnostic[];
+  /** Fingerprint of the server configuration that is active now (#1910). */
+  configFingerprint?: string;
 }
 
 export interface ValidatedFailoverIncident {
@@ -367,6 +387,9 @@ export function validateTransparencySummaryPayload(payload: unknown): Transparen
 
   const status = parseSummaryStatus(payload.status);
   const diagnostics = parseSummaryDiagnostics(payload.diagnostics);
+  const configFingerprint = isConfigFingerprint(payload.configFingerprint)
+    ? payload.configFingerprint
+    : undefined;
 
   return {
     totalRevenueLumens,
@@ -375,6 +398,7 @@ export function validateTransparencySummaryPayload(payload: unknown): Transparen
     history: validatedHistory,
     ...(status ? { status } : {}),
     ...(diagnostics.length > 0 ? { diagnostics } : {}),
+    ...(configFingerprint ? { configFingerprint } : {}),
   };
 }
 
@@ -385,6 +409,7 @@ const DIAGNOSTIC_CODES: ReadonlyArray<TransparencyDiagnosticCode> = [
   "STALE_LAST_KNOWN",
   "AGGREGATION_FAILED",
   "NO_DATA_AVAILABLE",
+  "CONFIG_SNAPSHOT_STALE",
 ];
 const DIAGNOSTIC_SEVERITIES: ReadonlyArray<TransparencyDiagnosticSeverity> = ["info", "warning", "critical"];
 
@@ -527,13 +552,24 @@ export function validateFailoverIncidentsPayload(payload: unknown): ValidatedFai
  * Pass the previous rollup input as `previous` to preserve last known-good
  * values when a retry comes back with a missing signal. This never invents a
  * value for a subsystem that was never observed.
+ *
+ * Pass `config` to tie the reused values to a configuration identity. A
+ * previous value is only reused when the current and previous fingerprints
+ * match; after a configuration change the old signals are rejected, the rollup
+ * cannot rely on them, and a `CONFIG_SNAPSHOT_STALE` diagnostic is reported.
  */
 export function summarizeTransparencyHealth(
   input: Partial<TransparencyHealthInput>,
   previous?: Partial<TransparencyHealthInput>,
+  config: TransparencyHealthConfig = {},
 ): TransparencyHealthSummary {
   const safeInput = isPlainRecord(input) ? input : {};
   const safePrevious = isPlainRecord(previous) ? previous : {};
+  const configStale = !configFingerprintsMatch(
+    config.configFingerprint,
+    config.previousConfigFingerprint,
+  );
+
   const reusedSubsystems: Array<keyof TransparencyHealthInput> = [];
 
   const resolve = (key: keyof TransparencyHealthInput): SubsystemState => {
@@ -541,6 +577,8 @@ export function summarizeTransparencyHealth(
     // reused as a last known-good value or flip the rollup to healthy.
     const incoming = sanitizeSubsystemState(safeInput[key]);
     if (incoming !== "unknown") return incoming;
+    // Signals observed under a different configuration are never reused (#1910).
+    if (configStale) return "unknown";
     const prior = sanitizeSubsystemState(safePrevious[key]);
     if (prior !== "unknown") {
       reusedSubsystems.push(key);
@@ -583,10 +621,16 @@ export function summarizeTransparencyHealth(
     contextSufficient,
     unknownSubsystems: SUBSYSTEM_KEYS.filter((key) => subsystems[key] === "unknown"),
     reusedSubsystems,
+    configStale,
   });
 
   let summaryMessage = "All transparency subsystems are healthy.";
-  if (!contextSufficient) {
+  if (configStale) {
+    summaryMessage =
+      "Degraded: the configuration changed since these signals were observed. " +
+      "Signals from the previous configuration were not reused; refresh once the " +
+      "new configuration has reported.";
+  } else if (!contextSufficient) {
     summaryMessage =
       `Degraded: insufficient diagnostic context — ${knownSubsystems.length} of ` +
       `${SUBSYSTEM_KEYS.length} transparency subsystems reported a status. ` +
@@ -610,6 +654,8 @@ export function summarizeTransparencyHealth(
     contextSufficient,
     reusedSubsystems,
     diagnostics,
+    ...(config.configFingerprint ? { configFingerprint: config.configFingerprint } : {}),
+    configStale,
   };
 }
 
@@ -617,6 +663,7 @@ interface DiagnosticContext {
   contextSufficient: boolean;
   unknownSubsystems: Array<keyof TransparencyHealthInput>;
   reusedSubsystems: Array<keyof TransparencyHealthInput>;
+  configStale: boolean;
 }
 
 /**
@@ -629,6 +676,15 @@ function buildHealthDiagnostics(
   context: DiagnosticContext,
 ): TransparencyDiagnostic[] {
   const diagnostics: TransparencyDiagnostic[] = [];
+
+  if (context.configStale) {
+    diagnostics.push(
+      buildTransparencyDiagnostic("CONFIG_SNAPSHOT_STALE", {
+        stage: "configuration",
+        affectedStages: ["configuration", "context-validation"],
+      }),
+    );
+  }
 
   if (!context.contextSufficient) {
     diagnostics.push(

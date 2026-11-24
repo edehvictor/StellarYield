@@ -452,3 +452,113 @@ describe("validateTransparencySummaryPayload – status and diagnostics (#1917)"
     expect(result).toEqual(base);
   });
 });
+
+describe("summarizeTransparencyHealth – stale configuration snapshots (#1910)", () => {
+  const healthyInput = {
+    indexer: "healthy" as const,
+    relayer: "healthy" as const,
+    registry: "healthy" as const,
+    smokeTest: "healthy" as const,
+  };
+
+  it("reports healthy with no stale signal when the configuration is unchanged", () => {
+    const first = summarizeTransparencyHealth(healthyInput, undefined, {
+      configFingerprint: "cfg1:aaaaaaaaaaaaaaaa",
+    });
+    expect(first.overall).toBe("healthy");
+    expect(first.configStale).toBe(false);
+    expect(first.diagnostics).toEqual([]);
+
+    const retried = summarizeTransparencyHealth({}, first.subsystems, {
+      configFingerprint: "cfg1:aaaaaaaaaaaaaaaa",
+      previousConfigFingerprint: first.configFingerprint,
+    });
+
+    // Unchanged configuration: last known-good signals are safely reusable.
+    expect(retried.configStale).toBe(false);
+    expect(retried.subsystems).toEqual(healthyInput);
+    expect(retried.reusedSubsystems).toHaveLength(4);
+    expect(retried.overall).toBe("healthy");
+  });
+
+  it("rejects signals from a previous configuration and never reports healthy", () => {
+    const first = summarizeTransparencyHealth(healthyInput, undefined, {
+      configFingerprint: "cfg1:aaaaaaaaaaaaaaaa",
+    });
+
+    const afterChange = summarizeTransparencyHealth({}, first.subsystems, {
+      configFingerprint: "cfg1:bbbbbbbbbbbbbbbb",
+      previousConfigFingerprint: first.configFingerprint,
+    });
+
+    expect(afterChange.configStale).toBe(true);
+    expect(afterChange.reusedSubsystems).toEqual([]);
+    expect(afterChange.subsystems).toEqual({
+      indexer: "unknown",
+      relayer: "unknown",
+      registry: "unknown",
+      smokeTest: "unknown",
+    });
+    expect(afterChange.contextSufficient).toBe(false);
+    expect(afterChange.overall).toBe("degraded");
+    expect(afterChange.summaryMessage).toMatch(/configuration changed/i);
+
+    const stale = afterChange.diagnostics.find(
+      (entry) => entry.code === "CONFIG_SNAPSHOT_STALE",
+    );
+    expect(stale).toBeDefined();
+    expect(stale?.stage).toBe("configuration");
+    expect(stale?.severity).toBe("critical");
+    expect(stale?.retryable).toBe(true);
+    expect(areDiagnosticsPrivacySafe(afterChange.diagnostics)).toBe(true);
+  });
+
+  it("keeps fresh signals reported under the new configuration", () => {
+    const first = summarizeTransparencyHealth(healthyInput, undefined, {
+      configFingerprint: "cfg1:aaaaaaaaaaaaaaaa",
+    });
+
+    const afterChange = summarizeTransparencyHealth(
+      { indexer: "healthy", relayer: "healthy" },
+      first.subsystems,
+      {
+        configFingerprint: "cfg1:bbbbbbbbbbbbbbbb",
+        previousConfigFingerprint: first.configFingerprint,
+      },
+    );
+
+    // The two fresh signals are kept; the two from the old config are dropped.
+    expect(afterChange.subsystems.indexer).toBe("healthy");
+    expect(afterChange.subsystems.relayer).toBe("healthy");
+    expect(afterChange.subsystems.registry).toBe("unknown");
+    expect(afterChange.subsystems.smokeTest).toBe("unknown");
+    expect(afterChange.reusedSubsystems).toEqual([]);
+    expect(afterChange.configStale).toBe(true);
+    expect(afterChange.contextSufficient).toBe(true);
+    // The two dropped signals are unknown, so the rollup is degraded rather
+    // than healthy even though the fresh signals are healthy.
+    expect(afterChange.overall).toBe("degraded");
+    expect(afterChange.attentionSubsystems).toEqual(["registry", "smokeTest"]);
+  });
+
+  it("treats a missing previous fingerprint as unknown, not as a mismatch", () => {
+    const summary = summarizeTransparencyHealth({}, healthyInput, {
+      configFingerprint: "cfg1:bbbbbbbbbbbbbbbb",
+    });
+
+    expect(summary.configStale).toBe(false);
+    expect(summary.reusedSubsystems).toHaveLength(4);
+    expect(summary.overall).toBe("healthy");
+  });
+
+  it("does not invent values that were never observed after a config change", () => {
+    const summary = summarizeTransparencyHealth({}, { indexer: "unknown" }, {
+      configFingerprint: "cfg1:bbbbbbbbbbbbbbbb",
+      previousConfigFingerprint: "cfg1:aaaaaaaaaaaaaaaa",
+    });
+
+    expect(summary.reusedSubsystems).toEqual([]);
+    expect(summary.contextSufficient).toBe(false);
+    expect(summary.subsystems.indexer).toBe("unknown");
+  });
+});

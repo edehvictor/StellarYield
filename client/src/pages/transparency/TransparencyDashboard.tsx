@@ -140,8 +140,15 @@ export default function TransparencyDashboard() {
     const [healthSummary, setHealthSummary] = useState<TransparencyHealthSummary | null>(null);
     /** Retry counter: bumping it re-runs the reads without clearing existing state. */
     const [reloadToken, setReloadToken] = useState(0);
-    /** Last observed subsystem signals, used to preserve state when a retry fails. */
-    const lastHealthRef = useRef<Partial<TransparencyHealthInput> | null>(null);
+    /**
+     * Last observed subsystem signals plus the config fingerprint they were
+     * reported under. Signals are only reusable while that fingerprint still
+     * matches the active configuration (#1910).
+     */
+    const lastHealthRef = useRef<{
+        subsystems: Partial<TransparencyHealthInput>;
+        configFingerprint?: string;
+    } | null>(null);
 
     const handleRetry = () => setReloadToken((token) => token + 1);
 
@@ -278,7 +285,12 @@ export default function TransparencyDashboard() {
                 smokeStatus?.checks,
             );
 
-            // Preserve last known-good signals when a retry comes back missing.
+            // Preserve last known-good signals while the configuration is
+            // unchanged; a failed summary read keeps the previous fingerprint.
+            const previous = lastHealthRef.current;
+            const currentFingerprint =
+                data?.configFingerprint ?? previous?.configFingerprint;
+
             const summary = summarizeTransparencyHealth(
                 {
                     indexer: indexerState,
@@ -286,14 +298,23 @@ export default function TransparencyDashboard() {
                     registry: registryState,
                     smokeTest: smokeState,
                 },
-                lastHealthRef.current ?? undefined,
+                previous?.subsystems,
+                {
+                    configFingerprint: currentFingerprint,
+                    previousConfigFingerprint: previous?.configFingerprint,
+                },
             );
-            lastHealthRef.current = summary.subsystems;
+            lastHealthRef.current = {
+                subsystems: summary.subsystems,
+                ...(currentFingerprint ? { configFingerprint: currentFingerprint } : {}),
+            };
             setHealthSummary(summary);
         }
 
         void loadServiceHealth();
-    }, [smokeStatus, reloadToken]);
+        // Re-run when the server reports a new config fingerprint so stale
+        // signals are rejected as soon as the configuration changes (#1910).
+    }, [smokeStatus, reloadToken, data?.configFingerprint]);
 
     const healthBadgeClass = (state: SubsystemState) => {
         switch (state) {

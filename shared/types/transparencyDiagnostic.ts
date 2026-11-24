@@ -24,6 +24,7 @@
 /** Pipeline stage that produced (or failed to produce) transparency status. */
 export type TransparencyStage =
   | "context-validation"
+  | "configuration"
   | "indexer"
   | "relayer"
   | "registry"
@@ -34,6 +35,7 @@ export type TransparencyStage =
 /** Stable, non-sensitive diagnostic identifiers. */
 export type TransparencyDiagnosticCode =
   | "CONTEXT_INSUFFICIENT"
+  | "CONFIG_SNAPSHOT_STALE"
   | "SUBSYSTEM_UNAVAILABLE"
   | "STALE_LAST_KNOWN"
   | "AGGREGATION_FAILED"
@@ -62,6 +64,7 @@ export interface TransparencyDiagnostic {
 
 export const TRANSPARENCY_STAGE_LABELS: Record<TransparencyStage, string> = {
   "context-validation": "Diagnostic context",
+  configuration: "Configuration",
   indexer: "Indexer",
   relayer: "Relayer",
   registry: "Registry",
@@ -123,6 +126,14 @@ interface DiagnosticTemplate {
 }
 
 const TEMPLATES: Record<TransparencyDiagnosticCode, DiagnosticTemplate> = {
+  CONFIG_SNAPSHOT_STALE: {
+    severity: "critical",
+    summary:
+      "The transparency snapshot was produced under a configuration that no longer matches the active configuration.",
+    remediation:
+      "Refresh the snapshot against the active configuration before trusting these metrics. No cached state or balances were changed.",
+    retryable: true,
+  },
   CONTEXT_INSUFFICIENT: {
     severity: "warning",
     summary:

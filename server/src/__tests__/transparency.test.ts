@@ -17,6 +17,8 @@ import {
     __expireTransparencyCacheForTesting,
     __resetTransparencyStateForTesting,
     __setTransparencyAggregatorForTesting,
+    __setTransparencyConfigForTesting,
+    getTransparencyConfigFingerprint,
 } from "../routes/transparency";
 import { failoverIncidentHistoryService } from "../services/failoverIncidentHistoryService";
 import { TRANSPARENCY_SCHEMA_VERSION } from "../../../shared/types/transparencyContext";
@@ -363,6 +365,7 @@ function makeSnapshot(overrides: Partial<Snapshot> = {}): Snapshot {
         history,
         cachedAt: Date.now(),
         context: { network: "testnet", ledger: 1, version: TRANSPARENCY_SCHEMA_VERSION },
+        configFingerprint: getTransparencyConfigFingerprint(),
         ...overrides,
     };
 }
@@ -501,5 +504,183 @@ describe("GET /api/transparency/summary – diagnostic hardening (#1917)", () =>
         expect(retried.body.totalRevenueLumens).toBe(1_500);
         expect(retried.body.totalBurnedTokens).toBe(150);
         expect(retried.body.deflationaryRatio).toBe(2);
+    });
+});
+
+// ── #1910: stale configuration snapshots ──────────────────────────────────
+
+describe("GET /api/transparency/summary – stale configuration snapshots (#1910)", () => {
+    beforeEach(() => {
+        __resetTransparencyStateForTesting();
+    });
+
+    afterEach(() => {
+        __resetTransparencyStateForTesting();
+    });
+
+    it("stamps a stable config fingerprint on a normal read", async () => {
+        const res = await request(createApp()).get("/api/transparency/summary");
+
+        expect(res.status).toBe(200);
+        expect(res.body.status).toBe("healthy");
+        expect(res.body.diagnostics).toEqual([]);
+        expect(res.body.configFingerprint).toBe(getTransparencyConfigFingerprint());
+        expect(res.body.snapshotConfigFingerprint).toBe(res.body.configFingerprint);
+
+        const again = await request(createApp()).get("/api/transparency/summary");
+        expect(again.body.configFingerprint).toBe(res.body.configFingerprint);
+    });
+
+    it("changes the fingerprint when the configuration changes", () => {
+        const before = getTransparencyConfigFingerprint();
+        __setTransparencyConfigForTesting({ cacheTtlMs: 1 });
+        const after = getTransparencyConfigFingerprint();
+
+        expect(after).not.toBe(before);
+        expect(after).toMatch(/^cfg1:[0-9a-f]{16}$/);
+    });
+
+    it("rejects a cached snapshot when the configuration no longer matches", async () => {
+        let aggregations = 0;
+        __setTransparencyAggregatorForTesting(async () => {
+            aggregations += 1;
+            return makeSnapshot({
+                totalRevenueLumens: 1_000 * aggregations,
+                history: [
+                    { date: "2026-11-18", revenue: 1_000 * aggregations, burned: 100 },
+                ],
+            });
+        });
+
+        const warm = await request(createApp()).get("/api/transparency/summary");
+        expect(warm.status).toBe(200);
+        expect(warm.body.totalRevenueLumens).toBe(1_000);
+        expect(aggregations).toBe(1);
+
+        // The config changes while the cached snapshot is still fresh.
+        __setTransparencyConfigForTesting({ horizonUrl: "https://new-horizon.example.com" });
+
+        const afterChange = await request(createApp()).get("/api/transparency/summary");
+
+        // The stale-config cache entry must not be served; work is refreshed.
+        expect(aggregations).toBe(2);
+        expect(afterChange.status).toBe(200);
+        expect(afterChange.body.status).toBe("healthy");
+        expect(afterChange.body.diagnostics).toEqual([]);
+        expect(afterChange.body.totalRevenueLumens).toBe(2_000);
+        expect(afterChange.body.snapshotConfigFingerprint).toBe(
+            afterChange.body.configFingerprint,
+        );
+        expect(afterChange.body.configFingerprint).not.toBe(warm.body.configFingerprint);
+    });
+
+    it("rejects an aggregator snapshot that declares a different configuration", async () => {
+        __setTransparencyConfigForTesting({ horizonUrl: "https://active-horizon.example.com" });
+        __setTransparencyAggregatorForTesting(async () =>
+            makeSnapshot({ configFingerprint: "cfg1:0000000000000000" }),
+        );
+
+        const res = await request(createApp()).get("/api/transparency/summary");
+
+        expect(res.status).toBe(500);
+        expect(res.body.status).toBe("unavailable");
+        expect(res.body.diagnostics[0].code).toBe("NO_DATA_AVAILABLE");
+
+        const serialized = JSON.stringify(res.body);
+        expect(serialized).not.toContain("config fingerprint mismatch");
+        expect(serialized).not.toContain("active-horizon.example.com");
+    });
+
+    it("preserves last known-good snapshot and balances on failure, marking it stale after a config change", async () => {
+        __setTransparencyAggregatorForTesting(async () => makeSnapshot());
+        const warm = await request(createApp()).get("/api/transparency/summary");
+        expect(warm.status).toBe(200);
+        expect(warm.body.status).toBe("healthy");
+
+        // Configuration changes, then the refresh fails.
+        __setTransparencyConfigForTesting({ historyDays: 7 });
+        __expireTransparencyCacheForTesting();
+        __setTransparencyAggregatorForTesting(secretBearingError);
+
+        const degraded = await request(createApp()).get("/api/transparency/summary");
+
+        expect(degraded.status).toBe(200);
+        expect(degraded.body.status).toBe("degraded");
+        // Existing metrics are preserved rather than blanked out.
+        expect(degraded.body.totalRevenueLumens).toBe(warm.body.totalRevenueLumens);
+        expect(degraded.body.totalBurnedTokens).toBe(warm.body.totalBurnedTokens);
+        expect(degraded.body.deflationaryRatio).toBe(warm.body.deflationaryRatio);
+        expect(degraded.body.history).toEqual(warm.body.history);
+
+        expect(degraded.body.diagnostics.map((d: { code: string }) => d.code)).toEqual([
+            "AGGREGATION_FAILED",
+            "CONFIG_SNAPSHOT_STALE",
+            "STALE_LAST_KNOWN",
+        ]);
+        expect(degraded.body.diagnostics[1].stage).toBe("configuration");
+        expect(degraded.body.diagnostics[1].severity).toBe("critical");
+        expect(degraded.body.diagnostics[1].privacySafe).toBe(true);
+        expect(degraded.body.snapshotConfigFingerprint).toBe(
+            warm.body.snapshotConfigFingerprint,
+        );
+        expect(degraded.body.configFingerprint).not.toBe(
+            degraded.body.snapshotConfigFingerprint,
+        );
+    });
+
+    it("does not mark a preserved snapshot stale when the configuration is unchanged", async () => {
+        __setTransparencyAggregatorForTesting(async () => makeSnapshot());
+        await request(createApp()).get("/api/transparency/summary");
+
+        __expireTransparencyCacheForTesting();
+        __setTransparencyAggregatorForTesting(secretBearingError);
+
+        const degraded = await request(createApp()).get("/api/transparency/summary");
+
+        expect(degraded.body.status).toBe("degraded");
+        expect(degraded.body.diagnostics.map((d: { code: string }) => d.code)).toEqual([
+            "AGGREGATION_FAILED",
+            "STALE_LAST_KNOWN",
+        ]);
+        expect(degraded.body.configFingerprint).toBe(degraded.body.snapshotConfigFingerprint);
+    });
+
+    it("retries safely after a configuration change and rebuilds under the new config", async () => {
+        __setTransparencyAggregatorForTesting(async () => makeSnapshot());
+        await request(createApp()).get("/api/transparency/summary");
+
+        __setTransparencyConfigForTesting({ horizonUrl: "https://changed.example.com" });
+        __setTransparencyAggregatorForTesting(secretBearingError);
+        const failed = await request(createApp()).get("/api/transparency/summary");
+        expect(failed.body.status).toBe("degraded");
+
+        __setTransparencyAggregatorForTesting(async () =>
+            makeSnapshot({
+                history: [{ date: "2026-11-19", revenue: 1_500, burned: 150 }],
+                totalRevenueLumens: 1_500,
+                totalBurnedTokens: 150,
+                deflationaryRatio: 2,
+            }),
+        );
+
+        const retried = await request(createApp()).get("/api/transparency/summary");
+
+        expect(retried.status).toBe(200);
+        expect(retried.body.status).toBe("healthy");
+        expect(retried.body.diagnostics).toEqual([]);
+        expect(retried.body.totalRevenueLumens).toBe(1_500);
+        expect(retried.body.configFingerprint).toBe(getTransparencyConfigFingerprint());
+        expect(retried.body.snapshotConfigFingerprint).toBe(
+            retried.body.configFingerprint,
+        );
+    });
+
+    it("clears the config override on reset", () => {
+        const before = getTransparencyConfigFingerprint();
+        __setTransparencyConfigForTesting({ cacheTtlMs: 5 });
+        expect(getTransparencyConfigFingerprint()).not.toBe(before);
+
+        __resetTransparencyStateForTesting();
+        expect(getTransparencyConfigFingerprint()).toBe(before);
     });
 });

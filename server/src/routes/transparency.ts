@@ -22,6 +22,13 @@
  * is served unchanged with `status: "degraded"` and a privacy-safe diagnostic
  * naming the failed stage. Responses never echo raw error text, RPC URLs,
  * wallets, or stack traces.
+ *
+ * Stale configuration (#1910): every snapshot is stamped with an immutable
+ * fingerprint of the aggregation configuration. A cached snapshot is only
+ * reused while that fingerprint still matches the active configuration; when it
+ * does not, the snapshot is rejected and re-aggregated instead of being served
+ * as if it were current. On failure the last known-good snapshot is preserved
+ * but reported as `degraded` with a `CONFIG_SNAPSHOT_STALE` diagnostic.
  */
 import { Router, type Request, type Response } from "express";
 import {
@@ -44,8 +51,62 @@ import {
     redactDiagnosticText,
     type TransparencyDiagnostic,
 } from "../../../shared/types/transparencyDiagnostic";
+import {
+    computeConfigFingerprint,
+    deepFreezeConfig,
+} from "../../../shared/types/configFingerprint";
 
 const transparencyRouter = Router();
+
+// ── Aggregation configuration ─────────────────────────────────────────────
+
+/**
+ * Version of the aggregation pipeline. Bump this whenever the shape or meaning
+ * of the metrics changes so cached snapshots from the old pipeline are
+ * rejected instead of being served under the new definition.
+ */
+const AGGREGATION_VERSION = "transparency-aggregation-v1";
+const CACHE_TTL_MS = 60_000; // 60 seconds
+const HISTORY_DAYS = 30;
+
+/**
+ * Configuration that the transparency snapshot depends on. It is frozen and
+ * fingerprinted as a unit so a change to any field invalidates cached work.
+ */
+export interface TransparencyConfig {
+    readonly aggregationVersion: string;
+    readonly cacheTtlMs: number;
+    readonly historyDays: number;
+    readonly horizonUrl: string;
+    /** Soroban RPC endpoint used for on-chain reads, when configured. */
+    readonly sorobanRpcUrl: string;
+}
+
+/** @internal Test seam: an explicit config snapshot replaces the environment. */
+let configOverride: Readonly<TransparencyConfig> | null = null;
+
+/**
+ * Build the active configuration from the process environment.
+ *
+ * The raw values stay in memory only; only the fingerprint is ever returned to
+ * a client, so endpoints are never leaked through diagnostics.
+ */
+export function getTransparencyConfig(): Readonly<TransparencyConfig> {
+    if (configOverride) return configOverride;
+
+    return deepFreezeConfig({
+        aggregationVersion: AGGREGATION_VERSION,
+        cacheTtlMs: CACHE_TTL_MS,
+        historyDays: HISTORY_DAYS,
+        horizonUrl: process.env.STELLAR_HORIZON_URL ?? "horizon:default",
+        sorobanRpcUrl: process.env.SOROBAN_RPC_URL ?? "soroban:default",
+    });
+}
+
+/** Fingerprint of the configuration that is active right now. */
+export function getTransparencyConfigFingerprint(): string {
+    return computeConfigFingerprint(getTransparencyConfig());
+}
 
 // ── In-memory cache ───────────────────────────────────────────────────────
 
@@ -72,16 +133,31 @@ export type ExternalTransparencySource = () => Promise<unknown> | unknown;
 /** Snapshot health as seen by the aggregation stage. */
 type TransparencyStatus = "healthy" | "degraded";
 
+/** A metrics snapshot plus the configuration identity it was produced under. */
+interface TransparencySnapshot extends TransparencyData {
+    /** Immutable config fingerprint the metrics were aggregated with. */
+    configFingerprint: string;
+}
+
+/** Metrics supplied by the aggregator, before the config stamp is applied. */
+type TransparencyAggregation = TransparencyData & {
+    /** Optional explicit fingerprint supplied by an aggregator/test double. */
+    configFingerprint?: string;
+};
+
 interface TransparencyPayload extends TransparencySummary {
     status: TransparencyStatus;
     diagnostics: TransparencyDiagnostic[];
+    /** Fingerprint of the configuration that is active now. */
+    configFingerprint: string;
+    /** Fingerprint of the configuration the served metrics were built under. */
+    snapshotConfigFingerprint: string;
 }
 
-let cache: TransparencyData | null = null;
+let cache: TransparencySnapshot | null = null;
 /** Most recent snapshot that passed validation; never overwritten by a failure. */
-let lastKnownGood: TransparencyData | null = null;
+let lastKnownGood: TransparencySnapshot | null = null;
 let externalDataSource: ExternalTransparencySource | null = null;
-const CACHE_TTL_MS = 60_000; // 60 seconds
 
 // ── Checked arithmetic & boundary validation helpers ──────────────────────
 
@@ -311,10 +387,11 @@ export function resetTransparencyCache(): void {
     lastKnownGood = null;
     externalDataSource = null;
     aggregatorOverride = null;
+    configOverride = null;
 }
 
 /** @internal Test seam so failure handling can be exercised without I/O. */
-let aggregatorOverride: (() => Promise<TransparencyData>) | null = null;
+let aggregatorOverride: (() => Promise<TransparencyAggregation>) | null = null;
 
 function isFiniteNonNegative(value: unknown): value is number {
     return typeof value === "number" && Number.isFinite(value) && value >= 0;
@@ -377,12 +454,30 @@ export function validateTransparencyData(value: unknown): value is TransparencyD
 }
 
 function toPayload(
-    data: TransparencyData,
+    snapshot: TransparencySnapshot,
     status: TransparencyStatus,
     diagnostics: TransparencyDiagnostic[],
 ): TransparencyPayload {
-    const { cachedAt: _omit, ...metrics } = cloneSummaryData(data);
-    return { ...metrics, status, diagnostics };
+    const { cachedAt: _omit, ...metrics } = cloneSummaryData(snapshot);
+    return {
+        ...metrics,
+        status,
+        diagnostics,
+        configFingerprint: getTransparencyConfigFingerprint(),
+        snapshotConfigFingerprint: snapshot.configFingerprint,
+    };
+}
+
+/**
+ * True when a snapshot was produced under the configuration that is active
+ * right now. A snapshot with a missing fingerprint is treated as stale because
+ * it cannot be proven to match.
+ */
+function matchesActiveConfig(snapshot: TransparencySnapshot): boolean {
+    return (
+        typeof snapshot.configFingerprint === "string" &&
+        snapshot.configFingerprint === getTransparencyConfigFingerprint()
+    );
 }
 
 // ── Network, ledger and version context (#1916) ─────────────────────────
@@ -522,11 +617,12 @@ function assertWriteNetwork(req: Request, res: Response): boolean {
 // ── Data aggregation ─────────────────────────────────────────────────────
 
 function buildDefaultSeededInput(): { history: TransparencyHistoryPoint[]; totalEmissions: number } {
+    const config = getTransparencyConfig();
     const history: TransparencyHistoryPoint[] = [];
     const baseRevenue = 12_400; // USDC equivalent
     const baseBurned = 3_200;   // YIELD tokens
 
-    for (let i = 29; i >= 0; i--) {
+    for (let i = config.historyDays - 1; i >= 0; i--) {
         const d = new Date();
         d.setDate(d.getDate() - i);
         const dateStr = d.toISOString().split("T")[0];
@@ -543,7 +639,8 @@ function buildDefaultSeededInput(): { history: TransparencyHistoryPoint[]; total
 
     return {
         history,
-        totalEmissions: 10_000 * 30,
+        // Emission rate mock: 10_000 YIELD/day over the configured window.
+        totalEmissions: 10_000 * config.historyDays,
     };
 }
 
@@ -554,10 +651,20 @@ function buildDefaultSeededInput(): { history: TransparencyHistoryPoint[]; total
  * We return seeded deterministic data derived from the current date so
  * tests and the dashboard always have realistic numbers.
  *
- * @returns Aggregated transparency metrics.
+ * @returns Aggregated transparency metrics stamped with the active config
+ *          fingerprint.
+ * @throws When the resulting snapshot fails validation or was built for a
+ *         different configuration than the one that is active now.
  */
-async function aggregateTransparencyData(options?: { forceRefresh?: boolean }): Promise<TransparencyData> {
+async function aggregateTransparencyData(options?: { forceRefresh?: boolean }): Promise<TransparencySnapshot> {
     const network = resolveTransparencyNetwork();
+    const activeFingerprint = getTransparencyConfigFingerprint();
+
+    // Only reuse a cached snapshot while it still matches the active config.
+    // A stale-config entry is rejected (dropped) and rebuilt below (#1910).
+    if (cache && !matchesActiveConfig(cache)) {
+        cache = null;
+    }
 
     // A snapshot read for another network is never served as this one's,
     // even as a fallback (#1916).
@@ -577,27 +684,44 @@ async function aggregateTransparencyData(options?: { forceRefresh?: boolean }): 
         return cache;
     }
 
-    const next = aggregatorOverride ? await aggregatorOverride() : await buildTransparencySnapshot(network);
+    const aggregated = aggregatorOverride ? await aggregatorOverride() : await buildTransparencySnapshot(network);
 
-    if (!validateTransparencyData(next)) {
+    if (!validateTransparencyData(aggregated)) {
         throw new TransparencyValidationError(
             "transparency snapshot failed validation",
             "MALFORMED_EXTERNAL_DATA",
         );
     }
 
+    // An aggregator may declare the configuration it built under. If it
+    // disagrees with the active configuration, reject the work rather than
+    // stamping it with a fingerprint it was not produced under.
+    if (
+        aggregated.configFingerprint !== undefined &&
+        aggregated.configFingerprint !== activeFingerprint
+    ) {
+        throw new TransparencyValidationError(
+            "transparency snapshot config fingerprint mismatch; rejecting stale data",
+            "MALFORMED_EXTERNAL_DATA",
+        );
+    }
+
     // A source that answers from an older ledger (for example an RPC node
     // that is behind) never replaces a newer snapshot (#1916).
-    if (cache && next.context.ledger < cache.context.ledger) {
+    if (cache && aggregated.context.ledger < cache.context.ledger) {
         return cache;
     }
 
     // Only replace the cache after every boundary validation and checked
     // computation has succeeded; a failure leaves the previous snapshot
     // intact for safe retry.
-    cache = next;
-    lastKnownGood = next;
-    return next;
+    const snapshot: TransparencySnapshot = {
+        ...cloneSummaryData(aggregated),
+        configFingerprint: activeFingerprint,
+    };
+    cache = snapshot;
+    lastKnownGood = snapshot;
+    return snapshot;
 }
 
 /**
@@ -605,7 +729,7 @@ async function aggregateTransparencyData(options?: { forceRefresh?: boolean }): 
  * cache/validation logic so a failed build can never partially write to
  * module state.
  */
-async function buildTransparencySnapshot(network: TransparencyNetwork): Promise<TransparencyData> {
+async function buildTransparencySnapshot(network: TransparencyNetwork): Promise<TransparencyAggregation> {
     const rawSourceData = externalDataSource
         ? await externalDataSource()
         : buildDefaultSeededInput();
@@ -618,6 +742,7 @@ async function buildTransparencySnapshot(network: TransparencyNetwork): Promise<
         history: summary.history.map((point) => ({ ...point })),
         cachedAt: Date.now(),
         context,
+        configFingerprint: getTransparencyConfigFingerprint(),
     };
 }
 
@@ -627,7 +752,7 @@ async function buildTransparencySnapshot(network: TransparencyNetwork): Promise<
  * GET /api/transparency/summary
  *
  * Returns protocol revenue and token burn metrics.
- * Cached for 60 seconds.
+ * Cached for 60 seconds and re-aggregated whenever the configuration changes.
  */
 const handleSummary = async (req: Request, res: Response): Promise<void> => {
     let expectation: TransparencyContextExpectation;
@@ -642,7 +767,7 @@ const handleSummary = async (req: Request, res: Response): Promise<void> => {
     }
 
     const respond = (
-        data: TransparencyData,
+        data: TransparencySnapshot,
         status: TransparencyStatus,
         diagnostics: TransparencyDiagnostic[],
     ): void => {
@@ -661,6 +786,17 @@ const handleSummary = async (req: Request, res: Response): Promise<void> => {
         // snapshot: read the source once more before answering.
         if (expectation.minLedger !== undefined && data.context.ledger < expectation.minLedger) {
             data = await aggregateTransparencyData({ forceRefresh: true });
+        }
+        // Surface staleness explicitly if the active configuration changed
+        // between aggregation and response (for example a hot reload).
+        if (!matchesActiveConfig(data)) {
+            respond(data, "degraded", [
+                buildTransparencyDiagnostic("CONFIG_SNAPSHOT_STALE", {
+                    stage: "configuration",
+                    affectedStages: ["configuration", "aggregation"],
+                }),
+            ]);
+            return;
         }
         respond(data, "healthy", []);
     } catch (err) {
@@ -681,15 +817,28 @@ const handleSummary = async (req: Request, res: Response): Promise<void> => {
             network = null;
         }
         if (lastKnownGood && network && lastKnownGood.context.network === network) {
-            respond(lastKnownGood, "degraded", [
+            // If it predates the active config, say so instead of pretending
+            // it is current (#1910).
+            const diagnostics: TransparencyDiagnostic[] = [
                 buildTransparencyDiagnostic("AGGREGATION_FAILED", {
                     stage: "aggregation",
                 }),
+            ];
+            if (!matchesActiveConfig(lastKnownGood)) {
+                diagnostics.push(
+                    buildTransparencyDiagnostic("CONFIG_SNAPSHOT_STALE", {
+                        stage: "configuration",
+                        affectedStages: ["configuration", "cache"],
+                    }),
+                );
+            }
+            diagnostics.push(
                 buildTransparencyDiagnostic("STALE_LAST_KNOWN", {
                     stage: "cache",
                     affectedStages: ["aggregation", "cache"],
                 }),
-            ]);
+            );
+            respond(lastKnownGood, "degraded", diagnostics);
             return;
         }
         if (err instanceof TransparencyContextError) {
@@ -702,6 +851,7 @@ const handleSummary = async (req: Request, res: Response): Promise<void> => {
             error: "Unable to fetch transparency data.",
             code,
             status: "unavailable",
+            configFingerprint: getTransparencyConfigFingerprint(),
             diagnostics: [
                 buildTransparencyDiagnostic("NO_DATA_AVAILABLE", {
                     stage: "aggregation",
@@ -857,9 +1007,21 @@ transparencyRouter.post(
 
 /** @internal Test hook: replace the aggregator used by the route. */
 export function __setTransparencyAggregatorForTesting(
-    aggregator: (() => Promise<TransparencyData>) | null,
+    aggregator: (() => Promise<TransparencyAggregation>) | null,
 ): void {
     aggregatorOverride = aggregator;
+}
+
+/** @internal Test hook: replace the active configuration snapshot. */
+export function __setTransparencyConfigForTesting(
+    config: Partial<TransparencyConfig> | null,
+): void {
+    configOverride = config
+        ? deepFreezeConfig({
+              ...getTransparencyConfig(),
+              ...config,
+          })
+        : null;
 }
 
 /** @internal Test hook: force the next read to bypass the fresh cache. */

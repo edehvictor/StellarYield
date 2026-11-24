@@ -442,3 +442,74 @@ so the dashboard keeps showing the last known state instead of blanking out.
 - `client/src/pages/transparency/TransparencyDashboard.test.tsx` — diagnostics
   rendering and keeping the last snapshot visible when a refresh fails.
 - `shared/types/transparencyDiagnostic.test.ts` — redaction and privacy guarantees.
+
+## 8. Transparency stale configuration snapshots (#1910)
+
+Transparency metrics are only meaningful for the configuration that produced
+them. If the configuration changes (aggregation version, cache TTL, history
+window, Horizon/RPC endpoints) while a snapshot is cached, serving that snapshot
+would silently mix data from two different configurations. Both the route and the
+dashboard now detect and reject that stale context.
+
+### Fingerprint contract
+
+`shared/types/configFingerprint.ts` canonicalizes the configuration (key order is
+normalized, unsupported values and cycles are rejected) and hashes it with a
+versioned, non-cryptographic digest, e.g. `cfg1:1a2b3c4d5e6f7890`.
+
+- The fingerprint is a **change detector**, not a secret or a cryptographic
+  commitment.
+- It contains no raw configuration values, so it is safe to return to clients. RPC
+  URLs, wallet addresses and credentials are never embedded.
+- `configFingerprintsMatch(a, b)` returns `true` when either side is missing. A
+  client that does not send a fingerprint keeps working; two present fingerprints
+  must match exactly.
+
+### Response additions
+
+| Field | Meaning |
+| :--- | :--- |
+| `configFingerprint` | Fingerprint of the configuration that is active **now**. |
+| `snapshotConfigFingerprint` | Fingerprint the served metric snapshot was built under. |
+
+On a healthy read the two are equal. They differ only when a failure forced the
+route to preserve an older snapshot, which is always reported as `degraded`.
+
+### Server behaviour
+
+1. `getTransparencyConfig()` builds a frozen snapshot from the aggregation version
+   and environment, and `getTransparencyConfigFingerprint()` hashes it.
+2. Every cache entry records the fingerprint it was built under. A cached entry is
+   reused only while the fingerprint still matches; otherwise the entry is dropped
+   and the snapshot is re-aggregated.
+3. An aggregator that declares a different fingerprint has its work rejected
+   outright instead of being stamped with a fingerprint it was not produced under.
+4. On failure the last known-good snapshot and all of its metrics are preserved. If
+   that snapshot predates the active configuration, the response includes a
+   `CONFIG_SNAPSHOT_STALE` diagnostic (`stage: "configuration"`, `severity:
+   "critical"`) alongside `AGGREGATION_FAILED` and `STALE_LAST_KNOWN`.
+5. With no usable snapshot at all the route still returns HTTP 500 with
+   `NO_DATA_AVAILABLE`; no balances or cached state are modified.
+
+### Client behaviour
+
+`summarizeTransparencyHealth(input, previous, config)` accepts
+`{ configFingerprint, previousConfigFingerprint }`. When both are present and
+differ, last known-good signals are **not** reused, the rollup cannot report
+`healthy` from unobserved values, `configStale` is `true`, and a
+`CONFIG_SNAPSHOT_STALE` diagnostic is added. The dashboard tracks the fingerprint
+alongside its last known-good signals and keeps the previous fingerprint when a
+summary refresh fails, so a configuration change can never be masked by an error.
+
+### Tests
+
+- `shared/types/configFingerprint.test.ts` — canonicalization, stability, change
+  detection, missing-fingerprint handling, freezing, and no-raw-values guarantee.
+- `server/src/__tests__/transparency.test.ts` — fingerprint stamping, cache
+  rejection on configuration change, aggregator mismatch rejection, preserved
+  degraded snapshot marked stale, and safe retry after a configuration change.
+- `client/src/pages/transparency/transparencyServiceHealth.test.ts` — unchanged
+  configuration reuse, rejection after a change, partial fresh signals, and no
+  invented values.
+- `client/src/pages/transparency/TransparencyDashboard.test.tsx` — fingerprint
+  passed into the rollup and stale diagnostics rendered without hiding metrics.
