@@ -260,6 +260,41 @@ describe("SDK simulation context binding (#1857)", () => {
   });
 
   describe("runWithSimulationContext", () => {
+    it("supports asynchronous live-context readers before and after work", async () => {
+      let reads = 0;
+      const outcome = await runWithSimulationContext({
+        readContext: async () => ({
+          ...TESTNET_CONTEXT,
+          ledger: 1000 + reads++,
+        }),
+        run: async (context) => context.ledger,
+      });
+
+      expect(outcome.result).toBe(1000);
+      expect(outcome.context.ledger).toBe(1000);
+      expect(outcome.observedContext.ledger).toBe(1001);
+      expect(reads).toBe(2);
+    });
+
+    it("rejects a write before execution when its captured ledger is too old", async () => {
+      const run = vi.fn(async () => "must not run");
+      const error = await captureAsyncError(() =>
+        runWithSimulationContext({
+          expected: { ...TESTNET_CONTEXT, ledger: 1000 },
+          readContext: async () => ({ ...TESTNET_CONTEXT, ledger: 1021 }),
+          maxLedgerDrift: 20,
+          run,
+        })
+      );
+
+      expect(error).toMatchObject({
+        field: "ledger",
+        reason: "ledger-expired",
+        retryable: true,
+      });
+      expect(run).not.toHaveBeenCalled();
+    });
+
     it("runs under the captured context and returns it with the result", async () => {
       const run = vi.fn(async (ctx) => `quote@${ctx.ledger}`);
       const outcome = await runWithSimulationContext({

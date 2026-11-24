@@ -7,6 +7,24 @@ vi.mock('../../hooks/useBackendStatus', () => ({
   useBackendStatus: vi.fn(() => 'available'),
 }));
 
+vi.mock('../../features/strategies/strategyComparisonContext', () => ({
+  runWithStrategyComparisonContext: vi.fn(async (run: (context: unknown) => unknown) => {
+    const context = {
+      network: 'testnet',
+      networkPassphrase: 'Test SDF Network ; September 2015',
+      contractId: 'CSTRATEGYTEST',
+      contractVersion: 'test-spec-v1',
+      ledger: 1000,
+    };
+    return {
+      result: await run(context),
+      context,
+      observedContext: context,
+      attempts: 1,
+    };
+  }),
+}));
+
 // Mock matchMedia for recharts/lucide-react inner behaviors if needed
 Object.defineProperty(window, 'matchMedia', {
   writable: true,

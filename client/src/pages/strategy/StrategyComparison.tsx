@@ -33,6 +33,8 @@ import {
   type StrategyYield,
 } from './strategyComparisonExport';
 import { formatShortFingerprint } from '../../../../shared/types/strategyComparisonConfigFingerprint';
+import { runWithStrategyComparisonContext } from '../../features/strategies/strategyComparisonContext';
+import type { SimulationContext } from '@stellaryield/sdk';
 
 const STRATEGY_THEMES: Record<string, { bg: string; text: string; shadow: string }> = {
   Blend: { bg: 'from-violet-500/20 to-indigo-600/20', text: 'text-indigo-400', shadow: 'shadow-indigo-500/20' },
@@ -53,6 +55,8 @@ export default function StrategyComparison() {
   const [comparisonVersion, setComparisonVersion] = useState<number>(1);
   const [selectedStrategyId, setSelectedStrategyId] = useState<string | null>(null);
   const [conflictNotice, setConflictNotice] = useState<string | null>(null);
+  const [validationWarning, setValidationWarning] = useState<string | null>(null);
+  const [comparisonContext, setComparisonContext] = useState<SimulationContext | null>(null);
   const [isUpdatingSelection, setIsUpdatingSelection] = useState(false);
   const backendStatus = useBackendStatus();
 
@@ -60,9 +64,16 @@ export default function StrategyComparison() {
     try {
       setError(null);
       setConflictNotice(null);
+      setValidationWarning(null);
       setLoading(true);
 
-      const res = await fetch(apiUrl('/api/yields'));
+      const { result: res, context } = await runWithStrategyComparisonContext(
+        () => fetch(apiUrl('/api/yields')),
+        {
+          onTransition: 'refresh',
+          stateSnapshot: { strategies: data, selectedStrategyId, comparisonVersion },
+        },
+      );
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const yields: unknown = await res.json();
       // A payload that is not a list is a failed fetch: keep the strategies
@@ -86,6 +97,7 @@ export default function StrategyComparison() {
       }
 
       setData(strategies);
+      setComparisonContext(context);
     } catch (err: unknown) {
       const msg = getErrorMessage(err);
       setData((prevData) => {
@@ -108,12 +120,24 @@ export default function StrategyComparison() {
       const stratId = strategyName.toLowerCase();
       const wallet = "G_CURRENT_USER";
 
-      const res = await selectStrategySafely(wallet, stratId, 1000, {
-        expectedVersion: comparisonVersion,
-      });
+      if (!comparisonContext) {
+        throw new Error('Refresh the strategy comparison before selecting a strategy.');
+      }
+
+      const { result: res, observedContext } = await runWithStrategyComparisonContext(
+        () => selectStrategySafely(wallet, stratId, 1000, {
+          expectedVersion: comparisonVersion,
+        }),
+        {
+          expected: comparisonContext,
+          onTransition: 'reject',
+          stateSnapshot: { selectedStrategyId, comparisonVersion },
+        },
+      );
 
       setSelectedStrategyId(stratId);
       setComparisonVersion(res.version);
+      setComparisonContext(observedContext);
     } catch (err: unknown) {
       if (err instanceof StrategyComparisonConflictError) {
         setConflictNotice(
@@ -124,7 +148,7 @@ export default function StrategyComparison() {
           setSelectedStrategyId(err.currentState.selectedStrategyId);
         }
       } else {
-        setError(getErrorMessage(err));
+        setValidationWarning(`${getErrorMessage(err)} Refresh the comparison before trying again.`);
       }
     } finally {
       setIsUpdatingSelection(false);
@@ -133,22 +157,6 @@ export default function StrategyComparison() {
 
   const handleExport = (format: StrategyComparisonExportFormat) => {
     downloadStrategyComparisonExport(data, format);
-  };
-
-  const handleSelectStrategy = (strategy: StrategyYield) => {
-    if (isStaleConfig) {
-      setActionNotice({
-        type: 'error',
-        message: 'Cannot select strategy: configuration snapshot is stale. Please refresh configuration to continue.',
-      });
-      return;
-    }
-
-    setSelectedStrategyId(strategy.protocolName);
-    setActionNotice({
-      type: 'success',
-      message: `Selected ${strategy.protocolName} strategy with verified configuration snapshot.`,
-    });
   };
 
   useEffect(() => {
@@ -283,6 +291,12 @@ export default function StrategyComparison() {
           >
             Dismiss
           </button>
+        </div>
+      )}
+
+      {validationWarning && (
+        <div role="alert" data-testid="strategy-context-warning" className="p-4 rounded-xl bg-amber-500/10 border border-amber-500/30 text-amber-200 text-sm">
+          {validationWarning}
         </div>
       )}
 
