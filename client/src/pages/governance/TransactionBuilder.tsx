@@ -19,6 +19,8 @@ const BUILD_PHASE_STEPS: readonly TxPhase[] = ["building", "simulating"];
 interface TransactionBuilderProps {
   threshold: number;
   contractId: string;
+  /** Immutable configuration fingerprint captured when the proposal is built. */
+  configFingerprint?: string;
   onTransactionCreated: (tx: PendingTransaction) => void;
 }
 
@@ -43,6 +45,7 @@ async function getRecommendedBaseFee(): Promise<string> {
 export default function TransactionBuilder({
   threshold,
   contractId,
+  configFingerprint,
   onTransactionCreated,
 }: TransactionBuilderProps) {
   const { walletAddress } = useWallet();
@@ -128,6 +131,7 @@ export default function TransactionBuilder({
 
       const pendingTx: PendingTransaction = {
         id: crypto.randomUUID(),
+        configFingerprint,
         description: `${action.label} - proposed by ${walletAddress.slice(0, 8)}...`,
         method: action.method,
         args: action.fields.map((f) => fieldValues[f.name] ?? ""),

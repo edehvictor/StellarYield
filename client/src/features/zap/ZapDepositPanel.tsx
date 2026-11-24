@@ -58,6 +58,14 @@ import {
   type DepositDraftState,
 } from "./depositDraft";
 import { apiFetch, apiUrl } from "../../lib/api";
+import {
+  clearDepositDraft,
+  reconcileDepositDraft,
+  saveDepositDraft,
+  type DepositDraftState,
+} from "./depositDraft";
+import { useProtectedWalletAction } from "../../hooks/useProtectedWalletAction";
+import SessionExpiredRecovery from "../../components/wallet/SessionExpiredRecovery";
 
 export interface ZapDepositPanelProps {
   walletAddress: string | null;

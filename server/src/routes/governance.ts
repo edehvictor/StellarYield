@@ -88,6 +88,100 @@ const VALID_PROPOSAL_TYPES: ProposalType[] = [
   "reward_change",
 ];
 
+type ConfigBinding =
+  | {
+      ok: true;
+      snapshot: GovernanceConfigSnapshot;
+      fingerprint: string;
+    }
+  | {
+      ok: false;
+      status: 400 | 409;
+      error: string;
+      message: string;
+      details?: unknown;
+      recoverable?: boolean;
+    };
+
+/**
+ * Validates a caller's configuration snapshot/fingerprint without mutating any
+ * governance state. A stale or malformed claim is rejected before the work
+ * (forecast, quorum computation, proposal preparation) runs.
+ */
+function bindGovernanceConfig(
+  snapshotInput: unknown,
+  expectedFingerprint: unknown,
+): ConfigBinding {
+  const validation = validateGovernanceConfigSnapshot(snapshotInput);
+  if (!validation.valid) {
+    return {
+      ok: false,
+      status: 400,
+      error: "INVALID_GOVERNANCE_CONFIG",
+      message: "The governance configuration snapshot is invalid.",
+      details: { issues: validation.issues },
+    };
+  }
+
+  const verification = verifyGovernanceConfigFingerprint(
+    validation.snapshot,
+    expectedFingerprint,
+  );
+  if (!verification.valid) {
+    return {
+      ok: false,
+      status: verification.status === "stale" ? 409 : 400,
+      error: verification.code,
+      message: verification.message,
+      details: {
+        expectedFingerprint: verification.expectedFingerprint,
+        providedFingerprint: verification.actualFingerprint,
+        driftReasons: verification.driftReasons,
+      },
+      recoverable: true,
+    };
+  }
+
+  return {
+    ok: true,
+    snapshot: validation.snapshot,
+    fingerprint: verification.expectedFingerprint,
+  };
+}
+
+function sendConfigBindingError(res: Response, binding: Extract<ConfigBinding, { ok: false }>): void {
+  sendError(
+    res,
+    binding.status,
+    binding.error,
+    binding.message,
+    binding.details,
+    undefined,
+    binding.recoverable,
+  );
+}
+
+/**
+ * POST /api/governance/config-snapshot
+ * Returns the canonical snapshot and immutable SHA-256 fingerprint for a
+ * governance configuration. Read-only; clients use it to refresh stale work.
+ */
+router.post("/config-snapshot", (req: Request, res: Response) => {
+  const validation = validateGovernanceConfigSnapshot(req.body);
+  if (!validation.valid) {
+    sendError(
+      res,
+      400,
+      "INVALID_GOVERNANCE_CONFIG",
+      "The governance configuration is invalid.",
+      { issues: validation.issues },
+    );
+    return;
+  }
+
+  res.json(computeGovernanceConfigFingerprint(validation.snapshot));
+});
+
 /**
  * POST /api/governance/forecast
  * Returns an estimated impact forecast for a governance proposal.
