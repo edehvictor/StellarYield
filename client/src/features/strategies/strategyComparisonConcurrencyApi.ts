@@ -96,6 +96,17 @@ export class StrategyComparisonIdempotencyMismatchError extends Error {
 }
 
 /**
+ * Backward-compatible name retained for clients created for #1920.
+ */
+export class StrategyComparisonOperationIdentityConflictError extends StrategyComparisonIdempotencyMismatchError {
+  readonly code = "STRATEGY_COMPARISON_OPERATION_IDENTITY_CONFLICT";
+  constructor(message: string, operationIdentity = "") {
+    super(message, operationIdentity);
+    this.name = "StrategyComparisonOperationIdentityConflictError";
+  }
+}
+
+/**
  * Thrown when a write could not be confirmed after every transport retry.
  * The server may or may not have kept it: resolve with
  * `fetchComparisonOperation(walletAddress, operationIdentity)`, or send the
@@ -175,6 +186,14 @@ async function sendComparisonWrite(
         currentVersion?: number;
         state?: StrategyComparisonState;
       };
+      if (
+        conflict.code === "STRATEGY_COMPARISON_OPERATION_IDENTITY_CONFLICT" ||
+        conflict.code === "STRATEGY_COMPARISON_IDEMPOTENCY_MISMATCH"
+      ) {
+        throw new StrategyComparisonOperationIdentityConflictError(
+          conflict.error ?? "Operation identity was already used for a different comparison update.",
+        );
+      }
       if (conflict.code === "STRATEGY_COMPARISON_VERSION_CONFLICT" && conflict.state) {
         throw new StrategyComparisonConflictError(
           conflict.error ?? fallbackMessages.conflict,
@@ -188,7 +207,7 @@ async function sendComparisonWrite(
     if (!res.ok) {
       const failed = (await res.json().catch(() => ({}))) as { code?: string; error?: string };
       if (failed.code === "STRATEGY_COMPARISON_IDEMPOTENCY_MISMATCH") {
-        throw new StrategyComparisonIdempotencyMismatchError(
+        throw new StrategyComparisonOperationIdentityConflictError(
           failed.error ?? "Operation identity was already used for a different change.",
           operationIdentity,
         );
