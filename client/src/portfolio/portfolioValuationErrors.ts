@@ -13,7 +13,8 @@ export type PortfolioValuationErrorCode =
   | "RATE_LIMITED"
   | "DUPLICATE_VALUATION_SUBMISSION"
   | "VALUATION_IN_PROGRESS"
-  | "VALUATION_IDENTITY_CONFLICT";
+  | "VALUATION_IDENTITY_CONFLICT"
+  | "VALUATION_CONTEXT_MISMATCH";
 
 export interface PortfolioValuationFailure {
   /** Stable machine-readable code. */
@@ -55,6 +56,8 @@ const KNOWN_ERROR_MESSAGES: Record<PortfolioValuationErrorCode, string> = {
     "A valuation is already in progress. Please wait before retrying.",
   VALUATION_IDENTITY_CONFLICT:
     "Operation identity conflict: the submitted parameters do not match the original submission.",
+  VALUATION_CONTEXT_MISMATCH:
+    "The portfolio network or ledger changed. Refresh the portfolio before retrying.",
 };
 
 /**
@@ -86,6 +89,8 @@ export function describeValuationFailure(error: unknown): PortfolioValuationFail
     code = "VALUATION_IN_PROGRESS";
   } else if (rawMessage.includes("identity conflict") || rawMessage.includes("do not match")) {
     code = "VALUATION_IDENTITY_CONFLICT";
+  } else if (rawMessage.includes("valuation context") || rawMessage.includes("ledger changed")) {
+    code = "VALUATION_CONTEXT_MISMATCH";
   } else if (rawMessage.includes("network") || rawMessage.includes("fetch failed") || rawMessage.includes("failed to fetch")) {
     code = "NETWORK_ERROR";
   } else if (rawMessage.includes("oracle") || rawMessage.includes("price") || rawMessage.includes("quote")) {
