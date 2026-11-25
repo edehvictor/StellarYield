@@ -4,6 +4,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   AlertPreferencesConflictError,
+  InvalidAlertPreferencesError,
   fetchAlertPreferencesVersioned,
   saveAlertPreferences,
   saveAlertPreferencesVersioned,
@@ -58,6 +59,15 @@ describe("versioned reads and writes", () => {
     await expect(fetchAlertPreferencesVersioned("GW", "Blend")).resolves.toBeNull();
   });
 
+  it("rejects malformed preference data returned by the server", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      reply(200, { ...prefs(10), cooldownMinutes: "10" }, 1),
+    );
+    await expect(fetchAlertPreferencesVersioned("GW", "Blend")).rejects.toBeInstanceOf(
+      InvalidAlertPreferencesError,
+    );
+  });
+
   it("sends the expected version as If-Match and returns the new version", async () => {
     const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(reply(200, prefs(20), 5));
     const saved = await saveAlertPreferencesVersioned("GW", "Blend", prefs(20), {
@@ -86,6 +96,15 @@ describe("versioned reads and writes", () => {
     expect(error).toBeInstanceOf(AlertPreferencesConflictError);
     expect((error as AlertPreferencesConflictError).currentVersion).toBe(2);
     expect((error as AlertPreferencesConflictError).currentPreferences).toEqual(prefs(30));
+  });
+
+  it("surfaces server-side validation failures as typed errors", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      reply(400, { error: "cooldownMinutes must be a number", code: "INVALID_ALERT_PREFERENCES" }),
+    );
+    await expect(saveAlertPreferencesVersioned("GW", "Blend", prefs(20))).rejects.toBeInstanceOf(
+      InvalidAlertPreferencesError,
+    );
   });
 
   it("keeps other 409s (operation identity reuse) as plain errors", async () => {
