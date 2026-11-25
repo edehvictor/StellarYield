@@ -6,10 +6,12 @@ import type { AdminAction, PendingTransaction } from "./types";
 import { AlertTriangle, CheckCircle, XCircle } from "lucide-react";
 import { validateTransactionBuilder } from "./validation";
 import { validateContractRegistryEntry } from "../../services/contractRegistry";
+import { createTransactionReviewContext, validateTransactionReviewContext } from "../../services/transactionReviewContext";
 import TxStatusTimeline from "../../components/transaction/TxStatusTimeline";
 import TransactionFailedModal from "../../components/transaction/TransactionFailedModal";
 import { decodeTransactionError } from "../../utils/errorDecoder";
 import type { TxPhase } from "../../services/transactionPhase";
+import type { ContextValidationError } from "../../services/transactionReviewContext";
 
 const BUILD_PHASE_STEPS: readonly TxPhase[] = ["building", "simulating"];
 
@@ -51,6 +53,7 @@ export default function TransactionBuilder({
   const [error, setError] = useState<string | null>(null);
   const [phase, setPhase] = useState<TxPhase>("idle");
   const [showFailedModal, setShowFailedModal] = useState(false);
+  const [reviewContext, setReviewContext] = useState<TransactionReviewContext | null>(null);
 
   const action = ADMIN_ACTIONS.find((a) => a.method === selectedAction);
 
@@ -62,12 +65,42 @@ export default function TransactionBuilder({
   async function handleBuild() {
     if (!walletAddress || !action || !contractId) return;
 
+    // ── Capture review context at build start ─────────────────────────
+    const reviewContext = createTransactionReviewContext(
+      import.meta.env.VITE_NETWORK_PASSPHRASE ?? "Test SDF Network ; September 2015",
+      import.meta.env.VITE_SOROBAN_RPC_URL ?? "https://soroban-testnet.stellar.org",
+      // Ledger sequence will be fetched from the server after account retrieval
+      0,
+      // Transaction version derived from the action and contract state
+      `${action.method}:${Date.now()}`,
+    );
+
     setBuilding(true);
     setError(null);
     setShowFailedModal(false);
     setPhase("building");
+    setReviewContext(reviewContext);
 
     try {
+      // ── Validate review context before proceeding ─────────────────────
+      if (reviewContext) {
+        const validationError = validateTransactionReviewContext(
+          reviewContext,
+          createTransactionReviewContext(
+            import.meta.env.VITE_NETWORK_PASSPHRASE ?? "Test SDF Network ; September 2015",
+            import.meta.env.VITE_SOROBAN_RPC_URL ?? "https://soroban-testnet.stellar.org",
+            0,
+            `${action.method}:${Date.now()}`,
+          )
+        );
+        if (validationError) {
+          setError(`Context validation failed: ${validationError}`);
+          setBuilding(false);
+          setPhase("idle");
+          return;
+        }
+      }
+
       validateContractRegistryEntry("vault", contractId);
       const server = new StellarSdk.rpc.Server(RPC_URL);
       const contract = new StellarSdk.Contract(contractId);

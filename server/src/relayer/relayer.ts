@@ -1,5 +1,6 @@
 import * as StellarSdk from '@stellar/stellar-sdk';
 import { Request, Response } from 'express';
+import { createTransactionReviewContext, validateTransactionReviewContext, type NetworkPassphrase } from '../services/transactionReviewContext';
 import {
   recordRelayStart,
   recordRelaySuccess,
@@ -9,14 +10,34 @@ import {
 
 // In a real app, this would be in an environment variable
 const RELAYER_SECRET_KEY = process.env.RELAYER_SECRET_KEY || 'SAH2...'; // Replace with a valid secret for local dev if needed
-const NETWORK_PASSPHRASE = process.env.NETWORK_PASSPHRASE || StellarSdk.Networks.TESTNET;
+const NETWORK_PASSPHRASE: NetworkPassphrase = process.env.NETWORK_PASSPHRASE || StellarSdk.Networks.TESTNET as NetworkPassphrase;
+/** Captures the review context from the request for validation during execution. */
+export interface RelayRequest {
+  innerTxXdr: string;
+  reviewContext?: {
+    networkPassphrase: NetworkPassphrase;
+    rpcUrl: string;
+    ledgerSequence: number;
+    transactionVersion: string;
+  };
+};
 
 export const signFeeBump = async (req: Request, res: Response) => {
-  const { innerTxXdr } = req.body;
+  const { innerTxXdr, reviewContext } = req.body;
 
   if (!innerTxXdr) {
     return res.status(400).json({ error: 'Missing innerTxXdr' });
   }
+
+  // ── Capture and validate review context ───────────────────────────────
+  const capturedContext = reviewContext
+    ? createTransactionReviewContext(
+        reviewContext.networkPassphrase,
+        reviewContext.rpcUrl,
+        reviewContext.ledgerSequence,
+        reviewContext.transactionVersion,
+      )
+    : null;
 
   const relayId = recordRelayStart();
   const startMs = Date.now();
@@ -30,6 +51,26 @@ export const signFeeBump = async (req: Request, res: Response) => {
       const durationMs = Date.now() - startMs;
       recordRelayFailure(relayId, durationMs, 'Duplicate transaction detected');
       return res.status(409).json({ error: 'Duplicate transaction - replay protection' });
+    }
+
+    // Validate context if provided
+    if (capturedContext) {
+      const validationError = validateTransactionReviewContext(
+        capturedContext,
+        createTransactionReviewContext(
+          NETWORK_PASSPHRASE,
+          process.env.SOROBAN_RPC_URL ?? "https://soroban-testnet.stellar.org",
+          0,
+          'pending'
+        )
+      );
+      if (validationError) {
+        recordRelayFailure(relayId, 0, `Context validation: ${validationError}`);
+        return res.status(400).json({
+          error: `Context validation failed: ${validationError}`,
+          code: 'CONTEXT_VALIDATION_ERROR',
+        });
+      }
     }
 
     const relayerKeypair = StellarSdk.Keypair.fromSecret(RELAYER_SECRET_KEY);
