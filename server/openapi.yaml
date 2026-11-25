@@ -1344,6 +1344,146 @@ paths:
                 error: "QUOTE_FAILED"
                 message: "Quote failed"
 
+  /api/zap/review-operations:
+    post:
+      summary: Start or resume a reviewed deposit operation
+      description: >-
+        Registers a reviewed zap deposit before it is signed (#1891). The same
+        operationId with the same request resumes it (200). A new operation is
+        refused with 409 REVIEW_OPERATION_IN_FLIGHT while another deposit from
+        the wallet is signed, unsettled and before its contract deadline.
+      tags:
+        - Zap
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [operationId, walletAddress, routeHash, amountInStroops, minAmountOutStroops, deadlineUnixSeconds]
+              properties:
+                operationId:
+                  type: string
+                  pattern: '^[A-Za-z0-9._:-]{8,128}$'
+                walletAddress:
+                  type: string
+                routeHash:
+                  type: string
+                amountInStroops:
+                  type: string
+                  pattern: '^[0-9]+$'
+                minAmountOutStroops:
+                  type: string
+                  pattern: '^[0-9]+$'
+                deadlineUnixSeconds:
+                  type: integer
+                  minimum: 1
+      responses:
+        '200':
+          description: Existing operation resumed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ZapReviewOperationEnvelope'
+        '201':
+          description: Operation started
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ZapReviewOperationEnvelope'
+        '400':
+          description: INVALID_REVIEW_OPERATION
+        '409':
+          description: >-
+            REVIEW_OPERATION_IN_FLIGHT (recoverable; details.operation names the
+            in-flight deposit) or REVIEW_OPERATION_MISMATCH (operationId reused
+            for a different deposit).
+
+  /api/zap/review-operations/{operationId}/events:
+    post:
+      summary: Record a reviewed deposit's stage change
+      description: >-
+        Stages move reviewed → signed → submitted → confirmed, or to failed
+        (#1891). Replaying an event is a no-op. A confirmation is accepted after
+        a reported failure, because the ledger is the authority.
+      tags:
+        - Zap
+      parameters:
+        - name: operationId
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [walletAddress, type]
+              properties:
+                walletAddress:
+                  type: string
+                type:
+                  type: string
+                  enum: [signed, submitted, confirmed, failed]
+                txHash:
+                  type: string
+                  pattern: '^[0-9a-f]{64}$'
+                  description: Required for signed, submitted and confirmed.
+                code:
+                  type: string
+                  description: >-
+                    Required for failed. TX_FAILED_ONCHAIN marks a ledger-recorded
+                    failure, which moved no funds.
+      responses:
+        '200':
+          description: Updated operation
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  operation:
+                    $ref: '#/components/schemas/ZapReviewOperation'
+        '400':
+          description: INVALID_REVIEW_OPERATION
+        '404':
+          description: REVIEW_OPERATION_NOT_FOUND
+        '409':
+          description: REVIEW_OPERATION_INVALID_TRANSITION or REVIEW_OPERATION_TX_HASH_MISMATCH
+
+  /api/zap/review-operations/{operationId}:
+    get:
+      summary: Read a reviewed deposit operation
+      tags:
+        - Zap
+      parameters:
+        - name: operationId
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: walletAddress
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: The operation
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  operation:
+                    $ref: '#/components/schemas/ZapReviewOperation'
+        '400':
+          description: INVALID_REVIEW_OPERATION
+        '404':
+          description: REVIEW_OPERATION_NOT_FOUND
+
   /api/zap/verify:
     post:
       summary: Verify a swap quote
@@ -5710,6 +5850,50 @@ components:
         type: string
         pattern: '^[A-Za-z0-9._:-]{1,255}$'
   schemas:
+    ZapReviewOperation:
+      type: object
+      description: Reviewed deposit journal entry (#1891).
+      properties:
+        operationId:
+          type: string
+        request:
+          type: object
+          properties:
+            walletAddress:
+              type: string
+            routeHash:
+              type: string
+            amountInStroops:
+              type: string
+            minAmountOutStroops:
+              type: string
+            deadlineUnixSeconds:
+              type: integer
+        stage:
+          type: string
+          enum: [reviewed, signed, submitted, confirmed, failed]
+        txHash:
+          type: string
+        failure:
+          type: object
+          properties:
+            stage:
+              type: string
+            code:
+              type: string
+            fundsMayHaveMoved:
+              type: boolean
+        createdAt:
+          type: integer
+        updatedAt:
+          type: integer
+    ZapReviewOperationEnvelope:
+      type: object
+      properties:
+        operation:
+          $ref: '#/components/schemas/ZapReviewOperation'
+        resumed:
+          type: boolean
     StrategyComparisonConfigSnapshotResponse:
       type: object
       required:
