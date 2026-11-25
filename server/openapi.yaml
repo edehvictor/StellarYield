@@ -682,8 +682,6 @@ paths:
       description: >-
         Updates comparison workspace state with optimistic concurrency control and idempotency deduplication.
         Send expectedVersion via If-Match header or JSON body. If another write committed first, returns 409 conflict.
-        Operation identities are scoped to a wallet; reusing one for different input returns
-        STRATEGY_COMPARISON_OPERATION_IDENTITY_CONFLICT without changing state.
       tags:
         - Strategies
       parameters:
@@ -759,21 +757,33 @@ paths:
         '400':
           description: Invalid strategy comparison state (e.g. fee > 10000 bps or negative balance)
         '409':
-          description: Version conflict or operation identity reused with different input
+          description: Concurrent write conflict (STRATEGY_COMPARISON_VERSION_CONFLICT)
           content:
             application/json:
               schema:
-                oneOf:
-                  - $ref: '#/components/schemas/StrategyComparisonVersionConflict'
-                  - $ref: '#/components/schemas/StrategyComparisonOperationIdentityConflict'
+                $ref: '#/components/schemas/StrategyComparisonVersionConflict'
+        '422':
+          description: >-
+            STRATEGY_COMPARISON_IDEMPOTENCY_MISMATCH. The operation identity was
+            already used for a different request (#1923). Nothing is written.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  code:
+                    type: string
+                    enum: [STRATEGY_COMPARISON_IDEMPOTENCY_MISMATCH]
+                  error:
+                    type: string
+                  operationIdentity:
+                    type: string
 
   /api/strategies/comparison/select:
     post:
       summary: Select strategy and allocate balance
       description: >-
         Atomically selects a strategy and allocates balance under optimistic concurrency control.
-        Operation identities are scoped to a wallet; reusing one for different input returns
-        STRATEGY_COMPARISON_OPERATION_IDENTITY_CONFLICT without changing state.
       tags:
         - Strategies
       parameters:
@@ -842,13 +852,90 @@ paths:
         '400':
           description: Invalid request parameters
         '409':
-          description: Version conflict or operation identity reused with different input
+          description: Concurrent write conflict (STRATEGY_COMPARISON_VERSION_CONFLICT)
           content:
             application/json:
               schema:
-                oneOf:
-                  - $ref: '#/components/schemas/StrategyComparisonVersionConflict'
-                  - $ref: '#/components/schemas/StrategyComparisonOperationIdentityConflict'
+                $ref: '#/components/schemas/StrategyComparisonVersionConflict'
+        '422':
+          description: >-
+            STRATEGY_COMPARISON_IDEMPOTENCY_MISMATCH. The operation identity was
+            already used for a different request (#1923). Nothing is written.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  code:
+                    type: string
+                    enum: [STRATEGY_COMPARISON_IDEMPOTENCY_MISMATCH]
+                  error:
+                    type: string
+                  operationIdentity:
+                    type: string
+
+
+  /api/strategies/comparison/operations/{walletAddress}/{operationIdentity}:
+    get:
+      summary: Look up the outcome of a keyed comparison write
+      description: >-
+        For a client that lost the response to a keyed comparison write (#1923).
+        `committed` means the change is kept and resending the same identity
+        replays it. `failed` means nothing was kept (the store is at
+        `baseVersion`) and the same identity may be retried. 404 means the
+        server never recorded it, so retrying is safe.
+      tags:
+        - Strategies
+      parameters:
+        - name: walletAddress
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: operationIdentity
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: kind
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [update, select]
+      responses:
+        '200':
+          description: Recorded outcome
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status, operationIdentity, kind, baseVersion, attempts]
+                properties:
+                  status:
+                    type: string
+                    enum: [committed, failed]
+                  operationIdentity:
+                    type: string
+                  kind:
+                    type: string
+                    enum: [update, select]
+                  baseVersion:
+                    type: integer
+                  version:
+                    type: integer
+                    description: Present when committed.
+                  state:
+                    $ref: '#/components/schemas/StrategyComparisonState'
+                  errorCode:
+                    type: string
+                    description: Present when failed.
+                  attempts:
+                    type: integer
+        '400':
+          description: kind is not update or select
+        '404':
+          description: STRATEGY_COMPARISON_OPERATION_NOT_FOUND. Never recorded; retrying is safe.
 
   /api/users/{walletAddress}/pnl:
     get:
@@ -1256,6 +1343,146 @@ paths:
               example:
                 error: "QUOTE_FAILED"
                 message: "Quote failed"
+
+  /api/zap/review-operations:
+    post:
+      summary: Start or resume a reviewed deposit operation
+      description: >-
+        Registers a reviewed zap deposit before it is signed (#1891). The same
+        operationId with the same request resumes it (200). A new operation is
+        refused with 409 REVIEW_OPERATION_IN_FLIGHT while another deposit from
+        the wallet is signed, unsettled and before its contract deadline.
+      tags:
+        - Zap
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [operationId, walletAddress, routeHash, amountInStroops, minAmountOutStroops, deadlineUnixSeconds]
+              properties:
+                operationId:
+                  type: string
+                  pattern: '^[A-Za-z0-9._:-]{8,128}$'
+                walletAddress:
+                  type: string
+                routeHash:
+                  type: string
+                amountInStroops:
+                  type: string
+                  pattern: '^[0-9]+$'
+                minAmountOutStroops:
+                  type: string
+                  pattern: '^[0-9]+$'
+                deadlineUnixSeconds:
+                  type: integer
+                  minimum: 1
+      responses:
+        '200':
+          description: Existing operation resumed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ZapReviewOperationEnvelope'
+        '201':
+          description: Operation started
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ZapReviewOperationEnvelope'
+        '400':
+          description: INVALID_REVIEW_OPERATION
+        '409':
+          description: >-
+            REVIEW_OPERATION_IN_FLIGHT (recoverable; details.operation names the
+            in-flight deposit) or REVIEW_OPERATION_MISMATCH (operationId reused
+            for a different deposit).
+
+  /api/zap/review-operations/{operationId}/events:
+    post:
+      summary: Record a reviewed deposit's stage change
+      description: >-
+        Stages move reviewed → signed → submitted → confirmed, or to failed
+        (#1891). Replaying an event is a no-op. A confirmation is accepted after
+        a reported failure, because the ledger is the authority.
+      tags:
+        - Zap
+      parameters:
+        - name: operationId
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [walletAddress, type]
+              properties:
+                walletAddress:
+                  type: string
+                type:
+                  type: string
+                  enum: [signed, submitted, confirmed, failed]
+                txHash:
+                  type: string
+                  pattern: '^[0-9a-f]{64}$'
+                  description: Required for signed, submitted and confirmed.
+                code:
+                  type: string
+                  description: >-
+                    Required for failed. TX_FAILED_ONCHAIN marks a ledger-recorded
+                    failure, which moved no funds.
+      responses:
+        '200':
+          description: Updated operation
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  operation:
+                    $ref: '#/components/schemas/ZapReviewOperation'
+        '400':
+          description: INVALID_REVIEW_OPERATION
+        '404':
+          description: REVIEW_OPERATION_NOT_FOUND
+        '409':
+          description: REVIEW_OPERATION_INVALID_TRANSITION or REVIEW_OPERATION_TX_HASH_MISMATCH
+
+  /api/zap/review-operations/{operationId}:
+    get:
+      summary: Read a reviewed deposit operation
+      tags:
+        - Zap
+      parameters:
+        - name: operationId
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: walletAddress
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: The operation
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  operation:
+                    $ref: '#/components/schemas/ZapReviewOperation'
+        '400':
+          description: INVALID_REVIEW_OPERATION
+        '404':
+          description: REVIEW_OPERATION_NOT_FOUND
 
   /api/zap/verify:
     post:
@@ -2642,7 +2869,10 @@ paths:
               schema:
                 $ref: '#/components/schemas/Alert'
         '400':
-          description: Invalid alert parameters
+          description: >-
+            Invalid alert parameters (boundary violation, malformed preferences,
+            negative values). Malformed initial preferences return
+            `INVALID_ALERT_PREFERENCES` and do not create an alert.
         '409':
           description: >-
             `OPERATION_IDENTITY_CONFLICT` (identity reused with different parameters) or
@@ -2759,8 +2989,9 @@ paths:
                 $ref: '#/components/schemas/AlertPreferences'
         '400':
           description: >-
-            Invalid preference parameters, a malformed If-Match / expectedVersion
-            (`INVALID_EXPECTED_VERSION`), or a malformed context (`INVALID_ALERT_CONTEXT`)
+            Invalid preference fields (`INVALID_ALERT_PREFERENCES`), a malformed
+            If-Match / expectedVersion (`INVALID_EXPECTED_VERSION`), or a malformed
+            context (`INVALID_ALERT_CONTEXT`). Invalid writes leave the stored record unchanged.
         '409':
           description: >-
             `OPERATION_IDENTITY_CONFLICT` (identity reused with different parameters),
@@ -5171,6 +5402,13 @@ paths:
         `expectedConfigFingerprint` are supplied together, the request is bound
         to that exact configuration: a stale or malformed fingerprint returns
         HTTP 409/400 before any forecast is computed (#1894).
+
+        Boundary & Rounding Invariants:
+        - Yield and exposure deltas are rounded half-up to 4 decimal places.
+        - Fee revenue delta is rounded half-up to 2 decimal places (cents).
+        - Risk score delta is rounded half-up to 2 decimal places.
+        - Non-finite, out-of-range, or negative inputs are rejected with 400 VALIDATION_FAILED.
+        - Existing balances and state are preserved on validation failure.
       tags:
         - Governance
       requestBody:
@@ -5260,11 +5498,21 @@ paths:
       description: |
         Deterministic quorum progress for a multi-sig operation: signed count,
         required threshold, remaining signatures, progress percentage, met flag,
-        and per-signer status. Read-only (#1310).
+        and per-signer status. Read-only (#1310, #1898).
 
         Optionally bind the calculation to an immutable governance configuration
         fingerprint (#1894). A stale or malformed `expectedConfigFingerprint`
         returns HTTP 409/400 without producing a quorum result.
+
+        Boundary & Rounding Invariants:
+        - Progress percentage is rounded to the nearest integer using standard half-up rounding.
+        - Critical boundary: `progressPct` is capped at 99% until quorum is strictly met
+          (e.g., 999/1000 signatures produces 99%, never premature 100%).
+        - `progressPct` reaches 100% if and only if `met` is true.
+        - Negative thresholds are rejected with 400 VALIDATION_FAILED.
+        - Thresholds exceeding signer count are clamped safely to total signers.
+        - A threshold of 0 is immediately satisfied (`met: true`, `progressPct: 100`).
+        - Preserves existing proposal and balance state on any error.
       tags:
         - Governance
       requestBody:
@@ -5290,7 +5538,8 @@ paths:
                   description: Public keys that have signed so far
                 threshold:
                   type: number
-                  description: Required signature threshold
+                  minimum: 0
+                  description: Required signature threshold (non-negative integer or number)
                 contractId:
                   type: string
                   description: Governance/vault contract the signer set applies to
@@ -5314,6 +5563,8 @@ paths:
                     type: integer
                   progressPct:
                     type: integer
+                    minimum: 0
+                    maximum: 100
                   met:
                     type: boolean
                   configFingerprint:
@@ -5329,11 +5580,29 @@ paths:
                         signed:
                           type: boolean
         '400':
-          description: Invalid request body or INVALID_GOVERNANCE_CONFIG
+          description: Validation failed (negative threshold, malformed arrays). Preserves state.
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/GovernanceConfigError'
+                type: object
+                properties:
+                  error:
+                    type: string
+                    example: VALIDATION_FAILED
+                  message:
+                    type: string
+                  stage:
+                    type: string
+                  retryable:
+                    type: boolean
+                  fields:
+                    type: array
+                    items:
+                      type: string
+                  diagnostics:
+                    type: array
+                    items:
+                      type: object
         '409':
           description: STALE_GOVERNANCE_CONFIG — refresh the snapshot and retry
           content:
@@ -5623,6 +5892,50 @@ components:
         type: string
         pattern: '^[A-Za-z0-9._:-]{1,255}$'
   schemas:
+    ZapReviewOperation:
+      type: object
+      description: Reviewed deposit journal entry (#1891).
+      properties:
+        operationId:
+          type: string
+        request:
+          type: object
+          properties:
+            walletAddress:
+              type: string
+            routeHash:
+              type: string
+            amountInStroops:
+              type: string
+            minAmountOutStroops:
+              type: string
+            deadlineUnixSeconds:
+              type: integer
+        stage:
+          type: string
+          enum: [reviewed, signed, submitted, confirmed, failed]
+        txHash:
+          type: string
+        failure:
+          type: object
+          properties:
+            stage:
+              type: string
+            code:
+              type: string
+            fundsMayHaveMoved:
+              type: boolean
+        createdAt:
+          type: integer
+        updatedAt:
+          type: integer
+    ZapReviewOperationEnvelope:
+      type: object
+      properties:
+        operation:
+          $ref: '#/components/schemas/ZapReviewOperation'
+        resumed:
+          type: boolean
     StrategyComparisonConfigSnapshotResponse:
       type: object
       required:
@@ -7001,6 +7314,12 @@ Incident:
 
      AlertPreferences:
       type: object
+      description: >-
+        Boundary-validated alert preferences. Writes validate cooldownMinutes
+        (integer 0-1440), severityThreshold (0-1000, half-up rounded to 2
+        decimals), and quietHoursStart/quietHoursEnd (integers 0-23); on
+        invalid input the request fails with HTTP 400 and existing state is
+        preserved.
       properties:
         channel:
           type: string
@@ -7258,15 +7577,3 @@ Incident:
           type: integer
         state:
           $ref: '#/components/schemas/StrategyComparisonState'
-
-    StrategyComparisonOperationIdentityConflict:
-      type: object
-      required:
-        - code
-        - error
-      properties:
-        code:
-          type: string
-          example: STRATEGY_COMPARISON_OPERATION_IDENTITY_CONFLICT
-        error:
-          type: string

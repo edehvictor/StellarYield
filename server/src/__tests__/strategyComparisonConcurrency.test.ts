@@ -19,7 +19,7 @@ import {
   StrategyComparisonOperationIdentityConflictError,
   StrategyComparisonValidationError,
   STRATEGY_COMPARISON_VERSION_CONFLICT,
-  STRATEGY_COMPARISON_OPERATION_IDENTITY_CONFLICT,
+  STRATEGY_COMPARISON_IDEMPOTENCY_MISMATCH,
   INVALID_STRATEGY_COMPARISON_STATE,
 } from "../services/strategyComparisonConcurrencyService";
 
@@ -387,8 +387,8 @@ describe("Strategy Comparison Concurrency HTTP Routes (#1919)", () => {
         selectedStrategyId: "soroswap",
         allocatedBalances: { soroswap: 2000 },
       });
-    expect(duplicate.status).toBe(409);
-    expect(duplicate.body.code).toBe(STRATEGY_COMPARISON_OPERATION_IDENTITY_CONFLICT);
+    expect(duplicate.status).toBe(422);
+    expect(duplicate.body.code).toBe(STRATEGY_COMPARISON_IDEMPOTENCY_MISMATCH);
 
     const current = await request(app).get(`/api/strategies/comparison/state/${WALLET}`);
     expect(current.body.state.selectedStrategyId).toBe("blend");

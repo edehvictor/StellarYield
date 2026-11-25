@@ -155,7 +155,7 @@ describe('strategyComparisonConcurrencyApi', () => {
       global.fetch = vi.fn().mockResolvedValue(
         makeResponse(
           {
-            code: 'STRATEGY_COMPARISON_OPERATION_IDENTITY_CONFLICT',
+            code: 'STRATEGY_COMPARISON_IDEMPOTENCY_MISMATCH',
             error: 'Operation identity was already used for a different comparison update.',
           },
           { status: 409 },
@@ -174,7 +174,7 @@ describe('strategyComparisonConcurrencyApi', () => {
     it('throws the same typed error for a strategy selection', async () => {
       global.fetch = vi.fn().mockResolvedValue(
         makeResponse(
-          { code: 'STRATEGY_COMPARISON_OPERATION_IDENTITY_CONFLICT', error: 'Identity conflict' },
+          { code: 'STRATEGY_COMPARISON_IDEMPOTENCY_MISMATCH', error: 'Identity conflict' },
           { status: 409 },
         ),
       );

@@ -153,3 +153,73 @@ state each time.
 See also: `docs/alert-preferences-concurrency.md` for the same OCC pattern applied
 to alert preferences (`#1903`).
 
+
+---
+
+## Partial completion and retry (#1923)
+
+A client that loses a response (timeout, dropped connection, 5xx from a proxy)
+cannot tell whether its write was kept. The server keeps a journal of keyed
+writes so the answer is always recoverable and a retry never applies twice.
+
+### Journal
+
+Every write that carries an operation identity (`Idempotency-Key`,
+`X-Operation-Identity` or body `operationIdentity`) is recorded per wallet and
+per kind (`update` for `PUT /comparison/state`, `select` for
+`POST /comparison/select`):
+
+| Outcome | Journal entry | Retrying the same identity |
+| --- | --- | --- |
+| Committed | `committed`, with the resulting state and version | Replays the stored result (`X-Idempotent-Replayed: true`), even if other writers moved the version since |
+| Validation failure (400) | `failed`, `INVALID_STRATEGY_COMPARISON_STATE` | Executes again |
+| Version conflict (409) | `failed`, `STRATEGY_COMPARISON_VERSION_CONFLICT` | Executes again |
+| Side effect threw | `failed`, the error's `code`; state and balances rolled back | Executes again |
+
+`baseVersion` on each entry is the version the workspace was at when the
+attempt ran. For a failed entry it is the version the store was left at, so
+the caller knows nothing was kept.
+
+### Rules
+
+- **One identity, one request.** Reusing an identity for a different request
+  returns `422 STRATEGY_COMPARISON_IDEMPOTENCY_MISMATCH` and writes nothing.
+  Requests are compared after sorting keys and dropping absent fields. For
+  `select` the request is `{ strategyId, allocationUsd }`, not the derived
+  balances, so a retry still matches after other writers changed balances.
+- **Identities are scoped to the wallet.** The same identity used by two
+  wallets is two operations; one wallet can never replay another's state.
+- **Replay wins over the version check.** A retry of a committed write carries
+  its original `expectedVersion`; it replays instead of failing with 409.
+
+### Outcome lookup
+
+`GET /api/strategies/comparison/operations/:walletAddress/:operationIdentity[?kind=update|select]`
+
+- `200 { status: "committed", version, state, baseVersion, attempts }`
+- `200 { status: "failed", errorCode, baseVersion, attempts }`
+- `404 STRATEGY_COMPARISON_OPERATION_NOT_FOUND`: never recorded; retrying is safe.
+
+### Client
+
+- `saveComparisonStateVersioned` and `selectStrategySafely` always send an
+  identity (generated when the caller gives none) and resend the identical
+  request with the same identity after a network error or 5xx (two extra
+  sends by default, after 250 ms and 750 ms). A 409, 422 or other 4xx is final
+  and never resent.
+- When no send gets an answer they throw `StrategyComparisonOutcomeUnknownError`
+  with the `operationIdentity`. Resolve it with
+  `fetchComparisonOperation(wallet, operationIdentity)` or send the same change
+  again with the same identity.
+- A 422 throws `StrategyComparisonIdempotencyMismatchError`.
+- `updateComparisonSafely` uses a new identity for each conflict attempt,
+  because the change is recomputed against newer state and is a different
+  request.
+- The comparison page keeps one identity per intended selection. If a
+  selection cannot be confirmed, the page keeps the current selection, says so,
+  and selecting the same strategy again reuses the identity.
+
+### Tests
+
+- Server: `server/src/__tests__/strategyComparisonRetry.test.ts`
+- Client: `client/src/features/strategies/__tests__/strategyComparisonRetry.test.ts`

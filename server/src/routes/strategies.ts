@@ -24,11 +24,19 @@ import {
   updateStrategyComparisonState,
   selectStrategyAndAllocate,
   StrategyComparisonVersionConflictError,
-  StrategyComparisonOperationIdentityConflictError,
   StrategyComparisonValidationError,
+  StrategyComparisonIdempotencyMismatchError,
+  StrategyComparisonOperationIdentityConflictError,
+  getStrategyComparisonOperation,
   STRATEGY_COMPARISON_VERSION_CONFLICT,
   INVALID_STRATEGY_COMPARISON_STATE,
 } from "../services/strategyComparisonConcurrencyService";
+import {
+  computeStrategyComparisonConfigFingerprint,
+  verifyStrategyComparisonConfigFingerprint,
+  DEFAULT_STRATEGY_COMPARISON_CONFIG,
+  type StrategyComparisonConfig,
+} from "../../../shared/types/strategyComparisonConfigFingerprint";
 
 const router = Router();
 
@@ -535,8 +543,12 @@ router.put("/comparison/state", (req: Request, res: Response) => {
       isReplay,
     });
   } catch (err) {
-    if (err instanceof StrategyComparisonOperationIdentityConflictError) {
-      res.status(409).json({ code: err.code, error: err.message });
+    if (err instanceof StrategyComparisonIdempotencyMismatchError) {
+      res.status(422).json({
+        code: err.code,
+        error: err.message,
+        operationIdentity: err.operationIdentity,
+      });
       return;
     }
 
@@ -632,8 +644,12 @@ router.post("/comparison/select", (req: Request, res: Response) => {
       isReplay,
     });
   } catch (err) {
-    if (err instanceof StrategyComparisonOperationIdentityConflictError) {
-      res.status(409).json({ code: err.code, error: err.message });
+    if (err instanceof StrategyComparisonIdempotencyMismatchError) {
+      res.status(422).json({
+        code: err.code,
+        error: err.message,
+        operationIdentity: err.operationIdentity,
+      });
       return;
     }
 
@@ -665,5 +681,42 @@ router.post("/comparison/select", (req: Request, res: Response) => {
     });
   }
 });
+
+/**
+ * GET /api/strategies/comparison/operations/:walletAddress/:operationIdentity
+ *
+ * Reports what happened to a keyed write (#1923), for a client that lost the
+ * response and must decide whether to retry:
+ * - 200 `committed`: the change is kept; retrying the same identity replays it.
+ * - 200 `failed`: nothing was kept; the same identity may be retried.
+ * - 404 `STRATEGY_COMPARISON_OPERATION_NOT_FOUND`: never received; retrying is safe.
+ */
+router.get(
+  "/comparison/operations/:walletAddress/:operationIdentity",
+  (req: Request, res: Response) => {
+    const { walletAddress, operationIdentity } = req.params;
+    const kind = req.query.kind;
+    if (kind !== undefined && kind !== "update" && kind !== "select") {
+      res.status(400).json({
+        code: INVALID_STRATEGY_COMPARISON_STATE,
+        error: 'kind must be "update" or "select".',
+      });
+      return;
+    }
+    const operation = getStrategyComparisonOperation(
+      walletAddress,
+      operationIdentity,
+      kind as "update" | "select" | undefined,
+    );
+    if (!operation) {
+      res.status(404).json({
+        code: "STRATEGY_COMPARISON_OPERATION_NOT_FOUND",
+        error: "No operation with this identity was recorded for this wallet. Retrying it is safe.",
+      });
+      return;
+    }
+    res.json(operation);
+  },
+);
 
 export default router;
