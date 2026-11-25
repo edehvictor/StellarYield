@@ -55,6 +55,7 @@ export interface ValidatedFailoverIncident {
   recoveredAt?: string;
   durationMs?: number;
   resolved: boolean;
+  version: number;
 }
 
 export type TransparencyDataErrorCode =
