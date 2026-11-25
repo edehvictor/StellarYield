@@ -12,7 +12,7 @@
  * Data is cached server-side; the page shows a loading skeleton while
  * the first fetch is in flight.
  */
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { Loader2, TrendingUp, Flame, BarChart2, AlertTriangle, CheckCircle, Clock } from "lucide-react";
 import {
     LineChart,
@@ -25,6 +25,14 @@ import {
     ResponsiveContainer,
 } from "recharts";
 import { getApiBaseUrl } from "../../lib/api";
+import {
+    buildTransparencySummaryUrl,
+    formatTransparencyContext,
+    getExpectedTransparencyNetwork,
+    readTransparencySummaryResponse,
+    TRANSPARENCY_SCHEMA_VERSION,
+    type TransparencyContext,
+} from "./transparencyContextClient";
 import { parseSmokeHistory, parseSmokeRunResult } from "./smokeResults";
 import VaultReliabilityPanel from "./VaultReliabilityPanel";
 import VaultSharePriceReconcilePanel from "../../features/vault_share_price/VaultSharePriceReconcilePanel";
@@ -129,17 +137,42 @@ export default function TransparencyDashboard() {
     const [failoverIncidents, setFailoverIncidents] = useState<FailoverIncident[]>([]);
     const [healthSummary, setHealthSummary] = useState<TransparencyHealthSummary | null>(null);
 
+    // Network, ledger and version of the snapshot on screen (#1916). A ref so
+    // a slow response from an earlier request is judged against the latest
+    // accepted snapshot, not the one current when it was sent.
+    const contextRef = useRef<TransparencyContext | null>(null);
+    const [snapshotContext, setSnapshotContext] = useState<TransparencyContext | null>(null);
+    const [contextNotice, setContextNotice] = useState<string | null>(null);
+    const expectedNetwork = getExpectedTransparencyNetwork();
+
     const fetchData = useCallback(async () => {
         setLoading((prev) => (data === null ? true : prev));
         setError(null);
         try {
-            const res = await fetch(`${getApiBase()}/api/transparency/summary`);
-            if (!res.ok) {
-                throw new Error(`Server returned ${res.status}`);
+            // A source still catching up to the ledger already shown is
+            // retried briefly; every other mismatch is final.
+            for (let attempt = 0; attempt < 3; attempt += 1) {
+                const request = { network: expectedNetwork, current: contextRef.current };
+                const res = await fetch(buildTransparencySummaryUrl(getApiBase(), request));
+                const result = await readTransparencySummaryResponse(res, request);
+                if (result.kind === "accept") {
+                    if (result.context) {
+                        contextRef.current = result.context;
+                        setSnapshotContext(result.context);
+                    }
+                    setContextNotice(null);
+                    setData(result.data);
+                    return;
+                }
+                if (result.error.retryable && attempt < 2) {
+                    await new Promise((resolve) => window.setTimeout(resolve, 300 * (attempt + 1)));
+                    continue;
+                }
+                // Keep the snapshot on screen; explain why the update was refused.
+                setContextNotice(result.error.message);
+                if (contextRef.current === null) setError(result.error.message);
+                return;
             }
-            const rawJson: unknown = await res.json();
-            const validated = validateTransparencySummaryPayload(rawJson);
-            setData(validated);
         } catch (err) {
             // Preserve existing state and balances if a previous valid snapshot
             // is already loaded; only surface error state when no snapshot exists
@@ -152,7 +185,7 @@ export default function TransparencyDashboard() {
         } finally {
             setLoading(false);
         }
-    }, [data]);
+    }, [data, expectedNetwork]);
 
     useEffect(() => {
         void fetchData();
@@ -173,7 +206,13 @@ export default function TransparencyDashboard() {
             // snapshot with an empty result. The API is read-only and safe to retry.
             for (let attempt = 0; attempt < 3; attempt += 1) {
                 try {
-                    const response = await fetch(`${getApiBase()}/api/transparency/failover-history`);
+                    const params = new URLSearchParams({ version: TRANSPARENCY_SCHEMA_VERSION });
+                    if (expectedNetwork) params.set("network", expectedNetwork);
+                    const response = await fetch(
+                        `${getApiBase()}/api/transparency/failover-history?${params.toString()}`,
+                    );
+                    // Another network's incidents are never shown (#1916).
+                    if (response.status === 409) return;
                     if (!response.ok) throw new Error(`Server returned ${response.status}`);
                     const payload: unknown = await response.json();
                     const validatedIncidents = validateFailoverIncidentsPayload(payload);
@@ -188,7 +227,7 @@ export default function TransparencyDashboard() {
         }
         void loadFailoverHistory();
         return () => { cancelled = true; };
-    }, []);
+    }, [expectedNetwork]);
 
     useEffect(() => {
         async function loadServiceHealth() {
@@ -298,6 +337,14 @@ export default function TransparencyDashboard() {
                     <p className="text-gray-400 mt-1">
                         Real-time protocol revenue, $YIELD burns, and the deflationary ratio.
                     </p>
+                    {snapshotContext && (
+                        <p
+                            data-testid="transparency-context"
+                            className="text-xs text-gray-500 mt-1 font-mono"
+                        >
+                            {formatTransparencyContext(snapshotContext)}
+                        </p>
+                    )}
                 </div>
                 <button
                     type="button"
@@ -308,6 +355,20 @@ export default function TransparencyDashboard() {
                     Refresh
                 </button>
             </header>
+
+            {(contextNotice || error) && (
+                <div
+                    role="status"
+                    data-testid="transparency-refresh-notice"
+                    className="p-3 rounded-xl bg-amber-500/10 border border-amber-500/30 text-amber-200 text-sm flex items-start gap-2"
+                >
+                    <AlertTriangle size={16} className="mt-0.5 flex-shrink-0" />
+                    <span>
+                        {contextNotice ?? error} The figures below are the last snapshot that matched this
+                        network.
+                    </span>
+                </div>
+            )}
 
             {/* Stat cards */}
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
