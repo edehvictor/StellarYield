@@ -12,9 +12,15 @@ const NotificationCenter: React.FC = () => {
   const { notifications, isLoading, error, markAsRead, markAllAsRead } = useNotificationsList();
   const [filterUnread, setFilterUnread] = useState(true);
 
+  const sortedNotifications = [...notifications].sort((a, b) => {
+    if (a.isRead !== b.isRead) return a.isRead ? 1 : -1;
+    const t = new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
+    if (t !== 0) return t;
+    return a.id.localeCompare(b.id);
+  });
   const filteredNotifications = filterUnread
-    ? notifications.filter((n) => !n.isRead)
-    : notifications;
+    ? sortedNotifications.filter((n) => !n.isRead)
+    : sortedNotifications;
 
   const unreadCount = notifications.filter((n) => !n.isRead).length;
 

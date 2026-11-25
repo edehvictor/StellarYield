@@ -1,3 +1,5 @@
+import { sha256Pure, stableStringify } from "./quoteAssumptionFingerprint";
+
 /**
  * Portfolio valuation and completeness model (#1660).
  *
@@ -248,14 +250,23 @@ export function computePortfolioValuationSummary(
 
 // ── Operation Identity & Duplicate Submission Protection (#1864) ────────────
 
-import { sha256Pure, stableStringify } from "./quoteAssumptionFingerprint";
+/**
+ * Stellar ledger snapshot that scopes a valuation read and every resulting
+ * write. A transition to another network or ledger invalidates the operation.
+ */
+export interface ValuationContext {
+  network: string;
+  ledgerSequence: number;
+}
 
 /**
- * Payload submitted for portfolio valuation.
+ * Payload submitted for portfolio valuation. `context` must identify the
+ * network and ledger from which all positions were read.
  */
 export interface PortfolioValuationPayload {
   walletAddress: string;
   positions: PositionValuationInput[];
+  context: ValuationContext;
   timestamp?: string;
   currency?: string;
   metadata?: Record<string, unknown>;
@@ -282,6 +293,7 @@ export interface ValuationEffect {
   effectId: string;
   type: "PORTFOLIO_VALUATION_RECORDED" | "BALANCE_SNAPSHOT_STAMPED" | "YIELD_ACCRUAL_EVALUATED";
   walletAddress: string;
+  context: ValuationContext;
   totalValueUsd: number | null;
   pricedValueUsd: number;
   yieldEarnedUsd: number | null;
@@ -297,6 +309,7 @@ export interface ValuationOperationRecord {
   operationId: string;
   payloadFingerprint: string;
   walletAddress: string;
+  context: ValuationContext;
   status: ValuationOperationStatus;
   summary?: PortfolioValuationSummary;
   effects?: ValuationEffect[];
@@ -341,9 +354,44 @@ export function canonicalizeValuationPayload(
 
   return {
     currency: String(payload.currency || "USD").toUpperCase(),
+    context: {
+      network: String(payload.context?.network || "").trim().toLowerCase(),
+      ledgerSequence: payload.context?.ledgerSequence ?? null,
+    },
     positions: normalizedPositions,
     walletAddress: String(payload.walletAddress || "").trim().toUpperCase(),
   };
+}
+
+function normalizeValuationContext(
+  context: ValuationContext | null | undefined,
+): ValuationContext | null {
+  if (
+    !context ||
+    typeof context.network !== "string" ||
+    context.network.trim() === "" ||
+    !Number.isSafeInteger(context.ledgerSequence) ||
+    context.ledgerSequence <= 0
+  ) {
+    return null;
+  }
+
+  return {
+    network: context.network.trim().toLowerCase(),
+    ledgerSequence: context.ledgerSequence,
+  };
+}
+
+function valuationContextsMatch(
+  left: ValuationContext | null,
+  right: ValuationContext | null,
+): boolean {
+  return (
+    left !== null &&
+    right !== null &&
+    left.network === right.network &&
+    left.ledgerSequence === right.ledgerSequence
+  );
 }
 
 /**
@@ -388,8 +436,17 @@ export interface SafeValuationOptions<TState, TResult> {
   payload: PortfolioValuationPayload;
   operationIdentity: ValuationOperationIdentity;
   currentState: TState;
+  /** Re-reads the active network/ledger before and after the write callback. */
+  getCurrentContext: () => ValuationContext;
   validate?: (payload: PortfolioValuationPayload) => boolean | string;
-  execute?: (summary: PortfolioValuationSummary) => Promise<TResult> | TResult;
+  /**
+   * Bind side effects to the supplied context; never infer the active network
+   * or ledger again while writing.
+   */
+  execute?: (
+    summary: PortfolioValuationSummary,
+    context: ValuationContext,
+  ) => Promise<TResult> | TResult;
   onSuccessStateUpdate?: (currentState: TState, summary: PortfolioValuationSummary) => TState;
 }
 
@@ -406,7 +463,8 @@ export interface SafeValuationResult<TState, TResult> {
     | "VALIDATION_FAILED"
     | "EXECUTION_FAILED"
     | "OPERATION_IDENTITY_CONFLICT"
-    | "DUPLICATE_VALUATION_IN_PROGRESS";
+    | "DUPLICATE_VALUATION_IN_PROGRESS"
+    | "VALUATION_CONTEXT_MISMATCH";
   isRecoverable: boolean;
 }
 
@@ -442,18 +500,47 @@ export class ValuationOperationManager {
       payload,
       operationIdentity,
       currentState,
+      getCurrentContext,
       validate,
       execute,
       onSuccessStateUpdate,
     } = options;
 
     const { operationId, payloadFingerprint } = operationIdentity;
+    const context = normalizeValuationContext(payload.context);
+    const actualPayloadFingerprint = computeValuationPayloadFingerprint(payload).fingerprint;
+
+    if (payloadFingerprint !== actualPayloadFingerprint) {
+      return {
+        success: false,
+        state: currentState,
+        error: "Operation identity conflict: parameters do not match the submitted payload.",
+        errorCode: "OPERATION_IDENTITY_CONFLICT",
+        isRecoverable: false,
+      };
+    }
+
+    const hasCurrentContext = (): boolean =>
+      valuationContextsMatch(context, normalizeValuationContext(getCurrentContext()));
+
+    if (!context || !hasCurrentContext()) {
+      return {
+        success: false,
+        state: currentState,
+        error: "Valuation context does not match the active network and ledger.",
+        errorCode: "VALUATION_CONTEXT_MISMATCH",
+        isRecoverable: true,
+      };
+    }
 
     // 1. Check for existing operation identity
     const existing = this.operations.get(operationId);
     if (existing) {
       // Conflict check: Same operation ID used with different payload
-      if (existing.payloadFingerprint !== payloadFingerprint) {
+      if (
+        existing.payloadFingerprint !== actualPayloadFingerprint ||
+        !valuationContextsMatch(existing.context, context)
+      ) {
         return {
           success: false,
           state: currentState, // Preserved untouched
@@ -496,8 +583,9 @@ export class ValuationOperationManager {
         const errorMsg = typeof val === "string" ? val : "Valuation validation failed.";
         this.operations.set(operationId, {
           operationId,
-          payloadFingerprint,
+          payloadFingerprint: actualPayloadFingerprint,
           walletAddress: payload.walletAddress,
+          context,
           status: "rejected",
           error: errorMsg,
           errorCode: "VALIDATION_FAILED",
@@ -518,8 +606,9 @@ export class ValuationOperationManager {
     // Mark as in-flight
     this.operations.set(operationId, {
       operationId,
-      payloadFingerprint,
+      payloadFingerprint: actualPayloadFingerprint,
       walletAddress: payload.walletAddress,
+      context,
       status: "in_flight",
       createdAt: new Date().toISOString(),
       replayedCount: 0,
@@ -529,10 +618,54 @@ export class ValuationOperationManager {
       // 3. Compute pure valuation summary
       const summary = computePortfolioValuationSummary(payload.positions);
 
-      // Run optional execution handler (e.g. storage or side-effect)
+      if (!hasCurrentContext()) {
+        const error = "Valuation context changed before execution.";
+        this.operations.set(operationId, {
+          operationId,
+          payloadFingerprint: actualPayloadFingerprint,
+          walletAddress: payload.walletAddress,
+          context,
+          status: "rejected",
+          error,
+          errorCode: "VALUATION_CONTEXT_MISMATCH",
+          createdAt: this.operations.get(operationId)?.createdAt || new Date().toISOString(),
+          replayedCount: 0,
+        });
+        return {
+          success: false,
+          state: currentState,
+          error,
+          errorCode: "VALUATION_CONTEXT_MISMATCH",
+          isRecoverable: true,
+        };
+      }
+
+      // The callback receives the read context and must bind writes to it.
       let execResult: TResult | undefined;
       if (execute) {
-        execResult = await execute(summary);
+        execResult = await execute(summary, context);
+      }
+
+      if (!hasCurrentContext()) {
+        const error = "Valuation context changed during execution.";
+        this.operations.set(operationId, {
+          operationId,
+          payloadFingerprint: actualPayloadFingerprint,
+          walletAddress: payload.walletAddress,
+          context,
+          status: "rejected",
+          error,
+          errorCode: "VALUATION_CONTEXT_MISMATCH",
+          createdAt: this.operations.get(operationId)?.createdAt || new Date().toISOString(),
+          replayedCount: 0,
+        });
+        return {
+          success: false,
+          state: currentState,
+          error,
+          errorCode: "VALUATION_CONTEXT_MISMATCH",
+          isRecoverable: true,
+        };
       }
 
       // 4. Generate committed atomic effects
@@ -540,6 +673,7 @@ export class ValuationOperationManager {
         effectId: `eff_${operationId.replace(/[^a-zA-Z0-9]/g, "").slice(0, 16)}`,
         type: "PORTFOLIO_VALUATION_RECORDED",
         walletAddress: payload.walletAddress,
+        context,
         totalValueUsd: summary.totalValueUsd,
         pricedValueUsd: summary.pricedValueUsd,
         yieldEarnedUsd: summary.yieldEarnedUsd,
@@ -549,8 +683,9 @@ export class ValuationOperationManager {
       // Commit record in registry
       this.operations.set(operationId, {
         operationId,
-        payloadFingerprint,
+        payloadFingerprint: actualPayloadFingerprint,
         walletAddress: payload.walletAddress,
+        context,
         status: "committed",
         summary,
         effects: [effect],
@@ -580,8 +715,9 @@ export class ValuationOperationManager {
       // Mark operation as failed, allow safe retry
       this.operations.set(operationId, {
         operationId,
-        payloadFingerprint,
+        payloadFingerprint: actualPayloadFingerprint,
         walletAddress: payload.walletAddress,
+        context,
         status: "failed",
         error: errorMsg,
         errorCode: "EXECUTION_FAILED",

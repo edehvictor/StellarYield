@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useRef } from 'react';
 import {
   RefreshCw,
   AlertTriangle,
@@ -10,11 +10,16 @@ import {
   TrendingUp,
   Percent,
   Download,
+  ShieldCheck,
+  Check,
 } from 'lucide-react';
 import { apiUrl } from '../../lib/api';
 import { useBackendStatus } from '../../hooks/useBackendStatus';
 import { BackendUnavailable } from '../../components/BackendUnavailable';
-
+import {
+  selectStrategySafely,
+  StrategyComparisonConflictError,
+} from '../../features/strategies/strategyComparisonConcurrencyApi';
 
 import {
   bpsToPercent,
@@ -27,6 +32,7 @@ import {
   type StrategyComparisonExportFormat,
   type StrategyYield,
 } from './strategyComparisonExport';
+import { formatShortFingerprint } from '../../../../shared/types/strategyComparisonConfigFingerprint';
 
 const STRATEGY_THEMES: Record<string, { bg: string; text: string; shadow: string }> = {
   Blend: { bg: 'from-violet-500/20 to-indigo-600/20', text: 'text-indigo-400', shadow: 'shadow-indigo-500/20' },
@@ -44,12 +50,18 @@ export default function StrategyComparison() {
   const [data, setData] = useState<StrategyYield[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [comparisonVersion, setComparisonVersion] = useState<number>(1);
+  const [selectedStrategyId, setSelectedStrategyId] = useState<string | null>(null);
+  const [conflictNotice, setConflictNotice] = useState<string | null>(null);
+  const [isUpdatingSelection, setIsUpdatingSelection] = useState(false);
   const backendStatus = useBackendStatus();
 
   const fetchStrategies = async () => {
     try {
       setError(null);
+      setConflictNotice(null);
       setLoading(true);
+
       const res = await fetch(apiUrl('/api/yields'));
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const yields: unknown = await res.json();
@@ -62,11 +74,60 @@ export default function StrategyComparison() {
       // Malformed entries are skipped; nothing is computed from them.
       const strategies = yields.filter(isComparableStrategy);
 
+      // Extract comparison version if returned by server headers (optional; guards missing headers in test mocks)
+      const versionHeader =
+        (res.headers?.get?.('X-Comparison-Version') ?? null) ||
+        (res.headers?.get?.('ETag') ?? null)?.replace(/^W\//, '').replace(/^"(.*)"$/, '$1');
+      if (versionHeader) {
+        const v = Number(versionHeader);
+        if (Number.isSafeInteger(v) && v > 0) {
+          setComparisonVersion(v);
+        }
+      }
+
       setData(strategies);
     } catch (err: unknown) {
-      setError(getErrorMessage(err));
+      const msg = getErrorMessage(err);
+      setData((prevData) => {
+        if (prevData.length > 0) {
+          setValidationWarning(`Strategy refresh failed (${msg}). Retaining existing strategy data.`);
+          return prevData;
+        }
+        setError(msg);
+        return [];
+      });
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handleSelectStrategy = async (strategyName: string) => {
+    try {
+      setConflictNotice(null);
+      setIsUpdatingSelection(true);
+      const stratId = strategyName.toLowerCase();
+      const wallet = "G_CURRENT_USER";
+
+      const res = await selectStrategySafely(wallet, stratId, 1000, {
+        expectedVersion: comparisonVersion,
+      });
+
+      setSelectedStrategyId(stratId);
+      setComparisonVersion(res.version);
+    } catch (err: unknown) {
+      if (err instanceof StrategyComparisonConflictError) {
+        setConflictNotice(
+          `Concurrent state change detected. Another session updated strategy workspace to v${err.currentVersion}. Synchronized safely without state corruption.`,
+        );
+        setComparisonVersion(err.currentVersion);
+        if (err.currentState?.selectedStrategyId) {
+          setSelectedStrategyId(err.currentState.selectedStrategyId);
+        }
+      } else {
+        setError(getErrorMessage(err));
+      }
+    } finally {
+      setIsUpdatingSelection(false);
     }
   };
 
@@ -74,11 +135,27 @@ export default function StrategyComparison() {
     downloadStrategyComparisonExport(data, format);
   };
 
+  const handleSelectStrategy = (strategy: StrategyYield) => {
+    if (isStaleConfig) {
+      setActionNotice({
+        type: 'error',
+        message: 'Cannot select strategy: configuration snapshot is stale. Please refresh configuration to continue.',
+      });
+      return;
+    }
+
+    setSelectedStrategyId(strategy.protocolName);
+    setActionNotice({
+      type: 'success',
+      message: `Selected ${strategy.protocolName} strategy with verified configuration snapshot.`,
+    });
+  };
+
   useEffect(() => {
     fetchStrategies();
   }, []);
 
-  // Show backend unavailable state if backend is down
+  // Show backend unavailable state if backend is down and no cached data exists
   if (backendStatus === "unavailable" && !data.length) {
     return (
       <div className="space-y-8 animate-in fade-in slide-in-from-bottom-4 duration-700">
@@ -94,7 +171,7 @@ export default function StrategyComparison() {
     );
   }
 
-  if (error) {
+  if (error && !data.length) {
     return (
       <div className="space-y-8 animate-in fade-in slide-in-from-bottom-4 duration-700">
         <header className="mb-6">
@@ -127,7 +204,8 @@ export default function StrategyComparison() {
 
   return (
     <div className="space-y-8 animate-in fade-in slide-in-from-bottom-4 duration-700">
-      <header className="flex flex-col md:flex-row md:items-end justify-between gap-4">
+      {/* Header */}
+      <header className="flex flex-col md:flex-row md:items-center justify-between gap-4 border-b border-white/10 pb-6">
         <div>
           <div className="flex items-center gap-3 mb-2">
             <div className="bg-emerald-500/20 p-2.5 rounded-xl border border-emerald-500/30 shadow-lg shadow-emerald-500/20">
@@ -137,9 +215,17 @@ export default function StrategyComparison() {
               Strategy Comparison Workspace
             </h2>
           </div>
-          <p className="text-gray-400 ml-[52px]">
-            Side-by-side analysis of risk, liquidity, and rebalancing approaches.
-          </p>
+          <div className="flex items-center gap-3 ml-[52px]">
+            <p className="text-gray-400">
+              Side-by-side analysis of risk, liquidity, and rebalancing approaches.
+            </p>
+            <span
+              data-testid="comparison-version-badge"
+              className="text-xs px-2.5 py-0.5 rounded-full bg-indigo-500/15 border border-indigo-500/30 text-indigo-300 font-mono inline-flex items-center gap-1"
+            >
+              <Layers size={11} /> Workspace v{comparisonVersion}
+            </span>
+          </div>
         </div>
         <div className="flex flex-wrap gap-2">
           <button
@@ -181,6 +267,45 @@ export default function StrategyComparison() {
         </div>
       </header>
 
+      {conflictNotice && (
+        <div
+          role="status"
+          data-testid="concurrent-conflict-notice"
+          className="p-4 rounded-xl bg-indigo-500/15 border border-indigo-500/30 flex items-center justify-between text-indigo-200 text-sm animate-in fade-in"
+        >
+          <div className="flex items-center gap-2">
+            <Activity size={18} className="text-indigo-400 flex-shrink-0" />
+            <span>{conflictNotice}</span>
+          </div>
+          <button
+            onClick={() => setConflictNotice(null)}
+            className="text-xs text-gray-400 hover:text-white ml-4"
+          >
+            Dismiss
+          </button>
+        </div>
+      )}
+
+      {error && data.length > 0 && (
+        <div
+          role="alert"
+          className="p-4 rounded-xl bg-amber-500/10 border border-amber-500/30 flex items-center justify-between text-amber-200 text-sm animate-in fade-in"
+        >
+          <div className="flex items-center gap-2">
+            <AlertTriangle size={18} className="text-amber-400 flex-shrink-0" />
+            <span>
+              Failed to refresh strategies: {error}. Existing strategy comparisons and balances remain preserved.
+            </span>
+          </div>
+          <button
+            onClick={fetchStrategies}
+            className="px-3 py-1 bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 rounded text-xs font-semibold ml-4"
+          >
+            Retry
+          </button>
+        </div>
+      )}
+
       {loading ? (
         renderSkeleton()
       ) : data.length === 0 ? (
@@ -199,20 +324,30 @@ export default function StrategyComparison() {
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 relative">
           {data.map((strategy, i) => {
             const theme = STRATEGY_THEMES[strategy.protocolName] || { bg: 'bg-white/5', text: 'text-gray-400', shadow: '' };
+            const isSelected = selectedStrategyId === strategy.protocolName;
             return (
               <div
                 key={strategy.protocolName}
                 style={{ animationDelay: `${i * 100}ms` }}
-                className={`glass-card overflow-hidden border border-white/5 hover:border-white/20 transition-all duration-300 shadow-2xl ${theme.shadow}`}
+                className={`glass-card overflow-hidden border transition-all duration-300 shadow-2xl ${
+                  isSelected ? 'border-emerald-500/50 ring-2 ring-emerald-500/20' : 'border-white/5 hover:border-white/20'
+                } ${theme.shadow}`}
               >
                 {/* Header */}
-                <div className={`p-6 bg-gradient-to-br ${theme.bg} border-b border-white/10`}>
-                  <h3 className="text-3xl font-black text-white mb-2 tracking-tight">
-                    {strategy.protocolName}
-                  </h3>
-                  <div className="flex items-center gap-2 text-sm font-medium text-white/80 uppercase tracking-widest">
-                     <span className="flex items-center gap-1"><Activity size={14}/> Score: {strategy.riskScore}/100</span>
+                <div className={`p-6 bg-gradient-to-br ${theme.bg} border-b border-white/10 flex justify-between items-start`}>
+                  <div>
+                    <h3 className="text-3xl font-black text-white mb-2 tracking-tight">
+                      {strategy.protocolName}
+                    </h3>
+                    <div className="flex items-center gap-2 text-sm font-medium text-white/80 uppercase tracking-widest">
+                       <span className="flex items-center gap-1"><Activity size={14}/> Score: {strategy.riskScore}/100</span>
+                    </div>
                   </div>
+                  {isSelected && (
+                    <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-semibold bg-emerald-500/20 text-emerald-300 border border-emerald-500/40">
+                      <Check size={12} /> Active
+                    </span>
+                  )}
                 </div>
 
                 <div className="p-6 space-y-5 flex-1 flex flex-col">
@@ -294,8 +429,20 @@ export default function StrategyComparison() {
                   </div>
 
                   {/* Actions */}
-                  <button className="w-full btn-primary py-3 rounded-xl hover:scale-[1.02] transition-transform font-bold tracking-wide mt-2">
-                    Select Strategy
+                  <button
+                    type="button"
+                    onClick={() => handleSelectStrategy(strategy.protocolName)}
+                    disabled={isUpdatingSelection}
+                    aria-pressed={selectedStrategyId === strategy.protocolName.toLowerCase()}
+                    className={`w-full py-3 rounded-xl transition-all font-bold tracking-wide mt-2 ${
+                      selectedStrategyId === strategy.protocolName.toLowerCase()
+                        ? 'bg-emerald-600 hover:bg-emerald-500 text-white shadow-lg shadow-emerald-600/30'
+                        : 'btn-primary hover:scale-[1.02]'
+                    }`}
+                  >
+                    {selectedStrategyId === strategy.protocolName.toLowerCase()
+                      ? '✓ Strategy Selected'
+                      : 'Select Strategy'}
                   </button>
                 </div>
               </div>

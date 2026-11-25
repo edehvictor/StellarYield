@@ -125,6 +125,7 @@ yieldsRouter.get("/", async (_req, res) => {
         reliabilityStatus: score.status,
         warnings,
         feeHistory,
+        configFingerprint: fpResult.fingerprint,
       };
     }));
     res.setHeader(
