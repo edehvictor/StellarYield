@@ -15,44 +15,61 @@ import {
   type RankingWeights,
 } from "../services/opportunityRankingService";
 import { getAssetConfigVersion } from "../services/zapQuote";
+import { getActiveComparisonConfig } from "./strategies";
+import {
+  computeStrategyComparisonConfigFingerprint,
+} from "../../../shared/types/strategyComparisonConfigFingerprint";
 
 const yieldsRouter = Router();
 
-/** Inclusive bounds for a fee/cost assumption in basis points (0% to 100%). */
 export const MIN_ASSUMPTION_BPS = 0;
 export const MAX_ASSUMPTION_BPS = 10_000;
 
 /**
- * Parses an optional basis-point assumption from the query string (#1922).
- * - absent, empty or non-numeric → `undefined` (the engine default applies)
- * - a finite number within [0, 10,000] → that number
- * - a finite number outside the range, or ±Infinity → `null` (rejected, 400)
- * In-range values above the engine's own 3,000 bps ceiling are still clamped
- * by `calculateNetYield`, as before.
+ * Parses optional basis-point assumptions.
+ * Missing or non-numeric values use engine defaults.
+ * Out-of-range and infinite values are rejected.
  */
-export function parseAssumptionBps(value: unknown): number | null | undefined {
+export function parseAssumptionBps(
+  value: unknown,
+): number | null | undefined {
   if (value === undefined || value === null) return undefined;
   if (typeof value !== "string" || value.trim() === "") return undefined;
+
   const parsed = Number(value);
+
   if (Number.isNaN(parsed)) return undefined;
   if (!Number.isFinite(parsed)) return null;
-  if (parsed < MIN_ASSUMPTION_BPS || parsed > MAX_ASSUMPTION_BPS) return null;
+
+  if (
+    parsed < MIN_ASSUMPTION_BPS ||
+    parsed > MAX_ASSUMPTION_BPS
+  ) {
+    return null;
+  }
+
   return parsed;
 }
 
 yieldsRouter.get("/", async (_req, res) => {
+  let stage = "validation";
+
   try {
-    // Strategy comparison assumptions (#1922): checked before any yield data
-    // is read, so a rejected request computes and caches nothing.
     const assumptions = {
       protocolFeeBps: parseAssumptionBps(_req.query.protocolFeeBps),
       vaultFeeBps: parseAssumptionBps(_req.query.vaultFeeBps),
       rebalanceCostBps: parseAssumptionBps(_req.query.rebalanceCostBps),
       slippageBps: parseAssumptionBps(_req.query.slippageBps),
     };
-    const outOfRange = (Object.entries(assumptions) as Array<[string, number | null | undefined]>)
+
+    const outOfRange = (
+      Object.entries(assumptions) as Array<
+        [string, number | null | undefined]
+      >
+    )
       .filter(([, value]) => value === null)
       .map(([name]) => name);
+
     if (outOfRange.length > 0) {
       sendError(
         res,
@@ -63,95 +80,176 @@ yieldsRouter.get("/", async (_req, res) => {
       );
       return;
     }
+
     const checkedAssumptions = {
       protocolFeeBps: assumptions.protocolFeeBps ?? undefined,
       vaultFeeBps: assumptions.vaultFeeBps ?? undefined,
       rebalanceCostBps: assumptions.rebalanceCostBps ?? undefined,
       slippageBps: assumptions.slippageBps ?? undefined,
     };
-    const { data: yields, cacheStatus } = await getYieldDataWithCacheStatus();
-    const hasCustomAssumptions = Object.values(assumptions).some((value) => value != null);
-    const payload = await Promise.all(yields.map(async (entry) => {
-      const providerId = `${entry.protocolName.toLowerCase()}_api`;
-      const score = await yieldReliabilityEngine.calculateReliabilityScore(
-        providerId,
-        entry.protocolName,
-        "api",
-      );
 
-      let isStale = false;
-      const lastFetchMs = new Date(score.signals.lastSuccessfulFetch).getTime();
-      const ageSeconds = Number.isFinite(lastFetchMs)
-        ? Math.max(0, Math.round((Date.now() - lastFetchMs) / 1000))
-        : Number.POSITIVE_INFINITY;
-      const freshness = Number.isFinite(score.metrics.freshness)
-        ? score.metrics.freshness
-        : 0;
+    // Compute the configuration fingerprint before fetching yield data.
+    stage = "configuration";
 
-      // 30 minutes stale window
-      if (ageSeconds > 30 * 60 || freshness < 0.5) {
-        isStale = true;
-      }
+    const activeConfig = getActiveComparisonConfig();
 
-      const warnings: string[] = [];
-      if (isStale) {
-        warnings.push(`Yield data from ${entry.protocolName} is stale (${Math.round(ageSeconds / 60)}m old).`);
-      }
-      if (score.status === "unreliable") {
-        warnings.push(`Yield source ${entry.protocolName} is unhealthy.`);
-      } else if (score.status === "low" || score.status === "medium") {
-        warnings.push(`Yield source ${entry.protocolName} is degraded.`);
-      }
+    const fpResult =
+      computeStrategyComparisonConfigFingerprint(activeConfig);
 
-      const netYield = calculateNetYield(
-        entry.totalApy,
-        hasCustomAssumptions ? checkedAssumptions : undefined,
-      );
-      // Recent protocol fee changes (#1147), newest-first. Sourced from
-      // protocolFeeHistoryService, which records a snapshot whenever the
-      // combined management + performance fee for this protocol changes.
-      // Always an array (never null/undefined) so the client can render a
-      // stable empty state without extra null-checks.
-      const feeHistory = getFeeHistory(entry.protocolName);
+    res.setHeader(
+      "X-Strategy-Config-Fingerprint",
+      fpResult.fingerprint,
+    );
 
-      return {
-        ...entry,
-        netApy: netYield.netApy,
-        feeDragApy: netYield.feeDragApy,
-        netYieldAssumptions: netYield.assumptions,
-        netYieldSensitivity: netYield.sensitivity,
-        feeAttribution: netYield.feeAttribution,
-        isStale,
-        reliabilityStatus: score.status,
-        warnings,
-        feeHistory,
-        configFingerprint: fpResult.fingerprint,
-      };
-    }));
+    const expectedFingerprints = [
+      _req.get("if-match-config"),
+      _req.query.expectedConfigFingerprint,
+    ].filter((value) => value !== undefined);
+
+    if (
+      expectedFingerprints.some(
+        (value) =>
+          typeof value !== "string" ||
+          value !== fpResult.fingerprint,
+      )
+    ) {
+      res.setHeader("Cache-Control", "no-store");
+
+      res.status(409).json({
+        code: "STALE_STRATEGY_CONFIG",
+        error: "Strategy comparison configuration is stale.",
+        stage: "conflict",
+        remediation: "Refresh the configuration snapshot and retry.",
+        retryable: true,
+        isRecoverable: true,
+        currentFingerprint: fpResult.fingerprint,
+        currentConfig: activeConfig,
+      });
+
+      return;
+    }
+
+    stage = "fetch";
+
+    const { data: yields, cacheStatus } =
+      await getYieldDataWithCacheStatus();
+
+    const hasCustomAssumptions = Object.values(assumptions).some(
+      (value) => value != null,
+    );
+
+    stage = "execution";
+
+    const payload = await Promise.all(
+      yields.map(async (entry) => {
+        const providerId =
+          `${entry.protocolName.toLowerCase()}_api`;
+
+        const score =
+          await yieldReliabilityEngine.calculateReliabilityScore(
+            providerId,
+            entry.protocolName,
+            "api",
+          );
+
+        let isStale = false;
+
+        const lastFetchMs = new Date(
+          score.signals.lastSuccessfulFetch,
+        ).getTime();
+
+        const ageSeconds = Number.isFinite(lastFetchMs)
+          ? Math.max(
+              0,
+              Math.round((Date.now() - lastFetchMs) / 1000),
+            )
+          : Number.POSITIVE_INFINITY;
+
+        const freshness = Number.isFinite(score.metrics.freshness)
+          ? score.metrics.freshness
+          : 0;
+
+        if (ageSeconds > 30 * 60 || freshness < 0.5) {
+          isStale = true;
+        }
+
+        const warnings: string[] = [];
+
+        if (isStale) {
+          warnings.push(
+            `Yield data from ${entry.protocolName} is stale (${Math.round(ageSeconds / 60)}m old).`,
+          );
+        }
+
+        if (score.status === "unreliable") {
+          warnings.push(
+            `Yield source ${entry.protocolName} is unhealthy.`,
+          );
+        } else if (
+          score.status === "low" ||
+          score.status === "medium"
+        ) {
+          warnings.push(
+            `Yield source ${entry.protocolName} is degraded.`,
+          );
+        }
+
+        const netYield = calculateNetYield(
+          entry.totalApy,
+          hasCustomAssumptions
+            ? checkedAssumptions
+            : undefined,
+        );
+
+        const feeHistory = getFeeHistory(entry.protocolName);
+
+        return {
+          ...entry,
+          netApy: netYield.netApy,
+          feeDragApy: netYield.feeDragApy,
+          netYieldAssumptions: netYield.assumptions,
+          netYieldSensitivity: netYield.sensitivity,
+          feeAttribution: netYield.feeAttribution,
+          isStale,
+          reliabilityStatus: score.status,
+          warnings,
+          feeHistory,
+          configFingerprint: fpResult.fingerprint,
+        };
+      }),
+    );
+
+    stage = "response";
+
     res.setHeader(
       "Cache-Control",
       `public, max-age=${CURRENT_YIELDS_TTL_SECONDS}, stale-while-revalidate=30`,
     );
+
     res.setHeader("X-Cache-Status", cacheStatus);
-    // Immutable configuration fingerprint (#stale-config): clients use this
-    // to detect when the asset configuration snapshot has changed between
-    // the quote that was shown and the one that would be executed. When the
-    // fingerprint received with a quote no longer matches the one on the
-    // current response the client must refresh before submitting.
+
     const configVersion = getAssetConfigVersion();
+
     res.setHeader("X-Config-Version", configVersion);
+
     res.json(payload);
-  } catch (error) {
-    console.error("Failed to serve /api/yields.", error);
-    // One response only: a second write after sendError threw
-    // ERR_HTTP_HEADERS_SENT and hid the original failure (#1922).
+  } catch {
+    // Avoid exposing raw provider errors or sensitive execution context.
+    console.error(`Failed to serve /api/yields at stage: ${stage}`);
+
     if (!res.headersSent) {
+      res.setHeader("Cache-Control", "no-store");
+
       sendError(
         res,
         500,
         "YIELD_FETCH_FAILED",
         "Unable to fetch yield data right now.",
-        undefined,
+        {
+          stage,
+          remediation: "Refresh yield data before retrying.",
+          retryable: true,
+        },
         (_req as unknown as { requestId?: string }).requestId,
         true,
       );
@@ -162,42 +260,53 @@ yieldsRouter.get("/", async (_req, res) => {
 yieldsRouter.get("/ranking", async (req, res) => {
   try {
     const customWeights: Partial<RankingWeights> = {};
+
     const parseParam = (val: unknown): number | undefined => {
       if (val === undefined || val === null) return undefined;
+
       const parsed = Number(val);
-      return Number.isFinite(parsed) && parsed >= 0 ? parsed : undefined;
+
+      return Number.isFinite(parsed) && parsed >= 0
+        ? parsed
+        : undefined;
     };
 
     const apy = parseParam(req.query.apy);
     if (apy !== undefined) customWeights.apy = apy;
+
     const liquidity = parseParam(req.query.liquidity);
     if (liquidity !== undefined) customWeights.liquidity = liquidity;
+
     const volatility = parseParam(req.query.volatility);
     if (volatility !== undefined) customWeights.volatility = volatility;
+
     const maturity = parseParam(req.query.maturity);
     if (maturity !== undefined) customWeights.maturity = maturity;
+
     const tvl = parseParam(req.query.tvl);
     if (tvl !== undefined) customWeights.tvl = tvl;
 
-    const ranked = await OpportunityRankingService.rankOpportunities(customWeights);
+    const ranked =
+      await OpportunityRankingService.rankOpportunities(customWeights);
+
     res.json(ranked);
   } catch (error) {
     console.error("Failed to rank opportunities.", error);
-    sendError(res, 500, "RANKING_FAILED", "Unable to rank opportunities right now.");
+
+    sendError(
+      res,
+      500,
+      "RANKING_FAILED",
+      "Unable to rank opportunities right now.",
+    );
   }
 });
 
 /**
  * GET /api/yields/parity
  *
- * Runs the yield normalization parity check between the market feed and a
- * portfolio summary built from that same feed, and returns the diagnostics.
- *
- * Optional `?positions=Blend:5000,Soroswap:2500` weights the summary by an
- * actual portfolio; without it every protocol is weighted equally.
- *
- * Always 200 — this is a diagnostic report, not a request that can fail
- * validation. Alert on `inParity: false`.
+ * Compares the market yield feed with a portfolio summary.
+ * Optional positions determine portfolio weights.
  */
 yieldsRouter.get("/parity", async (req, res) => {
   try {
@@ -205,12 +314,14 @@ yieldsRouter.get("/parity", async (req, res) => {
     const report = await getYieldParityReport(positions);
 
     res.setHeader("Cache-Control", "no-store");
+
     res.status(200).json({
       ...report,
       diagnostics: formatParityReport(report),
     });
   } catch (error) {
     console.error("Failed to serve /api/yields/parity.", error);
+
     sendError(
       res,
       500,
@@ -221,23 +332,37 @@ yieldsRouter.get("/parity", async (req, res) => {
 });
 
 /**
- * Parses `Blend:5000,Soroswap:2500` into portfolio positions. Malformed or
- * non-positive entries are dropped rather than rejected, so a bad query string
- * degrades to the equal-weight default instead of hiding a real parity break.
+ * Parses Blend:5000,Soroswap:2500 into portfolio positions.
+ * Malformed or non-positive entries are ignored.
  */
-function parsePositionsQuery(raw: unknown): PortfolioPositionInput[] | undefined {
-  if (typeof raw !== "string" || raw.trim() === "") return undefined;
+function parsePositionsQuery(
+  raw: unknown,
+): PortfolioPositionInput[] | undefined {
+  if (typeof raw !== "string" || raw.trim() === "") {
+    return undefined;
+  }
 
   const positions: PortfolioPositionInput[] = [];
+
   for (const chunk of raw.split(",")) {
     const [protocol, value] = chunk.split(":");
     const valueUsd = Number(value);
-    if (!protocol?.trim() || !Number.isFinite(valueUsd) || valueUsd <= 0) continue;
-    positions.push({ protocol: protocol.trim(), valueUsd });
+
+    if (
+      !protocol?.trim() ||
+      !Number.isFinite(valueUsd) ||
+      valueUsd <= 0
+    ) {
+      continue;
+    }
+
+    positions.push({
+      protocol: protocol.trim(),
+      valueUsd,
+    });
   }
 
   return positions.length > 0 ? positions : undefined;
 }
 
 export default yieldsRouter;
-
