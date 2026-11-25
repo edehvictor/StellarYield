@@ -17,8 +17,10 @@ import { apiUrl } from '../../lib/api';
 import { useBackendStatus } from '../../hooks/useBackendStatus';
 import { BackendUnavailable } from '../../components/BackendUnavailable';
 import {
+  newComparisonOperationIdentity,
   selectStrategySafely,
   StrategyComparisonConflictError,
+  StrategyComparisonOutcomeUnknownError,
 } from '../../features/strategies/strategyComparisonConcurrencyApi';
 
 import {
@@ -54,6 +56,8 @@ export default function StrategyComparison() {
   const [selectedStrategyId, setSelectedStrategyId] = useState<string | null>(null);
   const [conflictNotice, setConflictNotice] = useState<string | null>(null);
   const [isUpdatingSelection, setIsUpdatingSelection] = useState(false);
+  const [selectionNotice, setSelectionNotice] = useState<string | null>(null);
+  const pendingSelectionRef = useRef<{ strategyId: string; operationIdentity: string } | null>(null);
   const backendStatus = useBackendStatus();
 
   const fetchStrategies = async () => {
@@ -87,35 +91,43 @@ export default function StrategyComparison() {
 
       setData(strategies);
     } catch (err: unknown) {
-      const msg = getErrorMessage(err);
-      setData((prevData) => {
-        if (prevData.length > 0) {
-          setValidationWarning(`Strategy refresh failed (${msg}). Retaining existing strategy data.`);
-          return prevData;
-        }
-        setError(msg);
-        return [];
-      });
+      // Strategies already on screen stay; the refresh banner reports the
+      // failure and offers a retry.
+      setError(getErrorMessage(err));
     } finally {
       setLoading(false);
     }
   };
 
   const handleSelectStrategy = async (strategyName: string) => {
+    const stratId = strategyName.toLowerCase();
+    const wallet = "G_CURRENT_USER";
+    // One identity per intended selection (#1923). Retrying the same
+    // selection after a lost response reuses it, so the server replays the
+    // kept write instead of allocating twice.
+    const pending = pendingSelectionRef.current;
+    const operationIdentity =
+      pending && pending.strategyId === stratId
+        ? pending.operationIdentity
+        : newComparisonOperationIdentity();
+    pendingSelectionRef.current = { strategyId: stratId, operationIdentity };
+
     try {
       setConflictNotice(null);
+      setSelectionNotice(null);
       setIsUpdatingSelection(true);
-      const stratId = strategyName.toLowerCase();
-      const wallet = "G_CURRENT_USER";
 
       const res = await selectStrategySafely(wallet, stratId, 1000, {
         expectedVersion: comparisonVersion,
+        operationIdentity,
       });
 
+      pendingSelectionRef.current = null;
       setSelectedStrategyId(stratId);
       setComparisonVersion(res.version);
     } catch (err: unknown) {
       if (err instanceof StrategyComparisonConflictError) {
+        pendingSelectionRef.current = null;
         setConflictNotice(
           `Concurrent state change detected. Another session updated strategy workspace to v${err.currentVersion}. Synchronized safely without state corruption.`,
         );
@@ -123,8 +135,15 @@ export default function StrategyComparison() {
         if (err.currentState?.selectedStrategyId) {
           setSelectedStrategyId(err.currentState.selectedStrategyId);
         }
+      } else if (err instanceof StrategyComparisonOutcomeUnknownError) {
+        // Keep the pending identity: selecting the same strategy again is a
+        // safe retry, and the current selection stays as it was.
+        setSelectionNotice(
+          `Could not confirm the ${strategyName} selection. Your current selection and allocations are unchanged on this screen; select ${strategyName} again to retry safely.`,
+        );
       } else {
-        setError(getErrorMessage(err));
+        pendingSelectionRef.current = null;
+        setSelectionNotice(getErrorMessage(err));
       }
     } finally {
       setIsUpdatingSelection(false);
@@ -133,22 +152,6 @@ export default function StrategyComparison() {
 
   const handleExport = (format: StrategyComparisonExportFormat) => {
     downloadStrategyComparisonExport(data, format);
-  };
-
-  const handleSelectStrategy = (strategy: StrategyYield) => {
-    if (isStaleConfig) {
-      setActionNotice({
-        type: 'error',
-        message: 'Cannot select strategy: configuration snapshot is stale. Please refresh configuration to continue.',
-      });
-      return;
-    }
-
-    setSelectedStrategyId(strategy.protocolName);
-    setActionNotice({
-      type: 'success',
-      message: `Selected ${strategy.protocolName} strategy with verified configuration snapshot.`,
-    });
   };
 
   useEffect(() => {
@@ -266,6 +269,25 @@ export default function StrategyComparison() {
           </button>
         </div>
       </header>
+
+      {selectionNotice && (
+        <div
+          role="alert"
+          data-testid="selection-retry-notice"
+          className="p-4 rounded-xl bg-amber-500/10 border border-amber-500/30 flex items-center justify-between text-amber-200 text-sm"
+        >
+          <div className="flex items-center gap-2">
+            <AlertTriangle size={18} className="text-amber-400 flex-shrink-0" />
+            <span>{selectionNotice}</span>
+          </div>
+          <button
+            onClick={() => setSelectionNotice(null)}
+            className="text-xs text-gray-400 hover:text-white ml-4"
+          >
+            Dismiss
+          </button>
+        </div>
+      )}
 
       {conflictNotice && (
         <div
