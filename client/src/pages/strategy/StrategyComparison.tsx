@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useRef } from 'react';
 import {
   RefreshCw,
   AlertTriangle,
@@ -10,6 +10,8 @@ import {
   TrendingUp,
   Percent,
   Download,
+  ShieldCheck,
+  Check,
 } from 'lucide-react';
 import { apiUrl } from '../../lib/api';
 import { useBackendStatus } from '../../hooks/useBackendStatus';
@@ -30,6 +32,7 @@ import {
   type StrategyComparisonExportFormat,
   type StrategyYield,
 } from './strategyComparisonExport';
+import { formatShortFingerprint } from '../../../../shared/types/strategyComparisonConfigFingerprint';
 
 const STRATEGY_THEMES: Record<string, { bg: string; text: string; shadow: string }> = {
   Blend: { bg: 'from-violet-500/20 to-indigo-600/20', text: 'text-indigo-400', shadow: 'shadow-indigo-500/20' },
@@ -58,6 +61,7 @@ export default function StrategyComparison() {
       setError(null);
       setConflictNotice(null);
       setLoading(true);
+
       const res = await fetch(apiUrl('/api/yields'));
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const yields: unknown = await res.json();
@@ -83,7 +87,15 @@ export default function StrategyComparison() {
 
       setData(strategies);
     } catch (err: unknown) {
-      setError(getErrorMessage(err));
+      const msg = getErrorMessage(err);
+      setData((prevData) => {
+        if (prevData.length > 0) {
+          setValidationWarning(`Strategy refresh failed (${msg}). Retaining existing strategy data.`);
+          return prevData;
+        }
+        setError(msg);
+        return [];
+      });
     } finally {
       setLoading(false);
     }
@@ -124,11 +136,27 @@ export default function StrategyComparison() {
     downloadStrategyComparisonExport(data, format);
   };
 
+  const handleSelectStrategy = (strategy: StrategyYield) => {
+    if (isStaleConfig) {
+      setActionNotice({
+        type: 'error',
+        message: 'Cannot select strategy: configuration snapshot is stale. Please refresh configuration to continue.',
+      });
+      return;
+    }
+
+    setSelectedStrategyId(strategy.protocolName);
+    setActionNotice({
+      type: 'success',
+      message: `Selected ${strategy.protocolName} strategy with verified configuration snapshot.`,
+    });
+  };
+
   useEffect(() => {
     fetchStrategies();
   }, []);
 
-  // Show backend unavailable state if backend is down
+  // Show backend unavailable state if backend is down and no cached data exists
   if (backendStatus === "unavailable" && !data.length) {
     return (
       <div className="space-y-8 animate-in fade-in slide-in-from-bottom-4 duration-700">
@@ -177,7 +205,8 @@ export default function StrategyComparison() {
 
   return (
     <div className="space-y-8 animate-in fade-in slide-in-from-bottom-4 duration-700">
-      <header className="flex flex-col md:flex-row md:items-end justify-between gap-4">
+      {/* Header */}
+      <header className="flex flex-col md:flex-row md:items-center justify-between gap-4 border-b border-white/10 pb-6">
         <div>
           <div className="flex items-center gap-3 mb-2">
             <div className="bg-emerald-500/20 p-2.5 rounded-xl border border-emerald-500/30 shadow-lg shadow-emerald-500/20">
@@ -296,20 +325,30 @@ export default function StrategyComparison() {
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 relative">
           {data.map((strategy, i) => {
             const theme = STRATEGY_THEMES[strategy.protocolName] || { bg: 'bg-white/5', text: 'text-gray-400', shadow: '' };
+            const isSelected = selectedStrategyId === strategy.protocolName;
             return (
               <div
                 key={strategy.protocolName}
                 style={{ animationDelay: `${i * 100}ms` }}
-                className={`glass-card overflow-hidden border border-white/5 hover:border-white/20 transition-all duration-300 shadow-2xl ${theme.shadow}`}
+                className={`glass-card overflow-hidden border transition-all duration-300 shadow-2xl ${
+                  isSelected ? 'border-emerald-500/50 ring-2 ring-emerald-500/20' : 'border-white/5 hover:border-white/20'
+                } ${theme.shadow}`}
               >
                 {/* Header */}
-                <div className={`p-6 bg-gradient-to-br ${theme.bg} border-b border-white/10`}>
-                  <h3 className="text-3xl font-black text-white mb-2 tracking-tight">
-                    {strategy.protocolName}
-                  </h3>
-                  <div className="flex items-center gap-2 text-sm font-medium text-white/80 uppercase tracking-widest">
-                     <span className="flex items-center gap-1"><Activity size={14}/> Score: {strategy.riskScore}/100</span>
+                <div className={`p-6 bg-gradient-to-br ${theme.bg} border-b border-white/10 flex justify-between items-start`}>
+                  <div>
+                    <h3 className="text-3xl font-black text-white mb-2 tracking-tight">
+                      {strategy.protocolName}
+                    </h3>
+                    <div className="flex items-center gap-2 text-sm font-medium text-white/80 uppercase tracking-widest">
+                       <span className="flex items-center gap-1"><Activity size={14}/> Score: {strategy.riskScore}/100</span>
+                    </div>
                   </div>
+                  {isSelected && (
+                    <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-semibold bg-emerald-500/20 text-emerald-300 border border-emerald-500/40">
+                      <Check size={12} /> Active
+                    </span>
+                  )}
                 </div>
 
                 <div className="p-6 space-y-5 flex-1 flex flex-col">

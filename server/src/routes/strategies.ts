@@ -34,7 +34,21 @@ const router = Router();
 
 const VALID_TIME_WINDOWS: TimeWindow[] = ["24h", "7d", "30d", "all"];
 const CACHE_TTL = 60_000;
-let cache: { data: unknown; ts: number } | null = null;
+let cache: { data: unknown; ts: number; configFingerprint: string } | null = null;
+
+let activeComparisonConfig: StrategyComparisonConfig = { ...DEFAULT_STRATEGY_COMPARISON_CONFIG };
+
+export function getActiveComparisonConfig(): StrategyComparisonConfig {
+  return activeComparisonConfig;
+}
+
+export function setActiveComparisonConfig(config: StrategyComparisonConfig): void {
+  activeComparisonConfig = config;
+}
+
+export function resetActiveComparisonConfig(): void {
+  activeComparisonConfig = { ...DEFAULT_STRATEGY_COMPARISON_CONFIG };
+}
 
 /**
  * Build a health snapshot for the configured protocols. In production this
@@ -111,14 +125,19 @@ router.get("/leaderboard", async (req: Request, res: Response) => {
 
   const strategyType = (req.query.strategyType as string) || "all";
 
+  const currentFpResult = computeStrategyComparisonConfigFingerprint(activeComparisonConfig);
+  const currentConfigFingerprint = currentFpResult.fingerprint;
+
   const now = Date.now();
   if (
     process.env.NODE_ENV !== "test" &&
     cache &&
     now - cache.ts < CACHE_TTL &&
+    cache.configFingerprint === currentConfigFingerprint &&
     timeWindow === "all" &&
     strategyType === "all"
   ) {
+    res.setHeader("X-Strategy-Config-Fingerprint", currentConfigFingerprint);
     res.json(cache.data);
     return;
   }
@@ -150,6 +169,7 @@ router.get("/leaderboard", async (req: Request, res: Response) => {
     items: ranked,
     filters: { timeWindow, strategyType },
     total: ranked.length,
+    configFingerprint: currentConfigFingerprint,
     scoringMethodology:
       "RAY = APY × (riskScore / 10) / (1 + ilVolatility / 10). Ties resolved by TVL descending.",
     failover: {
@@ -160,10 +180,71 @@ router.get("/leaderboard", async (req: Request, res: Response) => {
   };
 
   if (timeWindow === "all" && strategyType === "all") {
-    cache = { data: response, ts: now };
+    cache = { data: response, ts: now, configFingerprint: currentConfigFingerprint };
   }
 
+  res.setHeader("X-Strategy-Config-Fingerprint", currentConfigFingerprint);
   res.json(response);
+});
+
+/**
+ * GET /api/strategies/config-snapshot
+ *
+ * Returns the immutable configuration snapshot and its SHA-256 fingerprint
+ * used for strategy comparisons.
+ */
+router.get("/config-snapshot", (_req: Request, res: Response) => {
+  const fpResult = computeStrategyComparisonConfigFingerprint(activeComparisonConfig);
+  res.setHeader("X-Strategy-Config-Fingerprint", fpResult.fingerprint);
+  res.json({
+    config: activeComparisonConfig,
+    configFingerprint: fpResult.fingerprint,
+    shortFingerprint: fpResult.shortFingerprint,
+    generatedAt: fpResult.computedAt,
+  });
+});
+
+/**
+ * POST /api/strategies/compare
+ *
+ * Compares strategies against the active configuration snapshot.
+ * If expectedConfigFingerprint is supplied and does not match the active
+ * fingerprint, rejects with 409 STALE_STRATEGY_CONFIG without mutating state.
+ */
+router.post("/compare", async (req: Request, res: Response) => {
+  const { expectedConfigFingerprint, strategyIds } = req.body || {};
+  const currentFpResult = computeStrategyComparisonConfigFingerprint(activeComparisonConfig);
+
+  if (expectedConfigFingerprint) {
+    const verification = verifyStrategyComparisonConfigFingerprint(
+      activeComparisonConfig,
+      expectedConfigFingerprint,
+    );
+    if (!verification.valid) {
+      res.setHeader("X-Strategy-Config-Fingerprint", currentFpResult.fingerprint);
+      res.status(409).json({
+        error: verification.message,
+        code: verification.code,
+        isRecoverable: true,
+        currentFingerprint: currentFpResult.fingerprint,
+        currentConfig: activeComparisonConfig,
+      });
+      return;
+    }
+  }
+
+  let strategies = buildStrategies();
+  if (Array.isArray(strategyIds) && strategyIds.length > 0) {
+    const ids = new Set(strategyIds.map((id: string) => String(id).toLowerCase()));
+    strategies = strategies.filter((s) => ids.has(s.id.toLowerCase()));
+  }
+
+  res.setHeader("X-Strategy-Config-Fingerprint", currentFpResult.fingerprint);
+  res.json({
+    strategies,
+    configFingerprint: currentFpResult.fingerprint,
+    comparedAt: new Date().toISOString(),
+  });
 });
 
 /**
