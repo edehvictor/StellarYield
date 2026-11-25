@@ -2870,7 +2870,8 @@ paths:
                 $ref: '#/components/schemas/Alert'
         '400':
           description: >-
-            Invalid alert parameters; malformed initial preferences return
+            Invalid alert parameters (boundary violation, malformed preferences,
+            negative values). Malformed initial preferences return
             `INVALID_ALERT_PREFERENCES` and do not create an alert.
         '409':
           description: >-
@@ -7313,6 +7314,12 @@ Incident:
 
      AlertPreferences:
       type: object
+      description: >-
+        Boundary-validated alert preferences. Writes validate cooldownMinutes
+        (integer 0-1440), severityThreshold (0-1000, half-up rounded to 2
+        decimals), and quietHoursStart/quietHoursEnd (integers 0-23); on
+        invalid input the request fails with HTTP 400 and existing state is
+        preserved.
       properties:
         channel:
           type: string
