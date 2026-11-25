@@ -45,6 +45,8 @@ export interface EndpointValidationResult {
   diagnostics: SdkDiagnostic[];
 }
 
+const MAX_RETRY_ATTEMPTS = 10;
+
 /**
  * Validates a single endpoint URL.
  * Rejects empty strings, non-http/https protocols, malformed URLs, and URLs with embedded user credentials.
@@ -107,10 +109,21 @@ export function validateEndpointConfig(config: unknown): EndpointValidationResul
     if (!Array.isArray(cfg.fallbackUrls)) {
       errors.push("fallbackUrls must be an array of URL strings.");
     } else {
+      const normalizedEndpoints = new Set<string>();
+      if (baseResult.valid && typeof cfg.baseUrl === "string") {
+        normalizedEndpoints.add(normalizeEndpointUrl(cfg.baseUrl));
+      }
       for (let i = 0; i < cfg.fallbackUrls.length; i++) {
         const fallbackRes = validateEndpointUrl(cfg.fallbackUrls[i]);
         if (!fallbackRes.valid) {
           errors.push(`fallbackUrls[${i}]: ${fallbackRes.error}`);
+          continue;
+        }
+        const normalized = normalizeEndpointUrl(cfg.fallbackUrls[i]);
+        if (normalizedEndpoints.has(normalized)) {
+          errors.push(`fallbackUrls[${i}] duplicates another configured endpoint.`);
+        } else {
+          normalizedEndpoints.add(normalized);
         }
       }
     }
@@ -128,6 +141,8 @@ export function validateEndpointConfig(config: unknown): EndpointValidationResul
     (typeof cfg.maxRetries !== "number" || cfg.maxRetries < 0 || !Number.isInteger(cfg.maxRetries))
   ) {
     errors.push("maxRetries must be a non-negative integer.");
+  } else if (typeof cfg.maxRetries === "number" && cfg.maxRetries > MAX_RETRY_ATTEMPTS) {
+    errors.push(`maxRetries must not exceed ${MAX_RETRY_ATTEMPTS} to keep exponential backoff bounded.`);
   }
 
   if (
