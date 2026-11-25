@@ -24,6 +24,12 @@ export interface TransactionReviewTokenDetail {
   decimals?: number;
 }
 
+export interface TransactionExecutionContext {
+  network?: string;
+  ledger?: number | string;
+  version?: string;
+}
+
 export interface TransactionReviewModalProps {
   isOpen: boolean;
   onClose: () => void;
@@ -45,6 +51,25 @@ export interface TransactionReviewModalProps {
    * the user still gets a remediation path and a state-preserved statement.
    */
   diagnostics?: readonly TransactionReviewDiagnostic[] | null;
+  expectedContext?: TransactionExecutionContext | null;
+  currentContext?: TransactionExecutionContext | null;
+  contextMismatchMessage?: string;
+}
+
+export function detectTransactionContextMismatch(
+  expected?: TransactionExecutionContext | null,
+  current?: TransactionExecutionContext | null,
+): { reason: "network" | "ledger" | "version"; expected: string; actual: string } | null {
+  if (!expected || !current) return null;
+  for (const reason of ["network", "ledger", "version"] as const) {
+    const expectedValue = expected[reason] == null ? null : String(expected[reason]).trim();
+    const actualValue = current[reason] == null ? null : String(current[reason]).trim();
+    if (!expectedValue && !actualValue) continue;
+    if (!expectedValue || !actualValue || expectedValue !== actualValue) {
+      return { reason, expected: expectedValue || "unknown", actual: actualValue || "unknown" };
+    }
+  }
+  return null;
 }
 
 export function TransactionReviewModal({
@@ -63,6 +88,9 @@ export function TransactionReviewModal({
   onRefreshQuote,
   error = null,
   diagnostics = null,
+  expectedContext = null,
+  currentContext = null,
+  contextMismatchMessage,
 }: TransactionReviewModalProps) {
   // Close on Escape key
   const handleKeyDown = useCallback(
@@ -81,12 +109,20 @@ export function TransactionReviewModal({
     }
   }, [isOpen, handleKeyDown]);
 
+  const contextMismatch = detectTransactionContextMismatch(expectedContext, currentContext);
   if (!isOpen) return null;
 
   const amountCheck = validateReviewAmounts({ inputToken, vaultToken, slippageTolerance });
   const amountError = amountCheck.valid ? null : amountCheck.reason;
-  const displayError = error ?? amountError;
-  const canConfirm = !isSubmitting && !isStale && !displayError;
+  const mismatchLabel = contextMismatch?.reason === "network" ? "Network" :
+    contextMismatch?.reason === "ledger" ? "Ledger" : "Protocol version";
+  const displayError = error ?? amountError ?? (contextMismatch
+    ? contextMismatchMessage ?? `${mismatchLabel} changed since this quote was issued. Refresh the quote before signing.`
+    : null);
+  const canConfirm = !isSubmitting && !isStale && !displayError && !contextMismatch;
+  const handleConfirm = () => {
+    if (canConfirm) void onConfirm();
+  };
   const shownDiagnostics: readonly TransactionReviewDiagnostic[] =
     diagnostics && diagnostics.length > 0
       ? diagnostics
@@ -118,6 +154,7 @@ export function TransactionReviewModal({
               <p className="text-xs text-gray-400">Verify parameters and quote cryptographic fingerprint</p>
             </div>
           </div>
+
           <button
             type="button"
             onClick={onClose}
@@ -141,6 +178,18 @@ export function TransactionReviewModal({
               {shortenAddress(walletAddress)}
             </span>
           </div>
+
+          {(expectedContext || currentContext) && (
+            <div data-testid="transaction-context" className="rounded-xl bg-white/5 p-3 text-xs">
+              <span className="text-gray-400">Execution context: </span>
+              <span className="font-mono text-gray-200">
+                {currentContext?.network ?? expectedContext?.network ?? "unknown"}
+                {currentContext?.ledger != null ? ` · ledger ${currentContext.ledger}` : ""}
+                {currentContext?.version ? ` / v${currentContext.version}` : ""}
+              </span>
+              {contextMismatch && <p className="mt-1 text-red-300">Context changed. Refresh the quote before signing.</p>}
+            </div>
+          )}
 
           {/* Tokens and Amount Exchange Card */}
           <div className="rounded-xl border border-white/10 bg-white/5 p-4 space-y-3">
@@ -227,7 +276,7 @@ export function TransactionReviewModal({
           </button>
           <button
             type="button"
-            onClick={() => void onConfirm()}
+            onClick={handleConfirm}
             disabled={!canConfirm}
             data-testid="confirm-transaction-btn"
             className="inline-flex items-center gap-2 rounded-xl bg-gradient-to-r from-blue-500 to-purple-600 px-5 py-2.5 text-sm font-semibold text-white shadow-lg hover:from-blue-600 hover:to-purple-700 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
