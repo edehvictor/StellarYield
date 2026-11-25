@@ -1,6 +1,8 @@
 import React, { useState } from "react";
 import { FlaskConical, AlertTriangle, TrendingUp, TrendingDown } from "lucide-react";
 import { apiUrl } from "../../lib/api";
+import { computeGovernanceConfigFingerprint } from "../../../../shared/types/governanceConfigSnapshot";
+import type { GovernanceConfig } from "./types";
 
 type ProposalType =
   | "fee_change"
@@ -52,7 +54,11 @@ const PARAM_HINTS: Record<ProposalType, string> = {
   reward_change: "rewardApyDelta",
 };
 
-const GovernanceForecast: React.FC = () => {
+interface GovernanceForecastProps {
+  config?: GovernanceConfig;
+}
+
+const GovernanceForecast: React.FC<GovernanceForecastProps> = ({ config }) => {
   const [proposalType, setProposalType] = useState<ProposalType>("fee_change");
   const [paramKey, setParamKey] = useState(PARAM_HINTS.fee_change);
   const [paramValue, setParamValue] = useState("3");
@@ -82,6 +88,9 @@ const GovernanceForecast: React.FC = () => {
 
     setLoading(true);
     try {
+      const configBinding = config
+        ? computeGovernanceConfigFingerprint(config)
+        : undefined;
       const res = await fetch(apiUrl("/api/governance/forecast"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -96,12 +105,18 @@ const GovernanceForecast: React.FC = () => {
             riskScore: parseFloat(baseRisk) || 0,
             vaultCount: parseFloat(vaultCount) || 0,
           },
+          ...(configBinding
+            ? {
+                configSnapshot: configBinding.snapshot,
+                expectedConfigFingerprint: configBinding.fingerprint,
+              }
+            : {}),
         }),
       });
 
       if (!res.ok) {
-        const body = (await res.json()) as { error?: string };
-        setError(body.error ?? "Forecast failed");
+        const body = (await res.json()) as { error?: string; message?: string };
+        setError(body.message ?? body.error ?? "Forecast failed");
       } else {
         setResult((await res.json()) as ForecastResult);
       }

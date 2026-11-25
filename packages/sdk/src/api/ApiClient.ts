@@ -82,6 +82,17 @@ const DEFAULT_RETRYABLE_STATUSES = [408, 429, 500, 502, 503, 504];
 const DEFAULT_CACHE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 const DEFAULT_MAX_PAGES = 50;
 
+function isApiCacheEntry(value: unknown): value is ApiCacheEntry<unknown> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const entry = value as { data?: unknown; fetchedAt?: unknown };
+  return (
+    Object.prototype.hasOwnProperty.call(entry, "data") &&
+    typeof entry.fetchedAt === "number" &&
+    Number.isFinite(entry.fetchedAt) &&
+    entry.fetchedAt >= 0
+  );
+}
+
 /**
  * Simple in-process cache store for environments without durable storage.
  * Suitable for tests and short-lived processes.
@@ -93,7 +104,8 @@ export function createMemoryCacheStore(): ApiCacheStore {
       const raw = map.get(key);
       if (!raw) return null;
       try {
-        return JSON.parse(raw) as ApiCacheEntry<T>;
+        const parsed: unknown = JSON.parse(raw);
+        return isApiCacheEntry(parsed) ? (parsed as ApiCacheEntry<T>) : null;
       } catch {
         return null;
       }
