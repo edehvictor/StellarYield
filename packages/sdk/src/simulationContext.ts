@@ -415,7 +415,7 @@ export interface SimulationContextRefreshEvent {
 
 export interface RunWithSimulationContextOptions<TResult, TState = unknown> {
   /** Reads the live network / ledger / version context before and after `run`. */
-  readContext: () => SimulationContextInput | SimulationContext;
+  readContext: () => SimulationContextInput | SimulationContext | Promise<SimulationContextInput | SimulationContext>;
   /** Simulation work executed under the captured context. */
   run: (context: SimulationContext) => TResult | Promise<TResult>;
   /** Explicit binding the live context must satisfy before work starts. */
@@ -478,9 +478,11 @@ export async function runWithSimulationContext<TResult, TState = unknown>(
 
   let lastError: SimulationContextMismatchError | undefined;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    const before = bindSimulationContext(options.readContext());
+    const before = bindSimulationContext(await options.readContext());
     if (expected) {
-      const preMismatch = compareSimulationContext(expected, before);
+      const preMismatch = compareSimulationContext(expected, before, {
+        maxLedgerDrift: options.maxLedgerDrift,
+      });
       if (preMismatch) {
         lastError = toSimulationContextError(preMismatch, {
           stateSnapshot: preservedState,
@@ -495,7 +497,7 @@ export async function runWithSimulationContext<TResult, TState = unknown>(
     }
 
     const result = await options.run(before);
-    const after = bindSimulationContext(options.readContext());
+    const after = bindSimulationContext(await options.readContext());
     const mismatch = compareSimulationContext(before, after, {
       maxLedgerDrift: options.maxLedgerDrift,
     });
