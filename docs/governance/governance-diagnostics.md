@@ -108,3 +108,8 @@ guarantee.
   attribution and retry-safety mapping.
 - `client/src/pages/governance/governanceProposalAttachment.test.ts` — existing
   attachment metadata coverage, including the hardened non-string field checks.
+
+## Related documentation
+
+- [`docs/governance-boundary-calculations.md`](../governance-boundary-calculations.md) — Boundary-value calculations, checked arithmetic, rounding policies, and state preservation invariants (#1898).
+- [`docs/governance/proposal-attachments.md`](proposal-attachments.md) — Proposal attachment metadata validation and integrity checks.

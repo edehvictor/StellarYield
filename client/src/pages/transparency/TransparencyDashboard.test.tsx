@@ -19,6 +19,9 @@ vi.mock("./AuditReplayReportPanel", () => ({
 vi.mock("./RegistryDiff", () => ({
   default: () => <div>RegistryDiffPage</div>,
 }));
+vi.mock("../../components/SorobanRpcFailoverPanel", () => ({
+  default: () => <div>SorobanRpcFailoverPanel</div>,
+}));
 vi.mock("recharts", () => ({
   ResponsiveContainer: ({ children }: { children?: React.ReactNode }) => <div>{children}</div>,
   LineChart: ({ children }: { children?: React.ReactNode }) => <div>{children}</div>,
@@ -390,5 +393,110 @@ describe("TransparencyDashboard – malformed external data hardening (#1913)", 
     });
     expect(screen.getByText(/Degraded:/)).toBeInTheDocument();
     expect(screen.queryByText(/All transparency subsystems are healthy/)).not.toBeInTheDocument();
+  });
+});
+
+describe("TransparencyDashboard – network and ledger binding (#1916)", () => {
+  const withContext = (ledger: number, network = "testnet", revenue = 372000) => ({
+    ...mockTransparencyData,
+    totalRevenueLumens: revenue,
+    context: { network, ledger, version: "1" },
+  });
+
+  function summarySequence(responses: Array<{ status?: number; body: unknown }>) {
+    const urls: string[] = [];
+    let call = 0;
+    const fetchMock = vi.fn().mockImplementation((url: string) => {
+      const path = String(url);
+      if (path.includes("/api/transparency/summary")) {
+        urls.push(path);
+        const next = responses[Math.min(call, responses.length - 1)];
+        call += 1;
+        const status = next.status ?? 200;
+        return Promise.resolve({ ok: status < 300, status, json: async () => next.body });
+      }
+      return makeFetchMock()(url);
+    });
+    return { fetchMock, urls };
+  }
+
+  it("shows the snapshot's network and ledger and sends them on refresh", async () => {
+    const { fetchMock, urls } = summarySequence([
+      { body: withContext(5000) },
+      { body: withContext(5004, "testnet", 380000) },
+    ]);
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<TransparencyDashboard />);
+    await waitFor(() => expect(screen.getByTestId("transparency-context")).toHaveTextContent("testnet · ledger 5,000"));
+    expect(urls[0]).toContain("network=testnet");
+    expect(urls[0]).not.toContain("minLedger");
+
+    fireEvent.click(screen.getByRole("button", { name: /Refresh transparency data/i }));
+    await waitFor(() => expect(screen.getByText("$380,000")).toBeInTheDocument());
+    expect(urls[1]).toContain("minLedger=5000");
+    expect(screen.getByTestId("transparency-context")).toHaveTextContent("ledger 5,004");
+  });
+
+  it("keeps the figures on screen when a refresh comes from another network", async () => {
+    const { fetchMock } = summarySequence([
+      { body: withContext(5000) },
+      { body: withContext(9000, "mainnet", 999999) },
+    ]);
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<TransparencyDashboard />);
+    await waitFor(() => expect(screen.getByText("$372,000")).toBeInTheDocument());
+
+    fireEvent.click(screen.getByRole("button", { name: /Refresh transparency data/i }));
+    await waitFor(() =>
+      expect(screen.getByTestId("transparency-refresh-notice")).toHaveTextContent(/mainnet/),
+    );
+    expect(screen.getByText("$372,000")).toBeInTheDocument();
+    expect(screen.queryByText("$999,999")).not.toBeInTheDocument();
+    expect(screen.getByTestId("transparency-context")).toHaveTextContent("ledger 5,000");
+  });
+
+  it("keeps the newer snapshot when a refresh answers from an older ledger", async () => {
+    const { fetchMock } = summarySequence([
+      { body: withContext(5000) },
+      { body: withContext(4000, "testnet", 1) },
+    ]);
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<TransparencyDashboard />);
+    await waitFor(() => expect(screen.getByText("$372,000")).toBeInTheDocument());
+
+    fireEvent.click(screen.getByRole("button", { name: /Refresh transparency data/i }));
+    await waitFor(() => expect(screen.getByTestId("transparency-refresh-notice")).toBeInTheDocument(), {
+      timeout: 3000,
+    });
+    expect(screen.getByText("$372,000")).toBeInTheDocument();
+    expect(screen.getByTestId("transparency-context")).toHaveTextContent("ledger 5,000");
+  });
+
+  it("retries while the server is behind the ledger shown, then shows the update", async () => {
+    const { fetchMock } = summarySequence([
+      { body: withContext(5000) },
+      { status: 409, body: { code: "TRANSPARENCY_LEDGER_BEHIND", error: "behind", retryable: true } },
+      { body: withContext(5001, "testnet", 390000) },
+    ]);
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<TransparencyDashboard />);
+    await waitFor(() => expect(screen.getByText("$372,000")).toBeInTheDocument());
+
+    fireEvent.click(screen.getByRole("button", { name: /Refresh transparency data/i }));
+    await waitFor(() => expect(screen.getByText("$390,000")).toBeInTheDocument(), { timeout: 3000 });
+    expect(screen.queryByTestId("transparency-refresh-notice")).not.toBeInTheDocument();
+  });
+
+  it("does not show data when the first read is for another network", async () => {
+    const { fetchMock } = summarySequence([{ body: withContext(9000, "mainnet", 999999) }]);
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<TransparencyDashboard />);
+    await waitFor(() => expect(screen.getByText("Unable to load data")).toBeInTheDocument());
+    expect(screen.queryByText("$999,999")).not.toBeInTheDocument();
   });
 });
