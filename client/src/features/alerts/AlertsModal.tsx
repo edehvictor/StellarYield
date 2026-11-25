@@ -355,7 +355,16 @@ export default function AlertsModal({
         }),
       );
 
-      setAlerts((prev) => (prev.some((a) => a.id === created.id) ? prev : [created, ...prev]));
+      setAlerts((prev) =>
+        (prev.some((a) => a.id === created.id) ? prev : [created, ...prev]).sort(
+          (a, b) => {
+            const ta = new Date(a.createdAt).getTime();
+            const tb = new Date(b.createdAt).getTime();
+            if (tb !== ta) return tb - ta;
+            return a.id.localeCompare(b.id);
+          },
+        ),
+      );
       setForm(DEFAULT_FORM);
     } catch (err) {
       setFormError(

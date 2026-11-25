@@ -18,6 +18,46 @@ When the signer list or threshold is changed and saved, the Governance dashboard
 
 This history is local to the browser and is not a chain-verified or tamper-proof audit trail. It does not include configuration changes made in another browser or directly on-chain. Keep an exported copy when a durable record is required.
 
+### Configuration Snapshots and Stale Work
+
+Governance work must run under the same configuration it was prepared with. The
+configuration snapshot is the immutable tuple of signers, threshold, and
+contract ID. Its SHA-256 fingerprint (domain-separated as
+`stellaryield_governance_config_v1`) is computed by
+`shared/types/governanceConfigSnapshot.ts` and is canonical:
+
+- signer order, duplicate signers, and surrounding whitespace do not change the
+  fingerprint;
+- changing the signer set, threshold, or contract ID always changes it;
+- pending transactions, signatures, proposal status, balances, timestamps, and
+  counters are deliberately excluded.
+
+When a proposal is built, the current fingerprint is stored on the proposal as
+`configFingerprint`. If the governance configuration later changes, the
+proposal becomes **stale**:
+
+- signing and execution are disabled before a wallet prompt or transaction
+  submission;
+- the proposal, its existing signatures, its threshold, and its status are
+  preserved;
+- review the new configuration, then use **Refresh Configuration** to re-bind
+  the existing proposal to the new fingerprint and retry safely.
+
+Proposals created before this feature have no fingerprint and are treated as
+stale until refreshed. A configuration save that fails validation (for example,
+a threshold larger than the signer set or duplicate signers) is rejected before
+storage is touched, so the previous configuration and audit history remain
+unchanged.
+
+The backend uses the same fingerprint for `/api/governance/forecast` and
+`/api/governance/quorum-progress`. Send `configSnapshot` and
+`expectedConfigFingerprint` together (forecast), or `expectedConfigFingerprint`
+with the signer payload (quorum). A mismatch returns HTTP `409` with
+`error: "STALE_GOVERNANCE_CONFIG"`, the expected/provided fingerprints, and
+`recoverable: true`; no forecast or quorum result is produced. Calling
+`POST /api/governance/config-snapshot` returns the canonical snapshot and
+fingerprint to refresh with, after which the same request can be retried.
+
 ---
 
 ## Lifecycle Stages
@@ -234,7 +274,8 @@ Running a forecast is optional but strongly encouraged for parameter changes tha
 | `client/src/pages/governance/GovernanceDashboard.tsx` | Main governance page; lists proposals by stage |
 | `client/src/pages/governance/TransactionBuilder.tsx` | Creates new proposals (signers only) |
 | `client/src/pages/governance/PendingTransactionCard.tsx` | Displays a proposal with sign/execute actions |
-| `client/src/pages/governance/useGovernanceStore.ts` | State management; auto-promotes pending → ready |
+| `client/src/pages/governance/useGovernanceStore.ts` | State management; auto-promotes pending → ready, rejects stale config |
+| `shared/types/governanceConfigSnapshot.ts` | Canonical configuration snapshot and SHA-256 fingerprint |
 | `client/src/pages/governance/GovernanceForecast.tsx` | Impact preview before proposing |
 | `client/src/pages/governance/governanceDiagnostics.ts` | Maps UI failures to privacy-safe stage diagnostics |
 | `client/src/pages/governance/GovernanceDiagnosticsList.tsx` | Renders stage, code, and remediation inline |
