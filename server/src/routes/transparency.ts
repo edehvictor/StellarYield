@@ -22,6 +22,17 @@ import {
   failoverIncidentHistoryService,
   FailoverIncidentValidationError,
 } from "../services/failoverIncidentHistoryService";
+import {
+  TRANSPARENCY_SCHEMA_VERSION,
+  TransparencyContextError,
+  checkTransparencyContext,
+  isValidLedgerSequence,
+  normalizeTransparencyNetwork,
+  parseTransparencyExpectation,
+  type TransparencyContext,
+  type TransparencyContextExpectation,
+  type TransparencyNetwork,
+} from "../../../shared/types/transparencyContext";
 
 const transparencyRouter = Router();
 
@@ -42,6 +53,7 @@ export interface TransparencySummary {
 
 interface TransparencyData extends TransparencySummary {
     cachedAt: number;
+    context: TransparencyContext;
 }
 
 export type ExternalTransparencySource = () => Promise<unknown> | unknown;
@@ -97,6 +109,7 @@ function cloneSummaryData(data: TransparencyData): TransparencyData {
         deflationaryRatio: data.deflationaryRatio,
         history: data.history.map((point) => ({ ...point })),
         cachedAt: data.cachedAt,
+        context: { ...data.context },
     };
 }
 
@@ -277,6 +290,140 @@ export function resetTransparencyCache(): void {
     externalDataSource = null;
 }
 
+// ── Network, ledger and version context (#1916) ─────────────────────────
+
+/** Stellar closes a ledger roughly every five seconds. */
+const LEDGER_CLOSE_MS = 5_000;
+
+/**
+ * Network the server reads transparency data for, from the same variables as
+ * the metrics network label. Unset means testnet, matching the client's
+ * default passphrase. A value that is set but not a known network throws, so
+ * a misconfigured server never labels data with a guessed network.
+ */
+export function resolveTransparencyNetwork(env: NodeJS.ProcessEnv = process.env): TransparencyNetwork {
+    const raw = env.NETWORK_PASSPHRASE ?? env.STELLAR_NETWORK_PASSPHRASE ?? env.STELLAR_NETWORK;
+    if (raw === undefined || raw.trim() === "") return "testnet";
+    const network = normalizeTransparencyNetwork(raw);
+    if (!network) {
+        throw new TransparencyContextError(
+            "INVALID_TRANSPARENCY_CONTEXT",
+            "Server network configuration is not a known Stellar network.",
+        );
+    }
+    return network;
+}
+
+/** Ledger estimate for a source that does not report one (the seeded data). */
+export function estimateLedgerFromClock(now: number = Date.now()): number {
+    return Math.floor(now / LEDGER_CLOSE_MS);
+}
+
+/**
+ * Context for a freshly read snapshot. A source that reports its own network
+ * must match the configured one; a source that reports its ledger must report
+ * a valid sequence. Throws TransparencyContextError otherwise.
+ */
+export function resolveSnapshotContext(
+    rawInput: unknown,
+    configuredNetwork: TransparencyNetwork,
+    now: number = Date.now(),
+): TransparencyContext {
+    const record = isPlainObject(rawInput) ? rawInput : {};
+    if (record.network !== undefined) {
+        const reported = normalizeTransparencyNetwork(record.network);
+        if (!reported) {
+            throw new TransparencyContextError(
+                "INVALID_TRANSPARENCY_CONTEXT",
+                "Transparency data source reported an unknown network.",
+            );
+        }
+        if (reported !== configuredNetwork) {
+            throw new TransparencyContextError(
+                "TRANSPARENCY_NETWORK_MISMATCH",
+                `Transparency data source is on ${reported}, but the server is configured for ${configuredNetwork}.`,
+            );
+        }
+    }
+    let ledger: number;
+    if (record.ledger !== undefined) {
+        if (!isValidLedgerSequence(record.ledger)) {
+            throw new TransparencyContextError(
+                "INVALID_TRANSPARENCY_CONTEXT",
+                "Transparency data source reported an invalid ledger sequence.",
+            );
+        }
+        ledger = record.ledger;
+    } else {
+        ledger = estimateLedgerFromClock(now);
+    }
+    return { network: configuredNetwork, ledger, version: TRANSPARENCY_SCHEMA_VERSION };
+}
+
+function readExpectation(req: Request): TransparencyContextExpectation {
+    const pick = (queryKey: string, headerKey: string): unknown => {
+        const q = req.query[queryKey];
+        if (q !== undefined) return Array.isArray(q) ? q[0] : q;
+        return req.headers[headerKey];
+    };
+    return parseTransparencyExpectation({
+        network: pick("network", "x-stellar-network"),
+        version: pick("version", "x-transparency-version"),
+        minLedger: pick("minLedger", "x-min-ledger"),
+    });
+}
+
+function setContextHeaders(res: Response, context: Pick<TransparencyContext, "network" | "version"> & { ledger?: number }): void {
+    res.setHeader("X-Stellar-Network", context.network);
+    res.setHeader("X-Transparency-Version", context.version);
+    if (context.ledger !== undefined) res.setHeader("X-Ledger", String(context.ledger));
+}
+
+function sendContextError(
+    res: Response,
+    error: TransparencyContextError,
+    context?: Partial<TransparencyContext>,
+): void {
+    const status = error.code === "INVALID_TRANSPARENCY_CONTEXT" ? 400 : 409;
+    res.status(status).json({
+        error: error.message,
+        code: error.code,
+        retryable: error.retryable,
+        ...(context ? { context } : {}),
+    });
+}
+
+/**
+ * Reject a write that names a different network from the server's (#1916).
+ * Returns false after answering, so the caller writes nothing.
+ */
+function assertWriteNetwork(req: Request, res: Response): boolean {
+    const bodyNetwork = isPlainObject(req.body) ? req.body.network : undefined;
+    const raw = req.headers["x-stellar-network"] ?? bodyNetwork;
+    let expectation: TransparencyContextExpectation;
+    let network: TransparencyNetwork;
+    try {
+        expectation = parseTransparencyExpectation({ network: raw });
+        network = resolveTransparencyNetwork();
+    } catch (error) {
+        if (error instanceof TransparencyContextError) {
+            sendContextError(res, error);
+            return false;
+        }
+        throw error;
+    }
+    const check = checkTransparencyContext(
+        { network, ledger: 0, version: TRANSPARENCY_SCHEMA_VERSION },
+        { network: expectation.network },
+    );
+    if (!check.ok) {
+        sendContextError(res, check.error, { network, version: TRANSPARENCY_SCHEMA_VERSION });
+        return false;
+    }
+    setContextHeaders(res, { network, version: TRANSPARENCY_SCHEMA_VERSION });
+    return true;
+}
+
 // ── Data aggregation ─────────────────────────────────────────────────────
 
 function buildDefaultSeededInput(): { history: TransparencyHistoryPoint[]; totalEmissions: number } {
@@ -315,6 +462,14 @@ function buildDefaultSeededInput(): { history: TransparencyHistoryPoint[]; total
  * @returns Aggregated transparency metrics.
  */
 async function aggregateTransparencyData(options?: { forceRefresh?: boolean }): Promise<TransparencyData> {
+    const network = resolveTransparencyNetwork();
+
+    // A snapshot read for another network is never served as this one's,
+    // even as a fallback (#1916).
+    if (cache && cache.context.network !== network) {
+        cache = null;
+    }
+
     if (!options?.forceRefresh && cache && Date.now() - cache.cachedAt < CACHE_TTL_MS) {
         return cache;
     }
@@ -324,6 +479,13 @@ async function aggregateTransparencyData(options?: { forceRefresh?: boolean }): 
         : buildDefaultSeededInput();
 
     const summary = buildTransparencySummary(rawSourceData);
+    const context = resolveSnapshotContext(rawSourceData, network);
+
+    // A source that answers from an older ledger (for example an RPC node
+    // that is behind) never replaces a newer snapshot (#1916).
+    if (cache && context.ledger < cache.context.ledger) {
+        return cache;
+    }
 
     // Only replace the cache after every boundary validation and checked
     // computation has succeeded; a failure leaves the previous snapshot
@@ -332,6 +494,7 @@ async function aggregateTransparencyData(options?: { forceRefresh?: boolean }): 
         ...summary,
         history: summary.history.map((point) => ({ ...point })),
         cachedAt: Date.now(),
+        context,
     };
 
     return cache;
@@ -345,18 +508,54 @@ async function aggregateTransparencyData(options?: { forceRefresh?: boolean }): 
  * Returns protocol revenue and token burn metrics.
  * Cached for 60 seconds.
  */
-const handleSummary = async (_req: Request, res: Response): Promise<void> => {
+const handleSummary = async (req: Request, res: Response): Promise<void> => {
+    let expectation: TransparencyContextExpectation;
     try {
-        const data = await aggregateTransparencyData();
+        expectation = readExpectation(req);
+    } catch (err) {
+        if (err instanceof TransparencyContextError) {
+            sendContextError(res, err);
+            return;
+        }
+        throw err;
+    }
+
+    const respond = (data: TransparencyData): void => {
+        const check = checkTransparencyContext(data.context, expectation);
+        setContextHeaders(res, data.context);
+        if (!check.ok) {
+            sendContextError(res, check.error, data.context);
+            return;
+        }
         const { cachedAt: _omit, ...payload } = cloneSummaryData(data);
         res.json(payload);
+    };
+
+    try {
+        let data = await aggregateTransparencyData();
+        // The caller has already shown a newer ledger than the cached
+        // snapshot: read the source once more before answering.
+        if (expectation.minLedger !== undefined && data.context.ledger < expectation.minLedger) {
+            data = await aggregateTransparencyData({ forceRefresh: true });
+        }
+        respond(data);
     } catch (err) {
         console.error("Failed to aggregate transparency data", err);
-        // Fall back to the last good snapshot if one exists; do not expose
-        // a poisoned partial result. Callers can safely retry.
-        if (cache) {
-            const { cachedAt: _omit, ...payload } = cloneSummaryData(cache);
-            res.json(payload);
+        // Fall back to the last good snapshot for the same network if one
+        // exists; do not expose a poisoned partial result. Callers can
+        // safely retry.
+        let network: TransparencyNetwork | null = null;
+        try {
+            network = resolveTransparencyNetwork();
+        } catch {
+            network = null;
+        }
+        if (cache && network && cache.context.network === network) {
+            respond(cache);
+            return;
+        }
+        if (err instanceof TransparencyContextError) {
+            sendContextError(res, err);
             return;
         }
         const code = err instanceof TransparencyCalculationError ? err.code : "MALFORMED_EXTERNAL_DATA";
@@ -388,7 +587,31 @@ transparencyRouter.get(
       return;
     }
     const protocolId = typeof rawProtocolId === "string" ? rawProtocolId.trim() : undefined;
-    res.json({ incidents: failoverIncidentHistoryService.getHistory(protocolId) });
+    let expectation: TransparencyContextExpectation;
+    let network: TransparencyNetwork;
+    try {
+      expectation = readExpectation(req);
+      network = resolveTransparencyNetwork();
+    } catch (error) {
+      if (error instanceof TransparencyContextError) {
+        sendContextError(res, error);
+        return;
+      }
+      throw error;
+    }
+    const context = { network, version: TRANSPARENCY_SCHEMA_VERSION };
+    // Incident history is not tied to a ledger, so only network and version
+    // are checked here.
+    const check = checkTransparencyContext(
+      { ...context, ledger: 0 },
+      { network: expectation.network, version: expectation.version },
+    );
+    setContextHeaders(res, context);
+    if (!check.ok) {
+      sendContextError(res, check.error, context);
+      return;
+    }
+    res.json({ incidents: failoverIncidentHistoryService.getHistory(protocolId), context });
   },
 );
 
@@ -408,6 +631,7 @@ transparencyRouter.post(
       });
       return;
     }
+    if (!assertWriteNetwork(req, res)) return;
     const { protocolId, protocolName, reasons, startedAt } = req.body as {
       protocolId?: unknown;
       protocolName?: unknown;
@@ -460,6 +684,7 @@ transparencyRouter.post(
       });
       return;
     }
+    if (!assertWriteNetwork(req, res)) return;
     const { recoveredAt } = (req.body ?? {}) as { recoveredAt?: unknown };
     let incident: ReturnType<typeof failoverIncidentHistoryService.resolveIncident>;
     try {

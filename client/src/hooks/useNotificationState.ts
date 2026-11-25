@@ -64,8 +64,14 @@ export function useNotificationState(): [NotificationState, NotificationActions]
         if (!response.ok) throw new Error("Failed to fetch notifications");
 
         const data: Notification[] = await response.json();
-        setNotifications(data);
-        const count = computeUnreadCount(data);
+        const sorted = [...data].sort((a, b) => {
+          if (a.isRead !== b.isRead) return a.isRead ? 1 : -1;
+          const t = new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
+          if (t !== 0) return t;
+          return a.id.localeCompare(b.id);
+        });
+        setNotifications(sorted);
+        const count = computeUnreadCount(sorted);
         setUnreadCount(count);
         fetchedWalletsRef.current.add(walletAddress);
       } catch (err) {
