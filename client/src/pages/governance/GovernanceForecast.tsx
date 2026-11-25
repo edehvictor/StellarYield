@@ -82,7 +82,39 @@ const GovernanceForecast: React.FC<GovernanceForecastProps> = ({ config }) => {
     setError("");
     const parsedValue = parseFloat(paramValue);
     if (!Number.isFinite(parsedValue)) {
-      setError("Parameter value must be a number");
+      setError("Parameter value must be a valid finite number");
+      return;
+    }
+
+    const parsedYield = parseFloat(baseYield);
+    const parsedExposure = parseFloat(baseExposure);
+    const parsedFeeRate = parseFloat(baseFeeRate);
+    const parsedTvl = parseFloat(baseTvl);
+    const parsedRisk = parseFloat(baseRisk);
+    const parsedVaults = parseInt(vaultCount, 10);
+
+    if (!Number.isFinite(parsedYield)) {
+      setError("Baseline yield must be a valid number");
+      return;
+    }
+    if (!Number.isFinite(parsedExposure) || parsedExposure < 0 || parsedExposure > 100) {
+      setError("Baseline exposure must be between 0 and 100%");
+      return;
+    }
+    if (!Number.isFinite(parsedFeeRate) || parsedFeeRate < 0 || parsedFeeRate > 100) {
+      setError("Baseline fee rate must be between 0 and 100%");
+      return;
+    }
+    if (!Number.isFinite(parsedTvl) || parsedTvl < 0) {
+      setError("Baseline TVL must be a non-negative number");
+      return;
+    }
+    if (!Number.isFinite(parsedRisk) || parsedRisk < 0 || parsedRisk > 100) {
+      setError("Baseline risk score must be between 0 and 100");
+      return;
+    }
+    if (!Number.isInteger(parsedVaults) || parsedVaults < 1) {
+      setError("Vault count must be a positive integer");
       return;
     }
 
@@ -98,12 +130,12 @@ const GovernanceForecast: React.FC<GovernanceForecastProps> = ({ config }) => {
           proposalType,
           parameters: { [paramKey]: parsedValue },
           baseline: {
-            yieldPct: parseFloat(baseYield) || 0,
-            exposurePct: parseFloat(baseExposure) || 0,
-            feeRatePct: parseFloat(baseFeeRate) || 0,
-            tvlUsd: parseFloat(baseTvl) || 0,
-            riskScore: parseFloat(baseRisk) || 0,
-            vaultCount: parseFloat(vaultCount) || 0,
+            yieldPct: parsedYield,
+            exposurePct: parsedExposure,
+            feeRatePct: parsedFeeRate,
+            tvlUsd: parsedTvl,
+            riskScore: parsedRisk,
+            vaultCount: parsedVaults,
           },
           ...(configBinding
             ? {
