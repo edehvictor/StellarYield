@@ -26,6 +26,8 @@ import { toTokenUnits } from "../types";
 import type { TokenAmount, VaultConfig } from "../types";
 import { validateEndpointUrl, normalizeEndpointUrl } from "../endpoint";
 import { buildSdkFailureDiagnostics } from "../diagnostics";
+import type { NetworkName } from "../network";
+import { bindSimulationContext, type SimulationContext } from "../simulationContext";
 
 /**
  * Options that give one logical operation a stable identity across retries.
@@ -86,6 +88,8 @@ export class VaultClient {
   public readonly rpcUrl: string;
   public readonly specHash: string;
   public readonly configFingerprint?: string;
+  /** Canonical network id, when supplied in the config (#1857). */
+  public readonly network?: NetworkName;
 
   constructor(config: VaultConfig) {
     const rpcValidation = validateEndpointUrl(config.rpcUrl);
@@ -113,6 +117,15 @@ export class VaultClient {
 
     if (config.specHash && config.specHash !== YIELD_VAULT_SPEC_HASH) {
       throw new SpecMismatchError(YIELD_VAULT_SPEC_HASH, config.specHash);
+    }
+
+    // Reject a network id whose well-known passphrase disagrees with the
+    // configured passphrase before any client state is built (#1857).
+    if (config.network !== undefined) {
+      this.network = bindSimulationContext({
+        network: config.network,
+        networkPassphrase: config.networkPassphrase,
+      }).network;
     }
 
     this.generatedClient = new GeneratedVaultClient({
@@ -323,6 +336,7 @@ export class VaultClient {
           : {}),
         specHash: this.specHash,
         configFingerprint: this.configFingerprint,
+        ...(this.network ? { network: this.network } : {}),
       };
 
       return new PreparedTransaction<TResult>(rawXdr, meta);
@@ -336,6 +350,20 @@ export class VaultClient {
 
   public getConfigFingerprint(): string | undefined {
     return this.configFingerprint;
+  }
+
+  /**
+   * Network / contract / version identity this client simulates against
+   * (#1857). Pass it as `expected` to `runWithSimulationContext`, or combine
+   * it with the current ledger as `expectedContext` when signing/submitting.
+   */
+  public getSimulationContext(): SimulationContext {
+    return bindSimulationContext({
+      network: this.network,
+      networkPassphrase: this.networkPassphrase,
+      contractId: this.contractId,
+      contractVersion: this.specHash,
+    });
   }
 
   // Read-only view methods
