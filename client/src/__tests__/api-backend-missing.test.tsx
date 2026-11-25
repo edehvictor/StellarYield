@@ -166,8 +166,8 @@ describe("Backend Config Absence - Edge Cases", () => {
 
     // Should show error state or handle gracefully
     await waitFor(() => {
-      const errorOrHeader = screen.queryByText(/Failed|Strategy|Workspace/i);
-      expect(errorOrHeader).toBeInTheDocument();
+      // The heading and the unavailable notice can both match.
+      expect(screen.queryAllByText(/Failed|Strategy|Workspace/i).length).toBeGreaterThan(0);
     });
   });
 
