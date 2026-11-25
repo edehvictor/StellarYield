@@ -56,6 +56,12 @@ simulation-context helpers. A network or contract-version mismatch is rejected
 as non-retryable; a stale or regressed ledger is rejected before caller state
 is changed, so a safe retry can refresh the read first.
 
+Simulation inputs are validated before the request starts. Malformed strategy,
+token, amount, or retry fields produce a typed validation error without changing
+caller state. The configuration fingerprint is checked before and after the
+request so concurrent configuration changes are rejected or refreshed according
+to the selected stale-policy.
+
 ### Safe retries and duplicate submissions
 
 Every prepared operation carries an `operationId` in `prepared.meta` (and `prepared.operationId`). Pass an `idempotencyKey` to make that identity deterministic: the same key plus the same operation arguments always produces the same id, even when a retry rebuilds and re-signs the transaction with a new sequence number. The key is never placed on-chain.
