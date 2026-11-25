@@ -33,7 +33,7 @@ import {
 import {
   getPreferenceAuditHistory,
 } from "../services/alertPreferenceAuditService";
-import type { AlertPreferences } from "../services/alertsPreferenceRules";
+import { roundToDecimals, type AlertPreferences } from "../services/alertsPreferenceRules";
 import {
   type AlertPreferenceContext,
   AlertPreferenceContextConflictError,
@@ -236,6 +236,7 @@ router.post("/", async (req: Request, res: Response) => {
     res.status(400).json({ error: "thresholdValue must be a number between 0 and 1000" });
     return;
   }
+  const roundedThreshold = roundToDecimals(threshold, 4);
 
   const contextInput = contextOr400(req, res, vaultId);
   if (!contextInput.ok) return;
@@ -255,7 +256,7 @@ router.post("/", async (req: Request, res: Response) => {
       walletAddress,
       vaultId,
       condition: condition as AlertCondition,
-      thresholdValue: threshold,
+      thresholdValue: roundedThreshold,
       email,
       preferences,
       operationIdentity,
@@ -453,7 +454,7 @@ router.put("/:wallet/preferences/:vaultId", (req: Request, res: Response) => {
   if (!contextInput.ok) return;
 
   try {
-    const { preferences, auditEntry, version } = updateAlertPreferences(wallet, vaultId, newPrefs, {
+    const { preferences, auditEntry, version } = updateAlertPreferences(wallet, vaultId, validation.sanitized, {
       actor: wallet,
       source: "api",
       reason: req.body.reason,
@@ -467,7 +468,7 @@ router.put("/:wallet/preferences/:vaultId", (req: Request, res: Response) => {
     if (sendVersionConflict(res, err)) return;
     if (sendContextConflict(res, err)) return;
     const message = err instanceof Error ? err.message : "Failed to update alert preferences";
-    res.status(500).json({ error: message });
+    res.status(400).json({ error: message });
   }
 });
 

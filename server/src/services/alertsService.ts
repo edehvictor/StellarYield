@@ -20,7 +20,11 @@
 
 import { PrismaClient } from "@prisma/client";
 import { sendEmail } from "./emailService";
-import { shouldSuppressAlert, type AlertPreferences } from "./alertsPreferenceRules";
+import {
+  shouldSuppressAlert,
+  roundToDecimals,
+  type AlertPreferences,
+} from "./alertsPreferenceRules";
 import {
   recordPreferenceChange,
   getPreferenceAuditHistory,
@@ -205,6 +209,63 @@ function toAlertKey(walletAddress: string, vaultId: string) {
   return `${walletAddress.toLowerCase()}::${vaultId.toLowerCase()}`;
 }
 
+export interface AlertPreferencesValidationResult {
+  valid: boolean;
+  errors: string[];
+  sanitized?: AlertPreferences;
+}
+
+/**
+ * Validates and sanitizes alert preferences against strict numeric boundaries
+ * and integer constraints. Preserves existing state on failure.
+ */
+export function validateAlertPreferences(raw: unknown): AlertPreferencesValidationResult {
+  const errors: string[] = [];
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    return { valid: false, errors: ["preferences must be an object"] };
+  }
+
+  const p = raw as Record<string, unknown>;
+
+  if (p.channel !== "email" && p.channel !== "in_app") {
+    errors.push("channel must be email or in_app");
+  }
+
+  const cooldown = Number(p.cooldownMinutes);
+  if (!Number.isFinite(cooldown) || !Number.isInteger(cooldown) || cooldown < 0 || cooldown > 1440) {
+    errors.push("cooldownMinutes must be an integer between 0 and 1440");
+  }
+
+  const severity = Number(p.severityThreshold);
+  if (!Number.isFinite(severity) || severity < 0 || severity > 1000) {
+    errors.push("severityThreshold must be a number between 0 and 1000");
+  }
+
+  const quietStart = Number(p.quietHoursStart);
+  if (!Number.isFinite(quietStart) || !Number.isInteger(quietStart) || quietStart < 0 || quietStart > 23) {
+    errors.push("quietHoursStart must be an integer from 0 to 23");
+  }
+
+  const quietEnd = Number(p.quietHoursEnd);
+  if (!Number.isFinite(quietEnd) || !Number.isInteger(quietEnd) || quietEnd < 0 || quietEnd > 23) {
+    errors.push("quietHoursEnd must be an integer from 0 to 23");
+  }
+
+  if (errors.length > 0) {
+    return { valid: false, errors };
+  }
+
+  const sanitized: AlertPreferences = {
+    channel: p.channel as "email" | "in_app",
+    cooldownMinutes: cooldown,
+    severityThreshold: roundToDecimals(severity, 2),
+    quietHoursStart: quietStart,
+    quietHoursEnd: quietEnd,
+  };
+
+  return { valid: true, errors: [], sanitized };
+}
+
 export function computeAlertFingerprint(input: {
   walletAddress: string;
   vaultId: string;
@@ -356,6 +417,18 @@ export function clearAlertPreferencesStore(): void {
  * Throws if the user already has MAX_ALERTS_PER_USER active alerts.
  */
 export async function createAlert(input: CreateAlertInput) {
+  if (!Number.isFinite(input.thresholdValue) || input.thresholdValue < 0 || input.thresholdValue > 1000) {
+    throw new Error("thresholdValue must be a number between 0 and 1000");
+  }
+  const roundedThreshold = roundToDecimals(input.thresholdValue, 4);
+  let sanitizedPrefs: AlertPreferences | undefined;
+  if (input.preferences) {
+    const validation = validateAlertPreferences(input.preferences);
+    if (!validation.valid || !validation.sanitized) {
+      throw new Error(`Invalid alert preferences: ${validation.errors.join("; ")}`);
+    }
+    sanitizedPrefs = validation.sanitized;
+  }
   const preferenceKey = toAlertKey(input.walletAddress, input.vaultId);
   const bindingContext = input.preferences
     ? resolveContextForWrite(
@@ -366,6 +439,7 @@ export async function createAlert(input: CreateAlertInput) {
     : undefined;
   const currentFingerprint = computeAlertFingerprint({
     ...input,
+    preferences: sanitizedPrefs ?? input.preferences,
     context: bindingContext,
   });
 
@@ -401,13 +475,13 @@ export async function createAlert(input: CreateAlertInput) {
       walletAddress: input.walletAddress,
       vaultId: input.vaultId,
       condition: input.condition,
-      thresholdValue: input.thresholdValue,
+      thresholdValue: roundedThreshold,
       email: input.email,
       status: "active",
     },
   });
-  if (input.preferences) {
-    const initial = input.preferences;
+  if (sanitizedPrefs) {
+    const initial = sanitizedPrefs;
     commitPreferences(
       preferenceKey,
       initial,
@@ -476,14 +550,18 @@ export async function evaluateAlerts(
   vaultId: string,
   currentApy: number,
 ): Promise<void> {
+  if (!Number.isFinite(currentApy)) {
+    return;
+  }
+  const roundedApy = roundToDecimals(currentApy, 4);
   const activeAlerts = await prisma.userAlert.findMany({
     where: { vaultId, status: "active" },
   });
 
   for (const alert of activeAlerts) {
     const triggered =
-      (alert.condition === "above" && currentApy > alert.thresholdValue) ||
-      (alert.condition === "below" && currentApy < alert.thresholdValue);
+      (alert.condition === "above" && roundedApy > alert.thresholdValue) ||
+      (alert.condition === "below" && roundedApy < alert.thresholdValue);
 
     if (!triggered) continue;
 
@@ -496,7 +574,7 @@ export async function evaluateAlerts(
         alertLastTriggeredStore.get(key),
         preferences,
       );
-      if (suppress || currentApy < preferences.severityThreshold) {
+      if (suppress || roundedApy < preferences.severityThreshold) {
         continue;
       }
       alertLastTriggeredStore.set(key, now.getTime());
@@ -512,7 +590,7 @@ export async function evaluateAlerts(
       vaultId: alert.vaultId,
       condition: alert.condition as AlertCondition,
       thresholdValue: alert.thresholdValue,
-      currentApy,
+      currentApy: roundedApy,
     });
   }
 }
@@ -673,6 +751,11 @@ export function updateAlertPreferences(
   version: number;
 } {
   const key = toAlertKey(walletAddress, vaultId);
+  const validation = validateAlertPreferences(newPreferences);
+  if (!validation.valid || !validation.sanitized) {
+    throw new Error(`Invalid alert preferences: ${validation.errors.join("; ")}`);
+  }
+  const sanitized = validation.sanitized;
   const effectiveContext = resolveContextForWrite(
     alertPreferenceContextStore.get(key),
     parseAlertContext(options?.context, vaultId),
@@ -682,7 +765,7 @@ export function updateAlertPreferences(
 
   const version = commitPreferences(
     key,
-    newPreferences,
+    sanitized,
     options?.expectedVersion,
     (before) => {
       auditEntry = recordPreferenceChange({
@@ -691,14 +774,14 @@ export function updateAlertPreferences(
         actor: options?.actor ?? walletAddress,
         source: options?.source ?? "api",
         before,
-        after: newPreferences,
+        after: sanitized,
         reason: options?.reason ?? "Preferences updated",
       });
     },
     effectiveContext,
   );
 
-  return { preferences: newPreferences, auditEntry: auditEntry!, version };
+  return { preferences: sanitized, auditEntry: auditEntry!, version };
 }
 
 /**
