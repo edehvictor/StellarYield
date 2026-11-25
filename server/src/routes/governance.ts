@@ -205,17 +205,32 @@ router.post("/forecast", forecastLimiter, (req: Request, res: Response) => {
   if (
     !parameters ||
     typeof parameters !== "object" ||
-    Array.isArray(parameters)
+    Array.isArray(parameters) ||
+    Object.values(parameters).some(
+      (v) => typeof v !== "number" || !Number.isFinite(v),
+    )
   ) {
     invalidFields.push("parameters");
   }
   if (
     !baseline ||
     typeof baseline !== "object" ||
+    Array.isArray(baseline) ||
     !Number.isFinite(baseline.yieldPct) ||
     !Number.isFinite(baseline.exposurePct) ||
+    baseline.exposurePct < 0 ||
+    baseline.exposurePct > 100 ||
     !Number.isFinite(baseline.feeRatePct) ||
-    !Number.isFinite(baseline.tvlUsd)
+    baseline.feeRatePct < 0 ||
+    baseline.feeRatePct > 100 ||
+    !Number.isFinite(baseline.tvlUsd) ||
+    baseline.tvlUsd < 0 ||
+    (baseline.riskScore !== undefined &&
+      (!Number.isFinite(baseline.riskScore) ||
+        baseline.riskScore < 0 ||
+        baseline.riskScore > 100)) ||
+    (baseline.vaultCount !== undefined &&
+      (!Number.isFinite(baseline.vaultCount) || baseline.vaultCount < 0))
   ) {
     invalidFields.push("baseline");
   }
@@ -228,6 +243,7 @@ router.post("/forecast", forecastLimiter, (req: Request, res: Response) => {
   ) {
     sendGovernanceFailure(res, 400, "VALIDATION_FAILED", "request-validation", {
       fields: invalidFields,
+      preserveState: true,
     });
     return;
   }
@@ -241,7 +257,9 @@ router.post("/forecast", forecastLimiter, (req: Request, res: Response) => {
     res.json(result);
   } catch {
     // Never echo the thrown error: it may contain input values or stack frames.
-    sendGovernanceFailure(res, 500, "STAGE_UNAVAILABLE", "forecast");
+    sendGovernanceFailure(res, 500, "STAGE_UNAVAILABLE", "forecast", {
+      preserveState: true,
+    });
   }
 });
 
@@ -263,7 +281,11 @@ router.post("/quorum-progress", (req: Request, res: Response) => {
   const invalidFields: string[] = [];
   if (!Array.isArray(body.signers)) invalidFields.push("signers");
   if (!Array.isArray(body.signatures)) invalidFields.push("signatures");
-  if (typeof body.threshold !== "number" || !Number.isFinite(body.threshold)) {
+  if (
+    typeof body.threshold !== "number" ||
+    !Number.isFinite(body.threshold) ||
+    body.threshold < 0
+  ) {
     invalidFields.push("threshold");
   }
 
@@ -272,10 +294,13 @@ router.post("/quorum-progress", (req: Request, res: Response) => {
     !Array.isArray(body.signers) ||
     !Array.isArray(body.signatures) ||
     typeof body.threshold !== "number" ||
-    !Number.isFinite(body.threshold)
+    !Number.isFinite(body.threshold) ||
+    body.threshold < 0
   ) {
     sendGovernanceFailure(res, 400, "VALIDATION_FAILED", "request-validation", {
       fields: invalidFields,
+      preserveState: true,
+      extra: { error: "INVALID_REQUEST" },
     });
     return;
   }
@@ -288,7 +313,9 @@ router.post("/quorum-progress", (req: Request, res: Response) => {
     });
     res.json(progress);
   } catch {
-    sendGovernanceFailure(res, 500, "STAGE_UNAVAILABLE", "quorum");
+    sendGovernanceFailure(res, 500, "STAGE_UNAVAILABLE", "quorum", {
+      preserveState: true,
+    });
   }
 });
 
