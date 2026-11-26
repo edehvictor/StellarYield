@@ -33,6 +33,14 @@ import {
   saveDigestPreference,
 } from "./alertsApi";
 import { useOptimisticUpdate } from "../../hooks/useOptimisticUpdate";
+import {
+  savePreferenceCheckpoint,
+  getPreferenceCheckpoint,
+  clearPreferenceCheckpoint,
+  canResumeCheckpoint,
+  canRollbackCheckpoint,
+  type ClientAlertPreferenceCheckpoint,
+} from "./alertPreferenceOperation";
 
 type ChannelOverride = "inherit" | "on" | "off";
 
@@ -282,11 +290,12 @@ export default function AlertsModal({
       return;
     }
 
-    const threshold = parseFloat(form.thresholdValue);
-    if (!Number.isFinite(threshold) || threshold < 0 || threshold > 1000) {
+    const parsedThreshold = parseFloat(form.thresholdValue);
+    if (!Number.isFinite(parsedThreshold) || parsedThreshold < 0 || parsedThreshold > 1000) {
       setFormError("APY threshold must be between 0 and 1000");
       return;
     }
+    const threshold = Math.round((parsedThreshold + Number.EPSILON) * 10000) / 10000;
 
     if (!form.email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(form.email)) {
       setFormError("Enter a valid email address");
@@ -298,37 +307,57 @@ export default function AlertsModal({
       return;
     }
 
-    const preferences: AlertPreferencesWithChannelOverrides = {
-      channel: form.channel,
-      cooldownMinutes: Number(form.cooldownMinutes),
-      severityThreshold: Number(form.severityThreshold),
-      quietHoursStart: Number(form.quietHoursStart),
-      quietHoursEnd: Number(form.quietHoursEnd),
-      channelOverrides: channelOverrides.apy,
-    };
-
-    if (
-      !Number.isFinite(preferences.cooldownMinutes) ||
-      preferences.cooldownMinutes < 0 ||
-      preferences.cooldownMinutes > 1440
-    ) {
-      setFormError("Cooldown must be between 0 and 1440 minutes");
+    const cooldown = Number(form.cooldownMinutes);
+    if (!Number.isFinite(cooldown) || !Number.isInteger(cooldown) || cooldown < 0 || cooldown > 1440) {
+      setFormError("Cooldown must be an integer between 0 and 1440 minutes");
       return;
     }
 
-    if (
-      !Number.isFinite(preferences.severityThreshold) ||
-      preferences.severityThreshold < 0 ||
-      preferences.severityThreshold > 1000
-    ) {
+    const severity = Number(form.severityThreshold);
+    if (!Number.isFinite(severity) || severity < 0 || severity > 1000) {
       setFormError("Severity threshold must be between 0 and 1000");
       return;
     }
+    const severityThreshold = Math.round((severity + Number.EPSILON) * 100) / 100;
+
+    const quietStart = Number(form.quietHoursStart);
+    if (!Number.isFinite(quietStart) || !Number.isInteger(quietStart) || quietStart < 0 || quietStart > 23) {
+      setFormError("Quiet hours start must be an integer from 0 to 23");
+      return;
+    }
+
+    const quietEnd = Number(form.quietHoursEnd);
+    if (!Number.isFinite(quietEnd) || !Number.isInteger(quietEnd) || quietEnd < 0 || quietEnd > 23) {
+      setFormError("Quiet hours end must be an integer from 0 to 23");
+      return;
+    }
+
+    const preferences: AlertPreferencesWithChannelOverrides = {
+      channel: form.channel,
+      cooldownMinutes: cooldown,
+      severityThreshold,
+      quietHoursStart: quietStart,
+      quietHoursEnd: quietEnd,
+      channelOverrides: channelOverrides.apy,
+    };
 
     if (!alertOperationIdRef.current) {
       alertOperationIdRef.current = `op-alert-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
     }
     const operationIdentity = alertOperationIdRef.current;
+
+    const checkpoint: ClientAlertPreferenceCheckpoint = {
+      operationId: operationIdentity,
+      walletAddress,
+      vaultId: form.vaultId,
+      targetPreferences: preferences,
+      previousPreferences: null,
+      status: "submitting",
+      attemptCount: 1,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    };
+    savePreferenceCheckpoint(checkpoint);
 
     setSubmitting(true);
     try {
@@ -343,6 +372,7 @@ export default function AlertsModal({
       });
 
       alertOperationIdRef.current = null;
+      clearPreferenceCheckpoint(walletAddress, form.vaultId);
 
       window.localStorage.setItem(
         PREFS_STORAGE_KEY,
@@ -355,9 +385,23 @@ export default function AlertsModal({
         }),
       );
 
-      setAlerts((prev) => (prev.some((a) => a.id === created.id) ? prev : [created, ...prev]));
+      setAlerts((prev) =>
+        (prev.some((a) => a.id === created.id) ? prev : [created, ...prev]).sort(
+          (a, b) => {
+            const ta = new Date(a.createdAt).getTime();
+            const tb = new Date(b.createdAt).getTime();
+            if (tb !== ta) return tb - ta;
+            return a.id.localeCompare(b.id);
+          },
+        ),
+      );
       setForm(DEFAULT_FORM);
     } catch (err) {
+      checkpoint.status = "failed";
+      checkpoint.error = err instanceof Error ? err.message : "Failed to create alert";
+      checkpoint.updatedAt = Date.now();
+      savePreferenceCheckpoint(checkpoint);
+
       setFormError(
         err instanceof Error ? err.message : "Failed to create alert",
       );

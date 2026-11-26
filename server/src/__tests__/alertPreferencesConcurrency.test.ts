@@ -8,6 +8,7 @@ import express from "express";
 import request from "supertest";
 import alertsRouter, { readExpectedVersion } from "../routes/alerts";
 import * as auditService from "../services/alertPreferenceAuditService";
+import * as alertsService from "../services/alertsService";
 import {
   PreferenceVersionConflictError,
   clearAlertOperationStore,
@@ -190,6 +191,72 @@ describe("routes", () => {
       .send({ walletAddress: WALLET, vaultId: VAULT, preferences: prefs(20), expectedVersion: 0 });
     expect(stale.status).toBe(409);
     expect(getAlertPreferences(WALLET, VAULT)).toEqual(prefs(10));
+  });
+
+  it("rejects malformed field types without mutation and permits a corrected safe retry", async () => {
+    setAlertPreferences(WALLET, VAULT, prefs(10));
+
+    const invalid = await request(app)
+      .put("/api/alerts/preferences")
+      .set("X-Operation-Identity", "op-correct-after-validation")
+      .send({
+        walletAddress: WALLET,
+        vaultId: VAULT,
+        expectedVersion: 1,
+        preferences: { ...prefs(20), cooldownMinutes: "20" },
+      });
+
+    expect(invalid.status).toBe(400);
+    expect(invalid.body.code).toBe("INVALID_ALERT_PREFERENCES");
+    expect(getAlertPreferences(WALLET, VAULT)).toEqual(prefs(10));
+    expect(getAlertPreferencesVersion(WALLET, VAULT)).toBe(1);
+
+    const retried = await request(app)
+      .put("/api/alerts/preferences")
+      .set("X-Operation-Identity", "op-correct-after-validation")
+      .send({
+        walletAddress: WALLET,
+        vaultId: VAULT,
+        expectedVersion: 1,
+        preferences: prefs(20),
+      });
+
+    expect(retried.status).toBe(200);
+    expect(retried.body.cooldownMinutes).toBe(20);
+    expect(getAlertPreferencesVersion(WALLET, VAULT)).toBe(2);
+  });
+
+  it("rejects malformed bodies on the path-based preference route", async () => {
+    setAlertPreferences(WALLET, VAULT, prefs(10));
+
+    const res = await request(app)
+      .put(`/api/alerts/${WALLET}/preferences/${VAULT}`)
+      .send({ ...prefs(20), quietHoursStart: "23" });
+
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe("INVALID_ALERT_PREFERENCES");
+    expect(getAlertPreferences(WALLET, VAULT)).toEqual(prefs(10));
+    expect(getAlertPreferencesVersion(WALLET, VAULT)).toBe(1);
+  });
+
+  it("rejects malformed initial preferences before creating an alert", async () => {
+    const createAlert = jest.spyOn(alertsService, "createAlert");
+    const res = await request(app)
+      .post("/api/alerts")
+      .send({
+        walletAddress: WALLET,
+        vaultId: VAULT,
+        condition: "above",
+        thresholdValue: 10,
+        email: "alerts@example.test",
+        preferences: { ...prefs(10), cooldownMinutes: null },
+      });
+
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe("INVALID_ALERT_PREFERENCES");
+    expect(createAlert).not.toHaveBeenCalled();
+    expect(getAlertPreferences(WALLET, VAULT)).toBeUndefined();
+    expect(getAlertPreferencesVersion(WALLET, VAULT)).toBe(0);
   });
 
   it("rejects a malformed If-Match with 400 and writes nothing", async () => {
