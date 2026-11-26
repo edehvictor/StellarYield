@@ -48,6 +48,20 @@ const withdrawn = await (await withdrawal.submit(vault.rpcUrl)).wait();
 
 If a simulation reports expired ledger entries, it throws `RestoreRequiredError` (`error.restorePreamble`) — pass that into the exported `restoreAndRetry()` helper, then retry `prepare()`. See `src/examples/basic.ts` for a full worked example including the restore path.
 
+### Context-bound reads and writes
+
+When a read is used to prepare a write, bind it to the same `network`,
+`networkPassphrase`, `contractId`, `contractVersion`, and `ledger` through the
+simulation-context helpers. A network or contract-version mismatch is rejected
+as non-retryable; a stale or regressed ledger is rejected before caller state
+is changed, so a safe retry can refresh the read first.
+
+Simulation inputs are validated before the request starts. Malformed strategy,
+token, amount, or retry fields produce a typed validation error without changing
+caller state. The configuration fingerprint is checked before and after the
+request so concurrent configuration changes are rejected or refreshed according
+to the selected stale-policy.
+
 ### Safe retries and duplicate submissions
 
 Every prepared operation carries an `operationId` in `prepared.meta` (and `prepared.operationId`). Pass an `idempotencyKey` to make that identity deterministic: the same key plus the same operation arguments always produces the same id, even when a retry rebuilds and re-signs the transaction with a new sequence number. The key is never placed on-chain.
@@ -190,6 +204,21 @@ const vaultData = await api.getVaultData('vault-contract-id');
   - `assertSimulationConfigCurrent(expected, current)`: Rejects stale configuration snapshots with typed, retryable `StaleSimulationConfigError`.
   - `runWithSimulationConfig(options)`: Runs simulation against an immutable snapshot, detects configuration drift, and either rejects (`onStale: "reject"`) or transparently re-runs (`onStale: "refresh"`).
   - State & Balance Preservation: Validation and execution failures never modify existing balances or state; every failure maintains `statePreserved: true`.
+
+- **Network, Ledger & Version Binding** (see `docs/sdk-simulation-context-binding.md`):
+  - `bindSimulationContext(input)`: Validates and deep-freezes a `{ network, networkPassphrase, contractId, contractVersion, ledger }` context; rejects a passphrase that does not belong to the declared network.
+  - `assertSimulationContext(expected, actual)` / `compareSimulationContext()`: Reject network, passphrase, contract, or version mismatches (non-retryable) and ledger regressions / expiry (retryable) with typed `SimulationContextMismatchError`.
+  - `runWithSimulationContext(options)`: Runs simulation work under the live context and rejects (`onTransition: "reject"`) or re-runs (`"refresh"`, bounded by `maxAttempts`) when the context transitions in flight.
+  - `VaultClient` accepts an optional `network`, records it on prepared transactions, and exposes `getSimulationContext()`. `prepared.sign(signer, { expectedContext })` and `signed.submit(server, { expectedContext })` reject before the signer, duplicate registry, or RPC is touched, so a corrected retry is safe.
+
+`ApiClient.simulateDeposit()` also checks the configuration after each request. With
+`onStale: "refresh"`, it retries under the latest snapshot up to `maxAttempts`
+(default 3, capped at 10); it never returns a response whose configuration changed
+in flight. On exhaustion, `StaleSimulationConfigError` includes the expected and
+actual fingerprints, completed `attempts`, and `preservedState` when supplied, so
+callers can refresh and retry with a known state snapshot. Successful responses
+include `simulationAttempts`. This retry is for read-only simulations and does not
+apply deposits or change balances.
 
 ## Deposit simulation fixtures
 

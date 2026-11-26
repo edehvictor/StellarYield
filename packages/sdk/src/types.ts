@@ -26,6 +26,13 @@ export interface VaultConfig {
    * contract or client configuration fingerprint drifts.
    */
   configFingerprint?: string;
+  /**
+   * Canonical network id (`testnet`, `mainnet`, `local`) this client targets.
+   * When set, it is validated against `networkPassphrase` and recorded on
+   * every prepared transaction so sign/submit can reject network
+   * transitions (#1857).
+   */
+  network?: string;
 }
 
 /**
