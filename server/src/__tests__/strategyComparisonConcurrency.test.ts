@@ -16,8 +16,10 @@ import {
   resetComparisonStateStore,
   clearComparisonOperationStore,
   StrategyComparisonVersionConflictError,
+  StrategyComparisonOperationIdentityConflictError,
   StrategyComparisonValidationError,
   STRATEGY_COMPARISON_VERSION_CONFLICT,
+  STRATEGY_COMPARISON_IDEMPOTENCY_MISMATCH,
   INVALID_STRATEGY_COMPARISON_STATE,
 } from "../services/strategyComparisonConcurrencyService";
 
@@ -202,11 +204,12 @@ describe("Strategy Comparison Concurrency Service (#1919)", () => {
 
   it("6. Confirmation that retries do not duplicate effects: idempotency key returns cached result", () => {
     const opKey = "op-alloc-999-blend";
+    const sideEffect = jest.fn();
 
     const first = updateStrategyComparisonState(
       WALLET,
       { selectedStrategyId: "blend", allocatedBalances: { blend: 2000 } },
-      { operationIdentity: opKey },
+      { operationIdentity: opKey, sideEffect },
     );
     expect(first.isReplay).toBe(false);
     expect(first.state.version).toBe(1);
@@ -215,11 +218,87 @@ describe("Strategy Comparison Concurrency Service (#1919)", () => {
     const replay = updateStrategyComparisonState(
       WALLET,
       { selectedStrategyId: "blend", allocatedBalances: { blend: 2000 } },
-      { operationIdentity: opKey },
+      { operationIdentity: opKey, sideEffect },
     );
     expect(replay.isReplay).toBe(true);
     expect(replay.state.version).toBe(1);
     expect(getStrategyComparisonVersion(WALLET)).toBe(1);
+    expect(sideEffect).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects an identity reused for different input and scopes identities to a wallet", () => {
+    const opKey = "op-wallet-scoped";
+    updateStrategyComparisonState(
+      WALLET,
+      { selectedStrategyId: "blend", allocatedBalances: { blend: 1000 } },
+      { operationIdentity: opKey },
+    );
+
+    expect(() =>
+      updateStrategyComparisonState(
+        WALLET,
+        { selectedStrategyId: "soroswap", allocatedBalances: { soroswap: 2000 } },
+        { operationIdentity: opKey },
+      ),
+    ).toThrow(StrategyComparisonOperationIdentityConflictError);
+
+    const otherWallet = "GOTHERWALLET123";
+    const otherWalletResult = updateStrategyComparisonState(
+      otherWallet,
+      { selectedStrategyId: "soroswap", allocatedBalances: { soroswap: 2000 } },
+      { operationIdentity: opKey },
+    );
+
+    expect(otherWalletResult.isReplay).toBe(false);
+    expect(otherWalletResult.state.walletAddress).toBe(otherWallet);
+    expect(getStrategyComparisonState(WALLET).selectedStrategyId).toBe("blend");
+    expect(getStrategyComparisonState(WALLET).allocatedBalances.blend).toBe(1000);
+    expect(getStrategyComparisonVersion(WALLET)).toBe(1);
+  });
+
+  it("replays the original selection after a later update without overwriting it", () => {
+    const options = { operationIdentity: "op-select-retry" };
+    const first = selectStrategyAndAllocate(WALLET, "blend", 1000, options);
+    updateStrategyComparisonState(WALLET, {
+      pinnedStrategyIds: ["blend"],
+      allocatedBalances: { blend: 1000, soroswap: 500 },
+    });
+
+    const replay = selectStrategyAndAllocate(WALLET, "blend", 1000, {
+      ...options,
+      expectedVersion: first.state.version,
+    });
+
+    expect(replay.isReplay).toBe(true);
+    expect(replay.state.version).toBe(1);
+    expect(getStrategyComparisonState(WALLET).version).toBe(2);
+    expect(getStrategyComparisonState(WALLET).allocatedBalances).toEqual({
+      blend: 1000,
+      soroswap: 500,
+    });
+  });
+
+  it("does not consume an operation identity when execution fails, allowing a safe retry", () => {
+    const input = {
+      selectedStrategyId: "blend",
+      allocatedBalances: { blend: 1200 },
+    };
+    const options = { operationIdentity: "op-retry-after-failure" };
+
+    expect(() =>
+      updateStrategyComparisonState(WALLET, input, {
+        ...options,
+        sideEffect: () => {
+          throw new Error("execution failed");
+        },
+      }),
+    ).toThrow("execution failed");
+    expect(getStrategyComparisonVersion(WALLET)).toBe(0);
+
+    const retry = updateStrategyComparisonState(WALLET, input, options);
+    expect(retry.isReplay).toBe(false);
+    expect(retry.state.version).toBe(1);
+    expect(retry.state.allocatedBalances.blend).toBe(1200);
   });
 });
 
@@ -278,6 +357,43 @@ describe("Strategy Comparison Concurrency HTTP Routes (#1919)", () => {
     expect(write2.body.expectedVersion).toBe(1);
     expect(write2.body.currentVersion).toBe(2);
     expect(write2.body.state.selectedStrategyId).toBe("soroswap");
+  });
+
+  it("PUT /api/strategies/comparison/state rejects a reused identity with different input", async () => {
+    const body = {
+      walletAddress: WALLET,
+      selectedStrategyId: "blend",
+      allocatedBalances: { blend: 1000 },
+    };
+    const first = await request(app)
+      .put("/api/strategies/comparison/state")
+      .set("Idempotency-Key", "route-operation-1")
+      .send(body);
+    expect(first.status).toBe(200);
+
+    const retry = await request(app)
+      .put("/api/strategies/comparison/state")
+      .set("Idempotency-Key", "route-operation-1")
+      .send(body);
+    expect(retry.status).toBe(200);
+    expect(retry.body.isReplay).toBe(true);
+    expect(retry.headers["x-idempotent-replayed"]).toBe("true");
+
+    const duplicate = await request(app)
+      .put("/api/strategies/comparison/state")
+      .set("Idempotency-Key", "route-operation-1")
+      .send({
+        walletAddress: WALLET,
+        selectedStrategyId: "soroswap",
+        allocatedBalances: { soroswap: 2000 },
+      });
+    expect(duplicate.status).toBe(422);
+    expect(duplicate.body.code).toBe(STRATEGY_COMPARISON_IDEMPOTENCY_MISMATCH);
+
+    const current = await request(app).get(`/api/strategies/comparison/state/${WALLET}`);
+    expect(current.body.state.selectedStrategyId).toBe("blend");
+    expect(current.body.state.allocatedBalances).toEqual({ blend: 1000 });
+    expect(current.body.version).toBe(1);
   });
 
   it("POST /api/strategies/comparison/select atomically updates selection and balance under OCC", async () => {
