@@ -158,6 +158,17 @@ router.post("/fingerprint", (req: Request, res: Response) => {
         buildTransactionReviewFailureDiagnostics("VALIDATION_FAILED", { stage: "request-validation" })
       );
     }
+    const b = body as Record<string, unknown>;
+    if (
+      typeof b.amountInStroops !== "string" ||
+      !/^\d+$/.test(b.amountInStroops) ||
+      typeof b.inputTokenContract !== "string" ||
+      !b.inputTokenContract.trim() ||
+      typeof b.vaultTokenContract !== "string" ||
+      !b.vaultTokenContract.trim()
+    ) {
+      return sendError(res, 400, "INVALID_ASSUMPTIONS", "Invalid assumptions payload: required fields missing or malformed");
+    }
     const result = computeQuoteAssumptionFingerprint(body);
     res.json(result);
   } catch (e) {
