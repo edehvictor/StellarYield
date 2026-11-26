@@ -20,6 +20,12 @@ import {
   type GovernanceDiagnosticCode,
   type GovernanceStage,
 } from "../../../shared/types/governanceDiagnostic";
+import {
+  computeGovernanceConfigFingerprint,
+  validateGovernanceConfigSnapshot,
+  verifyGovernanceConfigFingerprint,
+  type GovernanceConfigSnapshot,
+} from "../../../shared/types/governanceConfigSnapshot";
 
 const router = Router();
 
@@ -88,6 +94,117 @@ const VALID_PROPOSAL_TYPES: ProposalType[] = [
   "reward_change",
 ];
 
+type ConfigBinding =
+  | {
+      ok: true;
+      snapshot: GovernanceConfigSnapshot;
+      fingerprint: string;
+    }
+  | {
+      ok: false;
+      status: 400 | 409;
+      error: string;
+      message: string;
+      details?: unknown;
+      recoverable?: boolean;
+    };
+
+/**
+ * Validates a caller's configuration snapshot/fingerprint without mutating any
+ * governance state. A stale or malformed claim is rejected before the work
+ * (forecast, quorum computation, proposal preparation) runs.
+ */
+function bindGovernanceConfig(
+  snapshotInput: unknown,
+  expectedFingerprint: unknown,
+): ConfigBinding {
+  const validation = validateGovernanceConfigSnapshot(snapshotInput);
+  if (!validation.valid) {
+    return {
+      ok: false,
+      status: 400,
+      error: "INVALID_GOVERNANCE_CONFIG",
+      message: "The governance configuration snapshot is invalid.",
+      details: { issues: validation.issues },
+    };
+  }
+
+  const verification = verifyGovernanceConfigFingerprint(
+    validation.snapshot,
+    expectedFingerprint,
+  );
+  if (!verification.valid) {
+    return {
+      ok: false,
+      status: verification.status === "stale" ? 409 : 400,
+      error: verification.code,
+      message: verification.message,
+      details: {
+        expectedFingerprint: verification.expectedFingerprint,
+        providedFingerprint: verification.actualFingerprint,
+        driftReasons: verification.driftReasons,
+      },
+      recoverable: true,
+    };
+  }
+
+  return {
+    ok: true,
+    snapshot: validation.snapshot,
+    fingerprint: verification.expectedFingerprint,
+  };
+}
+
+function sendError(
+  res: Response,
+  statusCode: number,
+  error: string,
+  message: string,
+  details?: unknown,
+  _extra?: unknown,
+  recoverable?: boolean,
+): void {
+  res.status(statusCode).json({
+    error,
+    message,
+    ...(details !== undefined ? { details } : {}),
+    ...(recoverable !== undefined ? { recoverable } : {}),
+  });
+}
+
+function sendConfigBindingError(res: Response, binding: Extract<ConfigBinding, { ok: false }>): void {
+  sendError(
+    res,
+    binding.status,
+    binding.error,
+    binding.message,
+    binding.details,
+    undefined,
+    binding.recoverable,
+  );
+}
+
+/**
+ * POST /api/governance/config-snapshot
+ * Returns the canonical snapshot and immutable SHA-256 fingerprint for a
+ * governance configuration. Read-only; clients use it to refresh stale work.
+ */
+router.post("/config-snapshot", (req: Request, res: Response) => {
+  const validation = validateGovernanceConfigSnapshot(req.body);
+  if (!validation.valid) {
+    sendError(
+      res,
+      400,
+      "INVALID_GOVERNANCE_CONFIG",
+      "The governance configuration is invalid.",
+      { issues: validation.issues },
+    );
+    return;
+  }
+
+  res.json(computeGovernanceConfigFingerprint(validation.snapshot));
+});
+
 /**
  * POST /api/governance/forecast
  * Returns an estimated impact forecast for a governance proposal.
@@ -116,7 +233,10 @@ function isNonEmptyStringArray(value: unknown): value is string[] {
 router.post("/forecast", forecastLimiter, (req: Request, res: Response) => {
   const body =
     req.body && typeof req.body === "object" && !Array.isArray(req.body)
-      ? (req.body as Partial<GovernanceForecastInput>)
+      ? (req.body as Partial<GovernanceForecastInput> & {
+          configSnapshot?: unknown;
+          expectedConfigFingerprint?: unknown;
+        })
       : {};
   const { proposalType, parameters, baseline } = body;
 
@@ -133,11 +253,18 @@ router.post("/forecast", forecastLimiter, (req: Request, res: Response) => {
     Array.isArray(baseline) ||
     !Number.isFinite(baseline.yieldPct) ||
     !Number.isFinite(baseline.exposurePct) ||
+    baseline.exposurePct < 0 ||
+    baseline.exposurePct > 100 ||
     !Number.isFinite(baseline.feeRatePct) ||
+    baseline.feeRatePct < 0 ||
+    baseline.feeRatePct > 100 ||
     !Number.isFinite(baseline.tvlUsd) ||
     baseline.tvlUsd < 0 ||
     (baseline.riskScore !== undefined &&
-      (typeof baseline.riskScore !== "number" || !Number.isFinite(baseline.riskScore))) ||
+      (typeof baseline.riskScore !== "number" ||
+        !Number.isFinite(baseline.riskScore) ||
+        baseline.riskScore < 0 ||
+        baseline.riskScore > 100)) ||
     (baseline.vaultCount !== undefined &&
       (typeof baseline.vaultCount !== "number" ||
         !Number.isInteger(baseline.vaultCount) ||
@@ -154,8 +281,25 @@ router.post("/forecast", forecastLimiter, (req: Request, res: Response) => {
   ) {
     sendGovernanceFailure(res, 400, "VALIDATION_FAILED", "request-validation", {
       fields: invalidFields,
+      preserveState: true,
     });
     return;
+  }
+
+  let configBinding: Extract<ConfigBinding, { ok: true }> | undefined;
+  if (
+    body.configSnapshot !== undefined ||
+    body.expectedConfigFingerprint !== undefined
+  ) {
+    const binding = bindGovernanceConfig(
+      body.configSnapshot,
+      body.expectedConfigFingerprint,
+    );
+    if (!binding.ok) {
+      sendConfigBindingError(res, binding);
+      return;
+    }
+    configBinding = binding;
   }
 
   try {
@@ -164,10 +308,20 @@ router.post("/forecast", forecastLimiter, (req: Request, res: Response) => {
       parameters,
       baseline,
     });
-    res.json(result);
+    res.json(
+      configBinding
+        ? {
+            ...result,
+            configFingerprint: configBinding.fingerprint,
+            configSnapshot: configBinding.snapshot,
+          }
+        : result,
+    );
   } catch {
     // Never echo the thrown error: it may contain input values or stack frames.
-    sendGovernanceFailure(res, 500, "STAGE_UNAVAILABLE", "forecast");
+    sendGovernanceFailure(res, 500, "STAGE_UNAVAILABLE", "forecast", {
+      preserveState: true,
+    });
   }
 });
 
@@ -183,7 +337,11 @@ const MAX_ATTACHMENTS_PER_PROPOSAL = 20;
 router.post("/quorum-progress", (req: Request, res: Response) => {
   const body =
     req.body && typeof req.body === "object" && !Array.isArray(req.body)
-      ? (req.body as Partial<SignerQuorumInput>)
+      ? (req.body as Partial<SignerQuorumInput> & {
+          contractId?: unknown;
+          configSnapshot?: unknown;
+          expectedConfigFingerprint?: unknown;
+        })
       : {};
 
   const invalidFields: string[] = [];
@@ -205,8 +363,33 @@ router.post("/quorum-progress", (req: Request, res: Response) => {
   ) {
     sendGovernanceFailure(res, 400, "VALIDATION_FAILED", "request-validation", {
       fields: invalidFields,
+      preserveState: true,
+      extra: { error: "INVALID_REQUEST" },
     });
     return;
+  }
+
+  let configBinding: Extract<ConfigBinding, { ok: true }> | undefined;
+  if (
+    body.configSnapshot !== undefined ||
+    body.expectedConfigFingerprint !== undefined
+  ) {
+    const snapshotInput =
+      body.configSnapshot ??
+      ({
+        signers: body.signers,
+        threshold: body.threshold,
+        contractId: typeof body.contractId === "string" ? body.contractId : "",
+      } satisfies GovernanceConfigSnapshot);
+    const binding = bindGovernanceConfig(
+      snapshotInput,
+      body.expectedConfigFingerprint,
+    );
+    if (!binding.ok) {
+      sendConfigBindingError(res, binding);
+      return;
+    }
+    configBinding = binding;
   }
 
   try {
@@ -215,9 +398,18 @@ router.post("/quorum-progress", (req: Request, res: Response) => {
       signatures: body.signatures.map((s) => s.trim()),
       threshold: body.threshold,
     });
-    res.json(progress);
+    res.json(
+      configBinding
+        ? {
+            ...progress,
+            configFingerprint: configBinding.fingerprint,
+          }
+        : progress,
+    );
   } catch {
-    sendGovernanceFailure(res, 500, "STAGE_UNAVAILABLE", "quorum");
+    sendGovernanceFailure(res, 500, "STAGE_UNAVAILABLE", "quorum", {
+      preserveState: true,
+    });
   }
 });
 

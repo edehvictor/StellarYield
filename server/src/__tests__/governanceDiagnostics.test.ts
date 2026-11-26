@@ -320,7 +320,7 @@ describe("governance diagnostics (#1901)", () => {
         });
 
       expect(res.status).toBe(400);
-      expect(res.body.error).toBe("VALIDATION_FAILED");
+      expect(res.body.error).toBe("INVALID_REQUEST");
       expect(res.body.fields).toEqual(["signers", "signatures", "threshold"]);
 
       const retry = await request(app)

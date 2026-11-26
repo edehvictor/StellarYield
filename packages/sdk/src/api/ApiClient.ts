@@ -39,6 +39,7 @@ import {
   type SimulationConfigRunResult,
   runWithSimulationConfig,
 } from "../simulationConfig";
+import { buildSdkFailureDiagnostics } from "../diagnostics";
 
 export interface ApiRegisteredEndpoint {
   method: "GET" | "POST" | "PUT" | "DELETE" | "PATCH";
@@ -82,6 +83,17 @@ const DEFAULT_RETRYABLE_STATUSES = [408, 429, 500, 502, 503, 504];
 const DEFAULT_CACHE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 const DEFAULT_MAX_PAGES = 50;
 
+function isApiCacheEntry(value: unknown): value is ApiCacheEntry<unknown> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const entry = value as { data?: unknown; fetchedAt?: unknown };
+  return (
+    Object.prototype.hasOwnProperty.call(entry, "data") &&
+    typeof entry.fetchedAt === "number" &&
+    Number.isFinite(entry.fetchedAt) &&
+    entry.fetchedAt >= 0
+  );
+}
+
 /**
  * Simple in-process cache store for environments without durable storage.
  * Suitable for tests and short-lived processes.
@@ -93,7 +105,8 @@ export function createMemoryCacheStore(): ApiCacheStore {
       const raw = map.get(key);
       if (!raw) return null;
       try {
-        return JSON.parse(raw) as ApiCacheEntry<T>;
+        const parsed: unknown = JSON.parse(raw);
+        return isApiCacheEntry(parsed) ? (parsed as ApiCacheEntry<T>) : null;
       } catch {
         return null;
       }
@@ -123,6 +136,47 @@ function createAbortError(): Error {
   const err = new Error("The operation was aborted");
   err.name = "AbortError";
   return err;
+}
+
+function validateDepositSimulationParams(params: DepositSimulationParams): void {
+  const errors: string[] = [];
+  if (!params || typeof params !== "object") {
+    errors.push("params must be an object");
+  } else {
+    if (typeof params.strategyId !== "string" || params.strategyId.trim() === "") {
+      errors.push("strategyId must be a non-empty string");
+    }
+    if (typeof params.token !== "string" || params.token.trim() === "") {
+      errors.push("token must be a non-empty string");
+    }
+    if (typeof params.amount !== "number" || !Number.isFinite(params.amount) || params.amount <= 0) {
+      errors.push("amount must be a positive finite number");
+    }
+    if (
+      params.maxAttempts !== undefined &&
+      (typeof params.maxAttempts !== "number" ||
+        !Number.isFinite(params.maxAttempts) ||
+        !Number.isInteger(params.maxAttempts) ||
+        params.maxAttempts < 1)
+    ) {
+      errors.push("maxAttempts must be a positive integer");
+    }
+  }
+
+  if (errors.length > 0) {
+    throw new SdkEndpointError(
+      "Invalid simulation parameters.",
+      buildSdkFailureDiagnostics("VALIDATION_FAILED", {
+        stage: "request-validation",
+        summary: "Simulation input was rejected before any request or state change.",
+        remediation: "Provide valid simulation parameters and retry; existing state and balances were preserved.",
+        retryable: false,
+      }),
+      errors,
+      "simulate",
+      false,
+    );
+  }
 }
 
 function withQueryParam(path: string, key: string, value: string): string {
@@ -563,6 +617,7 @@ export class ApiClient {
     params: DepositSimulationParams,
     requestOptions?: ApiRequestOptions
   ): Promise<any> {
+    validateDepositSimulationParams(params);
     let expectedFingerprint =
       params.expectedConfigFingerprint ??
       (params.configSnapshot ? params.configSnapshot.fingerprint : undefined);

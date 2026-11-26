@@ -1,4 +1,4 @@
-import { useState, useCallback } from "react";
+import { useState, useCallback, useMemo } from "react";
 import type { PendingTransaction, GovernanceConfig } from "./types";
 import type { TxPhase } from "../../services/transactionPhase";
 import {
@@ -9,6 +9,11 @@ import {
   startExecutionAttempt,
   type GovernanceExecutionState,
 } from "./governanceOperation";
+import {
+  assertGovernanceConfigFingerprint,
+  computeGovernanceConfigFingerprint,
+  validateGovernanceConfigSnapshot,
+} from "../../../../shared/types/governanceConfigSnapshot";
 import {
   createSignerRotationAuditRecord,
   type SignerRotationAuditRecord,
@@ -76,6 +81,12 @@ export function isValidPendingTransaction(value: unknown): value is PendingTrans
     return false;
   }
   if (value.operation !== undefined && !isValidExecutionState(value.operation)) {
+    return false;
+  }
+  if (
+    value.configFingerprint !== undefined &&
+    !isNonEmptyString(value.configFingerprint)
+  ) {
     return false;
   }
   return true;
@@ -197,6 +208,11 @@ const DEFAULT_CONFIG: GovernanceConfig = {
   contractId: import.meta.env.VITE_CONTRACT_ID ?? "",
 };
 
+function configErrorMessage(config: GovernanceConfig): string {
+  const validation = validateGovernanceConfigSnapshot(config);
+  return validation.issues.map((issue) => `${issue.field}: ${issue.message}`).join("; ");
+}
+
 export function useGovernanceStore() {
   const [transactions, setTransactions] = useState<PendingTransaction[]>(() =>
     loadFromStorage(STORAGE_KEY, [], parseStoredTransactions),
@@ -209,6 +225,11 @@ export function useGovernanceStore() {
   const [signerRotationAudit, setSignerRotationAudit] = useState<
     SignerRotationAuditRecord[]
   >(() => loadFromStorage(SIGNER_ROTATION_AUDIT_KEY, [], parseStoredAuditRecords));
+
+  const configFingerprint = useMemo(
+    () => computeGovernanceConfigFingerprint(config).fingerprint,
+    [config],
+  );
 
   /**
    * Persist first, then publish to React. A storage failure leaves the
@@ -247,9 +268,16 @@ export function useGovernanceStore() {
           "transaction",
         );
       }
-      commitTransactions([...transactions, tx]);
+      const boundFingerprint =
+        tx.configFingerprint !== undefined
+          ? assertGovernanceConfigFingerprint(config, tx.configFingerprint)
+          : configFingerprint;
+      commitTransactions([
+        ...transactions,
+        { ...tx, configFingerprint: boundFingerprint },
+      ]);
     },
-    [transactions, commitTransactions],
+    [transactions, commitTransactions, config, configFingerprint],
   );
 
   const addSignature = useCallback(
@@ -270,6 +298,9 @@ export function useGovernanceStore() {
       }
       const normalizedKey = publicKey.trim();
       return updateTransaction(txId, (tx) => {
+        if (tx.configFingerprint !== undefined) {
+          assertGovernanceConfigFingerprint(config, tx.configFingerprint);
+        }
         const alreadySigned = tx.signatures.some((s) => s.publicKey === normalizedKey);
         if (alreadySigned) return tx;
 
@@ -283,13 +314,17 @@ export function useGovernanceStore() {
         return { ...tx, signatures: newSignatures, status: newStatus } as PendingTransaction;
       });
     },
-    [updateTransaction],
+    [updateTransaction, config],
   );
 
   const beginExecution = useCallback(
     (txId: string): GovernanceExecutionState | null => {
       const target = transactions.find((tx) => tx.id === txId);
       if (!target || target.status === "executed") return null;
+
+      if (target.configFingerprint !== undefined) {
+        assertGovernanceConfigFingerprint(config, target.configFingerprint);
+      }
 
       if (target.signatures.length < target.threshold) {
         throw new GovernanceExecutionError(
@@ -306,7 +341,7 @@ export function useGovernanceStore() {
       );
       return operation;
     },
-    [transactions, commitTransactions],
+    [transactions, commitTransactions, config],
   );
 
   const recordExecutionSubmitted = useCallback(
@@ -354,6 +389,9 @@ export function useGovernanceStore() {
     (txId: string, txHash?: string) => {
       return updateTransaction(txId, (tx) => {
         if (tx.status === "executed") return tx;
+        if (tx.configFingerprint !== undefined) {
+          assertGovernanceConfigFingerprint(config, tx.configFingerprint);
+        }
         return {
           ...tx,
           status: "executed" as const,
@@ -361,7 +399,7 @@ export function useGovernanceStore() {
         };
       });
     },
-    [updateTransaction],
+    [updateTransaction, config],
   );
 
   const rollbackExecution = useCallback(
@@ -388,12 +426,52 @@ export function useGovernanceStore() {
 
   const markExecuted = completeExecution;
 
+  const refreshTransactionConfig = useCallback(
+    (txId: string) => {
+      return updateTransaction(txId, (tx) => {
+        if (tx.status === "executed") return tx;
+        const allowedSigners = new Set(config.signers);
+        const retainedSignatures =
+          allowedSigners.size > 0
+            ? tx.signatures.filter((sig) => allowedSigners.has(sig.publicKey))
+            : tx.signatures;
+        const nextThreshold = config.threshold;
+        const nextStatus =
+          tx.status === "expired"
+            ? "expired"
+            : retainedSignatures.length >= nextThreshold
+              ? "ready"
+              : "pending";
+        return {
+          ...tx,
+          configFingerprint,
+          threshold: nextThreshold,
+          signatures: retainedSignatures,
+          status: nextStatus,
+        };
+      });
+    },
+    [updateTransaction, config, configFingerprint],
+  );
+
   const updateConfig = useCallback(
     (newConfig: GovernanceConfig, actor: string) => {
-      validateGovernanceConfigInput(newConfig, actor);
+      if (!isNonEmptyString(actor)) {
+        throw new GovernanceExecutionError(
+          "INVALID_INPUT",
+          "Actor address is required to update governance configuration.",
+          "actor",
+        );
+      }
+      const validation = validateGovernanceConfigSnapshot(newConfig);
+      if (!validation.valid) {
+        throw new Error(`Invalid governance configuration: ${configErrorMessage(newConfig)}`);
+      }
+
+      const normalizedConfig = validation.snapshot;
       const record = createSignerRotationAuditRecord(
         config,
-        newConfig,
+        normalizedConfig,
         actor,
         new Date().toISOString(),
       );
@@ -403,7 +481,7 @@ export function useGovernanceStore() {
       let configPersisted = false;
 
       try {
-        saveToStorage(CONFIG_KEY, newConfig);
+        saveToStorage(CONFIG_KEY, normalizedConfig);
         configPersisted = true;
         if (record) {
           saveToStorage(SIGNER_ROTATION_AUDIT_KEY, updatedAudit);
@@ -423,7 +501,7 @@ export function useGovernanceStore() {
         );
       }
 
-      setConfig(newConfig);
+      setConfig(normalizedConfig);
       if (record) setSignerRotationAudit(updatedAudit);
     },
     [config, signerRotationAudit],
@@ -432,6 +510,7 @@ export function useGovernanceStore() {
   return {
     transactions,
     config,
+    configFingerprint,
     signerRotationAudit,
     addTransaction,
     addSignature,
@@ -441,6 +520,7 @@ export function useGovernanceStore() {
     completeExecution,
     rollbackExecution,
     markExecuted,
+    refreshTransactionConfig,
     updateConfig,
   };
 }

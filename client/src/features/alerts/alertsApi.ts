@@ -110,6 +110,50 @@ export interface VersionedAlertPreferences {
   version: number;
 }
 
+export class InvalidAlertPreferencesError extends Error {
+  readonly code = "INVALID_ALERT_PREFERENCES";
+
+  constructor(message = "Server returned invalid alert preferences") {
+    super(message);
+    this.name = "InvalidAlertPreferencesError";
+  }
+}
+
+function parseAlertPreferences(value: unknown): AlertPreferences {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new InvalidAlertPreferencesError();
+  }
+  const preferences = value as Record<string, unknown>;
+  if (
+    (preferences.channel !== "email" && preferences.channel !== "in_app") ||
+    typeof preferences.cooldownMinutes !== "number" ||
+    !Number.isFinite(preferences.cooldownMinutes) ||
+    preferences.cooldownMinutes < 0 ||
+    preferences.cooldownMinutes > 1440 ||
+    typeof preferences.severityThreshold !== "number" ||
+    !Number.isFinite(preferences.severityThreshold) ||
+    preferences.severityThreshold < 0 ||
+    preferences.severityThreshold > 1000 ||
+    typeof preferences.quietHoursStart !== "number" ||
+    !Number.isInteger(preferences.quietHoursStart) ||
+    preferences.quietHoursStart < 0 ||
+    preferences.quietHoursStart > 23 ||
+    typeof preferences.quietHoursEnd !== "number" ||
+    !Number.isInteger(preferences.quietHoursEnd) ||
+    preferences.quietHoursEnd < 0 ||
+    preferences.quietHoursEnd > 23
+  ) {
+    throw new InvalidAlertPreferencesError();
+  }
+  return {
+    channel: preferences.channel,
+    cooldownMinutes: preferences.cooldownMinutes,
+    severityThreshold: preferences.severityThreshold,
+    quietHoursStart: preferences.quietHoursStart,
+    quietHoursEnd: preferences.quietHoursEnd,
+  };
+}
+
 /**
  * Another write committed after `expectedVersion` was read. Carries the
  * server's current record so the caller can show it or reapply its change.
@@ -168,8 +212,11 @@ async function throwPreferenceError(res: Response): Promise<never> {
     throw new AlertPreferencesConflictError(
       body.error ?? "Alert preferences changed elsewhere. Reload and try again.",
       typeof body.currentVersion === "number" ? body.currentVersion : readVersion(res),
-      body.preferences ?? null,
+      body.preferences == null ? null : parseAlertPreferences(body.preferences),
     );
+  }
+  if (body.code === "INVALID_ALERT_PREFERENCES") {
+    throw new InvalidAlertPreferencesError(body.error);
   }
   throw new Error(body.error ?? "Failed to save alert preferences");
 }
@@ -187,7 +234,7 @@ export async function fetchAlertPreferencesVersioned(
   if (res.status === 404) return null;
   if (res.status === 409) await throwPreferenceError(res);
   if (!res.ok) throw new Error("Failed to fetch alert preferences");
-  const preferences = (await res.json()) as AlertPreferences;
+  const preferences = parseAlertPreferences(await res.json());
   return { preferences, version: readVersion(res) };
 }
 
@@ -238,11 +285,8 @@ export async function saveAlertPreferencesVersioned(
     }),
   });
   if (res.status === 409) await throwPreferenceError(res);
-  if (!res.ok) {
-    const body = (await res.json().catch(() => ({}))) as { error?: string };
-    throw new Error(body.error ?? "Failed to save alert preferences");
-  }
-  const saved = (await res.json()) as AlertPreferences;
+  if (!res.ok) await throwPreferenceError(res);
+  const saved = parseAlertPreferences(await res.json());
   return { preferences: saved, version: readVersion(res) };
 }
 
@@ -331,6 +375,80 @@ export async function rebindAlertPreferenceContext(
     throw new Error(body.error ?? "Failed to rebind alert preferences");
   }
   return (await res.json()) as AlertPreferenceRebindResult;
+}
+
+export async function createAlertPreferenceOperation(payload: {
+  walletAddress: string;
+  vaultId: string;
+  preferences: AlertPreferences;
+  operationIdentity?: string;
+  autoExecute?: boolean;
+  reason?: string;
+}): Promise<{ operation: any; preferences: AlertPreferences; replayed: boolean }> {
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  const opId = payload.operationIdentity;
+  if (opId) {
+    headers["X-Operation-Identity"] = opId;
+    headers["Idempotency-Key"] = opId;
+  }
+  const res = await fetch(`${ALERTS_BASE}/preferences/operations`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) {
+    const body = (await res.json().catch(() => ({}))) as { error?: string };
+    throw new Error(body.error ?? "Failed to create alert preference operation");
+  }
+  return res.json();
+}
+
+export async function getAlertPreferenceOperation(
+  operationId: string,
+): Promise<{ operation: any }> {
+  const res = await fetch(
+    `${ALERTS_BASE}/preferences/operations/${encodeURIComponent(operationId)}`,
+  );
+  if (!res.ok) throw new Error("Failed to get alert preference operation");
+  return res.json();
+}
+
+export async function resumeAlertPreferenceOperation(
+  operationId: string,
+  reason?: string,
+): Promise<{ operation: any; preferences: AlertPreferences }> {
+  const res = await fetch(
+    `${ALERTS_BASE}/preferences/operations/${encodeURIComponent(operationId)}/resume`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ reason }),
+    },
+  );
+  if (!res.ok) {
+    const body = (await res.json().catch(() => ({}))) as { error?: string };
+    throw new Error(body.error ?? "Failed to resume alert preference operation");
+  }
+  return res.json();
+}
+
+export async function rollbackAlertPreferenceOperation(
+  operationId: string,
+  reason?: string,
+): Promise<{ operation: any; preferences: AlertPreferences | null }> {
+  const res = await fetch(
+    `${ALERTS_BASE}/preferences/operations/${encodeURIComponent(operationId)}/rollback`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ reason }),
+    },
+  );
+  if (!res.ok) {
+    const body = (await res.json().catch(() => ({}))) as { error?: string };
+    throw new Error(body.error ?? "Failed to rollback alert preference operation");
+  }
+  return res.json();
 }
 
 export async function fetchDigestPreference(

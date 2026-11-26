@@ -12,6 +12,8 @@ import type { GovernanceExecutionState } from "./governanceOperation";
 
 export interface PendingTransaction {
   id: string;
+  /** Canonical governance configuration fingerprint bound to this proposal (#1894). */
+  configFingerprint?: string;
   /** Durable execution checkpoint; survives reloads so retries can resume safely (#1899). */
   operation?: GovernanceExecutionState;
   description: string;

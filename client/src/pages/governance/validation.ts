@@ -43,6 +43,9 @@ export function getRiskLevel(action: AdminAction): "low" | "medium" | "high" | "
   }
 }
 
+export const I128_MAX = 170141183460469231731687303715884105727n;
+export const I128_MIN = -170141183460469231731687303715884105728n;
+
 export function validateAddress(address: string): boolean {
   if (!address) return false;
   try {
@@ -53,13 +56,45 @@ export function validateAddress(address: string): boolean {
   }
 }
 
-export function validateNumber(value: string, min?: number, max?: number): boolean {
-  if (!value) return false;
-  const num = Number(value);
-  if (!Number.isFinite(num) || num < 0) return false;
+export function validateNumber(
+  value: string,
+  min?: number,
+  max?: number,
+  integerOnly = false,
+): boolean {
+  if (!value || typeof value !== "string") return false;
+  const trimmed = value.trim();
+  if (!trimmed) return false;
+
+  if (integerOnly && !/^-?\d+$/.test(trimmed)) {
+    return false;
+  }
+
+  const num = Number(trimmed);
+  if (!Number.isFinite(num)) return false;
+  if (num < 0) return false;
   if (min !== undefined && num < min) return false;
   if (max !== undefined && num > max) return false;
   return true;
+}
+
+/**
+ * Validates a stroop amount string for checked arithmetic:
+ * - Must be non-empty digits only (no decimals or exponents)
+ * - Must be >= 1 stroop
+ * - Must not exceed maximum i128 bound
+ */
+export function validateStroopAmount(value: string): boolean {
+  if (!value || typeof value !== "string") return false;
+  const trimmed = value.trim();
+  if (!/^\d+$/.test(trimmed)) return false;
+
+  try {
+    const big = BigInt(trimmed);
+    return big >= 1n && big <= I128_MAX;
+  } catch {
+    return false;
+  }
 }
 
 export function validateTransactionBuilder(
@@ -99,22 +134,22 @@ export function validateTransactionBuilder(
         });
       } else if (field.type === "number") {
         // Special validation for specific fields
-        if (field.name === "fee_bps" && !validateNumber(value, 0, 10000)) {
+        if (field.name === "fee_bps" && !validateNumber(value, 0, 10000, true)) {
           errors.push({
             field: field.name,
             message: `${field.label} must be between 0 and 10000`,
           });
-        } else if (field.name === "min_bps" && !validateNumber(value, 0, 10000)) {
+        } else if (field.name === "min_bps" && !validateNumber(value, 0, 10000, true)) {
           errors.push({
             field: field.name,
             message: `${field.label} must be between 0 and 10000`,
           });
-        } else if (field.name === "max_bps" && !validateNumber(value, 0, 10000)) {
+        } else if (field.name === "max_bps" && !validateNumber(value, 0, 10000, true)) {
           errors.push({
             field: field.name,
             message: `${field.label} must be between 0 and 10000`,
           });
-        } else if (field.name === "amount" && !validateNumber(value, 1)) {
+        } else if (field.name === "amount" && !validateStroopAmount(value)) {
           errors.push({
             field: field.name,
             message: `${field.label} must be greater than 0`,
@@ -192,7 +227,7 @@ export function validateSignerSet(
     }
   }
 
-  if (threshold < 1) {
+  if (!Number.isInteger(threshold) || threshold < 1) {
     errors.push("Threshold must be at least 1");
   }
 
@@ -212,7 +247,7 @@ export function validateThresholdForExecution(
 ): ThresholdValidationResult {
   const errors: string[] = [];
 
-  if (threshold < 1) {
+  if (!Number.isInteger(threshold) || threshold < 1) {
     errors.push("Threshold must be at least 1");
     return { valid: false, errors };
   }
