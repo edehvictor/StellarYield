@@ -161,15 +161,19 @@ export function buildTransactionReviewFailureDiagnostics(
 }
 
 /**
- * Map a failed `/api/zap/verify` error code to diagnostics. Recoverable codes
- * (stale quote, config drift) ask for a fresh quote; the rest are validation
- * failures that retrying the same quote cannot fix. Unknown codes degrade to
- * `CONTEXT_INSUFFICIENT` rather than guessing.
+ * Map a failed `/api/zap/verify` error code to diagnostics. Stale or untrusted
+ * quote/review configuration snapshots (expiry, asset-config drift, or missing/
+ * mismatched assumption fingerprints) require a fresh quote so review work is
+ * refreshed against the current immutable snapshot. Validation failures that
+ * retrying the same quote cannot fix are non-retryable. Unknown codes degrade
+ * to `CONTEXT_INSUFFICIENT` rather than guessing.
  */
 export function buildQuoteVerificationDiagnostics(errorCode: string): TransactionReviewDiagnostic[] {
   switch (errorCode) {
     case "STALE_QUOTE":
     case "CONFIG_DRIFT":
+    case "ASSUMPTION_DRIFT":
+    case "INVALID_FINGERPRINT":
       return buildTransactionReviewFailureDiagnostics("QUOTE_REFRESH_REQUIRED", {
         stage: "quote-verification",
       });

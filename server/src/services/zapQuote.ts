@@ -251,7 +251,11 @@ export function getAssetConfigVersion(): string {
 }
 
 export function computeRouteHash(path: { contractId: string }[]): string {
-  const ids = path.map(p => p.contractId).join("->");
+  if (!Array.isArray(path)) return "";
+  const ids = path
+    .filter((p) => p && typeof p === "object" && typeof p.contractId === "string")
+    .map((p) => p.contractId)
+    .join("->");
   return crypto.createHash("sha256").update(ids).digest("hex");
 }
 
@@ -491,7 +495,9 @@ export type ZapQuoteVerification =
 
 /**
  * Codes a client can recover from by requesting a fresh quote (as opposed to
- * changing inputs or an unrecoverable internal failure).
+ * changing inputs or an unrecoverable internal failure). Stale or untrusted
+ * transaction review configuration/assumption snapshots are refreshable because
+ * verification is read-only and preserves existing state/balances.
  */
 export const RECOVERABLE_VERIFY_ERROR_CODES: ReadonlySet<ZapQuoteVerificationErrorCode> =
   new Set<ZapQuoteVerificationErrorCode>([
@@ -500,6 +506,7 @@ export const RECOVERABLE_VERIFY_ERROR_CODES: ReadonlySet<ZapQuoteVerificationErr
     "ROUTE_MISMATCH",
     "UNSUPPORTED_ASSET",
     "ASSUMPTION_DRIFT",
+    "INVALID_FINGERPRINT",
   ]);
 
 /**
@@ -554,6 +561,21 @@ export function verifyZapQuote(quote: unknown): ZapQuoteVerification {
     return { valid: false, reason: "Invalid quote format", errorCode: "INVALID_QUOTE" };
   }
   const q = quote as Record<string, unknown>;
+
+  // Validate malformed external fields at boundary (#1889)
+  if (q.assumptionFingerprint !== undefined && q.assumptionFingerprint !== null) {
+    if (typeof q.assumptionFingerprint !== "string" || !/^(?:0x|qaf-)?([a-fA-F0-9]{64})$/.test(String(q.assumptionFingerprint).trim())) {
+      return { valid: false, reason: "Malformed quote assumption fingerprint", errorCode: "INVALID_QUOTE" };
+    }
+  }
+
+  if (q.slippageApplied !== undefined && q.slippageApplied !== null) {
+    const s = Number(q.slippageApplied);
+    if (!Number.isFinite(s) || s < 0) {
+      return { valid: false, reason: "Invalid slippage in quote", errorCode: "INVALID_QUOTE" };
+    }
+  }
+
   if (isQuoteExpired(q as ZapQuoteExpiryInput)) {
     return { valid: false, reason: "Quote has expired", errorCode: "STALE_QUOTE" };
   }
@@ -561,8 +583,13 @@ export function verifyZapQuote(quote: unknown): ZapQuoteVerification {
   if (q.assetConfigVersion !== currentVersion) {
     return { valid: false, reason: "Asset configuration has drifted", errorCode: "CONFIG_DRIFT" };
   }
-  if (!q.path || !Array.isArray(q.path)) {
+  if (!q.path || !Array.isArray(q.path) || q.path.length === 0) {
     return { valid: false, reason: "Invalid path in quote", errorCode: "ROUTE_MISMATCH" };
+  }
+  for (const hop of q.path) {
+    if (!hop || typeof hop !== "object" || typeof (hop as any).contractId !== "string" || !(hop as any).contractId.trim()) {
+      return { valid: false, reason: "Invalid or malformed path hop in quote", errorCode: "ROUTE_MISMATCH" };
+    }
   }
   const path = q.path as { contractId: string }[];
   const currentRouteHash = computeRouteHash(path);
@@ -580,7 +607,7 @@ export function verifyZapQuote(quote: unknown): ZapQuoteVerification {
       return { valid: false, reason: `Asset ${hop.contractId} is no longer supported`, errorCode: "UNSUPPORTED_ASSET" };
     }
   }
-  // Check slippage exceeded — reject quotes where applied slippage exceeds maximum threshold
+  // Check slippage exceeded
   if (typeof q.slippageApplied === "number" && q.slippageApplied > 0.15) {
     return { valid: false, reason: `Slippage ${(q.slippageApplied * 100).toFixed(2)}% exceeds maximum allowed threshold of 15%`, errorCode: "SLIPPAGE_EXCEEDED" };
   }

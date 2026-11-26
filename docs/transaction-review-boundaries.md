@@ -16,6 +16,22 @@ Quote and review amounts are handled with exact integer (BigInt) math. Floating 
 
 Server helpers: `server/src/services/stroopsMath.ts`. Client mirror: `client/src/components/transaction/reviewAmounts.ts`.
 
+## Stale configuration snapshots (transaction review)
+
+Zap quote/review work is bound to an immutable configuration snapshot fingerprint
+(`assetConfigVersion`, SHA-256 of the supported asset configuration) and, when
+present, a cryptographic assumption fingerprint over the quoted review
+assumptions.
+
+- `POST /api/zap/verify` (and pre-submit verification) rejects missing/mismatched
+  `assetConfigVersion` as `CONFIG_DRIFT`, and rejects stale/untrusted assumption
+  snapshots as `ASSUMPTION_DRIFT` or `INVALID_FINGERPRINT`.
+- These failures are treated as stale/untrusted review snapshots: verification is
+  read-only, no balances or signed transactions are mutated, and the quote must
+  be refreshed/re-reviewed before submission (safe retry).
+- Clients must invalidate and not reuse a rejected quote; refreshing the quote
+  binds subsequent review/execution work to the current immutable snapshot.
+
 ## Client review modal
 
 `TransactionReviewModal` disables **Confirm & Sign** and shows a "Submission blocked" alert when:
@@ -29,5 +45,6 @@ A zero guaranteed minimum is allowed (very small deposits). A caller-supplied `e
 ## Tests
 
 - `server/src/__tests__/zapQuoteBoundary.test.ts`
+- `server/src/__tests__/zapQuoteConfigFingerprint.test.ts`
 - `client/src/components/transaction/reviewAmounts.test.ts`
 - `client/src/components/transaction/TransactionReviewModal.test.tsx`

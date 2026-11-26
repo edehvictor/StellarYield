@@ -4,6 +4,7 @@ import {
   buildSdkFailureDiagnostics,
   redactDiagnosticText,
 } from "./diagnostics";
+import {
   buildSimulationFailureDiagnostics,
   classifySimulationFailure,
   type SimulationDiagnostic,
@@ -47,15 +48,15 @@ export abstract class SorobanSdkError extends Error {
   public readonly phase?: SdkErrorPhase;
   /** Whether retrying the operation that produced this error may succeed. */
   public readonly retryable: boolean;
-  /** Privacy-safe diagnostics attached to the error. */
-  public readonly diagnostics?: readonly SdkDiagnostic[];
   /** Literal marker certifying that diagnostics contain no sensitive values. */
   public readonly privacySafe: boolean;
   /**
    * Privacy-safe diagnostics naming the failed stage and remediation path.
    * Present on simulation-path errors; never contains raw error payloads.
+   * Endpoint/lifecycle errors carry `SdkDiagnostic`s, simulation-path errors
+   * carry `SimulationDiagnostic`s.
    */
-  public diagnostics?: SimulationDiagnostic[];
+  public diagnostics?: readonly SdkDiagnostic[] | readonly SimulationDiagnostic[];
 
   constructor(
     message: string,
@@ -90,6 +91,8 @@ export class SdkEndpointError extends SorobanSdkError {
     this.name = "SdkEndpointError";
     this.validationErrors = validationErrors;
   }
+}
+
 export interface DiagnosticContext {
   stage: SdkErrorPhase;
   remediation: string;
@@ -205,9 +208,10 @@ export function attachSimulationDiagnostics<T extends SorobanSdkError>(
   error: T,
   diagnostics: SimulationDiagnostic[]
 ): T {
-  if (!error.diagnostics || error.diagnostics.length === 0) {
-    error.diagnostics = diagnostics;
-  }
+  // Simulation diagnostics supersede any endpoint-shaped defaults the error was
+  // constructed with (for example an InvalidAmountError's validation
+  // diagnostics), so callers always see the simulation stage that failed.
+  error.diagnostics = diagnostics;
   return error;
 }
 
@@ -234,6 +238,9 @@ export function toSimulationError(
   options: ToSimulationErrorOptions = {}
 ): SorobanSdkError {
   if (error instanceof SimulationDiagnosticsError) return error;
+  // Context binding violations keep their class so callers can branch on
+  // `field`/`reason` and the retry decision is not lost (#1857).
+  if (error instanceof SimulationContextMismatchError) return error;
 
   if (error instanceof RestoreRequiredError) {
     return attachSimulationDiagnostics(
@@ -375,6 +382,8 @@ export class StaleSimulationConfigError extends SorobanSdkError {
   public readonly code = "SIMULATION_CONFIG_STALE" as const;
   public readonly expectedFingerprint: string | null;
   public readonly actualFingerprint: string | null;
+  /** Number of simulation attempts completed before the stale result. */
+  public readonly attempts: number;
   public readonly statePreserved: boolean;
   public readonly preservedState?: unknown;
 
@@ -383,6 +392,7 @@ export class StaleSimulationConfigError extends SorobanSdkError {
     details: {
       expectedFingerprint?: string | null;
       actualFingerprint?: string | null;
+      attempts?: number;
       statePreserved?: boolean;
       preservedState?: unknown;
     } = {}
@@ -391,6 +401,7 @@ export class StaleSimulationConfigError extends SorobanSdkError {
     this.name = "StaleSimulationConfigError";
     this.expectedFingerprint = details.expectedFingerprint ?? null;
     this.actualFingerprint = details.actualFingerprint ?? null;
+    this.attempts = details.attempts ?? 1;
     this.statePreserved = details.statePreserved ?? true;
     this.preservedState = details.preservedState;
   }
@@ -404,6 +415,90 @@ export function isStaleSimulationConfigError(
     (typeof error === "object" &&
       error !== null &&
       (error as { code?: unknown }).code === "SIMULATION_CONFIG_STALE")
+  );
+}
+
+/** Context field whose binding was violated (#1857). */
+export type SimulationContextField =
+  | "network"
+  | "networkPassphrase"
+  | "contractId"
+  | "contractVersion"
+  | "ledger";
+
+/**
+ * Why a simulation context binding was rejected (#1857).
+ *
+ * - `invalid`: the supplied context itself is malformed or self-inconsistent.
+ * - `missing`: a bound field could not be confirmed by the live context.
+ * - `mismatch`: network / passphrase / contract / version differs.
+ * - `ledger-regressed`: the observed ledger moved backwards (lagging RPC node,
+ *   endpoint switched to another network, or a reset local network).
+ * - `ledger-expired`: the observed ledger moved past the simulation's validity
+ *   window, so the preview must be re-simulated.
+ */
+export type SimulationContextMismatchReason =
+  | "invalid"
+  | "missing"
+  | "mismatch"
+  | "ledger-regressed"
+  | "ledger-expired";
+
+/**
+ * Raised when simulation reads or writes are evaluated against a different
+ * network, ledger, or contract version than the one they were bound to (#1857).
+ *
+ * Identity mismatches (network, passphrase, contract, version) are never
+ * retryable: retrying would silently run against a different deployment.
+ * Ledger regressions and expiries are retryable after re-simulating.
+ * No caller state is mutated when this error is thrown.
+ */
+export class SimulationContextMismatchError extends SorobanSdkError {
+  public readonly code = "SIMULATION_CONTEXT_MISMATCH" as const;
+  public readonly field: SimulationContextField;
+  public readonly reason: SimulationContextMismatchReason;
+  public readonly expected: string | number | null;
+  public readonly actual: string | number | null;
+  /** Number of attempts completed before the mismatch was raised. */
+  public readonly attempts: number;
+  public readonly statePreserved: true = true;
+  public readonly preservedState?: unknown;
+
+  constructor(
+    message: string,
+    details: {
+      field: SimulationContextField;
+      reason: SimulationContextMismatchReason;
+      expected?: string | number | null;
+      actual?: string | number | null;
+      attempts?: number;
+      retryable?: boolean;
+      phase?: SdkErrorPhase;
+      preservedState?: unknown;
+    }
+  ) {
+    const retryable =
+      details.retryable ??
+      (details.reason === "ledger-regressed" || details.reason === "ledger-expired");
+    super(message, details.phase ?? "simulate", retryable);
+    this.name = "SimulationContextMismatchError";
+    this.field = details.field;
+    this.reason = details.reason;
+    this.expected = details.expected ?? null;
+    this.actual = details.actual ?? null;
+    this.attempts = details.attempts ?? 1;
+    this.preservedState = details.preservedState;
+  }
+}
+
+export function isSimulationContextMismatchError(
+  error: unknown
+): error is SimulationContextMismatchError {
+  return (
+    error instanceof SimulationContextMismatchError ||
+    (typeof error === "object" &&
+      error !== null &&
+      (error as { code?: unknown }).code === "SIMULATION_CONTEXT_MISMATCH")
   );
 }
 
@@ -664,6 +759,47 @@ export class ApiServerError extends ApiHttpError {
 export interface RestorePreambleInfo {
   minResourceFee: string;
   transactionData: unknown;
+}
+
+export class DuplicateSubmissionError extends SorobanSdkError {
+  public readonly operationId: string;
+  public readonly status: "in_flight" | "committed";
+
+  constructor(operationId: string, status: "in_flight" | "committed", message?: string) {
+    super(
+      message ||
+        (status === "in_flight"
+          ? `Signer submission for operation '${operationId}' is already in progress`
+          : `Signer submission for operation '${operationId}' was already completed`),
+      "sign",
+      status === "in_flight"
+    );
+    this.operationId = operationId;
+    this.status = status;
+  }
+}
+
+export class SignerOperationConflictError extends SorobanSdkError {
+  public readonly operationId: string;
+
+  constructor(operationId: string, message?: string) {
+    super(
+      message ||
+        `Operation identity conflict: operation '${operationId}' was previously submitted with different transaction parameters`,
+      "sign",
+      false
+    );
+    this.operationId = operationId;
+  }
+}
+
+export class SignerValidationError extends SorobanSdkError {
+  public readonly operationId?: string;
+
+  constructor(message: string, operationId?: string) {
+    super(`Signer validation failed: ${message}`, "sign", true);
+    this.operationId = operationId;
+  }
 }
 
 export class RestoreRequiredError extends SorobanSdkError {

@@ -15,6 +15,11 @@ import {
   type RankingWeights,
 } from "../services/opportunityRankingService";
 import { getAssetConfigVersion } from "../services/zapQuote";
+import { getActiveComparisonConfig } from "./strategies";
+import {
+  computeStrategyComparisonConfigFingerprint,
+  verifyStrategyComparisonConfigFingerprint,
+} from "../../../shared/types/strategyComparisonConfigFingerprint";
 
 const yieldsRouter = Router();
 
@@ -63,6 +68,32 @@ yieldsRouter.get("/", async (_req, res) => {
       );
       return;
     }
+
+    // Strategy comparison configuration binding (#1918): a caller holding an
+    // older configuration snapshot is refused before any yield data is read.
+    const fpResult = computeStrategyComparisonConfigFingerprint(getActiveComparisonConfig());
+    res.setHeader("X-Strategy-Config-Fingerprint", fpResult.fingerprint);
+    const claimedQuery = _req.query.expectedConfigFingerprint;
+    const claimedHeader = _req.headers["if-match-config"];
+    const claimed =
+      typeof claimedQuery === "string" && claimedQuery.trim() !== ""
+        ? claimedQuery
+        : typeof claimedHeader === "string" && claimedHeader.trim() !== ""
+          ? claimedHeader
+          : undefined;
+    if (claimed !== undefined) {
+      const verdict = verifyStrategyComparisonConfigFingerprint(getActiveComparisonConfig(), claimed);
+      if (!verdict.valid) {
+        res.status(409).json({
+          code: verdict.code,
+          error: verdict.message,
+          currentFingerprint: verdict.expectedFingerprint,
+          driftReasons: verdict.driftReasons,
+        });
+        return;
+      }
+    }
+
     const checkedAssumptions = {
       protocolFeeBps: assumptions.protocolFeeBps ?? undefined,
       vaultFeeBps: assumptions.vaultFeeBps ?? undefined,
@@ -84,9 +115,12 @@ yieldsRouter.get("/", async (_req, res) => {
       const ageSeconds = Number.isFinite(lastFetchMs)
         ? Math.max(0, Math.round((Date.now() - lastFetchMs) / 1000))
         : Number.POSITIVE_INFINITY;
+      const freshness = Number.isFinite(score.metrics.freshness)
+        ? score.metrics.freshness
+        : 0;
 
       // 30 minutes stale window
-      if (ageSeconds > 30 * 60 || score.metrics.freshness < 0.5) {
+      if (ageSeconds > 30 * 60 || freshness < 0.5) {
         isStale = true;
       }
 
@@ -122,6 +156,7 @@ yieldsRouter.get("/", async (_req, res) => {
         reliabilityStatus: score.status,
         warnings,
         feeHistory,
+        configFingerprint: fpResult.fingerprint,
       };
     }));
     res.setHeader(
