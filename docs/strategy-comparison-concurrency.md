@@ -48,9 +48,14 @@ are restored before the error is returned.
 - A retry with the same `X-Operation-Identity` / `Idempotency-Key` header
   returns the original committed result (`isReplay: true` in body,
   `X-Idempotent-Replayed: true` in headers). Nothing is written.
+- Operation identities are scoped to a wallet. Reusing an identity for a
+  different update on the same wallet returns `409
+  STRATEGY_COMPARISON_OPERATION_IDENTITY_CONFLICT` without changing state.
 - A write rejected with `409 STRATEGY_COMPARISON_VERSION_CONFLICT` does **not**
   consume its operation identity, so the caller can safely reload the newer
   state and retry with the same or a new identity.
+- Validation and execution failures do not consume the identity, so a corrected
+  or safe retry can use it again.
 
 ## New API endpoints (added in #1919)
 
@@ -142,8 +147,8 @@ state each time.
 
 ## Tests
 
-- Server: `server/src/__tests__/strategyComparisonConcurrency.test.ts` (9 tests)
-- Client: `client/src/features/strategies/__tests__/strategyComparisonConcurrencyApi.test.ts` (13 tests)
+- Server: `server/src/__tests__/strategyComparisonConcurrency.test.ts` (13 tests)
+- Client: `client/src/features/strategies/__tests__/strategyComparisonConcurrencyApi.test.ts` (17 tests)
 
 See also: `docs/alert-preferences-concurrency.md` for the same OCC pattern applied
 to alert preferences (`#1903`).
