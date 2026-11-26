@@ -4,13 +4,14 @@
  * Tests for rollback behavior when preference saves fail
  */
 
+import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import AlertsModal from "../AlertsModal";
 import * as alertsApi from "../alertsApi";
 import type { WatchlistDigestPreference } from "../types";
 
-jest.mock("../alertsApi");
+vi.mock("../alertsApi");
 
 describe("AlertsModal - Optimistic Update Rollback", () => {
   const mockWalletAddress = "0x123abc";
@@ -40,14 +41,14 @@ describe("AlertsModal - Optimistic Update Rollback", () => {
   };
 
   beforeEach(() => {
-    jest.clearAllMocks();
-    (alertsApi.fetchAlerts as jest.Mock).mockResolvedValue(mockAlerts);
-    (alertsApi.fetchDigestPreference as jest.Mock).mockResolvedValue(mockDigestPreferences);
+    vi.clearAllMocks();
+    (alertsApi.fetchAlerts as any).mockResolvedValue(mockAlerts);
+    (alertsApi.fetchDigestPreference as any).mockResolvedValue(mockDigestPreferences);
   });
 
   describe("Alert Deletion - Optimistic Rollback", () => {
     it("should show alert as deleted optimistically", async () => {
-      (alertsApi.deleteAlert as jest.Mock).mockResolvedValueOnce(undefined);
+      (alertsApi.deleteAlert as any).mockResolvedValueOnce(undefined);
 
       render(
         <AlertsModal
@@ -59,7 +60,7 @@ describe("AlertsModal - Optimistic Update Rollback", () => {
       );
 
       await waitFor(() => {
-        expect(screen.getByText("vault-a")).toBeInTheDocument();
+        expect(screen.getByLabelText(/Delete alert for vault-a/)).toBeInTheDocument();
       });
 
       const deleteButton = screen.getByLabelText(/Delete alert for vault-a/);
@@ -67,13 +68,13 @@ describe("AlertsModal - Optimistic Update Rollback", () => {
 
       // Alert should be removed optimistically
       await waitFor(() => {
-        expect(screen.queryByText("vault-a")).not.toBeInTheDocument();
+        expect(screen.queryByLabelText(/Delete alert for vault-a/)).not.toBeInTheDocument();
       });
     });
 
     it("should rollback alert when deletion fails", async () => {
       const deleteError = new Error("Network error");
-      (alertsApi.deleteAlert as jest.Mock).mockRejectedValueOnce(deleteError);
+      (alertsApi.deleteAlert as any).mockRejectedValueOnce(deleteError);
 
       render(
         <AlertsModal
@@ -85,25 +86,25 @@ describe("AlertsModal - Optimistic Update Rollback", () => {
       );
 
       await waitFor(() => {
-        expect(screen.getByText("vault-a")).toBeInTheDocument();
+        expect(screen.getByLabelText(/Delete alert for vault-a/)).toBeInTheDocument();
       });
 
       const deleteButton = screen.getByLabelText(/Delete alert for vault-a/);
       fireEvent.click(deleteButton);
 
       // Alert should be removed optimistically
-      expect(screen.queryByText("vault-a")).not.toBeInTheDocument();
+      expect(screen.queryByLabelText(/Delete alert for vault-a/)).not.toBeInTheDocument();
 
       // Then rollback when delete fails
       await waitFor(() => {
-        expect(screen.getByText("vault-a")).toBeInTheDocument();
+        expect(screen.getByLabelText(/Delete alert for vault-a/)).toBeInTheDocument();
         expect(screen.getByText("Network error")).toBeInTheDocument();
       });
     });
 
     it("should show retry button for failed deletion", async () => {
       const deleteError = new Error("Failed to delete");
-      (alertsApi.deleteAlert as jest.Mock)
+      (alertsApi.deleteAlert as any)
         .mockRejectedValueOnce(deleteError)
         .mockResolvedValueOnce(undefined);
 
@@ -117,7 +118,7 @@ describe("AlertsModal - Optimistic Update Rollback", () => {
       );
 
       await waitFor(() => {
-        expect(screen.getByText("vault-a")).toBeInTheDocument();
+        expect(screen.getByLabelText(/Delete alert for vault-a/)).toBeInTheDocument();
       });
 
       const deleteButton = screen.getByLabelText(/Delete alert for vault-a/);
@@ -133,12 +134,12 @@ describe("AlertsModal - Optimistic Update Rollback", () => {
       fireEvent.click(retryButton);
 
       await waitFor(() => {
-        expect(screen.queryByText("vault-a")).not.toBeInTheDocument();
+        expect(screen.queryByLabelText(/Delete alert for vault-a/)).not.toBeInTheDocument();
       });
     });
 
     it("should clear delete error after retry succeeds", async () => {
-      (alertsApi.deleteAlert as jest.Mock)
+      (alertsApi.deleteAlert as any)
         .mockRejectedValueOnce(new Error("First attempt failed"))
         .mockResolvedValueOnce(undefined);
 
@@ -152,7 +153,7 @@ describe("AlertsModal - Optimistic Update Rollback", () => {
       );
 
       await waitFor(() => {
-        expect(screen.getByText("vault-a")).toBeInTheDocument();
+        expect(screen.getByLabelText(/Delete alert for vault-a/)).toBeInTheDocument();
       });
 
       // Delete fails
@@ -169,7 +170,7 @@ describe("AlertsModal - Optimistic Update Rollback", () => {
 
       await waitFor(() => {
         expect(screen.queryByText("First attempt failed")).not.toBeInTheDocument();
-        expect(screen.queryByText("vault-a")).not.toBeInTheDocument();
+        expect(screen.queryByLabelText(/Delete alert for vault-a/)).not.toBeInTheDocument();
       });
     });
   });
@@ -177,7 +178,7 @@ describe("AlertsModal - Optimistic Update Rollback", () => {
   describe("Digest Preferences Save - Optimistic Rollback", () => {
     it("should show digest preferences error when save fails", async () => {
       const saveError = new Error("Save failed");
-      (alertsApi.saveDigestPreference as jest.Mock).mockRejectedValueOnce(saveError);
+      (alertsApi.saveDigestPreference as any).mockRejectedValueOnce(saveError);
 
       render(
         <AlertsModal
@@ -205,7 +206,7 @@ describe("AlertsModal - Optimistic Update Rollback", () => {
 
     it("should show retry button for failed digest preferences save", async () => {
       const saveError = new Error("Network error");
-      (alertsApi.saveDigestPreference as jest.Mock)
+      (alertsApi.saveDigestPreference as any)
         .mockRejectedValueOnce(saveError)
         .mockResolvedValueOnce(mockDigestPreferences);
 
@@ -242,7 +243,7 @@ describe("AlertsModal - Optimistic Update Rollback", () => {
     });
 
     it("should preserve user changes when save fails", async () => {
-      (alertsApi.saveDigestPreference as jest.Mock).mockRejectedValueOnce(
+      (alertsApi.saveDigestPreference as any).mockRejectedValueOnce(
         new Error("Save failed")
       );
 
@@ -281,7 +282,7 @@ describe("AlertsModal - Optimistic Update Rollback", () => {
         watchedVaultIds: ["vault-a", "vault-b"],
       };
 
-      (alertsApi.saveDigestPreference as jest.Mock)
+      (alertsApi.saveDigestPreference as any)
         .mockRejectedValueOnce(new Error("First attempt failed"))
         .mockResolvedValueOnce(updatedPreferences);
 
@@ -323,7 +324,7 @@ describe("AlertsModal - Optimistic Update Rollback", () => {
 
   describe("Error Message UX", () => {
     it("should show actionable error messages with icons", async () => {
-      (alertsApi.deleteAlert as jest.Mock).mockRejectedValueOnce(
+      (alertsApi.deleteAlert as any).mockRejectedValueOnce(
         new Error("Failed to delete alert")
       );
 
@@ -337,7 +338,7 @@ describe("AlertsModal - Optimistic Update Rollback", () => {
       );
 
       await waitFor(() => {
-        expect(screen.getByText("vault-a")).toBeInTheDocument();
+        expect(screen.getByLabelText(/Delete alert for vault-a/)).toBeInTheDocument();
       });
 
       const deleteButton = screen.getByLabelText(/Delete alert for vault-a/);
@@ -351,7 +352,7 @@ describe("AlertsModal - Optimistic Update Rollback", () => {
     });
 
     it("should display generic error message for unknown errors", async () => {
-      (alertsApi.deleteAlert as jest.Mock).mockRejectedValueOnce("Unknown error");
+      (alertsApi.deleteAlert as any).mockRejectedValueOnce("Unknown error");
 
       render(
         <AlertsModal
@@ -363,7 +364,7 @@ describe("AlertsModal - Optimistic Update Rollback", () => {
       );
 
       await waitFor(() => {
-        expect(screen.getByText("vault-a")).toBeInTheDocument();
+        expect(screen.getByLabelText(/Delete alert for vault-a/)).toBeInTheDocument();
       });
 
       const deleteButton = screen.getByLabelText(/Delete alert for vault-a/);

@@ -377,6 +377,80 @@ export async function rebindAlertPreferenceContext(
   return (await res.json()) as AlertPreferenceRebindResult;
 }
 
+export async function createAlertPreferenceOperation(payload: {
+  walletAddress: string;
+  vaultId: string;
+  preferences: AlertPreferences;
+  operationIdentity?: string;
+  autoExecute?: boolean;
+  reason?: string;
+}): Promise<{ operation: any; preferences: AlertPreferences; replayed: boolean }> {
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  const opId = payload.operationIdentity;
+  if (opId) {
+    headers["X-Operation-Identity"] = opId;
+    headers["Idempotency-Key"] = opId;
+  }
+  const res = await fetch(`${ALERTS_BASE}/preferences/operations`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) {
+    const body = (await res.json().catch(() => ({}))) as { error?: string };
+    throw new Error(body.error ?? "Failed to create alert preference operation");
+  }
+  return res.json();
+}
+
+export async function getAlertPreferenceOperation(
+  operationId: string,
+): Promise<{ operation: any }> {
+  const res = await fetch(
+    `${ALERTS_BASE}/preferences/operations/${encodeURIComponent(operationId)}`,
+  );
+  if (!res.ok) throw new Error("Failed to get alert preference operation");
+  return res.json();
+}
+
+export async function resumeAlertPreferenceOperation(
+  operationId: string,
+  reason?: string,
+): Promise<{ operation: any; preferences: AlertPreferences }> {
+  const res = await fetch(
+    `${ALERTS_BASE}/preferences/operations/${encodeURIComponent(operationId)}/resume`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ reason }),
+    },
+  );
+  if (!res.ok) {
+    const body = (await res.json().catch(() => ({}))) as { error?: string };
+    throw new Error(body.error ?? "Failed to resume alert preference operation");
+  }
+  return res.json();
+}
+
+export async function rollbackAlertPreferenceOperation(
+  operationId: string,
+  reason?: string,
+): Promise<{ operation: any; preferences: AlertPreferences | null }> {
+  const res = await fetch(
+    `${ALERTS_BASE}/preferences/operations/${encodeURIComponent(operationId)}/rollback`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ reason }),
+    },
+  );
+  if (!res.ok) {
+    const body = (await res.json().catch(() => ({}))) as { error?: string };
+    throw new Error(body.error ?? "Failed to rollback alert preference operation");
+  }
+  return res.json();
+}
+
 export async function fetchDigestPreference(
   walletAddress: string,
 ): Promise<WatchlistDigestPreference> {

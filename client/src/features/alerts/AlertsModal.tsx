@@ -33,6 +33,14 @@ import {
   saveDigestPreference,
 } from "./alertsApi";
 import { useOptimisticUpdate } from "../../hooks/useOptimisticUpdate";
+import {
+  savePreferenceCheckpoint,
+  getPreferenceCheckpoint,
+  clearPreferenceCheckpoint,
+  canResumeCheckpoint,
+  canRollbackCheckpoint,
+  type ClientAlertPreferenceCheckpoint,
+} from "./alertPreferenceOperation";
 
 type ChannelOverride = "inherit" | "on" | "off";
 
@@ -338,6 +346,19 @@ export default function AlertsModal({
     }
     const operationIdentity = alertOperationIdRef.current;
 
+    const checkpoint: ClientAlertPreferenceCheckpoint = {
+      operationId: operationIdentity,
+      walletAddress,
+      vaultId: form.vaultId,
+      targetPreferences: preferences,
+      previousPreferences: null,
+      status: "submitting",
+      attemptCount: 1,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    };
+    savePreferenceCheckpoint(checkpoint);
+
     setSubmitting(true);
     try {
       const created = await createAlert({
@@ -351,6 +372,7 @@ export default function AlertsModal({
       });
 
       alertOperationIdRef.current = null;
+      clearPreferenceCheckpoint(walletAddress, form.vaultId);
 
       window.localStorage.setItem(
         PREFS_STORAGE_KEY,
@@ -375,6 +397,11 @@ export default function AlertsModal({
       );
       setForm(DEFAULT_FORM);
     } catch (err) {
+      checkpoint.status = "failed";
+      checkpoint.error = err instanceof Error ? err.message : "Failed to create alert";
+      checkpoint.updatedAt = Date.now();
+      savePreferenceCheckpoint(checkpoint);
+
       setFormError(
         err instanceof Error ? err.message : "Failed to create alert",
       );
