@@ -9,6 +9,7 @@ import type {
   ApiRequestOptions,
   ApiVaultData,
   HistoricalDataPoint,
+  SdkEndpointConfig,
 } from "../types";
 import {
   ApiCancelledError,
@@ -18,7 +19,27 @@ import {
   ApiTimeoutError,
   ApiRateLimitError,
   ApiServerError,
+  SdkEndpointError,
 } from "../errors";
+import {
+  validateEndpointConfig,
+  normalizeEndpointUrl,
+  resolveSafeDiagnostics,
+} from "../endpoint";
+import { StaleSimulationConfigError } from "../errors";
+import {
+  captureSimulationConfig,
+  computeSimulationConfigFingerprint,
+  resolveFingerprint,
+  type SimulationConfig,
+  type SimulationConfigSnapshot,
+  type SimulationConfigFingerprint,
+  type StaleSimulationConfigPolicy,
+  type RunWithSimulationConfigOptions,
+  type SimulationConfigRunResult,
+  runWithSimulationConfig,
+} from "../simulationConfig";
+import { buildSdkFailureDiagnostics } from "../diagnostics";
 
 export interface ApiRegisteredEndpoint {
   method: "GET" | "POST" | "PUT" | "DELETE" | "PATCH";
@@ -41,14 +62,37 @@ export interface DepositSimulationParams {
   strategyId: string;
   amount: number;
   token: string;
+  /** Expected configuration fingerprint. When provided, mismatched snapshots are rejected or refreshed. */
+  expectedConfigFingerprint?: string;
+  /** Optional immutable configuration snapshot to validate against. */
+  configSnapshot?: SimulationConfigSnapshot;
+  /** Policy when stale configuration is detected: "reject" (default) or "refresh". */
+  onStale?: StaleSimulationConfigPolicy;
+  /** Maximum simulation requests when stale configuration is refreshed (default 3). */
+  maxAttempts?: number;
+  /** Caller state or balance snapshot to preserve upon validation or execution failure. */
+  stateSnapshot?: unknown;
 }
 
 const DEFAULT_TIMEOUT_MS = 15_000;
 const DEFAULT_MAX_RETRIES = 2;
 const DEFAULT_RETRY_DELAY_MS = 250;
+const DEFAULT_SIMULATION_MAX_ATTEMPTS = 3;
+const MAX_SIMULATION_ATTEMPTS = 10;
 const DEFAULT_RETRYABLE_STATUSES = [408, 429, 500, 502, 503, 504];
 const DEFAULT_CACHE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 const DEFAULT_MAX_PAGES = 50;
+
+function isApiCacheEntry(value: unknown): value is ApiCacheEntry<unknown> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const entry = value as { data?: unknown; fetchedAt?: unknown };
+  return (
+    Object.prototype.hasOwnProperty.call(entry, "data") &&
+    typeof entry.fetchedAt === "number" &&
+    Number.isFinite(entry.fetchedAt) &&
+    entry.fetchedAt >= 0
+  );
+}
 
 /**
  * Simple in-process cache store for environments without durable storage.
@@ -61,7 +105,8 @@ export function createMemoryCacheStore(): ApiCacheStore {
       const raw = map.get(key);
       if (!raw) return null;
       try {
-        return JSON.parse(raw) as ApiCacheEntry<T>;
+        const parsed: unknown = JSON.parse(raw);
+        return isApiCacheEntry(parsed) ? (parsed as ApiCacheEntry<T>) : null;
       } catch {
         return null;
       }
@@ -91,6 +136,47 @@ function createAbortError(): Error {
   const err = new Error("The operation was aborted");
   err.name = "AbortError";
   return err;
+}
+
+function validateDepositSimulationParams(params: DepositSimulationParams): void {
+  const errors: string[] = [];
+  if (!params || typeof params !== "object") {
+    errors.push("params must be an object");
+  } else {
+    if (typeof params.strategyId !== "string" || params.strategyId.trim() === "") {
+      errors.push("strategyId must be a non-empty string");
+    }
+    if (typeof params.token !== "string" || params.token.trim() === "") {
+      errors.push("token must be a non-empty string");
+    }
+    if (typeof params.amount !== "number" || !Number.isFinite(params.amount) || params.amount <= 0) {
+      errors.push("amount must be a positive finite number");
+    }
+    if (
+      params.maxAttempts !== undefined &&
+      (typeof params.maxAttempts !== "number" ||
+        !Number.isFinite(params.maxAttempts) ||
+        !Number.isInteger(params.maxAttempts) ||
+        params.maxAttempts < 1)
+    ) {
+      errors.push("maxAttempts must be a positive integer");
+    }
+  }
+
+  if (errors.length > 0) {
+    throw new SdkEndpointError(
+      "Invalid simulation parameters.",
+      buildSdkFailureDiagnostics("VALIDATION_FAILED", {
+        stage: "request-validation",
+        summary: "Simulation input was rejected before any request or state change.",
+        remediation: "Provide valid simulation parameters and retry; existing state and balances were preserved.",
+        retryable: false,
+      }),
+      errors,
+      "simulate",
+      false,
+    );
+  }
 }
 
 function withQueryParam(path: string, key: string, value: string): string {
@@ -176,13 +262,90 @@ export class ApiClient {
   private readonly maxRetries: number;
   private readonly retryDelayMs: number;
   private readonly retryableStatuses: Set<number>;
+  private simulationConfigSnapshot: SimulationConfigSnapshot | null = null;
+  private simulationConfigReader?: () => SimulationConfig;
 
   constructor(config: ApiConfig) {
-    this.config = config;
+    const validation = validateEndpointConfig(config);
+    if (!validation.valid) {
+      throw new SdkEndpointError(
+        `Invalid API client configuration: ${validation.errors.join("; ")}`,
+        validation.diagnostics,
+        validation.errors,
+        "simulate",
+        false
+      );
+    }
+    this.config = {
+      ...config,
+      baseUrl: normalizeEndpointUrl(config.baseUrl),
+    };
     this.timeoutMs = config.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     this.maxRetries = config.maxRetries ?? DEFAULT_MAX_RETRIES;
     this.retryDelayMs = config.retryDelayMs ?? DEFAULT_RETRY_DELAY_MS;
     this.retryableStatuses = new Set(config.retryableStatuses ?? DEFAULT_RETRYABLE_STATUSES);
+  }
+
+  /**
+   * Updates endpoint configuration dynamically.
+   * If validation fails, throws SdkEndpointError and leaves existing configuration
+   * and state unchanged.
+   */
+  public configureEndpoint(config: Partial<SdkEndpointConfig>): void {
+    const candidate = { ...this.config, ...config };
+    const validation = validateEndpointConfig(candidate);
+    if (!validation.valid) {
+      throw new SdkEndpointError(
+        `Invalid endpoint configuration update: ${validation.errors.join("; ")}`,
+        validation.diagnostics,
+        validation.errors,
+        "simulate",
+        false
+      );
+    }
+    this.config = {
+      ...candidate,
+      baseUrl: normalizeEndpointUrl(candidate.baseUrl),
+    };
+  }
+
+  public getConfig(): Readonly<ApiConfig> {
+    return { ...this.config };
+  }
+
+  public setSimulationConfig(config: SimulationConfig): SimulationConfigSnapshot {
+    this.simulationConfigSnapshot = captureSimulationConfig(config);
+    return this.simulationConfigSnapshot;
+  }
+
+  public setSimulationConfigReader(reader: () => SimulationConfig): void {
+    this.simulationConfigReader = reader;
+  }
+
+  public getSimulationConfig(): SimulationConfigSnapshot | null {
+    if (this.simulationConfigReader) {
+      return captureSimulationConfig(this.simulationConfigReader());
+    }
+    return this.simulationConfigSnapshot;
+  }
+
+  public getSimulationConfigFingerprint(): string | null {
+    const snapshot = this.getSimulationConfig();
+    return snapshot ? snapshot.fingerprint : null;
+  }
+
+  public invalidateSimulationConfig(): void {
+    this.simulationConfigSnapshot = null;
+  }
+
+  /**
+   * Run simulation work under an immutable configuration snapshot,
+   * with automatic staleness detection and optional refresh retry.
+   */
+  public async simulateWithConfig<TResult, TState = unknown>(
+    options: RunWithSimulationConfigOptions<TResult, TState>
+  ): Promise<SimulationConfigRunResult<TResult, TState>> {
+    return runWithSimulationConfig(options);
   }
 
   public getRegisteredEndpoints(): ApiRegisteredEndpoint[] {
@@ -237,6 +400,17 @@ export class ApiClient {
 
         if (!response.ok) {
           const retryable = this.retryableStatuses.has(response.status);
+
+          let responseBody: unknown = undefined;
+          try {
+            responseBody = await response.json();
+          } catch {
+            // body is empty or non-JSON; safe diagnostics will safely handle insufficient context
+          }
+
+          const isValidation = response.status >= 400 && response.status < 500 && response.status !== 408 && response.status !== 429;
+          const fallbackStage = isValidation ? "request-validation" : "network-dispatch";
+          const diagnostics = resolveSafeDiagnostics(responseBody, fallbackStage, false);
           
           let err: Error;
           if (response.status === 429) {
@@ -246,11 +420,11 @@ export class ApiClient {
               const secs = Number(retryAfterHeader);
               retryAfterMs = !isNaN(secs) ? secs * 1000 : undefined;
             }
-            err = new ApiRateLimitError(path, retryAfterMs, response.statusText);
+            err = new ApiRateLimitError(path, retryAfterMs, response.statusText, diagnostics);
           } else if (response.status >= 500 && response.status < 600) {
-            err = new ApiServerError(path, response.status, response.statusText);
+            err = new ApiServerError(path, response.status, response.statusText, diagnostics);
           } else {
-            err = new ApiHttpError(path, response.status, response.statusText, retryable);
+            err = new ApiHttpError(path, response.status, response.statusText, retryable, diagnostics);
           }
 
           if (mayRetry && retryable && attempt < this.maxRetries) {
@@ -443,15 +617,97 @@ export class ApiClient {
     params: DepositSimulationParams,
     requestOptions?: ApiRequestOptions
   ): Promise<any> {
-    return this.request<any>(
-      "/api/simulator/deposit",
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(params),
-      },
-      { retrySafe: requestOptions?.retrySafe ?? true, signal: requestOptions?.signal }
-    );
+    validateDepositSimulationParams(params);
+    let expectedFingerprint =
+      params.expectedConfigFingerprint ??
+      (params.configSnapshot ? params.configSnapshot.fingerprint : undefined);
+    const refreshStaleConfig = params.onStale === "refresh";
+    const requestedAttempts = params.maxAttempts ?? DEFAULT_SIMULATION_MAX_ATTEMPTS;
+    const maxAttempts = refreshStaleConfig
+      ? Math.min(
+          MAX_SIMULATION_ATTEMPTS,
+          Math.max(
+            1,
+            Number.isFinite(requestedAttempts)
+              ? Math.floor(requestedAttempts)
+              : DEFAULT_SIMULATION_MAX_ATTEMPTS
+          )
+        )
+      : 1;
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      let liveSnapshot = this.getSimulationConfig();
+
+      if (expectedFingerprint && liveSnapshot && expectedFingerprint !== liveSnapshot.fingerprint) {
+        if (refreshStaleConfig && this.simulationConfigReader) {
+          liveSnapshot = captureSimulationConfig(this.simulationConfigReader());
+          this.simulationConfigSnapshot = liveSnapshot;
+          expectedFingerprint = liveSnapshot.fingerprint;
+        } else {
+          throw new StaleSimulationConfigError(
+            `Simulation configuration snapshot is stale (expected ${expectedFingerprint}, current ${liveSnapshot.fingerprint})`,
+            {
+              expectedFingerprint,
+              actualFingerprint: liveSnapshot.fingerprint,
+              attempts: attempt,
+              statePreserved: true,
+              preservedState: params.stateSnapshot,
+            }
+          );
+        }
+      }
+
+      const response = await this.request<any>(
+        "/api/simulator/deposit",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            strategyId: params.strategyId,
+            amount: params.amount,
+            token: params.token,
+          }),
+        },
+        { retrySafe: requestOptions?.retrySafe ?? true, signal: requestOptions?.signal }
+      );
+
+      // Verify the configuration hasn't drifted while the request was in flight
+      if (this.simulationConfigReader && liveSnapshot) {
+        const afterLiveSnapshot = captureSimulationConfig(this.simulationConfigReader());
+        if (afterLiveSnapshot.fingerprint !== liveSnapshot.fingerprint) {
+          if (refreshStaleConfig && attempt < maxAttempts) {
+            this.simulationConfigSnapshot = afterLiveSnapshot;
+            expectedFingerprint = afterLiveSnapshot.fingerprint;
+            continue;
+          }
+
+          throw new StaleSimulationConfigError(
+            `Simulation configuration drifted during request execution (snapshot ${liveSnapshot.fingerprint}, current ${afterLiveSnapshot.fingerprint})`,
+            {
+              expectedFingerprint: liveSnapshot.fingerprint,
+              actualFingerprint: afterLiveSnapshot.fingerprint,
+              attempts: attempt,
+              statePreserved: true,
+              preservedState: params.stateSnapshot,
+            }
+          );
+        }
+      }
+
+      return {
+        ...response,
+        configFingerprint: liveSnapshot ? liveSnapshot.fingerprint : expectedFingerprint,
+        simulationAttempts: attempt,
+      };
+    }
+
+    throw new StaleSimulationConfigError("Simulation configuration remained stale after retries", {
+      expectedFingerprint: expectedFingerprint ?? null,
+      actualFingerprint: this.getSimulationConfigFingerprint(),
+      attempts: maxAttempts,
+      statePreserved: true,
+      preservedState: params.stateSnapshot,
+    });
   }
 
   async getZapSupportedAssets(

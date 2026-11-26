@@ -35,7 +35,7 @@ import {
 
 // ── Configuration ───────────────────────────────────────────────────────
 
-export const RPC_URL = import.meta.env.VITE_SOROBAN_RPC_URL ?? "https://soroban-testnet.stellar.org";
+export const RPC_URL = getRpcUrl();
 export const RPC_FALLBACK_URLS: string[] = (
   (import.meta.env.VITE_SOROBAN_RPC_FALLBACK_URLS as string | undefined) ?? ""
 )
@@ -58,9 +58,6 @@ export function rotateToFallbackRpc(): string {
   return getActiveRpcUrl();
 }
 
-export const NETWORK_PASSPHRASE =
-  import.meta.env.VITE_NETWORK_PASSPHRASE ?? "Test SDF Network ; September 2015";
-export const RPC_URL = getRpcUrl();
 export const NETWORK_PASSPHRASE = getNetworkPassphrase();
 
 const POLL_INTERVAL_MS = 2_000;
@@ -88,6 +85,16 @@ export interface TxResult {
    * events (#1339). Prefer it over parsing `error` when rendering a failure.
    */
   panic?: DecodedContractPanic;
+  /**
+   * The transaction was accepted for submission but not seen on the ledger
+   * before polling gave up (#1891). It may still land: do not resubmit.
+   */
+  pending?: boolean;
+  /**
+   * The RPC node refused the transaction at submission, so it was never
+   * included and moved no funds (#1891).
+   */
+  rejected?: boolean;
 }
 
 /** Placeholder code the SDK uses when no contract error code was recognized. */
@@ -289,23 +296,11 @@ async function signWithFreighter(xdr: string, networkPassphrase: string): Promis
   return signedXdr;
 }
 
-async function submitAndPoll(signedXdr: string, onPhase?: TxPhaseCallback): Promise<TxResult> {
-  onPhase?.("submitting");
-  const server = getServer();
-  const tx = StellarSdk.TransactionBuilder.fromXDR(signedXdr, NETWORK_PASSPHRASE);
-  const sendResponse = await server.sendTransaction(tx);
-
-  if (sendResponse.status === "ERROR") {
-    const parsed = parseContractError(
-      new Error(`Submission rejected: ${sendResponse.errorResult?.toXDR("base64") ?? "unknown"}`)
-    );
-    return {
-      success: false,
-      error: parsed.message,
-    };
-  }
-
-  const hash = sendResponse.hash;
+async function pollSubmittedHash(
+  server: StellarSdk.rpc.Server,
+  hash: string,
+  onPhase?: TxPhaseCallback,
+): Promise<TxResult> {
   const deadline = Date.now() + POLL_TIMEOUT_MS;
   let result = await server.getTransaction(hash);
 
@@ -327,15 +322,74 @@ async function submitAndPoll(signedXdr: string, onPhase?: TxPhaseCallback): Prom
     return { success: false, hash, error: parsed.message };
   }
 
-  return { success: false, hash, error: "Transaction timed out" };
+  return { success: false, hash, error: "Transaction timed out", pending: true };
+}
+
+async function submitAndPoll(
+  signedXdr: string,
+  onPhase?: TxPhaseCallback,
+  onSubmitted?: (hash: string) => void,
+): Promise<TxResult> {
+  onPhase?.("submitting");
+  const server = getServer();
+  const tx = StellarSdk.TransactionBuilder.fromXDR(signedXdr, NETWORK_PASSPHRASE);
+  const sendResponse = await server.sendTransaction(tx);
+
+  if (sendResponse.status === "ERROR") {
+    const parsed = parseContractError(
+      new Error(`Submission rejected: ${sendResponse.errorResult?.toXDR("base64") ?? "unknown"}`)
+    );
+    return {
+      success: false,
+      error: parsed.message,
+      rejected: true,
+    };
+  }
+
+  const hash = sendResponse.hash;
+  // Persist the hash before polling so an interrupted poll can be resumed
+  // without submitting the same governance action again (#1899).
+  onSubmitted?.(hash);
+  return pollSubmittedHash(server, hash, onPhase);
 }
 
 export async function submitSignedXdrAndPoll(
   signedXdr: string,
   onPhase?: TxPhaseCallback,
+  onSubmitted?: (hash: string) => void,
 ): Promise<TxResult> {
   try {
-    const result = await submitAndPoll(signedXdr, onPhase);
+    const result = await submitAndPoll(signedXdr, onPhase, onSubmitted);
+    onPhase?.(result.success ? "success" : "failure");
+    return result;
+  } catch (err) {
+    onPhase?.("failure");
+    const parsed = parseContractError(err);
+    return {
+      success: false,
+      error: parsed.message,
+    };
+  }
+}
+
+/**
+ * Resume a governance execution that already reached the network. Polls the
+ * saved hash only; never resubmits the transaction.
+ */
+export async function resumeSubmittedTransaction(
+  hash: string,
+  onPhase?: TxPhaseCallback,
+): Promise<TxResult> {
+  const normalized = hash.trim();
+  if (!/^[0-9a-f]{64}$/i.test(normalized)) {
+    return {
+      success: false,
+      error: "Saved transaction hash is invalid. Roll back the attempt only after checking the network.",
+    };
+  }
+
+  try {
+    const result = await pollSubmittedHash(getServer(), normalized, onPhase);
     onPhase?.(result.success ? "success" : "failure");
     return result;
   } catch (err) {
@@ -426,6 +480,21 @@ export async function executeContractCallOn(
   }
 }
 
+/**
+ * Submission progress for a zap deposit (#1891). `onSigned` receives the
+ * transaction hash after the wallet signs and before anything is sent, so an
+ * interrupted submission can always be looked up instead of resubmitted.
+ */
+export interface ZapSubmissionHooks {
+  onSigned?: (hash: string) => void;
+  onSubmitted?: (hash: string) => void;
+}
+
+/** Hash of a signed transaction envelope, as the ledger will record it. */
+export function signedTransactionHash(signedXdr: string): string {
+  return StellarSdk.TransactionBuilder.fromXDR(signedXdr, NETWORK_PASSPHRASE).hash().toString("hex");
+}
+
 export async function executeZapContractCall(
   sourcePublicKey: string,
   method: string,
@@ -433,6 +502,7 @@ export async function executeZapContractCall(
   onPhase?: TxPhaseCallback,
   useFeeBump: boolean = false,
   txSettings?: TxSettings,
+  hooks?: ZapSubmissionHooks,
 ): Promise<TxResult> {
   try {
     const xdr = await buildContractCallOn(getZapContract(), sourcePublicKey, method, args, onPhase, txSettings, "zap");
@@ -452,12 +522,37 @@ export async function executeZapContractCall(
       finalXdr = feeBumpXdr;
     }
 
-    const result = await submitAndPoll(finalXdr, onPhase);
+    hooks?.onSigned?.(signedTransactionHash(finalXdr));
+    const result = await submitAndPoll(finalXdr, onPhase, hooks?.onSubmitted);
     onPhase?.(result.success ? "success" : "failure");
     return result;
   } catch (err) {
     onPhase?.("failure");
     return failedTxResult(err);
+  }
+}
+
+/**
+ * What the ledger says about a transaction hash (#1891). Returns "unknown"
+ * when the RPC cannot be reached, so callers never treat silence as absence.
+ */
+export async function getLedgerTransactionStatus(
+  hash: string,
+): Promise<"success" | "failed" | "not_found" | "unknown"> {
+  try {
+    const result = await getServer().getTransaction(hash);
+    switch (result.status) {
+      case StellarSdk.rpc.Api.GetTransactionStatus.SUCCESS:
+        return "success";
+      case StellarSdk.rpc.Api.GetTransactionStatus.FAILED:
+        return "failed";
+      case StellarSdk.rpc.Api.GetTransactionStatus.NOT_FOUND:
+        return "not_found";
+      default:
+        return "unknown";
+    }
+  } catch {
+    return "unknown";
   }
 }
 
@@ -485,6 +580,7 @@ export async function zapDeposit(
   onPhase?: TxPhaseCallback,
   useFeeBump: boolean = false,
   txSettings?: TxSettings,
+  hooks?: ZapSubmissionHooks,
 ): Promise<TxResult> {
   return executeZapContractCall(
     userAddress,
@@ -504,6 +600,7 @@ export async function zapDeposit(
     onPhase,
     useFeeBump,
     txSettings,
+    hooks,
   );
 }
 

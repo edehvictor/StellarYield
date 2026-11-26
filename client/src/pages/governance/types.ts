@@ -8,8 +8,12 @@ export interface SignerQuorumProgress {
   perSigner: { address: string; signed: boolean }[];
 }
 
+import type { GovernanceExecutionState } from "./governanceOperation";
+
 export interface PendingTransaction {
   id: string;
+  /** Durable execution checkpoint; survives reloads so retries can resume safely (#1899). */
+  operation?: GovernanceExecutionState;
   description: string;
   method: string;
   args: string[];

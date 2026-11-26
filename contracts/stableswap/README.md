@@ -9,12 +9,59 @@
 - `initialize(admin, token0, token1, lp_token, amp_coeff, base_fee, fee_multiplier)`
 - `get_pool_context()` returns the pool's network, deployment and version context
 - `migrate()` (admin only) binds a legacy pool to the live network and current context version
-- `add_liquidity(sender, amount0, amount1, min_mint_amount, expected_context)`
-- `remove_liquidity(sender, lp_amount, min_amount0, min_amount1, expected_context)`
-- `swap(sender, token_in, amount_in, min_out, expected_context)`
+- `add_liquidity(sender, amount0, amount1, min_mint_amount, expected_context, operation_id)`
+- `remove_liquidity(sender, lp_amount, min_amount0, min_amount1, expected_context, operation_id)`
+- `swap(sender, token_in, amount_in, min_out, expected_context, operation_id)`
+- `is_operation_consumed(sender, kind, operation_id)` (`kind` is `add_liq`, `rem_liq` or `swap`)
 - pool views and pricing helpers
+- `preview_swap(sender, token_in, amount_in, min_out, expected_context, operation_id) -> Diagnostic` (read-only dry run)
+- `preview_add_liquidity(sender, amount0, amount1, min_mint_amount, expected_context, operation_id) -> Diagnostic` (read-only dry run)
+- `preview_remove_liquidity(sender, lp_amount, min_amount0, min_amount1, expected_context, operation_id) -> Diagnostic` (read-only dry run)
+
+## Diagnostics
+
+`add_liquidity`, `remove_liquidity` and `swap` validate and compute everything
+**before** any token transfer or storage write. A failed call therefore leaves
+reserves, LP supply, LP balances, token balances and the operation id unchanged,
+and can be retried with corrected arguments.
+
+The `preview_*` calls run exactly the same validation (they share the planner
+with the real call) without requiring auth or mutating state, and return:
+
+```text
+Diagnostic { ok: bool, stage: FailureStage, error_code: u32, remediation: RemediationPath }
+```
+
+| `FailureStage`    | Meaning                                              |
+| ----------------- | ---------------------------------------------------- |
+| `None`            | No failure                                           |
+| `PoolState`       | Not initialized / no usable liquidity                |
+| `Context`         | Network, deployment or version context mismatch      |
+| `Replay`          | `operation_id` already consumed                      |
+| `InputValidation` | Bad amount, unknown token or LP amount above balance |
+| `FeeComputation`  | Dynamic fee computation failed                       |
+| `Invariant`       | D / y or share math failed or overflowed             |
+| `Slippage`        | Result below the caller's minimum                    |
+
+| `RemediationPath` | Suggested action                                     |
+| ----------------- | ---------------------------------------------------- |
+| `None`            | Nothing to do                                        |
+| `InitializePool`  | Initialize the pool first                            |
+| `FixInput`        | Correct arguments and retry                          |
+| `AddLiquidity`    | Add liquidity or use a smaller size                  |
+| `ReduceAmount`    | Reduce the amount and retry                          |
+| `RelaxSlippage`   | Loosen `min_out` / `min_mint_amount` / `min_amount*` |
+| `ContactAdmin`    | Not caller-fixable                                   |
+| `RefreshContext`  | Re-read `get_pool_context()` and retry               |
+| `CheckOperation`  | Check `is_operation_consumed` before resubmitting    |
+
+Diagnostics are privacy-safe: they contain only these enums and the numeric
+`StableSwapError` code - never addresses, amounts, reserves or balances.
 
 ## Events
+
+Every successful mutating call also emits `("op",) -> (sender, kind, operation_id)`
+so a client can match a landed transaction to the submission it retried.
 
 Init, liquidity, swap (including fee output) and `migrate` events. `migrate`
 publishes topics `(migrate,)` with the payload `(admin, network_id, version)`.
@@ -37,6 +84,7 @@ Existing init, liquidity and swap event shapes are unchanged.
 - `WrongNetwork` (12): Live ledger or the caller's context belongs to another network than the pool's bound state, or `migrate` would re-bind it.
 - `WrongContract` (13): The caller's context names a different pool deployment.
 - `WrongVersion` (14): Stored state or the caller's context is not at the supported pool context version.
+- `DuplicateOperation` (15): `operation_id` was already consumed by a successful call of the same kind from the same sender.
 
 ## Pool Context Binding
 
@@ -78,12 +126,17 @@ migration can refresh it with `get_pool_context()` and retry the same operation.
 - **Boundary Validation**: Untrusted fields (`token0`, `token1`, `lp_token`, `amp_coeff`, `base_fee`, `fee_multiplier`, amounts, and slippage bounds) are validated at contract entry points before state or balance mutation.
 - **State & Balance Preservation**: Token transfers and storage mutations occur only after all validations, reserve math, and slippage checks succeed. When validation or execution fails, existing state, pool reserves, and user balances remain strictly untouched.
 - **Safe Retry**: Because failures leave state and balances unmodified, callers may safely retry operations immediately with adjusted slippage bounds or valid parameters without risk of fund lockup or state corruption.
+- **Operation Identity**: `add_liquidity`, `remove_liquidity` and `swap` take a caller-generated `operation_id: BytesN<32>`. The contract stores a receipt keyed by `sha256("stellaryield_stableswap_op_v1" || xdr(contract, sender, kind, operation_id))` only after the call's effect is applied, so:
+  - resubmitting a call that already succeeded (for example after a lost response or a wallet double-submit) fails with `DuplicateOperation` and moves nothing;
+  - a call that failed (including a context mismatch) never consumes its id, so the same id can be retried with fixed parameters or a refreshed context;
+  - ids are scoped per deployment, sender and operation kind, so one caller cannot burn another's id.
+  Receipts are kept for about 30 days of ledgers (TTL extended to 518 400 ledgers). Use a fresh random id for every new intent, and reuse it only when retrying that same intent.
 - **Solver Hardening**: Newton-Raphson solvers (`compute_d` and `compute_y`) validate bounds, guard against non-positive intermediate reserves and zero denominators, and explicitly fail with `MathOverflow` rather than returning unverified approximations on non-convergence.
 
 ## Storage Model
 
 - Instance: admin, tokens, amp, reserves, fee parameters, LP accounting metadata, bound network id and context version.
-- Persistent: LP/user position state where applicable.
+- Persistent: LP/user position state where applicable, and `Operation(key)` receipts for consumed operation ids.
 
 ## Local Test
 

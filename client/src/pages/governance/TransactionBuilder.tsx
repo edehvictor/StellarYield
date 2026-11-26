@@ -11,12 +11,16 @@ import TransactionFailedModal from "../../components/transaction/TransactionFail
 import { decodeTransactionError } from "../../utils/errorDecoder";
 import type { TxPhase } from "../../services/transactionPhase";
 import { getNetworkPassphrase, getRpcUrl } from "../../lib/networkEnv";
+import GovernanceDiagnosticsList from "./GovernanceDiagnosticsList";
+import { buildProposalBuildDiagnostics } from "./governanceDiagnostics";
 
 const BUILD_PHASE_STEPS: readonly TxPhase[] = ["building", "simulating"];
 
 interface TransactionBuilderProps {
   threshold: number;
   contractId: string;
+  /** Immutable configuration fingerprint captured when the proposal is built. */
+  configFingerprint?: string;
   onTransactionCreated: (tx: PendingTransaction) => void;
 }
 
@@ -32,7 +36,9 @@ async function getRecommendedBaseFee(): Promise<string> {
     };
     const fee = payload.fees?.average;
     if (!fee || !Number.isFinite(fee) || fee <= 0) return StellarSdk.BASE_FEE;
-    return String(Math.round(fee));
+    const rounded = Math.round(fee);
+    const boundedFee = Math.max(Number(StellarSdk.BASE_FEE), Math.min(10000000, rounded));
+    return String(boundedFee);
   } catch {
     return StellarSdk.BASE_FEE;
   }
@@ -41,6 +47,7 @@ async function getRecommendedBaseFee(): Promise<string> {
 export default function TransactionBuilder({
   threshold,
   contractId,
+  configFingerprint,
   onTransactionCreated,
 }: TransactionBuilderProps) {
   const { walletAddress } = useWallet();
@@ -49,6 +56,9 @@ export default function TransactionBuilder({
   const [building, setBuilding] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [phase, setPhase] = useState<TxPhase>("idle");
+  const [failedAtPhase, setFailedAtPhase] = useState<"building" | "simulating" | null>(
+    null,
+  );
   const [showFailedModal, setShowFailedModal] = useState(false);
 
   const action = ADMIN_ACTIONS.find((a) => a.method === selectedAction);
@@ -61,9 +71,15 @@ export default function TransactionBuilder({
   async function handleBuild() {
     if (!walletAddress || !action || !contractId) return;
 
+    if (validationSummary && !validationSummary.isValid) {
+      setError(validationSummary.errors[0]?.message ?? "Validation failed");
+      return;
+    }
+
     setBuilding(true);
     setError(null);
     setShowFailedModal(false);
+    setFailedAtPhase("building");
     setPhase("building");
 
     try {
@@ -89,9 +105,17 @@ export default function TransactionBuilder({
         if (field.type === "address") {
           args.push(new StellarSdk.Address(value).toScVal());
         } else if (field.type === "number") {
-          args.push(
-            StellarSdk.nativeToScVal(BigInt(value), { type: "i128" }),
-          );
+          try {
+            const bigVal = BigInt(value.trim());
+            args.push(
+              StellarSdk.nativeToScVal(bigVal, { type: "i128" }),
+            );
+          } catch {
+            setError(`Invalid number format for ${field.label}`);
+            setBuilding(false);
+            setPhase("idle");
+            return;
+          }
         }
       }
 
@@ -103,6 +127,7 @@ export default function TransactionBuilder({
         .setTimeout(86400) // 24h expiry for multi-sig collection
         .build();
 
+      setFailedAtPhase("simulating");
       setPhase("simulating");
       const simulated = await server.simulateTransaction(tx);
 
@@ -121,6 +146,7 @@ export default function TransactionBuilder({
 
       const pendingTx: PendingTransaction = {
         id: crypto.randomUUID(),
+        configFingerprint,
         description: `${action.label} - proposed by ${walletAddress.slice(0, 8)}...`,
         method: action.method,
         args: action.fields.map((f) => fieldValues[f.name] ?? ""),
@@ -155,7 +181,7 @@ export default function TransactionBuilder({
             setShowFailedModal(false);
             void handleBuild();
           }}
-          failurePhase="simulating"
+          failurePhase={failedAtPhase ?? "simulating"}
           walletConnected={Boolean(walletAddress)}
         />
       )}
@@ -213,10 +239,14 @@ export default function TransactionBuilder({
               steps={BUILD_PHASE_STEPS}
               phase={phase}
               errorMessage={phase === "failure" ? error : null}
-              failedAtPhase={phase === "failure" ? "simulating" : null}
+              failedAtPhase={phase === "failure" ? failedAtPhase ?? "simulating" : null}
               onRetry={phase === "failure" ? () => void handleBuild() : undefined}
               className="mb-2"
             />
+
+            {phase === "failure" && (
+              <GovernanceDiagnosticsList diagnostics={buildProposalBuildDiagnostics()} />
+            )}
 
             {validationSummary && (
               <div

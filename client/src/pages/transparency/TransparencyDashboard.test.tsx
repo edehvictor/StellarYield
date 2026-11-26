@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, fireEvent } from "@testing-library/react";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import TransparencyDashboard from "./TransparencyDashboard";
 
@@ -18,6 +18,9 @@ vi.mock("./AuditReplayReportPanel", () => ({
 }));
 vi.mock("./RegistryDiff", () => ({
   default: () => <div>RegistryDiffPage</div>,
+}));
+vi.mock("../../components/SorobanRpcFailoverPanel", () => ({
+  default: () => <div>SorobanRpcFailoverPanel</div>,
 }));
 vi.mock("recharts", () => ({
   ResponsiveContainer: ({ children }: { children?: React.ReactNode }) => <div>{children}</div>,
@@ -227,5 +230,273 @@ describe("TransparencyDashboard – mixed service health (#865)", () => {
     render(<TransparencyDashboard />);
     await waitFor(() => expect(screen.getByText(/Critical:/)).toBeInTheDocument());
     expect(screen.getByText(/Latest run: FAIL/)).toBeInTheDocument();
+  });
+});
+
+describe("TransparencyDashboard – malformed external data hardening (#1913)", () => {
+  it("rejects malformed summary data at the boundary without crashing and recovers on Try Again", async () => {
+    let summaryCallCount = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation((url: string) => {
+        const path = String(url);
+        if (path.includes("/api/transparency/summary")) {
+          summaryCallCount += 1;
+          if (summaryCallCount === 1) {
+            return Promise.resolve({
+              ok: true,
+              json: async () => ({
+                totalRevenueLumens: "corrupted",
+                totalBurnedTokens: -50,
+                deflationaryRatio: 200,
+                history: [{ date: null, revenue: "bad", burned: null }],
+              }),
+            });
+          }
+          return Promise.resolve({ ok: true, json: async () => mockTransparencyData });
+        }
+        return makeFetchMock()(url);
+      }),
+    );
+
+    render(<TransparencyDashboard />);
+    await waitFor(() =>
+      expect(screen.getByText("Unable to load data")).toBeInTheDocument(),
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /Try Again/i }));
+
+    await waitFor(() =>
+      expect(screen.getByText("Protocol Transparency")).toBeInTheDocument(),
+    );
+    expect(screen.getByText("$372,000")).toBeInTheDocument();
+    expect(screen.getByText("96,000")).toBeInTheDocument();
+    expect(screen.getByText("32.00%")).toBeInTheDocument();
+  });
+
+  it("preserves existing state and balances when a subsequent refresh returns malformed external data", async () => {
+    let summaryCallCount = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation((url: string) => {
+        const path = String(url);
+        if (path.includes("/api/transparency/summary")) {
+          summaryCallCount += 1;
+          if (summaryCallCount === 1) {
+            return Promise.resolve({ ok: true, json: async () => mockTransparencyData });
+          }
+          return Promise.resolve({
+            ok: true,
+            json: async () => ({
+              totalRevenueLumens: 999999,
+              totalBurnedTokens: 999999,
+              deflationaryRatio: 50,
+              history: [{ date: "not-a-valid-date", revenue: 100, burned: 50 }],
+            }),
+          });
+        }
+        return makeFetchMock()(url);
+      }),
+    );
+
+    render(<TransparencyDashboard />);
+    await waitFor(() => expect(screen.getByText("$372,000")).toBeInTheDocument());
+    expect(screen.getByText("96,000")).toBeInTheDocument();
+    expect(screen.getByText("32.00%")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /Refresh transparency data/i }));
+
+    await waitFor(() => expect(summaryCallCount).toBe(2));
+    // Existing valid balances remain intact and are not replaced by the malformed payload
+    expect(screen.getByText("$372,000")).toBeInTheDocument();
+    expect(screen.getByText("96,000")).toBeInTheDocument();
+    expect(screen.getByText("32.00%")).toBeInTheDocument();
+    expect(screen.queryByText("$999,999")).not.toBeInTheDocument();
+  });
+
+  it("isolates malformed service health, failover incident, and smoke history payloads without crashing", async () => {
+    let failoverCallCount = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation((url: string) => {
+        const path = String(url);
+        if (path.includes("failover-history")) {
+          failoverCallCount += 1;
+          if (failoverCallCount === 1) {
+            // First attempt returns malformed incident object -> triggers retry
+            return Promise.resolve({
+              ok: true,
+              json: async () => ({ incidents: [{ id: "bad", trigger: null, reasons: "not-array" }] }),
+            });
+          }
+          return Promise.resolve({
+            ok: true,
+            json: async () => ({
+              incidents: [
+                {
+                  id: "1",
+                  protocolId: "blend",
+                  protocolName: "Blend",
+                  trigger: "stale_data",
+                  reasons: ["data is stale"],
+                  startedAt: "2026-05-01T10:00:00.000Z",
+                  resolved: false,
+                },
+                { id: "corrupt", trigger: 123, reasons: null },
+              ],
+            }),
+          });
+        }
+        if (path.includes("/api/indexer/status")) {
+          // Malformed JSON throw on indexer status should not break relayer status
+          return Promise.resolve({
+            ok: true,
+            json: async () => {
+              throw new SyntaxError("Unexpected token in JSON");
+            },
+          });
+        }
+        if (path.includes("/api/relayer/status")) {
+          // Incomplete relayer object missing failureCount/successRate must not report healthy
+          return Promise.resolve({
+            ok: true,
+            json: async () => ({ isOnline: true }),
+          });
+        }
+        return makeFetchMock()(url);
+      }),
+    );
+
+    vi.stubGlobal("localStorage", {
+      getItem: vi.fn((key: string) => {
+        if (key === "stellar-yield.smoke-results") {
+          return JSON.stringify({
+            timestamp: "not-a-timestamp",
+            frontendUrl: "https://example.com",
+            backendUrl: "https://api.example.com",
+            status: "pass",
+            checks: [{ label: null, status: "unknown" }],
+          });
+        }
+        if (key === "stellar-yield.smoke-history") {
+          return '{"malformed":"not-an-array"}';
+        }
+        return null;
+      }),
+      setItem: vi.fn(),
+      removeItem: vi.fn(),
+    });
+
+    render(<TransparencyDashboard />);
+    await waitFor(() => expect(screen.getByText("Blend")).toBeInTheDocument(), {
+      timeout: 2500,
+    });
+    expect(screen.getByText(/Degraded:/)).toBeInTheDocument();
+    expect(screen.queryByText(/All transparency subsystems are healthy/)).not.toBeInTheDocument();
+  });
+});
+
+describe("TransparencyDashboard – network and ledger binding (#1916)", () => {
+  const withContext = (ledger: number, network = "testnet", revenue = 372000) => ({
+    ...mockTransparencyData,
+    totalRevenueLumens: revenue,
+    context: { network, ledger, version: "1" },
+  });
+
+  function summarySequence(responses: Array<{ status?: number; body: unknown }>) {
+    const urls: string[] = [];
+    let call = 0;
+    const fetchMock = vi.fn().mockImplementation((url: string) => {
+      const path = String(url);
+      if (path.includes("/api/transparency/summary")) {
+        urls.push(path);
+        const next = responses[Math.min(call, responses.length - 1)];
+        call += 1;
+        const status = next.status ?? 200;
+        return Promise.resolve({ ok: status < 300, status, json: async () => next.body });
+      }
+      return makeFetchMock()(url);
+    });
+    return { fetchMock, urls };
+  }
+
+  it("shows the snapshot's network and ledger and sends them on refresh", async () => {
+    const { fetchMock, urls } = summarySequence([
+      { body: withContext(5000) },
+      { body: withContext(5004, "testnet", 380000) },
+    ]);
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<TransparencyDashboard />);
+    await waitFor(() => expect(screen.getByTestId("transparency-context")).toHaveTextContent("testnet · ledger 5,000"));
+    expect(urls[0]).toContain("network=testnet");
+    expect(urls[0]).not.toContain("minLedger");
+
+    fireEvent.click(screen.getByRole("button", { name: /Refresh transparency data/i }));
+    await waitFor(() => expect(screen.getByText("$380,000")).toBeInTheDocument());
+    expect(urls[1]).toContain("minLedger=5000");
+    expect(screen.getByTestId("transparency-context")).toHaveTextContent("ledger 5,004");
+  });
+
+  it("keeps the figures on screen when a refresh comes from another network", async () => {
+    const { fetchMock } = summarySequence([
+      { body: withContext(5000) },
+      { body: withContext(9000, "mainnet", 999999) },
+    ]);
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<TransparencyDashboard />);
+    await waitFor(() => expect(screen.getByText("$372,000")).toBeInTheDocument());
+
+    fireEvent.click(screen.getByRole("button", { name: /Refresh transparency data/i }));
+    await waitFor(() =>
+      expect(screen.getByTestId("transparency-refresh-notice")).toHaveTextContent(/mainnet/),
+    );
+    expect(screen.getByText("$372,000")).toBeInTheDocument();
+    expect(screen.queryByText("$999,999")).not.toBeInTheDocument();
+    expect(screen.getByTestId("transparency-context")).toHaveTextContent("ledger 5,000");
+  });
+
+  it("keeps the newer snapshot when a refresh answers from an older ledger", async () => {
+    const { fetchMock } = summarySequence([
+      { body: withContext(5000) },
+      { body: withContext(4000, "testnet", 1) },
+    ]);
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<TransparencyDashboard />);
+    await waitFor(() => expect(screen.getByText("$372,000")).toBeInTheDocument());
+
+    fireEvent.click(screen.getByRole("button", { name: /Refresh transparency data/i }));
+    await waitFor(() => expect(screen.getByTestId("transparency-refresh-notice")).toBeInTheDocument(), {
+      timeout: 3000,
+    });
+    expect(screen.getByText("$372,000")).toBeInTheDocument();
+    expect(screen.getByTestId("transparency-context")).toHaveTextContent("ledger 5,000");
+  });
+
+  it("retries while the server is behind the ledger shown, then shows the update", async () => {
+    const { fetchMock } = summarySequence([
+      { body: withContext(5000) },
+      { status: 409, body: { code: "TRANSPARENCY_LEDGER_BEHIND", error: "behind", retryable: true } },
+      { body: withContext(5001, "testnet", 390000) },
+    ]);
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<TransparencyDashboard />);
+    await waitFor(() => expect(screen.getByText("$372,000")).toBeInTheDocument());
+
+    fireEvent.click(screen.getByRole("button", { name: /Refresh transparency data/i }));
+    await waitFor(() => expect(screen.getByText("$390,000")).toBeInTheDocument(), { timeout: 3000 });
+    expect(screen.queryByTestId("transparency-refresh-notice")).not.toBeInTheDocument();
+  });
+
+  it("does not show data when the first read is for another network", async () => {
+    const { fetchMock } = summarySequence([{ body: withContext(9000, "mainnet", 999999) }]);
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<TransparencyDashboard />);
+    await waitFor(() => expect(screen.getByText("Unable to load data")).toBeInTheDocument());
+    expect(screen.queryByText("$999,999")).not.toBeInTheDocument();
   });
 });

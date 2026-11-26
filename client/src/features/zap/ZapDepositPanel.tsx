@@ -3,11 +3,18 @@ import { ArrowDown, Zap, Loader2, AlertTriangle, RefreshCw, Clock, Info, Ban, Ex
 import TxStatusTimeline from "../../components/transaction/TxStatusTimeline";
 import TransactionFailedModal from "../../components/transaction/TransactionFailedModal";
 import { decodeTransactionError, ZAP_QUOTE_EXPIRED_ERROR_CODE } from "../../utils/errorDecoder";
+import * as sorobanService from "../../services/soroban";
 import { zapDeposit } from "../../services/soroban";
 import type { DecodedContractPanic } from "../../../../shared/types/contractPanic";
 import type { TxPhase } from "../../services/transactionPhase";
 import { TX_PHASE_PIPELINE } from "../../services/transactionPhase";
-import { fetchSwapQuote, isQuoteCancellation, verifySwapQuote, ZapQuoteError } from "./fetchSwapQuote";
+import {
+  describeZapQuoteVerifyFailure,
+  fetchSwapQuote,
+  isQuoteCancellation,
+  verifySwapQuote,
+  ZapQuoteError,
+} from "./fetchSwapQuote";
 import { minAmountAfterSlippage } from "./slippage";
 import {
   buildZapQuoteRequestKey,
@@ -42,7 +49,24 @@ import DepositRouteMaterialImpactWarning from "./DepositRouteMaterialImpactWarni
 import { useDepositImpact } from "./useDepositImpact";
 import type { QuoteSnapshot } from "./useDepositImpact";
 import { getVaultSlippage, setVaultSlippage, resetVaultSlippage } from "../../lib/preferences";
+import { explorerAccountUrl } from "../../lib/networkEnv";
+import { useProtectedWalletAction } from "../../hooks/useProtectedWalletAction";
+import SessionExpiredRecovery from "../../components/wallet/SessionExpiredRecovery";
+import {
+  saveDepositDraft,
+  clearDepositDraft,
+  reconcileDepositDraft,
+  type DepositDraftState,
+} from "./depositDraft";
 import { apiFetch, apiUrl } from "../../lib/api";
+import {
+  beginReviewJournal,
+  classifyZapSubmission,
+  newReviewOperationId,
+  planRetryFromDraft,
+  recordReviewJournalEvent,
+} from "./reviewOperation";
+import { loadDepositDraft } from "./depositDraft";
 
 export interface ZapDepositPanelProps {
   walletAddress: string | null;
@@ -52,13 +76,6 @@ const MIN_SLIPPAGE = 0.1;
 const MAX_SLIPPAGE = 15;
 const FALLBACK_SOURCE = "fallback_rate";
 const SUPPORT_URL = "https://github.com/edehvictor/StellarYield/issues";
-
-function explorerAccountUrl(walletAddress: string | null): string {
-  const passphrase = import.meta.env.VITE_NETWORK_PASSPHRASE ?? "";
-  const isMainnet = passphrase.includes("mainnet") || passphrase.includes("Public Global");
-  const base = `https://stellar.expert/explorer/${isMainnet ? "public" : "testnet"}`;
-  return walletAddress ? `${base}/account/${walletAddress}` : base;
-}
 
 export default function ZapDepositPanel({ walletAddress }: ZapDepositPanelProps) {
   const useApiAssets = shouldLoadZapMetadataFromApi();
@@ -555,20 +572,63 @@ export default function ZapDepositPanel({ walletAddress }: ZapDepositPanelProps)
           }
         }
       }
+      // An earlier attempt may have left a signed deposit that could still
+      // land (#1891). Never submit a second one until the ledger settles it
+      // or its contract deadline has passed.
+      const earlierDraft = loadDepositDraft(walletAddress);
+      const retryPlan = await planRetryFromDraft(walletAddress, earlierDraft, (hash) =>
+        sorobanService.getLedgerTransactionStatus(hash),
+      );
+      if (retryPlan?.action === "await-confirmation" && earlierDraft) {
+        setDraftState({ kind: "pending", draft: earlierDraft });
+        setDraftDismissed(false);
+        setStatus("idle");
+        setError(`Your previous deposit is still processing. ${retryPlan.reason}`);
+        return;
+      }
+      if (retryPlan && earlierDraft) {
+        // Settled (confirmed, failed on-chain, or past its deadline without
+        // landing): it can no longer move funds, so a new deposit is safe.
+        clearDepositDraft(walletAddress);
+        if (earlierDraft.operationId && retryPlan.action === "done") {
+          void recordReviewJournalEvent(walletAddress, earlierDraft.operationId, {
+            type: "confirmed",
+            txHash: retryPlan.txHash,
+          });
+        }
+      }
+
+      const operationId = newReviewOperationId();
+      const deadlineSeconds = zapQuoteDeadlineSeconds(quoteData);
+      const journal = await beginReviewJournal(operationId, {
+        walletAddress,
+        routeHash: quoteData?.routeHash ?? "direct",
+        amountInStroops: amountIn.toString(),
+        minAmountOutStroops: minOut.toString(),
+        deadlineUnixSeconds: Number(deadlineSeconds),
+      });
+      if (journal.kind === "in-flight") {
+        setStatus("idle");
+        setError(`${journal.message} Nothing was submitted.`);
+        return;
+      }
+
       // Persist minimal deposit-flow context before submission (#1146) so a
       // reload mid-flow can reconcile against the indexer instead of losing
       // track of the deposit entirely. Saved without a tx hash yet — the
-      // hash is added right after the wallet returns one, inside zapDeposit's
-      // phase callback below.
-      saveDepositDraft(walletAddress, {
+      // hash is added as soon as the wallet signs, before anything is sent.
+      const baseDraft = {
         amount,
         vaultContractId,
         vaultTokenSymbol: vaultToken.symbol,
         inputTokenContract: inputAsset.contractId,
         inputTokenSymbol: inputAsset.symbol,
-        submittedAt: Date.now(),
-      });
+        operationId,
+        deadlineUnixSeconds: Number(deadlineSeconds),
+      };
+      saveDepositDraft(walletAddress, { ...baseDraft, submittedAt: Date.now() });
 
+      let signedHash: string | null = null;
       const result = await zapDeposit(
         walletAddress,
         {
@@ -581,12 +641,51 @@ export default function ZapDepositPanel({ walletAddress }: ZapDepositPanelProps)
           expectedAmountOut: expectedOut ?? 0n,
           // `minAmountOut` already enforces the user's slippage tolerance.
           allowPartial: true,
-          deadlineUnixSeconds: zapQuoteDeadlineSeconds(quoteData),
+          deadlineUnixSeconds: deadlineSeconds,
         },
         emitPhase,
         false,
         settings,
+        {
+          // Record the hash before the transaction is sent (#1891): if the
+          // submission is interrupted, a retry looks it up instead of
+          // submitting a second deposit.
+          onSigned: (hash) => {
+            signedHash = hash;
+            saveDepositDraft(walletAddress, { ...baseDraft, txHash: hash, submittedAt: Date.now() });
+            void recordReviewJournalEvent(walletAddress, operationId, { type: "signed", txHash: hash });
+          },
+          onSubmitted: (hash) => {
+            void recordReviewJournalEvent(walletAddress, operationId, { type: "submitted", txHash: hash });
+          },
+        },
       );
+
+      const outcome = classifyZapSubmission(result, signedHash);
+      if (outcome.kind === "in-flight") {
+        // Possibly on the ledger: keep the draft so every retry, reload or
+        // other tab waits for it instead of depositing again.
+        void recordReviewJournalEvent(walletAddress, operationId, { type: "failed", code: outcome.code });
+        const pendingDraft = { ...baseDraft, txHash: outcome.txHash, submittedAt: Date.now() };
+        saveDepositDraft(walletAddress, pendingDraft);
+        setTxHash(outcome.txHash);
+        // Not a failure: leave the failure phase so the timeline and the
+        // failed-transaction modal do not invite a retry.
+        setTxPhase("idle");
+        setDraftState({ kind: "pending", draft: pendingDraft });
+        setDraftDismissed(false);
+        setStatus("error");
+        setError(
+          "Your deposit was sent but is not confirmed yet. It will not be submitted again; check back shortly.",
+        );
+        return;
+      }
+      if (outcome.kind === "failed") {
+        // Settled without moving funds: nothing to resume.
+        void recordReviewJournalEvent(walletAddress, operationId, { type: "failed", code: outcome.code });
+        clearDepositDraft(walletAddress);
+      }
+
       if (!result.success && result.errorCode === ZAP_QUOTE_EXPIRED_ERROR_CODE) {
         // The contract refused the quote as expired before moving any funds.
         invalidatePreview();
@@ -599,17 +698,17 @@ export default function ZapDepositPanel({ walletAddress }: ZapDepositPanelProps)
         throw new Error(result.error || "Transaction failed");
       }
       setTxHash(result.hash ?? null);
+      if (outcome.kind === "confirmed") {
+        void recordReviewJournalEvent(walletAddress, operationId, { type: "confirmed", txHash: outcome.txHash });
+      }
       if (result.hash) {
-        // Re-save with the confirmed tx hash so a reload before on-chain
-        // confirmation can reconcile this specific transaction.
+        // Re-save with the confirmed tx hash so a reload before the indexer
+        // records it can reconcile this specific transaction.
         saveDepositDraft(walletAddress, {
-          amount,
-          vaultContractId,
-          vaultTokenSymbol: vaultToken.symbol,
-          inputTokenContract: inputAsset.contractId,
-          inputTokenSymbol: inputAsset.symbol,
+          ...baseDraft,
           txHash: result.hash,
           submittedAt: Date.now(),
+          ledgerConfirmed: true,
         });
       } else {
         // No hash was ever returned — nothing resumable to reconcile later.

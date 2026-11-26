@@ -15,10 +15,15 @@ export default function GovernanceDashboard() {
   const {
     transactions,
     config,
+    configFingerprint,
     signerRotationAudit,
     addTransaction,
     addSignature,
-    markExecuted,
+    beginExecution,
+    recordExecutionSubmitted,
+    failExecution,
+    completeExecution,
+    rollbackExecution,
     updateConfig,
   } = useGovernanceStore();
 
@@ -260,6 +265,7 @@ export default function GovernanceDashboard() {
         <TransactionBuilder
           threshold={config.threshold}
           contractId={config.contractId}
+          configFingerprint={configFingerprint}
           onTransactionCreated={handleTransactionCreated}
         />
       )}
@@ -294,8 +300,13 @@ export default function GovernanceDashboard() {
               key={tx.id}
               transaction={tx}
               onSign={addSignature}
-              onExecute={markExecuted}
+              onBeginExecute={beginExecution}
+              onExecutionSubmitted={recordExecutionSubmitted}
+              onExecutionFailed={failExecution}
+              onExecutionRolledBack={rollbackExecution}
+              onExecute={completeExecution}
               config={config}
+              onRefreshConfig={refreshTransactionConfig}
             />
           ))}
         </div>
@@ -310,8 +321,13 @@ export default function GovernanceDashboard() {
               key={tx.id}
               transaction={tx}
               onSign={addSignature}
-              onExecute={markExecuted}
+              onBeginExecute={beginExecution}
+              onExecutionSubmitted={recordExecutionSubmitted}
+              onExecutionFailed={failExecution}
+              onExecutionRolledBack={rollbackExecution}
+              onExecute={completeExecution}
               config={config}
+              onRefreshConfig={refreshTransactionConfig}
             />
           ))}
         </div>
@@ -328,8 +344,13 @@ export default function GovernanceDashboard() {
               key={tx.id}
               transaction={tx}
               onSign={addSignature}
-              onExecute={markExecuted}
+              onBeginExecute={beginExecution}
+              onExecutionSubmitted={recordExecutionSubmitted}
+              onExecutionFailed={failExecution}
+              onExecutionRolledBack={rollbackExecution}
+              onExecute={completeExecution}
               config={config}
+              onRefreshConfig={refreshTransactionConfig}
             />
           ))}
         </div>
@@ -343,7 +364,7 @@ export default function GovernanceDashboard() {
 
       {/* Impact Forecast Engine */}
       <div className="mt-4">
-        <GovernanceForecast />
+        <GovernanceForecast config={config} />
       </div>
     </div>
   );

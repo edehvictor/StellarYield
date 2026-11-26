@@ -1,4 +1,4 @@
-import React, { useEffect, useCallback } from "react";
+import React, { useEffect, useCallback, useMemo } from "react";
 import {
   X,
   ArrowRight,
@@ -8,8 +8,18 @@ import {
   ExternalLink,
   Wallet,
 } from "lucide-react";
+import {
+  buildTransactionReviewFailureDiagnostics,
+  getTransactionReviewStageLabel,
+  type TransactionReviewDiagnostic,
+} from "../../../../shared/types/transactionReviewDiagnostic";
 import { QuoteAssumptionFingerprintDisplay } from "./QuoteAssumptionFingerprintDisplay";
+import { shortenAddress, validateReviewAmounts } from "./reviewAmounts";
 import type { QuoteAssumptions } from "../../../../shared/types/quoteAssumptionFingerprint";
+import {
+  validateTransactionReview,
+  type TransactionReviewValidationError,
+} from "../../../../shared/types/transactionReview";
 
 export interface TransactionReviewTokenDetail {
   symbol: string;
@@ -33,6 +43,12 @@ export interface TransactionReviewModalProps {
   isStale?: boolean;
   onRefreshQuote?: () => void;
   error?: string | null;
+  /**
+   * Privacy-safe stage diagnostics for the failure. When `error` is set and no
+   * diagnostics are supplied, a `CONTEXT_INSUFFICIENT` diagnostic is shown so
+   * the user still gets a remediation path and a state-preserved statement.
+   */
+  diagnostics?: readonly TransactionReviewDiagnostic[] | null;
 }
 
 export function TransactionReviewModal({
@@ -50,7 +66,26 @@ export function TransactionReviewModal({
   isStale = false,
   onRefreshQuote,
   error = null,
+  diagnostics = null,
 }: TransactionReviewModalProps) {
+  // Boundary validation against malformed external data (#1889)
+  const validationResult = useMemo(() => {
+    return validateTransactionReview({
+      walletAddress,
+      inputToken,
+      vaultToken,
+      slippageTolerance,
+      assumptions,
+      fingerprint,
+    });
+  }, [walletAddress, inputToken, vaultToken, slippageTolerance, assumptions, fingerprint]);
+
+  useEffect(() => {
+    if (isOpen && !validationResult.valid && onValidationError) {
+      onValidationError(validationResult.error);
+    }
+  }, [isOpen, validationResult, onValidationError]);
+
   // Close on Escape key
   const handleKeyDown = useCallback(
     (e: KeyboardEvent) => {
@@ -68,9 +103,29 @@ export function TransactionReviewModal({
     }
   }, [isOpen, handleKeyDown]);
 
+  const canConfirm = !isSubmitting && !isStale && !error && validationResult.valid;
+
+  const handleConfirm = useCallback(() => {
+    if (!canConfirm || !validationResult.valid) {
+      return;
+    }
+    void onConfirm();
+  }, [canConfirm, validationResult.valid, onConfirm]);
+
   if (!isOpen) return null;
 
-  const canConfirm = !isSubmitting && !isStale && !error;
+  const amountCheck = validateReviewAmounts({ inputToken, vaultToken, slippageTolerance });
+  const amountError = amountCheck.valid ? null : amountCheck.reason;
+  const displayError = error ?? amountError;
+  const canConfirm = !isSubmitting && !isStale && !displayError;
+  const shownDiagnostics: readonly TransactionReviewDiagnostic[] =
+    diagnostics && diagnostics.length > 0
+      ? diagnostics
+      : error
+        ? buildTransactionReviewFailureDiagnostics("CONTEXT_INSUFFICIENT", { stage: "unknown" })
+        : amountError
+          ? buildTransactionReviewFailureDiagnostics("VALIDATION_FAILED", { stage: "request-validation" })
+          : [];
 
   return (
     <div
@@ -114,7 +169,7 @@ export function TransactionReviewModal({
               Connected Account
             </span>
             <span className="font-mono text-gray-200">
-              {walletAddress.slice(0, 6)}…{walletAddress.slice(-4)}
+              {shortenAddress(walletAddress)}
             </span>
           </div>
 
@@ -123,24 +178,24 @@ export function TransactionReviewModal({
             <div className="flex items-center justify-between">
               <div>
                 <span className="text-xs text-gray-400 block">You Deposit</span>
-                <span className="text-lg font-bold text-white">
-                  {inputToken.amount} {inputToken.symbol}
+                <span className="text-lg font-bold text-white" data-testid="review-input-amount">
+                  {displayInputAmount} {displayInputSymbol}
                 </span>
               </div>
               <ArrowRight className="h-5 w-5 text-gray-500" />
               <div className="text-right">
                 <span className="text-xs text-gray-400 block">Estimated Output</span>
-                <span className="text-lg font-bold text-white">
-                  {vaultToken.amount} {vaultToken.symbol}
+                <span className="text-lg font-bold text-white" data-testid="review-vault-amount">
+                  {displayVaultAmount} {displayVaultSymbol}
                 </span>
               </div>
             </div>
 
-            {vaultToken.minAmount && (
+            {displayMinAmount && (
               <div className="flex items-center justify-between pt-2 border-t border-white/10 text-xs">
                 <span className="text-gray-400">Guaranteed Minimum ({slippageTolerance}% slippage)</span>
-                <span className="font-mono text-emerald-300">
-                  {vaultToken.minAmount} {vaultToken.symbol}
+                <span className="font-mono text-emerald-300" data-testid="review-min-amount">
+                  {displayMinAmount} {displayVaultSymbol}
                 </span>
               </div>
             )}
@@ -158,8 +213,25 @@ export function TransactionReviewModal({
             />
           </div>
 
+          {/* Boundary Validation Failure Alert (#1889) */}
+          {!validationResult.valid && (
+            <div
+              data-testid="transaction-review-validation-error"
+              className="flex items-start gap-2 rounded-xl border border-red-500/30 bg-red-500/10 p-3 text-xs text-red-200"
+              role="alert"
+            >
+              <AlertTriangle className="h-4 w-4 shrink-0 text-red-400 mt-0.5" />
+              <div>
+                <p className="font-semibold text-red-300">
+                  Review blocked ({validationResult.error.code})
+                </p>
+                <p>{validationResult.error.message}</p>
+              </div>
+            </div>
+          )}
+
           {/* Error Message if Present */}
-          {error && (
+          {displayError && (
             <div
               className="flex items-start gap-2 rounded-xl border border-red-500/30 bg-red-500/10 p-3 text-xs text-red-200"
               role="alert"
@@ -167,9 +239,27 @@ export function TransactionReviewModal({
               <AlertTriangle className="h-4 w-4 shrink-0 text-red-400 mt-0.5" />
               <div>
                 <p className="font-semibold text-red-300">Submission blocked</p>
-                <p>{error}</p>
+                <p>{displayError}</p>
               </div>
             </div>
+          )}
+
+          {shownDiagnostics.length > 0 && (
+            <ul
+              data-testid="transaction-review-diagnostics"
+              aria-label="Transaction review diagnostics"
+              className="space-y-2 rounded-xl border border-amber-500/20 bg-amber-500/5 p-3"
+            >
+              {shownDiagnostics.map((d) => (
+                <li key={`${d.code}-${d.stage}`} className="text-xs text-gray-300">
+                  <p className="font-medium text-amber-200">
+                    {getTransactionReviewStageLabel(d.stage)} · {d.code}
+                  </p>
+                  <p className="mt-0.5">{d.summary}</p>
+                  <p className="mt-0.5 text-gray-400">Next: {d.remediation}</p>
+                </li>
+              ))}
+            </ul>
           )}
         </div>
 
@@ -185,7 +275,7 @@ export function TransactionReviewModal({
           </button>
           <button
             type="button"
-            onClick={() => void onConfirm()}
+            onClick={handleConfirm}
             disabled={!canConfirm}
             data-testid="confirm-transaction-btn"
             className="inline-flex items-center gap-2 rounded-xl bg-gradient-to-r from-blue-500 to-purple-600 px-5 py-2.5 text-sm font-semibold text-white shadow-lg hover:from-blue-600 hover:to-purple-700 transition-all disabled:opacity-50 disabled:cursor-not-allowed"

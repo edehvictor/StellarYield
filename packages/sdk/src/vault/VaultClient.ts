@@ -6,11 +6,43 @@ import {
   PreparedTransaction,
   PreparedTransactionMeta,
   SubmittedTransaction,
+  createOperationId,
   needsRestore,
 } from "../lifecycle";
-import { SpecMismatchError, parseContractError, RestoreRequiredError } from "../errors";
+import {
+  SpecMismatchError,
+  SimulationDiagnosticsError,
+  parseContractError,
+  RestoreRequiredError,
+  SdkEndpointError,
+  toSimulationError,
+} from "../errors";
+import {
+  buildSimulationFailureDiagnostics,
+  extractContractErrorCode,
+} from "../simulationDiagnostics";
+import { rpc } from "@stellar/stellar-sdk";
 import { toTokenUnits } from "../types";
 import type { TokenAmount, VaultConfig } from "../types";
+import { validateEndpointUrl, normalizeEndpointUrl } from "../endpoint";
+import { buildSdkFailureDiagnostics } from "../diagnostics";
+import type { NetworkName } from "../network";
+import { bindSimulationContext, type SimulationContext } from "../simulationContext";
+
+/**
+ * Options that give one logical operation a stable identity across retries.
+ *
+ * Supply an `idempotencyKey` when a retry may rebuild and re-sign the
+ * transaction (for example after a timeout): the same key and arguments
+ * produce the same `operationId`, so submit() reuses the first transaction
+ * hash instead of applying the effect twice. The key never goes on-chain.
+ */
+export interface OperationIdentityOptions {
+  /** Stable caller-supplied key for safe retries of this operation. */
+  idempotencyKey?: string;
+  /** Explicit operation id; prefer `idempotencyKey` for normal retries. */
+  operationId?: string;
+}
 
 export interface PreparedMethod<TArgs, TResult> {
   (args: TArgs): Promise<PreparedTransaction<TResult>>;
@@ -22,26 +54,31 @@ export interface PreparedMethod<TArgs, TResult> {
  * integer `number`; anything that would lose precision throws
  * {@link InvalidAmountError} before a transaction is built.
  */
-export interface DepositArgs {
+export interface DepositArgs extends OperationIdentityOptions {
   from: string;
   amount: TokenAmount;
   min_shares_out?: TokenAmount;
 }
 
-export interface SharesArgs {
+export interface SharesArgs extends OperationIdentityOptions {
   to: string;
   shares: TokenAmount;
 }
 
-export interface HarvestArgs {
+export interface HarvestArgs extends OperationIdentityOptions {
   caller: string;
   min_amount_out?: TokenAmount;
 }
 
-export interface RebalanceArgs {
+export interface RebalanceArgs extends OperationIdentityOptions {
   caller: string;
   target: string;
   amount: TokenAmount;
+}
+
+interface PreparedRequest {
+  args: Record<string, any>;
+  identity?: OperationIdentityOptions;
 }
 
 export class VaultClient {
@@ -50,15 +87,45 @@ export class VaultClient {
   public readonly networkPassphrase: string;
   public readonly rpcUrl: string;
   public readonly specHash: string;
+  public readonly configFingerprint?: string;
+  /** Canonical network id, when supplied in the config (#1857). */
+  public readonly network?: NetworkName;
 
   constructor(config: VaultConfig) {
+    const rpcValidation = validateEndpointUrl(config.rpcUrl);
+    if (!rpcValidation.valid) {
+      const diagnostics = buildSdkFailureDiagnostics("VALIDATION_FAILED", {
+        stage: "endpoint-configuration",
+        summary: `RPC endpoint configuration invalid: ${rpcValidation.error}`,
+        remediation: "Provide a valid Soroban RPC endpoint URL; existing state was preserved.",
+        retryable: false,
+      });
+      throw new SdkEndpointError(
+        `Invalid RPC endpoint URL: ${rpcValidation.error}`,
+        diagnostics,
+        [rpcValidation.error ?? "Invalid rpcUrl"],
+        "simulate",
+        false
+      );
+    }
+
     this.contractId = config.contractId;
     this.networkPassphrase = config.networkPassphrase;
-    this.rpcUrl = config.rpcUrl;
+    this.rpcUrl = normalizeEndpointUrl(config.rpcUrl);
     this.specHash = config.specHash || YIELD_VAULT_SPEC_HASH;
+    this.configFingerprint = config.configFingerprint;
 
     if (config.specHash && config.specHash !== YIELD_VAULT_SPEC_HASH) {
       throw new SpecMismatchError(YIELD_VAULT_SPEC_HASH, config.specHash);
+    }
+
+    // Reject a network id whose well-known passphrase disagrees with the
+    // configured passphrase before any client state is built (#1857).
+    if (config.network !== undefined) {
+      this.network = bindSimulationContext({
+        network: config.network,
+        networkPassphrase: config.networkPassphrase,
+      }).network;
     }
 
     this.generatedClient = new GeneratedVaultClient({
@@ -70,41 +137,80 @@ export class VaultClient {
     this.initMethods();
   }
 
+  /**
+   * Reconfigures the RPC endpoint URL safely.
+   * If validation fails, throws SdkEndpointError and preserves existing configuration.
+   */
+  public configureEndpoint(rpcUrl: string): void {
+    const rpcValidation = validateEndpointUrl(rpcUrl);
+    if (!rpcValidation.valid) {
+      const diagnostics = buildSdkFailureDiagnostics("VALIDATION_FAILED", {
+        stage: "endpoint-configuration",
+        summary: `RPC endpoint configuration invalid: ${rpcValidation.error}`,
+        remediation: "Provide a valid Soroban RPC endpoint URL; existing state was preserved.",
+        retryable: false,
+      });
+      throw new SdkEndpointError(
+        `Invalid RPC endpoint URL: ${rpcValidation.error}`,
+        diagnostics,
+        [rpcValidation.error ?? "Invalid rpcUrl"],
+        "simulate",
+        false
+      );
+    }
+    (this as any).rpcUrl = normalizeEndpointUrl(rpcUrl);
+  }
+
   private initMethods() {
     const deposit = (args: DepositArgs) =>
       this.prepareStateChangingTx<bigint>("deposit", () => ({
-        from: args.from,
-        amount: toTokenUnits(args.amount, { field: "amount" }),
-        min_shares_out: toTokenUnits(args.min_shares_out ?? 0n, { field: "min_shares_out" }),
+        args: {
+          from: args.from,
+          amount: toTokenUnits(args.amount, { field: "amount" }),
+          min_shares_out: toTokenUnits(args.min_shares_out ?? 0n, { field: "min_shares_out" }),
+        },
+        identity: { idempotencyKey: args.idempotencyKey, operationId: args.operationId },
       }));
     this.deposit = Object.assign(deposit, { prepare: deposit });
 
     const withdraw = (args: SharesArgs) =>
       this.prepareStateChangingTx<bigint>("withdraw", () => ({
-        to: args.to,
-        shares: toTokenUnits(args.shares, { field: "shares" }),
+        args: {
+          to: args.to,
+          shares: toTokenUnits(args.shares, { field: "shares" }),
+        },
+        identity: { idempotencyKey: args.idempotencyKey, operationId: args.operationId },
       }));
     this.withdraw = Object.assign(withdraw, { prepare: withdraw });
 
     const harvest = (args: HarvestArgs) =>
       this.prepareStateChangingTx<bigint>("harvest", () => ({
-        caller: args.caller,
-        min_amount_out: toTokenUnits(args.min_amount_out ?? 0n, { field: "min_amount_out" }),
+        args: {
+          caller: args.caller,
+          min_amount_out: toTokenUnits(args.min_amount_out ?? 0n, { field: "min_amount_out" }),
+        },
+        identity: { idempotencyKey: args.idempotencyKey, operationId: args.operationId },
       }));
     this.harvest = Object.assign(harvest, { prepare: harvest });
 
     const rebalance = (args: RebalanceArgs) =>
       this.prepareStateChangingTx<void>("rebalance", () => ({
-        caller: args.caller,
-        target: args.target,
-        amount: toTokenUnits(args.amount, { field: "amount" }),
+        args: {
+          caller: args.caller,
+          target: args.target,
+          amount: toTokenUnits(args.amount, { field: "amount" }),
+        },
+        identity: { idempotencyKey: args.idempotencyKey, operationId: args.operationId },
       }));
     this.rebalance = Object.assign(rebalance, { prepare: rebalance });
 
     const emergencyWithdraw = (args: SharesArgs) =>
       this.prepareStateChangingTx<bigint>("emergency_withdraw", () => ({
-        to: args.to,
-        shares: toTokenUnits(args.shares, { field: "shares" }),
+        args: {
+          to: args.to,
+          shares: toTokenUnits(args.shares, { field: "shares" }),
+        },
+        identity: { idempotencyKey: args.idempotencyKey, operationId: args.operationId },
       }));
     this.emergencyWithdraw = Object.assign(emergencyWithdraw, { prepare: emergencyWithdraw });
   }
@@ -122,18 +228,64 @@ export class VaultClient {
 
   private async prepareStateChangingTx<TResult>(
     methodName: string,
-    buildArgs: () => Record<string, any>
+    buildRequest: () => PreparedRequest
   ): Promise<PreparedTransaction<TResult>> {
-    // Amount validation runs outside the try block so InvalidAmountError
-    // reaches the caller as-is instead of being re-parsed as a contract error.
-    const args = buildArgs();
+    // Amount/argument validation runs before any RPC call. InvalidAmountError
+    // keeps its class (callers already branch on it) but gains privacy-safe
+    // diagnostics naming the validation stage; no transaction is built.
+    let args: Record<string, any>;
+    let identity: OperationIdentityOptions | undefined;
+    try {
+      const request = buildRequest();
+      args = request.args;
+      identity = request.identity;
+    } catch (error) {
+      throw toSimulationError(error, { method: methodName });
+    }
+
+    const argsHash = JSON.stringify(args, (_key, value) =>
+      typeof value === "bigint" ? value.toString() : value
+    );
+    const operationId = createOperationId({
+      contractId: this.contractId,
+      networkPassphrase: this.networkPassphrase,
+      method: methodName,
+      argsHash,
+      idempotencyKey: identity?.idempotencyKey,
+      operationId: identity?.operationId,
+    });
+
     try {
       const fn = (this.generatedClient as any)[methodName];
       if (typeof fn !== "function") {
-        throw new Error(`Unknown contract method '${methodName}'`);
+        throw new SimulationDiagnosticsError(
+          buildSimulationFailureDiagnostics("CONTEXT_INSUFFICIENT", {
+            stage: "transaction-build",
+          }),
+          { method: methodName }
+        );
       }
 
       const assembled = await fn.call(this.generatedClient, args);
+      const simulation = assembled.simulation;
+
+      // Defensive: a failed simulation can be returned instead of thrown by
+      // the generated client. Surface it through the same diagnostic path so
+      // the caller never receives a half-built PreparedTransaction.
+      if (simulation && rpc.Api.isSimulationError(simulation)) {
+        const eventCount = Array.isArray((simulation as any).diagnosticEvents)
+          ? (simulation as any).diagnosticEvents.length
+          : Array.isArray((simulation as any).events)
+          ? (simulation as any).events.length
+          : 0;
+        throw toSimulationError(
+          new Error(String((simulation as any).error ?? "simulation failed")),
+          {
+            method: methodName,
+            context: { diagnosticEventCount: eventCount },
+          }
+        );
+      }
 
       if (needsRestore(assembled.simulation)) {
         throw new RestoreRequiredError(
@@ -142,10 +294,32 @@ export class VaultClient {
         );
       }
 
+      let simulationResult: TResult;
+      try {
+        simulationResult = (assembled.result?.unwrap?.() ?? assembled.result) as TResult;
+      } catch (decodeError) {
+        // A contract rejection thrown by Result.unwrap carries a decodable
+        // code; anything else means the pinned bindings could not decode the
+        // returned value.
+        const code = extractContractErrorCode(decodeError);
+        if (code !== undefined) {
+          throw toSimulationError(decodeError, {
+            method: methodName,
+            context: { contractErrorCode: code },
+          });
+        }
+        throw new SimulationDiagnosticsError(
+          buildSimulationFailureDiagnostics("RESULT_DECODE_FAILED", {
+            stage: "result-decoding",
+          }),
+          { method: methodName }
+        );
+      }
+
       const rawXdr = assembled.built ? assembled.built.toXDR() : assembled.simulation;
 
       const meta: PreparedTransactionMeta<TResult> = {
-        simulationResult: (assembled.result?.unwrap?.() ?? assembled.result) as TResult,
+        simulationResult,
         footprint: assembled.simulation?.footprint || "",
         authEntries: assembled.simulation?.auth || [],
         minResourceFee: assembled.simulation?.minResourceFee || "0",
@@ -155,16 +329,41 @@ export class VaultClient {
         contractId: this.contractId,
         networkPassphrase: this.networkPassphrase,
         method: methodName,
-        argsHash: JSON.stringify(args, (_key, value) =>
-          typeof value === "bigint" ? value.toString() : value
-        ),
+        argsHash,
+        operationId,
+        ...(identity?.idempotencyKey
+          ? { idempotencyKey: identity.idempotencyKey }
+          : {}),
         specHash: this.specHash,
+        configFingerprint: this.configFingerprint,
+        ...(this.network ? { network: this.network } : {}),
       };
 
       return new PreparedTransaction<TResult>(rawXdr, meta);
     } catch (error) {
-      throw parseContractError(error, undefined, undefined, "simulate");
+      // Known typed errors keep their class and gain diagnostics; failures
+      // without a decodable code or diagnostic events become a privacy-safe
+      // SimulationDiagnosticsError instead of echoing raw upstream text.
+      throw toSimulationError(error, { method: methodName });
     }
+  }
+
+  public getConfigFingerprint(): string | undefined {
+    return this.configFingerprint;
+  }
+
+  /**
+   * Network / contract / version identity this client simulates against
+   * (#1857). Pass it as `expected` to `runWithSimulationContext`, or combine
+   * it with the current ledger as `expectedContext` when signing/submitting.
+   */
+  public getSimulationContext(): SimulationContext {
+    return bindSimulationContext({
+      network: this.network,
+      networkPassphrase: this.networkPassphrase,
+      contractId: this.contractId,
+      contractVersion: this.specHash,
+    });
   }
 
   // Read-only view methods

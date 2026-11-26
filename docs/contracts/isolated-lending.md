@@ -165,6 +165,7 @@ invocations and decode the new `HealthFactor` shape.
 | 16 | `WrongNetwork` | Context names a different network than the live ledger or stored binding |
 | 17 | `WrongContract` | Context names a different deployment address |
 | 18 | `WrongVersion` | Context storage version does not match the stored version |
+| 19 | `InvalidOracleQuote` | Oracle quote has an invalid price, confidence or future ledger |
 
 See `contracts/ERROR_CODES.md` for the full table.
 
@@ -200,3 +201,10 @@ positions, totals, the borrow index, accrual markers and the liquidation id
 unchanged, so the same call can be retried with corrected inputs. Examples:
 repay debt before borrowing another unit, withdraw no more than redeemable
 cash, or refresh the configuration fingerprint after an admin change and retry.
+
+Oracle quotes are checked both when pushed and when consumed. A quote must have
+a nonzero price, confidence at most 10,000 bps, and a ledger no later than the
+current ledger. A malformed stored quote fails with `InvalidOracleQuote` before
+borrow accrual or transfers; the oracle can publish a corrected quote and the
+borrow can be retried safely. The push entry point rejects invalid price or
+confidence with `InvalidConfig` and leaves the previous quote intact.

@@ -13,6 +13,10 @@ pub enum DataKey {
     /// Collateral already paid out by partial exercises of an option. Kept apart
     /// from `OptionData` so existing stored records keep decoding unchanged.
     ExercisedAmount(u32),
+    /// Monotonic settlement sequence used for optimistic concurrency checks.
+    SettlementSequence(u32),
+    /// Temporary guard preventing a token callback from re-entering settlement.
+    SettlementLock(u32),
     /// Whether an option has been cancelled by its minter.
     Cancelled(u32),
     /// Withdrawable collateral an owner holds in the contract, per (owner, asset).
@@ -167,6 +171,21 @@ pub fn read_exercised_amount(e: &Env, id: u32) -> i128 {
 pub fn write_exercised_amount(e: &Env, id: u32, amount: i128) {
     let key = DataKey::ExercisedAmount(id);
     e.storage().persistent().set(&key, &amount);
+    extend_persistent_ttl_default(e, &key);
+}
+
+/// Legacy options without this key start at sequence one.
+pub fn read_settlement_sequence(e: &Env, id: u32) -> u64 {
+    let key = DataKey::SettlementSequence(id);
+    if e.storage().persistent().has(&key) {
+        extend_persistent_ttl_default(e, &key);
+    }
+    e.storage().persistent().get(&key).unwrap_or(1)
+}
+
+pub fn write_settlement_sequence(e: &Env, id: u32, sequence: u64) {
+    let key = DataKey::SettlementSequence(id);
+    e.storage().persistent().set(&key, &sequence);
     extend_persistent_ttl_default(e, &key);
 }
 

@@ -1,10 +1,38 @@
 import { InvalidAmountError } from "./errors";
+import type { EndpointDiagnosticContext, SdkEndpointConfig } from "./endpoint";
+import type { SdkDiagnostic, SdkDiagnosticCode, SdkDiagnosticSeverity, SdkStage } from "./diagnostics";
+
+export type {
+  EndpointDiagnosticContext,
+  SdkEndpointConfig,
+  SdkDiagnostic,
+  SdkDiagnosticCode,
+  SdkDiagnosticSeverity,
+  SdkStage,
+};
 
 export interface VaultConfig {
   contractId: string;
   networkPassphrase: string;
   rpcUrl: string;
+  /** Optional backup/fallback RPC endpoint URLs. */
+  fallbackRpcUrls?: string[];
+  /** Optional diagnostic context. */
+  diagnosticContext?: EndpointDiagnosticContext;
   specHash?: string;
+  /**
+   * Expected configuration fingerprint for contract and market terms.
+   * Simulations prepared under an older snapshot will be rejected if the live
+   * contract or client configuration fingerprint drifts.
+   */
+  configFingerprint?: string;
+  /**
+   * Canonical network id (`testnet`, `mainnet`, `local`) this client targets.
+   * When set, it is validated against `networkPassphrase` and recorded on
+   * every prepared transaction so sign/submit can reject network
+   * transitions (#1857).
+   */
+  network?: string;
 }
 
 /**
@@ -37,11 +65,7 @@ export interface ApiCacheStore {
   set<T>(key: string, entry: ApiCacheEntry<T>): void | Promise<void>;
 }
 
-export interface ApiConfig extends ApiRetryConfig {
-  baseUrl: string;
-  /** Enables {@link ApiClient.cachedGet} offline/cache fallback. */
-  cacheStore?: ApiCacheStore;
-}
+export interface ApiConfig extends SdkEndpointConfig {}
 
 /** Options for a single ApiClient request. */
 export interface ApiRequestOptions {

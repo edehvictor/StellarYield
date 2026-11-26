@@ -129,6 +129,13 @@ export default function AlertsModal({
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [digestLoading, setDigestLoading] = useState(false);
   const overlayRef = useRef<HTMLDivElement>(null);
+  const alertOperationIdRef = useRef<string | null>(null);
+  const digestOperationIdRef = useRef<string | null>(null);
+
+  const updateFormField = <K extends keyof FormState>(field: K, value: FormState[K]) => {
+    alertOperationIdRef.current = null;
+    setForm((current) => ({ ...current, [field]: value }));
+  };
 
   // Digest preferences with optimistic updates and rollback on failure
   const {
@@ -275,11 +282,12 @@ export default function AlertsModal({
       return;
     }
 
-    const threshold = parseFloat(form.thresholdValue);
-    if (!Number.isFinite(threshold) || threshold < 0 || threshold > 1000) {
+    const parsedThreshold = parseFloat(form.thresholdValue);
+    if (!Number.isFinite(parsedThreshold) || parsedThreshold < 0 || parsedThreshold > 1000) {
       setFormError("APY threshold must be between 0 and 1000");
       return;
     }
+    const threshold = Math.round((parsedThreshold + Number.EPSILON) * 10000) / 10000;
 
     if (!form.email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(form.email)) {
       setFormError("Enter a valid email address");
@@ -291,32 +299,44 @@ export default function AlertsModal({
       return;
     }
 
-    const preferences: AlertPreferencesWithChannelOverrides = {
-      channel: form.channel,
-      cooldownMinutes: Number(form.cooldownMinutes),
-      severityThreshold: Number(form.severityThreshold),
-      quietHoursStart: Number(form.quietHoursStart),
-      quietHoursEnd: Number(form.quietHoursEnd),
-      channelOverrides: channelOverrides.apy,
-    };
-
-    if (
-      !Number.isFinite(preferences.cooldownMinutes) ||
-      preferences.cooldownMinutes < 0 ||
-      preferences.cooldownMinutes > 1440
-    ) {
-      setFormError("Cooldown must be between 0 and 1440 minutes");
+    const cooldown = Number(form.cooldownMinutes);
+    if (!Number.isFinite(cooldown) || !Number.isInteger(cooldown) || cooldown < 0 || cooldown > 1440) {
+      setFormError("Cooldown must be an integer between 0 and 1440 minutes");
       return;
     }
 
-    if (
-      !Number.isFinite(preferences.severityThreshold) ||
-      preferences.severityThreshold < 0 ||
-      preferences.severityThreshold > 1000
-    ) {
+    const severity = Number(form.severityThreshold);
+    if (!Number.isFinite(severity) || severity < 0 || severity > 1000) {
       setFormError("Severity threshold must be between 0 and 1000");
       return;
     }
+    const severityThreshold = Math.round((severity + Number.EPSILON) * 100) / 100;
+
+    const quietStart = Number(form.quietHoursStart);
+    if (!Number.isFinite(quietStart) || !Number.isInteger(quietStart) || quietStart < 0 || quietStart > 23) {
+      setFormError("Quiet hours start must be an integer from 0 to 23");
+      return;
+    }
+
+    const quietEnd = Number(form.quietHoursEnd);
+    if (!Number.isFinite(quietEnd) || !Number.isInteger(quietEnd) || quietEnd < 0 || quietEnd > 23) {
+      setFormError("Quiet hours end must be an integer from 0 to 23");
+      return;
+    }
+
+    const preferences: AlertPreferencesWithChannelOverrides = {
+      channel: form.channel,
+      cooldownMinutes: cooldown,
+      severityThreshold,
+      quietHoursStart: quietStart,
+      quietHoursEnd: quietEnd,
+      channelOverrides: channelOverrides.apy,
+    };
+
+    if (!alertOperationIdRef.current) {
+      alertOperationIdRef.current = `op-alert-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+    }
+    const operationIdentity = alertOperationIdRef.current;
 
     setSubmitting(true);
     try {
@@ -327,7 +347,10 @@ export default function AlertsModal({
         thresholdValue: threshold,
         email: form.email,
         preferences,
+        operationIdentity,
       });
+
+      alertOperationIdRef.current = null;
 
       window.localStorage.setItem(
         PREFS_STORAGE_KEY,
@@ -340,7 +363,16 @@ export default function AlertsModal({
         }),
       );
 
-      setAlerts((prev) => [created, ...prev]);
+      setAlerts((prev) =>
+        (prev.some((a) => a.id === created.id) ? prev : [created, ...prev]).sort(
+          (a, b) => {
+            const ta = new Date(a.createdAt).getTime();
+            const tb = new Date(b.createdAt).getTime();
+            if (tb !== ta) return tb - ta;
+            return a.id.localeCompare(b.id);
+          },
+        ),
+      );
       setForm(DEFAULT_FORM);
     } catch (err) {
       setFormError(
@@ -393,24 +425,37 @@ export default function AlertsModal({
   };
 
   const toggleWatchedVault = (vaultId: string) => {
-    const newPrefs: WatchlistDigestPreference = {
-      ...digestPreferences,
-      watchedVaultIds: digestPreferences.watchedVaultIds.includes(vaultId)
-        ? digestPreferences.watchedVaultIds.filter((value) => value !== vaultId)
-        : [...digestPreferences.watchedVaultIds, vaultId],
-    };
-    // Update optimistically - will be saved when user clicks Save
-    // No API call here, just local state update
-    setDigestPreferences(newPrefs);
+    digestOperationIdRef.current = null;
+    setDigestPreferences((current) => ({
+      ...current,
+      watchedVaultIds: current.watchedVaultIds.includes(vaultId)
+        ? current.watchedVaultIds.filter((value) => value !== vaultId)
+        : [...current.watchedVaultIds, vaultId],
+    }));
   };
 
   const handleSaveDigestPreferences = async () => {
+    if (digestSaving) return;
+
+    // Stable per-attempt identity so an interrupted save is not applied twice
+    // when the user retries from the optimistic-update retry path.
+    if (!digestOperationIdRef.current) {
+      digestOperationIdRef.current = `op-digest-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+    }
+    const operationIdentity = digestOperationIdRef.current;
+
     const preferencesWithOverrides = {
       ...digestPreferences,
       channelOverrides: channelOverrides.watchlist,
     };
     await optimisticDigestUpdate(preferencesWithOverrides, async () => {
-      return await saveDigestPreference(walletAddress, preferencesWithOverrides);
+      const saved = await saveDigestPreference(
+        walletAddress,
+        preferencesWithOverrides,
+        operationIdentity,
+      );
+      digestOperationIdRef.current = null;
+      return saved;
     });
   };
 
@@ -449,12 +494,7 @@ export default function AlertsModal({
           <div className="grid grid-cols-2 gap-2">
             <select
               value={form.vaultId}
-              onChange={(event) =>
-                setForm((current) => ({
-                  ...current,
-                  vaultId: event.target.value,
-                }))
-              }
+              onChange={(event) => updateFormField("vaultId", event.target.value)}
               aria-label="Select vault"
               className="col-span-2 bg-white/10 text-white rounded-xl px-3 py-2 text-sm border border-white/10 focus:border-indigo-400 outline-none"
             >
@@ -468,12 +508,7 @@ export default function AlertsModal({
 
             <select
               value={form.condition}
-              onChange={(event) =>
-                setForm((current) => ({
-                  ...current,
-                  condition: event.target.value as AlertCondition,
-                }))
-              }
+              onChange={(event) => updateFormField("condition", event.target.value as AlertCondition)}
               aria-label="Alert condition"
               className="bg-white/10 text-white rounded-xl px-3 py-2 text-sm border border-white/10 focus:border-indigo-400 outline-none"
             >
@@ -490,12 +525,7 @@ export default function AlertsModal({
                 step={0.1}
                 placeholder="10.0"
                 value={form.thresholdValue}
-                onChange={(event) =>
-                  setForm((current) => ({
-                    ...current,
-                    thresholdValue: event.target.value,
-                  }))
-                }
+                onChange={(event) => updateFormField("thresholdValue", event.target.value)}
                 aria-label="APY threshold"
                 className="flex-1 bg-white/10 text-white rounded-xl px-3 py-2 text-sm border border-white/10 focus:border-indigo-400 outline-none"
               />
@@ -506,24 +536,14 @@ export default function AlertsModal({
               type="email"
               placeholder="you@example.com"
               value={form.email}
-              onChange={(event) =>
-                setForm((current) => ({
-                  ...current,
-                  email: event.target.value,
-                }))
-              }
+              onChange={(event) => updateFormField("email", event.target.value)}
               aria-label="Notification email"
               className="col-span-2 bg-white/10 text-white rounded-xl px-3 py-2 text-sm border border-white/10 focus:border-indigo-400 outline-none placeholder:text-gray-500"
             />
 
             <select
               value={form.channel}
-              onChange={(event) =>
-                setForm((current) => ({
-                  ...current,
-                  channel: event.target.value as "email" | "in_app",
-                }))
-              }
+              onChange={(event) => updateFormField("channel", event.target.value as "email" | "in_app")}
               aria-label="Notification channel"
               className="col-span-2 bg-white/10 text-white rounded-xl px-3 py-2 text-sm border border-white/10 focus:border-indigo-400 outline-none"
             >
@@ -536,12 +556,7 @@ export default function AlertsModal({
               min={0}
               max={1440}
               value={form.cooldownMinutes}
-              onChange={(event) =>
-                setForm((current) => ({
-                  ...current,
-                  cooldownMinutes: event.target.value,
-                }))
-              }
+              onChange={(event) => updateFormField("cooldownMinutes", event.target.value)}
               aria-label="Cooldown minutes"
               placeholder="Cooldown (minutes)"
               className="bg-white/10 text-white rounded-xl px-3 py-2 text-sm border border-white/10 focus:border-indigo-400 outline-none"
@@ -551,12 +566,7 @@ export default function AlertsModal({
               min={0}
               max={1000}
               value={form.severityThreshold}
-              onChange={(event) =>
-                setForm((current) => ({
-                  ...current,
-                  severityThreshold: event.target.value,
-                }))
-              }
+              onChange={(event) => updateFormField("severityThreshold", event.target.value)}
               aria-label="Severity threshold"
               placeholder="Severity threshold"
               className="bg-white/10 text-white rounded-xl px-3 py-2 text-sm border border-white/10 focus:border-indigo-400 outline-none"
@@ -566,12 +576,7 @@ export default function AlertsModal({
               min={0}
               max={23}
               value={form.quietHoursStart}
-              onChange={(event) =>
-                setForm((current) => ({
-                  ...current,
-                  quietHoursStart: event.target.value,
-                }))
-              }
+              onChange={(event) => updateFormField("quietHoursStart", event.target.value)}
               aria-label="Quiet hours start"
               placeholder="Quiet start UTC"
               className="bg-white/10 text-white rounded-xl px-3 py-2 text-sm border border-white/10 focus:border-indigo-400 outline-none"
@@ -581,12 +586,7 @@ export default function AlertsModal({
               min={0}
               max={23}
               value={form.quietHoursEnd}
-              onChange={(event) =>
-                setForm((current) => ({
-                  ...current,
-                  quietHoursEnd: event.target.value,
-                }))
-              }
+              onChange={(event) => updateFormField("quietHoursEnd", event.target.value)}
               aria-label="Quiet hours end"
               placeholder="Quiet end UTC"
               className="bg-white/10 text-white rounded-xl px-3 py-2 text-sm border border-white/10 focus:border-indigo-400 outline-none"
