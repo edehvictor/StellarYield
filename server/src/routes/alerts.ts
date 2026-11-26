@@ -31,9 +31,20 @@ import {
   type AlertCondition,
 } from "../services/alertsService";
 import {
+  stageAlertPreferenceOperation,
+  executeAlertPreferenceOperation,
+  resumeAlertPreferenceOperation,
+  rollbackAlertPreferenceOperation,
+  getAlertPreferenceOperation,
+  listAlertPreferenceOperations,
+  validateAlertPreferencesInput,
+  AlertPreferenceValidationError,
+  AlertPreferenceConflictError,
+} from "../services/alertPreferenceOperationService";
+import {
   getPreferenceAuditHistory,
 } from "../services/alertPreferenceAuditService";
-import type { AlertPreferences } from "../services/alertsPreferenceRules";
+import { roundToDecimals, type AlertPreferences } from "../services/alertsPreferenceRules";
 import {
   type AlertPreferenceContext,
   AlertPreferenceContextConflictError,
@@ -47,6 +58,66 @@ const router = Router();
 const VALID_CONDITIONS: AlertCondition[] = ["above", "below"];
 
 class InvalidExpectedVersionError extends Error {}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function parseAlertPreferences(
+  value: unknown,
+): { ok: true; preferences: AlertPreferences } | { ok: false; error: string } {
+  if (!isRecord(value)) return { ok: false, error: "preferences must be an object" };
+  const { channel, cooldownMinutes, severityThreshold, quietHoursStart, quietHoursEnd } = value;
+  if (channel !== "email" && channel !== "in_app") {
+    return { ok: false, error: "preferences.channel must be email or in_app" };
+  }
+  if (
+    typeof cooldownMinutes !== "number" ||
+    !Number.isFinite(cooldownMinutes) ||
+    cooldownMinutes < 0 ||
+    cooldownMinutes > 1440
+  ) {
+    return { ok: false, error: "preferences.cooldownMinutes must be between 0 and 1440" };
+  }
+  if (
+    typeof severityThreshold !== "number" ||
+    !Number.isFinite(severityThreshold) ||
+    severityThreshold < 0 ||
+    severityThreshold > 1000
+  ) {
+    return { ok: false, error: "preferences.severityThreshold must be between 0 and 1000" };
+  }
+  if (
+    typeof quietHoursStart !== "number" ||
+    !Number.isInteger(quietHoursStart) ||
+    quietHoursStart < 0 ||
+    quietHoursStart > 23
+  ) {
+    return { ok: false, error: "preferences.quietHoursStart must be an integer from 0 to 23" };
+  }
+  if (
+    typeof quietHoursEnd !== "number" ||
+    !Number.isInteger(quietHoursEnd) ||
+    quietHoursEnd < 0 ||
+    quietHoursEnd > 23
+  ) {
+    return { ok: false, error: "preferences.quietHoursEnd must be an integer from 0 to 23" };
+  }
+  return {
+    ok: true,
+    preferences: {
+      channel,
+      cooldownMinutes,
+      severityThreshold,
+      quietHoursStart,
+      quietHoursEnd,
+    },
+  };
+}
+
+function invalidAlertPreferences(res: Response, error: string): void {
+  res.status(400).json({ error, code: "INVALID_ALERT_PREFERENCES" });
+}
 
 /**
  * The version a preference write expects (#1903), from `If-Match` (`"3"`,
@@ -143,25 +214,22 @@ function expectedVersionOr400(req: Request, res: Response): { ok: true; value: n
 
 /** POST /api/alerts */
 router.post("/", async (req: Request, res: Response) => {
+  if (!isRecord(req.body)) {
+    res.status(400).json({ error: "Request body must be an object", code: "INVALID_ALERT_REQUEST" });
+    return;
+  }
+  const body = req.body;
   const operationIdentity =
     (req.headers["x-operation-identity"] as string | undefined) ??
     (req.headers["idempotency-key"] as string | undefined) ??
-    (req.body?.operationIdentity as string | undefined);
+    (typeof body.operationIdentity === "string" ? body.operationIdentity : undefined);
 
-  const { walletAddress, vaultId, condition, thresholdValue, email } = req.body as {
+  const { walletAddress, vaultId, condition, thresholdValue, email } = body as {
     walletAddress?: string;
     vaultId?: string;
     condition?: string;
     thresholdValue?: unknown;
     email?: string;
-    operationIdentity?: string;
-    preferences?: {
-      channel?: string;
-      cooldownMinutes?: unknown;
-      severityThreshold?: unknown;
-      quietHoursStart?: unknown;
-      quietHoursEnd?: unknown;
-    };
   };
 
   if (!walletAddress || !vaultId || !condition || thresholdValue === undefined || !email) {
@@ -179,54 +247,27 @@ router.post("/", async (req: Request, res: Response) => {
     res.status(400).json({ error: "thresholdValue must be a number between 0 and 1000" });
     return;
   }
+  const roundedThreshold = roundToDecimals(threshold, 4);
 
   const contextInput = contextOr400(req, res, vaultId);
   if (!contextInput.ok) return;
 
   try {
-    let preferences;
-    if (req.body.preferences) {
-      const channel = req.body.preferences.channel;
-      const cooldownMinutes = Number(req.body.preferences.cooldownMinutes);
-      const severityThreshold = Number(req.body.preferences.severityThreshold);
-      const quietHoursStart = Number(req.body.preferences.quietHoursStart);
-      const quietHoursEnd = Number(req.body.preferences.quietHoursEnd);
-
-      if (!["email", "in_app"].includes(channel)) {
-        res.status(400).json({ error: "preferences.channel must be email or in_app" });
+    let preferences: AlertPreferences | undefined;
+    if (body.preferences !== undefined) {
+      const parsedPreferences = parseAlertPreferences(body.preferences);
+      if (!parsedPreferences.ok) {
+        invalidAlertPreferences(res, parsedPreferences.error);
         return;
       }
-      if (!Number.isFinite(cooldownMinutes) || cooldownMinutes < 0 || cooldownMinutes > 1440) {
-        res.status(400).json({ error: "preferences.cooldownMinutes must be between 0 and 1440" });
-        return;
-      }
-      if (!Number.isFinite(severityThreshold) || severityThreshold < 0 || severityThreshold > 1000) {
-        res.status(400).json({ error: "preferences.severityThreshold must be between 0 and 1000" });
-        return;
-      }
-      if (!Number.isInteger(quietHoursStart) || quietHoursStart < 0 || quietHoursStart > 23) {
-        res.status(400).json({ error: "preferences.quietHoursStart must be an integer from 0 to 23" });
-        return;
-      }
-      if (!Number.isInteger(quietHoursEnd) || quietHoursEnd < 0 || quietHoursEnd > 23) {
-        res.status(400).json({ error: "preferences.quietHoursEnd must be an integer from 0 to 23" });
-        return;
-      }
-
-      preferences = {
-        channel: channel as "email" | "in_app",
-        cooldownMinutes,
-        severityThreshold,
-        quietHoursStart,
-        quietHoursEnd,
-      };
+      preferences = parsedPreferences.preferences;
     }
 
     const alert = await createAlert({
       walletAddress,
       vaultId,
       condition: condition as AlertCondition,
-      thresholdValue: threshold,
+      thresholdValue: roundedThreshold,
       email,
       preferences,
       operationIdentity,
@@ -250,6 +291,105 @@ router.post("/", async (req: Request, res: Response) => {
       return;
     }
     const status = message.includes("Maximum") ? 429 : 500;
+    res.status(status).json({ error: message });
+  }
+});
+
+/** POST /api/alerts/preferences/operations - Stage (and optionally execute) an alert preference operation */
+router.post("/preferences/operations", (req: Request, res: Response) => {
+  const operationIdentity =
+    (req.headers["x-operation-identity"] as string | undefined) ??
+    (req.headers["idempotency-key"] as string | undefined) ??
+    (req.body?.operationIdentity as string | undefined);
+
+  const { walletAddress, vaultId, preferences, autoExecute = true, reason } = req.body as {
+    walletAddress?: string;
+    vaultId?: string;
+    preferences?: unknown;
+    autoExecute?: boolean;
+    reason?: string;
+  };
+
+  if (!walletAddress || !vaultId || !preferences) {
+    res.status(400).json({ error: "walletAddress, vaultId, and preferences are required" });
+    return;
+  }
+
+  try {
+    const validatedPrefs = validateAlertPreferencesInput(preferences);
+    const { operation, replayed } = stageAlertPreferenceOperation({
+      operationId: operationIdentity,
+      walletAddress,
+      vaultId,
+      preferences: validatedPrefs,
+    });
+
+    if (replayed) {
+      res.setHeader("X-Idempotent-Replayed", "true");
+      res.status(200).json({ operation, preferences: operation.targetPreferences, replayed: true });
+      return;
+    }
+
+    if (autoExecute) {
+      const completed = executeAlertPreferenceOperation(operation.operationId, {
+        actor: walletAddress,
+        reason,
+      });
+      res.status(201).json({ operation: completed, preferences: completed.targetPreferences, replayed: false });
+      return;
+    }
+
+    res.status(201).json({ operation, preferences: operation.targetPreferences, replayed: false });
+  } catch (err: any) {
+    if (err instanceof AlertPreferenceValidationError) {
+      res.status(400).json({ error: err.message });
+      return;
+    }
+    if (err instanceof AlertPreferenceConflictError || err.code === "OPERATION_IDENTITY_CONFLICT") {
+      res.status(409).json({ error: err.message, code: "OPERATION_IDENTITY_CONFLICT" });
+      return;
+    }
+    res.status(500).json({ error: err instanceof Error ? err.message : "Failed to stage operation" });
+  }
+});
+
+/** GET /api/alerts/preferences/operations/:operationId - Inspect an operation attempt */
+router.get("/preferences/operations/:operationId", (req: Request, res: Response) => {
+  const { operationId } = req.params;
+  const operation = getAlertPreferenceOperation(operationId);
+  if (!operation) {
+    res.status(404).json({ error: `Alert preference operation ${operationId} not found` });
+    return;
+  }
+  res.json({ operation });
+});
+
+/** POST /api/alerts/preferences/operations/:operationId/resume - Resume a failed or interrupted operation */
+router.post("/preferences/operations/:operationId/resume", (req: Request, res: Response) => {
+  const { operationId } = req.params;
+  const { reason } = req.body ?? {};
+
+  try {
+    const result = resumeAlertPreferenceOperation(operationId, { reason });
+    res.json(result);
+  } catch (err: any) {
+    const message = err instanceof Error ? err.message : "Failed to resume operation";
+    const status = message.includes("not found") ? 404 : 400;
+    res.status(status).json({ error: message });
+  }
+});
+
+/** POST /api/alerts/preferences/operations/:operationId/rollback - Rollback an operation to its previous snapshot */
+router.post("/preferences/operations/:operationId/rollback", (req: Request, res: Response) => {
+  const { operationId } = req.params;
+  const { reason } = req.body ?? {};
+
+  try {
+    const result = rollbackAlertPreferenceOperation(operationId, { reason });
+    res.json(result);
+  } catch (err: any) {
+    const message = err instanceof Error ? err.message : "Failed to roll back operation";
+    const status = message.includes("not found") ? 404 : 400;
     res.status(status).json({ error: message });
   }
 });
@@ -278,72 +418,49 @@ router.get("/preferences/:wallet/:vaultId", (req: Request, res: Response) => {
 
 /** PUT /api/alerts/preferences */
 router.put("/preferences", (req: Request, res: Response) => {
-  const operationIdentity =
-    (req.headers["x-operation-identity"] as string | undefined) ??
-    (req.headers["idempotency-key"] as string | undefined) ??
-    (req.body?.operationIdentity as string | undefined);
+  if (!isRecord(req.body)) {
+    invalidAlertPreferences(res, "Request body must be an object");
+    return;
+  }
+  const body = req.body;
+  const identityHeader = req.headers["x-operation-identity"] ?? req.headers["idempotency-key"];
+  if (identityHeader !== undefined && typeof identityHeader !== "string") {
+    invalidAlertPreferences(res, "operation identity header must be a string");
+    return;
+  }
+  if (body.operationIdentity !== undefined && typeof body.operationIdentity !== "string") {
+    invalidAlertPreferences(res, "operationIdentity must be a string");
+    return;
+  }
+  const operationIdentity = identityHeader ?? body.operationIdentity;
 
-  const { walletAddress, vaultId, preferences } = req.body as {
-    walletAddress?: string;
-    vaultId?: string;
-    preferences?: {
-      channel?: string;
-      cooldownMinutes?: unknown;
-      severityThreshold?: unknown;
-      quietHoursStart?: unknown;
-      quietHoursEnd?: unknown;
-    };
-    operationIdentity?: string;
-  };
-
-  if (!walletAddress || !vaultId || !preferences) {
-    res.status(400).json({ error: "walletAddress, vaultId, and preferences are required" });
-    return;
-  }
-
-  const channel = preferences.channel;
-  const cooldownMinutes = Number(preferences.cooldownMinutes);
-  const severityThreshold = Number(preferences.severityThreshold);
-  const quietHoursStart = Number(preferences.quietHoursStart);
-  const quietHoursEnd = Number(preferences.quietHoursEnd);
-
-  if (!["email", "in_app"].includes(String(channel))) {
-    res.status(400).json({ error: "preferences.channel must be email or in_app" });
-    return;
-  }
-  if (!Number.isFinite(cooldownMinutes) || cooldownMinutes < 0 || cooldownMinutes > 1440) {
-    res.status(400).json({ error: "preferences.cooldownMinutes must be between 0 and 1440" });
-    return;
-  }
-  if (!Number.isFinite(severityThreshold) || severityThreshold < 0 || severityThreshold > 1000) {
-    res.status(400).json({ error: "preferences.severityThreshold must be between 0 and 1000" });
-    return;
-  }
-  if (!Number.isInteger(quietHoursStart) || quietHoursStart < 0 || quietHoursStart > 23) {
-    res.status(400).json({ error: "preferences.quietHoursStart must be an integer from 0 to 23" });
-    return;
-  }
-  if (!Number.isInteger(quietHoursEnd) || quietHoursEnd < 0 || quietHoursEnd > 23) {
-    res.status(400).json({ error: "preferences.quietHoursEnd must be an integer from 0 to 23" });
+  const { walletAddress, vaultId } = body;
+  if (
+    typeof walletAddress !== "string" ||
+    !walletAddress ||
+    typeof vaultId !== "string" ||
+    !vaultId
+  ) {
+    invalidAlertPreferences(res, "walletAddress and vaultId are required");
     return;
   }
 
+  const parsedPreferences = parseAlertPreferences(body.preferences);
+  if (!parsedPreferences.ok) {
+    invalidAlertPreferences(res, parsedPreferences.error);
+    return;
+  }
   const expected = expectedVersionOr400(req, res);
   if (!expected.ok) return;
   const contextInput = contextOr400(req, res, vaultId);
   if (!contextInput.ok) return;
 
   try {
+    const validatedPrefs = validateAlertPreferencesInput(preferences);
     const result = setAlertPreferences(
       walletAddress,
       vaultId,
-      {
-        channel: channel as "email" | "in_app",
-        cooldownMinutes,
-        severityThreshold,
-        quietHoursStart,
-        quietHoursEnd,
-      },
+      parsedPreferences.preferences,
       operationIdentity,
       // Only passed when sent, so unconditional writes keep their old call shape.
       ...(expected.value === undefined ? [] : [expected.value]),
@@ -360,7 +477,11 @@ router.put("/preferences", (req: Request, res: Response) => {
     if (sendVersionConflict(res, err)) return;
     if (sendContextConflict(res, err)) return;
     const message = err instanceof Error ? err.message : "Failed to update alert preferences";
-    if (err.code === "OPERATION_IDENTITY_CONFLICT" || message.includes("Operation identity has already been used")) {
+    if (
+      err instanceof AlertPreferenceConflictError ||
+      err.code === "OPERATION_IDENTITY_CONFLICT" ||
+      message.includes("Operation identity has already been used")
+    ) {
       res.status(409).json({ error: message, code: "OPERATION_IDENTITY_CONFLICT" });
       return;
     }
@@ -426,37 +547,21 @@ router.get("/:wallet/preferences/:vaultId", (req: Request, res: Response) => {
 /** PUT /api/alerts/:wallet/preferences/:vaultId */
 router.put("/:wallet/preferences/:vaultId", (req: Request, res: Response) => {
   const { wallet, vaultId } = req.params;
-  const { channel, cooldownMinutes, severityThreshold, quietHoursStart, quietHoursEnd } =
-    req.body as Record<string, unknown>;
-
-  if (!["email", "in_app"].includes(channel as string)) {
-    res.status(400).json({ error: "channel must be email or in_app" });
+  if (!isRecord(req.body)) {
+    invalidAlertPreferences(res, "Request body must be an object");
     return;
   }
-  if (!Number.isFinite(Number(cooldownMinutes)) || Number(cooldownMinutes) < 0 || Number(cooldownMinutes) > 1440) {
-    res.status(400).json({ error: "cooldownMinutes must be between 0 and 1440" });
+  const parsedPreferences = parseAlertPreferences(req.body);
+  if (!parsedPreferences.ok) {
+    invalidAlertPreferences(res, parsedPreferences.error);
     return;
   }
-  if (!Number.isFinite(Number(severityThreshold)) || Number(severityThreshold) < 0 || Number(severityThreshold) > 1000) {
-    res.status(400).json({ error: "severityThreshold must be between 0 and 1000" });
-    return;
-  }
-  if (!Number.isInteger(Number(quietHoursStart)) || Number(quietHoursStart) < 0 || Number(quietHoursStart) > 23) {
-    res.status(400).json({ error: "quietHoursStart must be an integer from 0 to 23" });
-    return;
-  }
-  if (!Number.isInteger(Number(quietHoursEnd)) || Number(quietHoursEnd) < 0 || Number(quietHoursEnd) > 23) {
-    res.status(400).json({ error: "quietHoursEnd must be an integer from 0 to 23" });
+  if (req.body.reason !== undefined && typeof req.body.reason !== "string") {
+    invalidAlertPreferences(res, "reason must be a string");
     return;
   }
 
-  const newPrefs: AlertPreferences = {
-    channel: channel as "email" | "in_app",
-    cooldownMinutes: Number(cooldownMinutes),
-    severityThreshold: Number(severityThreshold),
-    quietHoursStart: Number(quietHoursStart),
-    quietHoursEnd: Number(quietHoursEnd),
-  };
+  const newPrefs = parsedPreferences.preferences;
 
   const expected = expectedVersionOr400(req, res);
   if (!expected.ok) return;
@@ -464,10 +569,10 @@ router.put("/:wallet/preferences/:vaultId", (req: Request, res: Response) => {
   if (!contextInput.ok) return;
 
   try {
-    const { preferences, auditEntry, version } = updateAlertPreferences(wallet, vaultId, newPrefs, {
+    const { preferences, auditEntry, version } = updateAlertPreferences(wallet, vaultId, validation.sanitized, {
       actor: wallet,
       source: "api",
-      reason: req.body.reason as string | undefined,
+      reason: req.body.reason,
       expectedVersion: expected.value,
       context: contextInput.value,
     });
@@ -478,7 +583,7 @@ router.put("/:wallet/preferences/:vaultId", (req: Request, res: Response) => {
     if (sendVersionConflict(res, err)) return;
     if (sendContextConflict(res, err)) return;
     const message = err instanceof Error ? err.message : "Failed to update alert preferences";
-    res.status(500).json({ error: message });
+    res.status(400).json({ error: message });
   }
 });
 

@@ -11,8 +11,8 @@ import {
   TX_PHASE_SUBMIT_POLL,
   TX_PHASE_WALLET_ONLY,
 } from "../../services/transactionPhase";
-import type { PendingTransaction } from "./types";
-import type { GovernanceConfig } from "./types";
+import type { PendingTransaction, GovernanceConfig } from "./types";
+import { computeGovernanceConfigFingerprint } from "../../../../shared/types/governanceConfigSnapshot";
 import SignerQuorumProgress from "./SignerQuorumProgress";
 import { computeSignerQuorumProgress } from "./signerQuorum";
 import { getNetworkPassphrase } from "../../lib/networkEnv";
@@ -58,6 +58,7 @@ export default function PendingTransactionCard({
   onExecutionRolledBack,
   onExecute,
   config,
+  onRefreshConfig,
 }: PendingTransactionCardProps) {
   const { walletAddress } = useWallet();
   const [signing, setSigning] = useState(false);
@@ -95,9 +96,32 @@ export default function PendingTransactionCard({
   const quorumProgress = computeSignerQuorumProgress(transaction, {
     signers: config?.signers ?? [],
   });
+  const liveConfigFingerprint = config
+    ? computeGovernanceConfigFingerprint(config).fingerprint
+    : undefined;
+  const configStale =
+    !isExecuted &&
+    Boolean(liveConfigFingerprint) &&
+    transaction.configFingerprint !== liveConfigFingerprint;
+  const staleConfigMessage =
+    "Governance configuration changed since this proposal was prepared. Refresh the configuration before signing or executing; existing signatures are preserved.";
+
+  function refreshStaleConfig() {
+    onRefreshConfig?.(transaction.id);
+    setError(null);
+    setSignError(null);
+    setExecError(null);
+    setSignPhase("idle");
+    setExecPhase("idle");
+  }
 
   async function handleSign() {
     if (!walletAddress) return;
+    if (configStale) {
+      setError(staleConfigMessage);
+      setSignError(staleConfigMessage);
+      return;
+    }
     setSigning(true);
     setError(null);
     setSignError(null);
@@ -129,6 +153,11 @@ export default function PendingTransactionCard({
 
   async function handleExecute() {
     if (!isReady) return;
+    if (configStale) {
+      setError(staleConfigMessage);
+      setExecError(staleConfigMessage);
+      return;
+    }
     setExecuting(true);
     setError(null);
     setExecError(null);
@@ -267,6 +296,29 @@ export default function PendingTransactionCard({
 
       <SignerQuorumProgress progress={quorumProgress} />
 
+      {configStale && !isExecuted && (
+        <div
+          role="alert"
+          className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-yellow-500/30 bg-yellow-500/10 p-3 text-sm text-yellow-200"
+        >
+          <span>
+            {staleConfigMessage}
+            {transaction.configFingerprint
+              ? ` Captured fingerprint: ${transaction.configFingerprint.slice(0, 12)}…`
+              : " This proposal predates configuration fingerprints."}
+          </span>
+          {onRefreshConfig && (
+            <button
+              type="button"
+              onClick={refreshStaleConfig}
+              className="rounded-lg border border-yellow-500/40 bg-yellow-500/20 px-3 py-1.5 font-semibold text-yellow-100 hover:bg-yellow-500/30"
+            >
+              Refresh Configuration
+            </button>
+          )}
+        </div>
+      )}
+
       <div className="flex flex-wrap gap-2">
         {transaction.signatures.map((sig) => (
           <span
@@ -317,7 +369,7 @@ export default function PendingTransactionCard({
               <button
                 type="button"
                 onClick={() => void handleSign()}
-                disabled={signing || !walletAddress}
+                disabled={signing || !walletAddress || configStale}
                 className="w-full bg-indigo-500/20 text-indigo-300 border border-indigo-500/30 font-semibold py-2 rounded-lg hover:bg-indigo-500/30 disabled:opacity-50 transition-all"
               >
                 {signing ? "Signing..." : "Sign Transaction"}
@@ -346,7 +398,7 @@ export default function PendingTransactionCard({
               <button
                 type="button"
                 onClick={() => void handleExecute()}
-                disabled={executing}
+                disabled={executing || configStale}
                 className="w-full bg-gradient-to-r from-green-500 to-emerald-600 text-white font-semibold py-2 rounded-lg disabled:opacity-50 transition-opacity"
               >
                 {executing

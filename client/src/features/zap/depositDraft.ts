@@ -63,6 +63,19 @@ export interface DepositDraft {
   };
   /** epoch ms when the draft was saved (at submission time). */
   submittedAt: number;
+  /** Review operation id shared with the server journal (#1891). */
+  operationId?: string;
+  /**
+   * Contract deadline of the signed deposit, Unix seconds (#1891). After it
+   * the deposit can no longer move funds, so a retry may resubmit once the
+   * ledger shows it never landed.
+   */
+  deadlineUnixSeconds?: number;
+  /**
+   * True once the ledger confirmed this transaction (#1891). The draft stays
+   * for indexer reconciliation, but it no longer holds back a new deposit.
+   */
+  ledgerConfirmed?: boolean;
 }
 
 export type DepositDraftState =
