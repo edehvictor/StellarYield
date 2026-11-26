@@ -1,4 +1,4 @@
-import { AlertTriangle, Plug, RefreshCw, Unplug, Shield, Clock, Globe, Eye } from "lucide-react";
+import { AlertTriangle, Plug, RefreshCw, Unplug, Shield, Clock, Globe, Eye, RotateCcw } from "lucide-react";
 import { useMemo, useEffect, useState, useCallback } from "react";
 import { useWallet } from "../context/useWallet";
 import { isSessionExpired, isSessionStale, onSessionEvent, loadStoredSession } from "./session";
@@ -33,6 +33,7 @@ export default function WalletSessionReview() {
 
   const [crossTabUpdate, setCrossTabUpdate] = useState<WalletSession | null>(null);
   const [showPermissionDetail, setShowPermissionDetail] = useState(false);
+  const [reconnectError, setReconnectError] = useState<string | null>(null);
 
   useEffect(() => {
     const unsub = onSessionEvent((event) => {
@@ -79,12 +80,24 @@ export default function WalletSessionReview() {
   }, [providerId, network, isStale, isExpired, providerAvailable, needsReverification, crossTabUpdate]);
 
   const handleReconnect = useCallback(async () => {
+    setReconnectError(null);
     try {
       await connectWallet({ providerId: providerId ?? "freighter" });
     } catch (err) {
       console.error("Reconnect failed:", err);
+      setReconnectError(err instanceof Error ? err.message : "Reconnect failed. Existing session preserved.");
+      throw err;
     }
   }, [connectWallet, providerId]);
+
+  const handleRetry = useCallback(async () => {
+    setReconnectError(null);
+    try {
+      await handleReconnect();
+    } catch (err) {
+      setReconnectError(err instanceof Error ? err.message : "Retry failed. Existing session preserved.");
+    }
+  }, [handleReconnect]);
 
   if (!isConnected) {
     return (
@@ -131,6 +144,15 @@ export default function WalletSessionReview() {
         <div className="rounded-xl border border-amber-400/30 bg-amber-500/10 p-3 text-sm text-amber-200">
           <p className="font-semibold flex items-center gap-2"><AlertTriangle size={14} /> Review Warnings</p>
           {warnings.map((warning) => <p key={warning}>{warning}</p>)}
+        </div>
+      )}
+
+      {/* Reconnect failure — existing session and balances are preserved */}
+      {reconnectError && (
+        <div className="rounded-xl border border-red-400/30 bg-red-500/10 p-3 text-sm text-red-200">
+          <p className="font-semibold flex items-center gap-2"><AlertTriangle size={14} /> Reconnect Failed</p>
+          <p>{reconnectError}</p>
+          <p className="text-xs text-red-300/80 mt-1">Your current session and balances remain intact.</p>
         </div>
       )}
 
@@ -205,6 +227,11 @@ export default function WalletSessionReview() {
         <button type="button" className="btn-primary inline-flex items-center gap-2" onClick={() => void handleReconnect()}>
           <RefreshCw size={16} /> Reconnect
         </button>
+        {reconnectError && (
+          <button type="button" className="btn-secondary inline-flex items-center gap-2" onClick={() => void handleRetry()}>
+            <RotateCcw size={16} /> Retry
+          </button>
+        )}
       </div>
     </div>
   );

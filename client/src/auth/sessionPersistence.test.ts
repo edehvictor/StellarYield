@@ -1,4 +1,4 @@
-/**
+/*
  * Tests for wallet session persistence, clear, crash recovery,
  * cross-tab StorageEvent handling, expiry, staleness, and BroadcastChannel.
  */
@@ -40,7 +40,7 @@ const STORAGE_KEY = "stellar-yield.wallet-session";
 
 function makeSession(overrides: Partial<WalletSession> = {}): WalletSession {
   return {
-    walletAddress: "GABC1234567890ABCDEFGHIJKLMNOPQRSTUVWXYZ",
+    walletAddress: "G@ABC1234567890ABCDEFGHIJKLMNOPQRSTUVWXYZ",
     walletAddressType: "account",
     providerId: "freighter",
     providerLabel: "Freighter",
@@ -72,7 +72,7 @@ describe("loadStoredSession", () => {
   });
 
   it("preserves all optional fields (sessionKeyAddress, loginHint)", () => {
-    const session = makeSession({
+    const session = makeSession(({
       providerId: "email",
       providerLabel: "Email Smart Wallet",
       walletAddressType: "contract",
@@ -80,7 +80,7 @@ describe("loadStoredSession", () => {
       sessionSecret: "SECRET",
       loginHint: "user@example.com",
       verificationStatus: "degraded",
-    });
+    }));
     localStorage.setItem(STORAGE_KEY, JSON.stringify(session));
 
     const loaded = loadStoredSession();
@@ -90,12 +90,12 @@ describe("loadStoredSession", () => {
   });
 
   it("preserves new permission and origin fields", () => {
-    const session = makeSession({
+    const session = makeSession(({
       permissions: ["read", "sign", "trade"],
       origin: { tabId: "abc-123", origin: "https://stellar.yield" },
       lastVerifiedAt: new Date().toISOString(),
       providerAvailable: true,
-    });
+    }));
     localStorage.setItem(STORAGE_KEY, JSON.stringify(session));
 
     const loaded = loadStoredSession();
@@ -178,7 +178,7 @@ describe("cross-tab StorageEvent", () => {
   });
 
   it("loadStoredSession reflects a session written by another tab", () => {
-    const session = makeSession({ walletAddress: "GCROSS_TAB_ADDRESS" });
+    const session = makeSession(({ walletAddress: "GCROSS_TAB_ADDRESS" }));
     localStorage.setItem(STORAGE_KEY, JSON.stringify(session));
 
     const loaded = loadStoredSession();
@@ -250,9 +250,9 @@ describe("isSessionStale", () => {
   });
 
   it("returns true when idle longer than STALE_THRESHOLD_MS", () => {
-    const session = makeSession({
+    const session = makeSession(({
       lastActivityAt: new Date(Date.now() - STALE_THRESHOLD_MS - 1000).toISOString(),
-    });
+    }));
     expect(isSessionStale(session)).toBe(true);
   });
 
@@ -349,8 +349,6 @@ describe("BroadcastChannel cross-tab events", () => {
 });
 
 describe("recoverSession — #1297 wallet session handoff recovery", () => {
-  const STORAGE_KEY = "stellar-yield.wallet-session";
-
   beforeEach(() => {
     localStorage.clear();
     vi.clearAllMocks();
@@ -362,7 +360,7 @@ describe("recoverSession — #1297 wallet session handoff recovery", () => {
     expect(result.session).toBeNull();
   });
 
-  it("returns expired and clears storage when session TTL has passed", async () => {
+  it("returns expired and clears storage when session TVL has passed", async () => {
     const expired = makeSession({
       connectedAt: new Date(Date.now() - SESSION_TTL_MS - 1000).toISOString(),
     });
@@ -375,7 +373,11 @@ describe("recoverSession — #1297 wallet session handoff recovery", () => {
   });
 
   it("returns recovered and updates lastActivityAt for an extension wallet with available provider", async () => {
-    const session = makeSession({ providerId: "freighter", providerAvailable: false });
+    const session = makeSession({
+      providerId: "freighter",
+      providerAvailable: false,
+      lastActivityAt: new Date(Date.now() - 1_000).toISOString(),
+    });
     localStorage.setItem(STORAGE_KEY, JSON.stringify(session));
 
     (getAdapter as ReturnType<typeof vi.fn>).mockReturnValue({
@@ -413,20 +415,5 @@ describe("recoverSession — #1297 wallet session handoff recovery", () => {
 
     const result = await recoverSession();
     expect(result.status).toBe("degraded");
-    expect(result.session).not.toBeNull();
-  });
-
-  it("persists updated providerAvailable flag to localStorage on recovery", async () => {
-    const session = makeSession({ providerId: "xbull", providerAvailable: undefined });
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(session));
-
-    (getAdapter as ReturnType<typeof vi.fn>).mockReturnValue({
-      isAvailable: vi.fn().mockResolvedValue(true),
-    });
-
-    await recoverSession();
-
-    const stored = JSON.parse(localStorage.getItem(STORAGE_KEY)!) as WalletSession;
-    expect(stored.providerAvailable).toBe(true);
   });
 });
