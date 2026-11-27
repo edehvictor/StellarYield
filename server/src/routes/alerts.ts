@@ -31,6 +31,17 @@ import {
   type AlertCondition,
 } from "../services/alertsService";
 import {
+  stageAlertPreferenceOperation,
+  executeAlertPreferenceOperation,
+  resumeAlertPreferenceOperation,
+  rollbackAlertPreferenceOperation,
+  getAlertPreferenceOperation,
+  listAlertPreferenceOperations,
+  validateAlertPreferencesInput,
+  AlertPreferenceValidationError,
+  AlertPreferenceConflictError,
+} from "../services/alertPreferenceOperationService";
+import {
   getPreferenceAuditHistory,
 } from "../services/alertPreferenceAuditService";
 import { roundToDecimals, type AlertPreferences } from "../services/alertsPreferenceRules";
@@ -284,6 +295,105 @@ router.post("/", async (req: Request, res: Response) => {
   }
 });
 
+/** POST /api/alerts/preferences/operations - Stage (and optionally execute) an alert preference operation */
+router.post("/preferences/operations", (req: Request, res: Response) => {
+  const operationIdentity =
+    (req.headers["x-operation-identity"] as string | undefined) ??
+    (req.headers["idempotency-key"] as string | undefined) ??
+    (req.body?.operationIdentity as string | undefined);
+
+  const { walletAddress, vaultId, preferences, autoExecute = true, reason } = req.body as {
+    walletAddress?: string;
+    vaultId?: string;
+    preferences?: unknown;
+    autoExecute?: boolean;
+    reason?: string;
+  };
+
+  if (!walletAddress || !vaultId || !preferences) {
+    res.status(400).json({ error: "walletAddress, vaultId, and preferences are required" });
+    return;
+  }
+
+  try {
+    const validatedPrefs = validateAlertPreferencesInput(preferences);
+    const { operation, replayed } = stageAlertPreferenceOperation({
+      operationId: operationIdentity,
+      walletAddress,
+      vaultId,
+      preferences: validatedPrefs,
+    });
+
+    if (replayed) {
+      res.setHeader("X-Idempotent-Replayed", "true");
+      res.status(200).json({ operation, preferences: operation.targetPreferences, replayed: true });
+      return;
+    }
+
+    if (autoExecute) {
+      const completed = executeAlertPreferenceOperation(operation.operationId, {
+        actor: walletAddress,
+        reason,
+      });
+      res.status(201).json({ operation: completed, preferences: completed.targetPreferences, replayed: false });
+      return;
+    }
+
+    res.status(201).json({ operation, preferences: operation.targetPreferences, replayed: false });
+  } catch (err: any) {
+    if (err instanceof AlertPreferenceValidationError) {
+      res.status(400).json({ error: err.message });
+      return;
+    }
+    if (err instanceof AlertPreferenceConflictError || err.code === "OPERATION_IDENTITY_CONFLICT") {
+      res.status(409).json({ error: err.message, code: "OPERATION_IDENTITY_CONFLICT" });
+      return;
+    }
+    res.status(500).json({ error: err instanceof Error ? err.message : "Failed to stage operation" });
+  }
+});
+
+/** GET /api/alerts/preferences/operations/:operationId - Inspect an operation attempt */
+router.get("/preferences/operations/:operationId", (req: Request, res: Response) => {
+  const { operationId } = req.params;
+  const operation = getAlertPreferenceOperation(operationId);
+  if (!operation) {
+    res.status(404).json({ error: `Alert preference operation ${operationId} not found` });
+    return;
+  }
+  res.json({ operation });
+});
+
+/** POST /api/alerts/preferences/operations/:operationId/resume - Resume a failed or interrupted operation */
+router.post("/preferences/operations/:operationId/resume", (req: Request, res: Response) => {
+  const { operationId } = req.params;
+  const { reason } = req.body ?? {};
+
+  try {
+    const result = resumeAlertPreferenceOperation(operationId, { reason });
+    res.json(result);
+  } catch (err: any) {
+    const message = err instanceof Error ? err.message : "Failed to resume operation";
+    const status = message.includes("not found") ? 404 : 400;
+    res.status(status).json({ error: message });
+  }
+});
+
+/** POST /api/alerts/preferences/operations/:operationId/rollback - Rollback an operation to its previous snapshot */
+router.post("/preferences/operations/:operationId/rollback", (req: Request, res: Response) => {
+  const { operationId } = req.params;
+  const { reason } = req.body ?? {};
+
+  try {
+    const result = rollbackAlertPreferenceOperation(operationId, { reason });
+    res.json(result);
+  } catch (err: any) {
+    const message = err instanceof Error ? err.message : "Failed to roll back operation";
+    const status = message.includes("not found") ? 404 : 400;
+    res.status(status).json({ error: message });
+  }
+});
+
 /** GET /api/alerts/preferences/:wallet/:vaultId */
 router.get("/preferences/:wallet/:vaultId", (req: Request, res: Response) => {
   const { wallet, vaultId } = req.params;
@@ -346,6 +456,7 @@ router.put("/preferences", (req: Request, res: Response) => {
   if (!contextInput.ok) return;
 
   try {
+    const validatedPrefs = validateAlertPreferencesInput(preferences);
     const result = setAlertPreferences(
       walletAddress,
       vaultId,
@@ -366,7 +477,11 @@ router.put("/preferences", (req: Request, res: Response) => {
     if (sendVersionConflict(res, err)) return;
     if (sendContextConflict(res, err)) return;
     const message = err instanceof Error ? err.message : "Failed to update alert preferences";
-    if (err.code === "OPERATION_IDENTITY_CONFLICT" || message.includes("Operation identity has already been used")) {
+    if (
+      err instanceof AlertPreferenceConflictError ||
+      err.code === "OPERATION_IDENTITY_CONFLICT" ||
+      message.includes("Operation identity has already been used")
+    ) {
       res.status(409).json({ error: message, code: "OPERATION_IDENTITY_CONFLICT" });
       return;
     }
