@@ -48,6 +48,17 @@ function configErrorMessage(config: GovernanceConfig): string {
   return validation.issues.map((issue) => `${issue.field}: ${issue.message}`).join("; ");
 }
 
+/**
+ * Binds a proposal to the configuration that was live when it was prepared.
+ * Rejects work prepared against a different signer/threshold/contract (#1894).
+ */
+function assertProposalConfig(
+  config: GovernanceConfig,
+  transaction: PendingTransaction,
+): void {
+  assertGovernanceConfigFingerprint(config, transaction.configFingerprint);
+}
+
 export function useGovernanceStore() {
   const [transactions, setTransactions] = useState<PendingTransaction[]>(() =>
     loadFromStorage(STORAGE_KEY, []),
@@ -58,6 +69,15 @@ export function useGovernanceStore() {
   const [signerRotationAudit, setSignerRotationAudit] = useState<
     SignerRotationAuditRecord[]
   >(() => loadFromStorage(SIGNER_ROTATION_AUDIT_KEY, []));
+
+  /** Fingerprint of the live configuration, or undefined when it is invalid. */
+  const configFingerprint = useMemo(() => {
+    try {
+      return computeGovernanceConfigFingerprint(config).fingerprint;
+    } catch {
+      return undefined;
+    }
+  }, [config]);
 
   /**
    * Persist first, then publish to React. A storage failure leaves the
@@ -89,14 +109,19 @@ export function useGovernanceStore() {
 
   const addTransaction = useCallback(
     (tx: PendingTransaction) => {
-      commitTransactions([...transactions, tx]);
+      const bound =
+        tx.configFingerprint === undefined && configFingerprint !== undefined
+          ? { ...tx, configFingerprint }
+          : tx;
+      commitTransactions([...transactions, bound]);
     },
-    [transactions, commitTransactions],
+    [transactions, commitTransactions, configFingerprint],
   );
 
   const addSignature = useCallback(
     (txId: string, publicKey: string) => {
       return updateTransaction(txId, (tx) => {
+        assertProposalConfig(config, tx);
         const alreadySigned = tx.signatures.some((s) => s.publicKey === publicKey);
         if (alreadySigned) return tx;
 
@@ -110,13 +135,15 @@ export function useGovernanceStore() {
         return { ...tx, signatures: newSignatures, status: newStatus } as PendingTransaction;
       });
     },
-    [updateTransaction],
+    [updateTransaction, config],
   );
 
   const beginExecution = useCallback(
     (txId: string): GovernanceExecutionState | null => {
       const target = transactions.find((tx) => tx.id === txId);
       if (!target || target.status === "executed") return null;
+
+      assertProposalConfig(config, target);
 
       if (target.signatures.length < target.threshold) {
         throw new GovernanceExecutionError(
@@ -133,7 +160,7 @@ export function useGovernanceStore() {
       );
       return operation;
     },
-    [transactions, commitTransactions],
+    [transactions, commitTransactions, config],
   );
 
   const recordExecutionSubmitted = useCallback(
@@ -167,6 +194,7 @@ export function useGovernanceStore() {
     (txId: string, txHash?: string) => {
       return updateTransaction(txId, (tx) => {
         if (tx.status === "executed") return tx;
+        assertProposalConfig(config, tx);
         return {
           ...tx,
           status: "executed" as const,
@@ -174,7 +202,7 @@ export function useGovernanceStore() {
         };
       });
     },
-    [updateTransaction],
+    [updateTransaction, config],
   );
 
   const rollbackExecution = useCallback(
@@ -245,6 +273,26 @@ export function useGovernanceStore() {
       if (record) setSignerRotationAudit(updatedAudit);
     },
     [config, signerRotationAudit],
+  );
+
+  /**
+   * Re-captures the live configuration fingerprint on an existing proposal so a
+   * stale-config warning clears without discarding its signatures (#1894).
+   */
+  const refreshTransactionConfig = useCallback(
+    (txId: string) => {
+      try {
+        const currentFingerprint = computeGovernanceConfigFingerprint(config).fingerprint;
+        updateTransaction(txId, (transaction) => ({
+          ...transaction,
+          configFingerprint: currentFingerprint,
+        }));
+      } catch {
+        // An invalid live configuration leaves the captured fingerprint intact;
+        // the proposal stays blocked until the configuration is fixed.
+      }
+    },
+    [config, updateTransaction],
   );
 
   return {

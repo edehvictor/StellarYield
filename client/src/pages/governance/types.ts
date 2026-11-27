@@ -20,6 +20,8 @@ export interface PendingTransaction {
   xdr: string;
   signatures: SignerRecord[];
   threshold: number;
+  /** Configuration fingerprint captured when the proposal was built (#1894). */
+  configFingerprint?: string;
   createdAt: number;
   createdBy: string;
   status: "pending" | "ready" | "executed" | "expired";

@@ -40,7 +40,9 @@ interface PendingTransactionCardProps {
   onExecutionRolledBack?: (txId: string) => void;
   onExecute: (txId: string, txHash?: string) => void;
   /** Governance config used to render per-signer quorum progress (#1310). */
-  config?: Pick<GovernanceConfig, "signers">;
+  config?: GovernanceConfig;
+  /** Re-capture the live configuration fingerprint on this proposal (#1894). */
+  onRefreshConfig?: (txId: string) => void;
 }
 
 export default function PendingTransactionCard({
