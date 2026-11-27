@@ -403,6 +403,11 @@ export function clearAlertOperationStore(): void {
   alertOperationStore.clear();
 }
 
+export function deleteAlertPreferences(walletAddress: string, vaultId: string): boolean {
+  const key = toAlertKey(walletAddress, vaultId);
+  return alertPreferencesStore.delete(key);
+}
+
 export function clearAlertPreferencesStore(): void {
   alertPreferencesStore.clear();
   alertPreferencesVersionStore.clear();
