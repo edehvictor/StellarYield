@@ -1,10 +1,18 @@
 /**
- * Signer quorum progress service (#1310)
+ * Signer quorum progress service (#1310, #1898)
  *
  * Deterministic computation of multi-sig quorum progress used by the
  * governance API. Mirrors the on-chain `get_quorum_progress` view so the
  * client can render signed/required/remaining/progressPct/met without
  * waiting for an RPC round-trip.
+ *
+ * Rounding & Boundary Calculation Policy:
+ * - `threshold`: strictly checked integer. If threshold <= 0, defaults to 1.
+ * - `progressPct`: Documented floor rounding (`Math.floor((signed / required) * 100)`).
+ *   Near-limit signers (e.g. 999 of 1000) will yield 99% (never prematurely rounding up
+ *   to 100%). Quorum progress is 100% if and only if `met` is true (signed >= required).
+ * - Duplicate signatures are de-duplicated and counted at most once.
+ * - Signatures from unknown addresses not in `signers` are ignored.
  */
 
 export interface SignerQuorumInput {
@@ -35,12 +43,16 @@ export interface SignerQuorumProgress {
  * - `threshold <= 0` is treated as 1; threshold > signers.length is allowed
  *   (met only when enough unique known signatures exist).
  * - Empty signers list yields a zeroed, non-met progress with required =
- *   max(threshold, 0).
+ *   max(threshold, 1).
+ * - Progress percentage uses documented floor rounding: progressPct reaches 100%
+ *   if and only if signed >= required.
  */
 export function computeSignerQuorumProgress(
   input: SignerQuorumInput,
 ): SignerQuorumProgress {
-  const signers = Array.isArray(input.signers) ? input.signers.filter(Boolean) : [];
+  const signers = Array.isArray(input.signers)
+    ? input.signers.filter((s): s is string => typeof s === "string" && s.trim().length > 0)
+    : [];
   const required =
     typeof input.threshold === "number" && Number.isFinite(input.threshold)
       ? Math.max(1, Math.floor(input.threshold))
@@ -56,11 +68,17 @@ export function computeSignerQuorumProgress(
 
   const signed = signedSet.size;
   const remaining = Math.max(0, required - signed);
+  const met = signed >= required;
+
+  // Documented rounding policy: Standard round half-up, capped at 99% until quorum is reached.
+  // 100% progress is attained if and only if `met` is true (signed >= required).
+  const rawPct = Math.round((signed / required) * 100);
   const progressPct =
     required === 0
       ? 100
-      : Math.min(100, Math.round((signed / required) * 100));
-  const met = signed >= required;
+      : met
+        ? 100
+        : Math.min(99, Math.max(0, rawPct));
 
   const perSigner = signers.map((address) => ({
     address,

@@ -48,6 +48,20 @@ const withdrawn = await (await withdrawal.submit(vault.rpcUrl)).wait();
 
 If a simulation reports expired ledger entries, it throws `RestoreRequiredError` (`error.restorePreamble`) — pass that into the exported `restoreAndRetry()` helper, then retry `prepare()`. See `src/examples/basic.ts` for a full worked example including the restore path.
 
+### Context-bound reads and writes
+
+When a read is used to prepare a write, bind it to the same `network`,
+`networkPassphrase`, `contractId`, `contractVersion`, and `ledger` through the
+simulation-context helpers. A network or contract-version mismatch is rejected
+as non-retryable; a stale or regressed ledger is rejected before caller state
+is changed, so a safe retry can refresh the read first.
+
+Simulation inputs are validated before the request starts. Malformed strategy,
+token, amount, or retry fields produce a typed validation error without changing
+caller state. The configuration fingerprint is checked before and after the
+request so concurrent configuration changes are rejected or refreshed according
+to the selected stale-policy.
+
 ### Safe retries and duplicate submissions
 
 Every prepared operation carries an `operationId` in `prepared.meta` (and `prepared.operationId`). Pass an `idempotencyKey` to make that identity deterministic: the same key plus the same operation arguments always produces the same id, even when a retry rebuilds and re-signs the transaction with a new sequence number. The key is never placed on-chain.
