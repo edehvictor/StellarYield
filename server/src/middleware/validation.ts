@@ -58,7 +58,6 @@ export function validateZapQuote(req: Request, res: Response, next: NextFunction
     }
     throw e;
   }
-  const { slippageTolerance } = req.body;
   if (
     slippageTolerance !== undefined &&
     !(

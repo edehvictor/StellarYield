@@ -3,6 +3,9 @@ import {
   resolveValuationPriceStatus,
   resolvePositionValuation,
   computePortfolioValuationSummary,
+  validatePositionValuationInput,
+  validatePortfolioValuationInputs,
+  computeValidatedPortfolioValuationSummary,
   type PositionValuationInput,
 } from "./portfolioValuation";
 
@@ -152,6 +155,98 @@ describe("portfolioValuation (#1660)", () => {
       expect(summary.pricedValueUsd).toBe(0);
       expect(summary.totalDepositedUsd).toBe(7000);
       expect(summary.unpricedAssets).toEqual(["ALPHA", "BETA"]);
+    });
+  });
+
+  describe("malformed external data boundary (#1865)", () => {
+    it("validates a well-formed position without mutating the source object", () => {
+      const input = {
+        protocol: "Blend",
+        asset: "USDC",
+        deposited: 1000,
+        currentValue: 1050,
+        apy: 5,
+        extra: "ignored",
+      };
+      const snapshot = JSON.parse(JSON.stringify(input));
+      const result = validatePositionValuationInput(input);
+
+      expect(result.ok).toBe(true);
+      if (result.ok) {
+        expect(result.value).toEqual({
+          protocol: "Blend",
+          asset: "USDC",
+          deposited: 1000,
+          currentValue: 1050,
+          apy: 5,
+        });
+        expect(result.value).not.toBe(input);
+      }
+      expect(input).toEqual(snapshot);
+    });
+
+    it("returns a typed failure for each malformed field without throwing", () => {
+      expect(validatePositionValuationInput(null).ok).toBe(false);
+      expect(validatePositionValuationInput("nope").ok).toBe(false);
+      expect(validatePositionValuationInput({ protocol: "", asset: "USDC" }).ok).toBe(false);
+      expect(validatePositionValuationInput({ protocol: "Blend", asset: "USDC", deposited: NaN }).ok).toBe(false);
+      expect(validatePositionValuationInput({ protocol: "Blend", asset: "USDC", currentValue: Infinity }).ok).toBe(false);
+      expect(validatePositionValuationInput({ protocol: "Blend", asset: "USDC", deposited: -1 }).ok).toBe(false);
+
+      const result = validatePositionValuationInput(
+        { protocol: "Blend", asset: "USDC", priceStatus: "UNKNOWN" },
+        2,
+      );
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.failure).toEqual({
+          code: "INVALID_FIELD",
+          message: "Invalid priceStatus: must be priced, unpriced, or zero",
+          field: "priceStatus",
+          index: 2,
+        });
+      }
+    });
+
+    it("rejects malformed lists and never returns a partial summary", () => {
+      expect(validatePortfolioValuationInputs({}).ok).toBe(false);
+
+      const result = validatePortfolioValuationInputs([
+        { protocol: "Blend", asset: "USDC", deposited: 100, currentValue: 110 },
+        { protocol: "Blend", asset: "BAD", deposited: "200", currentValue: 210 },
+      ]);
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.failure.code).toBe("INVALID_FIELD");
+        expect(result.failure.field).toBe("deposited");
+        expect(result.failure.index).toBe(1);
+      }
+
+      const summaryResult = computeValidatedPortfolioValuationSummary([
+        { protocol: "Blend", asset: "USDC", deposited: 100, currentValue: 110 },
+        { protocol: "Blend", asset: "BAD", deposited: "200", currentValue: 210 },
+      ]);
+      expect(summaryResult.ok).toBe(false);
+      if (summaryResult.ok) {
+        throw new Error("expected a typed failure");
+      }
+      expect(summaryResult.failure.field).toBe("deposited");
+    });
+
+    it("supports safe retry after malformed data is replaced", () => {
+      const bad = computeValidatedPortfolioValuationSummary([
+        { protocol: "Blend", asset: "USDC", deposited: 100, currentValue: Number.NaN },
+      ]);
+      expect(bad.ok).toBe(false);
+
+      const retry = computeValidatedPortfolioValuationSummary([
+        { protocol: "Blend", asset: "USDC", deposited: 100, currentValue: 110 },
+      ]);
+      expect(retry.ok).toBe(true);
+      if (retry.ok) {
+        expect(retry.summary.totalValueUsd).toBe(110);
+        expect(retry.summary.completeness).toBe("complete");
+      }
     });
   });
 });

@@ -248,6 +248,248 @@ export function computePortfolioValuationSummary(
   };
 }
 
+// ── Untrusted input boundary (#1865) ───────────────────────────────────────
+
+/** Typed failure describing the first malformed field in untrusted input. */
+export interface PortfolioValuationInputFailure {
+  code: "INVALID_FIELD";
+  message: string;
+  /** Name of the rejected field ("position" / "positions" for shape errors). */
+  field: string;
+  /** Index of the rejected position within the submitted list. */
+  index: number;
+}
+
+export type PositionValuationValidationResult =
+  | { ok: true; value: PositionValuationInput }
+  | { ok: false; failure: PortfolioValuationInputFailure };
+
+export type PortfolioValuationInputsResult =
+  | { ok: true; positions: PositionValuationInput[] }
+  | { ok: false; failure: PortfolioValuationInputFailure };
+
+export type PortfolioValuationSummaryResult =
+  | { ok: true; summary: PortfolioValuationSummary }
+  | { ok: false; failure: PortfolioValuationInputFailure };
+
+const VALUATION_PRICE_STATUSES: readonly ValuationPriceStatus[] = [
+  "priced",
+  "unpriced",
+  "zero",
+];
+
+function invalidField(
+  field: string,
+  message: string,
+  index: number,
+): PortfolioValuationInputFailure {
+  return { code: "INVALID_FIELD", message, field, index };
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** Optional finite, non-negative number: absent, null, or a valid amount. */
+function readOptionalAmount(
+  source: Record<string, unknown>,
+  field: string,
+  index: number,
+): { ok: true; value: number | null | undefined } | { ok: false; failure: PortfolioValuationInputFailure } {
+  const raw = source[field];
+  if (raw === undefined || raw === null) {
+    return { ok: true, value: raw === null ? null : undefined };
+  }
+  if (typeof raw !== "number" || !Number.isFinite(raw) || raw < 0) {
+    return {
+      ok: false,
+      failure: invalidField(
+        field,
+        `Invalid ${field}: must be a finite non-negative number`,
+        index,
+      ),
+    };
+  }
+  return { ok: true, value: raw };
+}
+
+function isIsoTimestamp(value: string): boolean {
+  const trimmed = value.trim();
+  if (trimmed === "") {
+    return false;
+  }
+  const parsed = Date.parse(trimmed);
+  return Number.isFinite(parsed);
+}
+
+/**
+ * Validates one untrusted position record from a price feed, persisted store or
+ * refresh callback. Never throws and never mutates the input: unknown keys are
+ * dropped and a fresh object is returned on success.
+ */
+export function validatePositionValuationInput(
+  input: unknown,
+  index = 0,
+): PositionValuationValidationResult {
+  if (!isPlainObject(input)) {
+    return {
+      ok: false,
+      failure: invalidField("position", "Invalid position: expected an object", index),
+    };
+  }
+
+  const protocol = input.protocol;
+  if (typeof protocol !== "string" || protocol.trim() === "") {
+    return {
+      ok: false,
+      failure: invalidField("protocol", "Invalid protocol: must be a non-empty string", index),
+    };
+  }
+
+  const asset = input.asset;
+  if (typeof asset !== "string" || asset.trim() === "") {
+    return {
+      ok: false,
+      failure: invalidField("asset", "Invalid asset: must be a non-empty string", index),
+    };
+  }
+
+  const deposited = readOptionalAmount(input, "deposited", index);
+  if (!deposited.ok) {
+    return deposited;
+  }
+
+  const currentValue = readOptionalAmount(input, "currentValue", index);
+  if (!currentValue.ok) {
+    return currentValue;
+  }
+
+  const shares = readOptionalAmount(input, "shares", index);
+  if (!shares.ok) {
+    return shares;
+  }
+
+  const apy = readOptionalAmount(input, "apy", index);
+  if (!apy.ok) {
+    return apy;
+  }
+
+  const priceStatus = input.priceStatus;
+  if (
+    priceStatus !== undefined &&
+    (typeof priceStatus !== "string" ||
+      !VALUATION_PRICE_STATUSES.includes(priceStatus as ValuationPriceStatus))
+  ) {
+    return {
+      ok: false,
+      failure: invalidField(
+        "priceStatus",
+        "Invalid priceStatus: must be priced, unpriced, or zero",
+        index,
+      ),
+    };
+  }
+
+  const isPriceUnavailable = input.isPriceUnavailable;
+  if (isPriceUnavailable !== undefined && typeof isPriceUnavailable !== "boolean") {
+    return {
+      ok: false,
+      failure: invalidField(
+        "isPriceUnavailable",
+        "Invalid isPriceUnavailable: must be a boolean",
+        index,
+      ),
+    };
+  }
+
+  const fetchedAt = input.fetchedAt;
+  if (fetchedAt !== undefined && fetchedAt !== null) {
+    if (typeof fetchedAt !== "string" || !isIsoTimestamp(fetchedAt)) {
+      return {
+        ok: false,
+        failure: invalidField(
+          "fetchedAt",
+          "Invalid fetchedAt: must be a parseable timestamp",
+          index,
+        ),
+      };
+    }
+  }
+
+  const unpricedReason = input.unpricedReason;
+  if (unpricedReason !== undefined && typeof unpricedReason !== "string") {
+    return {
+      ok: false,
+      failure: invalidField("unpricedReason", "Invalid unpricedReason: must be a string", index),
+    };
+  }
+
+  const value: PositionValuationInput = { protocol, asset };
+  if (deposited.value !== undefined) {
+    value.deposited = deposited.value;
+  }
+  if (currentValue.value !== undefined) {
+    value.currentValue = currentValue.value;
+  }
+  if (shares.value !== undefined) {
+    value.shares = shares.value;
+  }
+  if (apy.value !== undefined) {
+    value.apy = apy.value;
+  }
+  if (fetchedAt !== undefined) {
+    value.fetchedAt = fetchedAt as string | null;
+  }
+  if (isPriceUnavailable !== undefined) {
+    value.isPriceUnavailable = isPriceUnavailable;
+  }
+  if (priceStatus !== undefined) {
+    value.priceStatus = priceStatus as ValuationPriceStatus;
+  }
+  if (unpricedReason !== undefined) {
+    value.unpricedReason = unpricedReason;
+  }
+
+  return { ok: true, value };
+}
+
+/**
+ * Validates an untrusted list of positions. Rejects any malformed entry so a
+ * caller never aggregates or persists a partial portfolio.
+ */
+export function validatePortfolioValuationInputs(
+  input: unknown,
+): PortfolioValuationInputsResult {
+  if (!Array.isArray(input)) {
+    return {
+      ok: false,
+      failure: invalidField("positions", "Invalid positions: expected an array", 0),
+    };
+  }
+
+  const positions: PositionValuationInput[] = [];
+  for (let index = 0; index < input.length; index += 1) {
+    const result = validatePositionValuationInput(input[index], index);
+    if (!result.ok) {
+      return result;
+    }
+    positions.push(result.value);
+  }
+
+  return { ok: true, positions };
+}
+
+/** Result-returning summary builder for untrusted input; never partial. */
+export function computeValidatedPortfolioValuationSummary(
+  input: unknown,
+): PortfolioValuationSummaryResult {
+  const validated = validatePortfolioValuationInputs(input);
+  if (!validated.ok) {
+    return validated;
+  }
+  return { ok: true, summary: computePortfolioValuationSummary(validated.positions) };
+}
+
 // ── Operation Identity & Duplicate Submission Protection (#1864) ────────────
 
 /**

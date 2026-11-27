@@ -7,7 +7,8 @@ import {
   type ConcentrationWarning,
 } from "../../../shared/types/exposureConcentration";
 import {
-  computePortfolioValuationSummary,
+  computeValidatedPortfolioValuationSummary,
+  type PortfolioValuationInputFailure,
   type PortfolioValuationSummary,
   type ValuationPriceStatus,
 } from "../../../shared/types/portfolioValuation";
@@ -29,6 +30,19 @@ export interface VaultPosition {
   /** Explicit valuation price status (#1660). */
   priceStatus?: ValuationPriceStatus;
   isPriceUnavailable?: boolean;
+}
+
+/** Typed failure raised when untrusted valuation input cannot be aggregated safely. */
+export class PortfolioValuationDataError extends Error {
+  readonly code = "PORTFOLIO_VALUATION_INVALID_DATA";
+  readonly statusCode = 400;
+  readonly details: PortfolioValuationInputFailure;
+
+  constructor(failure: PortfolioValuationInputFailure) {
+    super(`Invalid portfolio valuation data: ${failure.message}`);
+    this.name = "PortfolioValuationDataError";
+    this.details = failure;
+  }
 }
 
 /** A holding with its source-freshness metadata attached (#1107). */
@@ -200,22 +214,41 @@ export class PortfolioService {
   }
 
   /**
+   * Validate untrusted server-side positions and aggregate only when every
+   * field is safe. Returns a typed failure instead of a partial summary (#1865).
+   */
+  public static computeValidatedValuationSummary(
+    positions: unknown,
+  ):
+    | { ok: true; summary: PortfolioValuationSummary }
+    | { ok: false; failure: PortfolioValuationInputFailure } {
+    const mapped = Array.isArray(positions)
+      ? positions.map((position: VaultPosition) => ({
+          protocol: position?.protocol,
+          asset: position?.asset,
+          deposited: position?.depositedUsd,
+          currentValue: position?.currentValueUsd,
+          fetchedAt: position?.fetchedAt,
+          isPriceUnavailable: position?.isPriceUnavailable,
+          priceStatus: position?.priceStatus,
+        }))
+      : positions;
+
+    return computeValidatedPortfolioValuationSummary(mapped);
+  }
+
+  /**
    * Computes valuation completeness, unpriced holdings count, and fair yield metrics (#1660).
+   * Throws a typed {@link PortfolioValuationDataError} for malformed external data.
    */
   public static computeValuationSummary(
     positions: VaultPosition[],
   ): PortfolioValuationSummary {
-    return computePortfolioValuationSummary(
-      positions.map((p) => ({
-        protocol: p.protocol,
-        asset: p.asset,
-        deposited: p.depositedUsd,
-        currentValue: p.currentValueUsd,
-        fetchedAt: p.fetchedAt,
-        isPriceUnavailable: p.isPriceUnavailable,
-        priceStatus: p.priceStatus,
-      })),
-    );
+    const result = this.computeValidatedValuationSummary(positions);
+    if (!result.ok) {
+      throw new PortfolioValuationDataError(result.failure);
+    }
+    return result.summary;
   }
 
   private static getStrategyForProtocol(protocol: string): string {

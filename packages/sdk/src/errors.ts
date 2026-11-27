@@ -349,6 +349,20 @@ export class InvalidAmountError extends SorobanSdkError {
   }
 }
 
+/**
+ * Raised when simulation request parameters are malformed. The request is not
+ * sent, so the caller can retain its last accepted snapshot and retry safely.
+ */
+export class InvalidSimulationParamsError extends SorobanSdkError {
+  public readonly code = "invalid_simulation_params" as const;
+  public readonly field: string;
+
+  constructor(field: string, reason: string) {
+    super(`Invalid ${field}: ${reason}`, "simulate", false);
+    this.field = field;
+  }
+}
+
 export class StaleSimulationError extends SorobanSdkError {
   public readonly currentLedger: number;
   public readonly validUntilLedger: number;

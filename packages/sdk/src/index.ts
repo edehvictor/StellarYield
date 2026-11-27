@@ -8,6 +8,7 @@ export * from "./signers";
 export * from "./errors";
 export * from "./simulationDiagnostics";
 export * from "./network";
+export * from "./simulationMath";
 export * from "./contractRegistry";
 export * from "./simulationConfig";
 export * from "./simulationContext";

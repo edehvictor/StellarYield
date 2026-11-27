@@ -14,7 +14,8 @@ export type PortfolioValuationErrorCode =
   | "DUPLICATE_VALUATION_SUBMISSION"
   | "VALUATION_IN_PROGRESS"
   | "VALUATION_IDENTITY_CONFLICT"
-  | "VALUATION_CONTEXT_MISMATCH";
+  | "VALUATION_CONTEXT_MISMATCH"
+  | "INVALID_VALUATION_DATA";
 
 export interface PortfolioValuationFailure {
   /** Stable machine-readable code. */
@@ -58,6 +59,8 @@ const KNOWN_ERROR_MESSAGES: Record<PortfolioValuationErrorCode, string> = {
     "Operation identity conflict: the submitted parameters do not match the original submission.",
   VALUATION_CONTEXT_MISMATCH:
     "The portfolio network or ledger changed. Refresh the portfolio before retrying.",
+  INVALID_VALUATION_DATA:
+    "Received invalid portfolio valuation data. Displaying last known positions.",
 };
 
 /**
