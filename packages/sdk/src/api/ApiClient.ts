@@ -39,6 +39,7 @@ import {
   type SimulationConfigRunResult,
   runWithSimulationConfig,
 } from "../simulationConfig";
+import { buildSdkFailureDiagnostics } from "../diagnostics";
 
 export interface ApiRegisteredEndpoint {
   method: "GET" | "POST" | "PUT" | "DELETE" | "PATCH";
@@ -67,6 +68,8 @@ export interface DepositSimulationParams {
   configSnapshot?: SimulationConfigSnapshot;
   /** Policy when stale configuration is detected: "reject" (default) or "refresh". */
   onStale?: StaleSimulationConfigPolicy;
+  /** Maximum simulation requests when stale configuration is refreshed (default 3). */
+  maxAttempts?: number;
   /** Caller state or balance snapshot to preserve upon validation or execution failure. */
   stateSnapshot?: unknown;
 }
@@ -74,9 +77,22 @@ export interface DepositSimulationParams {
 const DEFAULT_TIMEOUT_MS = 15_000;
 const DEFAULT_MAX_RETRIES = 2;
 const DEFAULT_RETRY_DELAY_MS = 250;
+const DEFAULT_SIMULATION_MAX_ATTEMPTS = 3;
+const MAX_SIMULATION_ATTEMPTS = 10;
 const DEFAULT_RETRYABLE_STATUSES = [408, 429, 500, 502, 503, 504];
 const DEFAULT_CACHE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 const DEFAULT_MAX_PAGES = 50;
+
+function isApiCacheEntry(value: unknown): value is ApiCacheEntry<unknown> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const entry = value as { data?: unknown; fetchedAt?: unknown };
+  return (
+    Object.prototype.hasOwnProperty.call(entry, "data") &&
+    typeof entry.fetchedAt === "number" &&
+    Number.isFinite(entry.fetchedAt) &&
+    entry.fetchedAt >= 0
+  );
+}
 
 /**
  * Simple in-process cache store for environments without durable storage.
@@ -89,7 +105,8 @@ export function createMemoryCacheStore(): ApiCacheStore {
       const raw = map.get(key);
       if (!raw) return null;
       try {
-        return JSON.parse(raw) as ApiCacheEntry<T>;
+        const parsed: unknown = JSON.parse(raw);
+        return isApiCacheEntry(parsed) ? (parsed as ApiCacheEntry<T>) : null;
       } catch {
         return null;
       }
@@ -119,6 +136,47 @@ function createAbortError(): Error {
   const err = new Error("The operation was aborted");
   err.name = "AbortError";
   return err;
+}
+
+function validateDepositSimulationParams(params: DepositSimulationParams): void {
+  const errors: string[] = [];
+  if (!params || typeof params !== "object") {
+    errors.push("params must be an object");
+  } else {
+    if (typeof params.strategyId !== "string" || params.strategyId.trim() === "") {
+      errors.push("strategyId must be a non-empty string");
+    }
+    if (typeof params.token !== "string" || params.token.trim() === "") {
+      errors.push("token must be a non-empty string");
+    }
+    if (typeof params.amount !== "number" || !Number.isFinite(params.amount) || params.amount <= 0) {
+      errors.push("amount must be a positive finite number");
+    }
+    if (
+      params.maxAttempts !== undefined &&
+      (typeof params.maxAttempts !== "number" ||
+        !Number.isFinite(params.maxAttempts) ||
+        !Number.isInteger(params.maxAttempts) ||
+        params.maxAttempts < 1)
+    ) {
+      errors.push("maxAttempts must be a positive integer");
+    }
+  }
+
+  if (errors.length > 0) {
+    throw new SdkEndpointError(
+      "Invalid simulation parameters.",
+      buildSdkFailureDiagnostics("VALIDATION_FAILED", {
+        stage: "request-validation",
+        summary: "Simulation input was rejected before any request or state change.",
+        remediation: "Provide valid simulation parameters and retry; existing state and balances were preserved.",
+        retryable: false,
+      }),
+      errors,
+      "simulate",
+      false,
+    );
+  }
 }
 
 function withQueryParam(path: string, key: string, value: string): string {
@@ -559,40 +617,46 @@ export class ApiClient {
     params: DepositSimulationParams,
     requestOptions?: ApiRequestOptions
   ): Promise<any> {
-    const liveSnapshot = this.getSimulationConfig();
-    const expectedFingerprint =
+    validateDepositSimulationParams(params);
+    let expectedFingerprint =
       params.expectedConfigFingerprint ??
       (params.configSnapshot ? params.configSnapshot.fingerprint : undefined);
+    const refreshStaleConfig = params.onStale === "refresh";
+    const requestedAttempts = params.maxAttempts ?? DEFAULT_SIMULATION_MAX_ATTEMPTS;
+    const maxAttempts = refreshStaleConfig
+      ? Math.min(
+          MAX_SIMULATION_ATTEMPTS,
+          Math.max(
+            1,
+            Number.isFinite(requestedAttempts)
+              ? Math.floor(requestedAttempts)
+              : DEFAULT_SIMULATION_MAX_ATTEMPTS
+          )
+        )
+      : 1;
 
-    // If an expected fingerprint is specified, validate it against the live config
-    if (expectedFingerprint && liveSnapshot) {
-      if (expectedFingerprint !== liveSnapshot.fingerprint) {
-        if (params.onStale === "refresh" && this.simulationConfigReader) {
-          const refreshed = captureSimulationConfig(this.simulationConfigReader());
-          this.simulationConfigSnapshot = refreshed;
-          return this.simulateDeposit(
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      let liveSnapshot = this.getSimulationConfig();
+
+      if (expectedFingerprint && liveSnapshot && expectedFingerprint !== liveSnapshot.fingerprint) {
+        if (refreshStaleConfig && this.simulationConfigReader) {
+          liveSnapshot = captureSimulationConfig(this.simulationConfigReader());
+          this.simulationConfigSnapshot = liveSnapshot;
+          expectedFingerprint = liveSnapshot.fingerprint;
+        } else {
+          throw new StaleSimulationConfigError(
+            `Simulation configuration snapshot is stale (expected ${expectedFingerprint}, current ${liveSnapshot.fingerprint})`,
             {
-              ...params,
-              expectedConfigFingerprint: refreshed.fingerprint,
-              configSnapshot: refreshed,
-            },
-            requestOptions
+              expectedFingerprint,
+              actualFingerprint: liveSnapshot.fingerprint,
+              attempts: attempt,
+              statePreserved: true,
+              preservedState: params.stateSnapshot,
+            }
           );
         }
-
-        throw new StaleSimulationConfigError(
-          `Simulation configuration snapshot is stale (expected ${expectedFingerprint}, current ${liveSnapshot.fingerprint})`,
-          {
-            expectedFingerprint,
-            actualFingerprint: liveSnapshot.fingerprint,
-            statePreserved: true,
-            preservedState: params.stateSnapshot,
-          }
-        );
       }
-    }
 
-    try {
       const response = await this.request<any>(
         "/api/simulator/deposit",
         {
@@ -611,16 +675,10 @@ export class ApiClient {
       if (this.simulationConfigReader && liveSnapshot) {
         const afterLiveSnapshot = captureSimulationConfig(this.simulationConfigReader());
         if (afterLiveSnapshot.fingerprint !== liveSnapshot.fingerprint) {
-          if (params.onStale === "refresh") {
+          if (refreshStaleConfig && attempt < maxAttempts) {
             this.simulationConfigSnapshot = afterLiveSnapshot;
-            return this.simulateDeposit(
-              {
-                ...params,
-                expectedConfigFingerprint: afterLiveSnapshot.fingerprint,
-                configSnapshot: afterLiveSnapshot,
-              },
-              requestOptions
-            );
+            expectedFingerprint = afterLiveSnapshot.fingerprint;
+            continue;
           }
 
           throw new StaleSimulationConfigError(
@@ -628,6 +686,7 @@ export class ApiClient {
             {
               expectedFingerprint: liveSnapshot.fingerprint,
               actualFingerprint: afterLiveSnapshot.fingerprint,
+              attempts: attempt,
               statePreserved: true,
               preservedState: params.stateSnapshot,
             }
@@ -638,13 +697,17 @@ export class ApiClient {
       return {
         ...response,
         configFingerprint: liveSnapshot ? liveSnapshot.fingerprint : expectedFingerprint,
+        simulationAttempts: attempt,
       };
-    } catch (error) {
-      if (error instanceof StaleSimulationConfigError) {
-        throw error;
-      }
-      throw error;
     }
+
+    throw new StaleSimulationConfigError("Simulation configuration remained stale after retries", {
+      expectedFingerprint: expectedFingerprint ?? null,
+      actualFingerprint: this.getSimulationConfigFingerprint(),
+      attempts: maxAttempts,
+      statePreserved: true,
+      preservedState: params.stateSnapshot,
+    });
   }
 
   async getZapSupportedAssets(

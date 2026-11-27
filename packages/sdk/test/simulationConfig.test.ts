@@ -334,9 +334,87 @@ describe("SDK Simulation API Configuration Hardening (#1851)", () => {
       });
 
       expect(result.expectedShares).toBe(950);
+      expect(result.simulationAttempts).toBe(1);
       expect(result.configFingerprint).toBe(
         computeSimulationConfigFingerprint(currentConfig)
       );
+    });
+
+    it("retries a partially completed simulation under the refreshed config", async () => {
+      let currentConfig: SimulationConfig = { ...baseConfig };
+      const client = new ApiClient({ baseUrl: "https://api.stellaryield.io" });
+      client.setSimulationConfigReader(() => currentConfig);
+      const fetchSpy = vi.spyOn(global, "fetch").mockImplementation(async () => {
+        currentConfig = {
+          ...currentConfig,
+          protocolFeeBps: Number(currentConfig.protocolFeeBps) + 1,
+        };
+        return new Response(JSON.stringify({ expectedShares: 900 }), { status: 200 });
+      });
+
+      const balances = { usdc: 10_000n };
+      const error = await client
+        .simulateDeposit(
+          {
+            strategyId: "blend-usdc-v1",
+            amount: 1000,
+            token: "USDC",
+            onStale: "refresh",
+            maxAttempts: 2,
+            stateSnapshot: balances,
+          }
+        )
+        .catch((caught: unknown) => caught);
+
+      expect(error).toBeInstanceOf(StaleSimulationConfigError);
+      expect((error as StaleSimulationConfigError).attempts).toBe(2);
+      expect((error as StaleSimulationConfigError).statePreserved).toBe(true);
+      expect((error as StaleSimulationConfigError).preservedState).toEqual(balances);
+      expect(fetchSpy).toHaveBeenCalledTimes(2);
+      expect(balances).toEqual({ usdc: 10_000n });
+
+      fetchSpy.mockResolvedValueOnce(
+        new Response(JSON.stringify({ expectedShares: 875 }), { status: 200 })
+      );
+      const retry = await client.simulateDeposit(
+        {
+          strategyId: "blend-usdc-v1",
+          amount: 1000,
+          token: "USDC",
+          onStale: "refresh",
+          stateSnapshot: balances,
+        }
+      );
+
+      expect(retry.expectedShares).toBe(875);
+      expect(retry.simulationAttempts).toBe(1);
+      expect(retry.configFingerprint).toBe(computeSimulationConfigFingerprint(currentConfig));
+      expect(fetchSpy).toHaveBeenCalledTimes(3);
+      expect(balances).toEqual({ usdc: 10_000n });
+    });
+
+    it("does not issue unbounded refresh requests when configuration keeps changing", async () => {
+      let currentConfig: SimulationConfig = { ...baseConfig };
+      const client = new ApiClient({ baseUrl: "https://api.stellaryield.io" });
+      client.setSimulationConfigReader(() => currentConfig);
+      const fetchSpy = vi.spyOn(global, "fetch").mockImplementation(async () => {
+        currentConfig = {
+          ...currentConfig,
+          protocolFeeBps: Number(currentConfig.protocolFeeBps) + 1,
+        };
+        return new Response(JSON.stringify({ expectedShares: 900 }), { status: 200 });
+      });
+
+      await expect(
+        client.simulateDeposit({
+          strategyId: "blend-usdc-v1",
+          amount: 1000,
+          token: "USDC",
+          onStale: "refresh",
+          maxAttempts: 2,
+        })
+      ).rejects.toMatchObject({ attempts: 2 });
+      expect(fetchSpy).toHaveBeenCalledTimes(2);
     });
   });
 
@@ -354,4 +432,3 @@ describe("SDK Simulation API Configuration Hardening (#1851)", () => {
     });
   });
 });
-
