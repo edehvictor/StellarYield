@@ -9,6 +9,7 @@ Thanks for contributing to StellarYield, a Stellar-native DeFi yield aggregator 
 * **Use Issue Canvases:** For non-trivial features, refactors, or smart contract tasks, review and follow the [Issue Canvases Framework](./docs/issue-canvases.md) and use the markdown templates in [`docs/templates/issue-canvases/`](./docs/templates/issue-canvases/README.md).
 * **Keep it Focused:** Keep pull requests limited to one specific feature, bug fix, or contract concern at a time.
 * **Discuss Major Changes:** Start a discussion in the issues tab before changing core architecture, smart contract storage models, or automated routing logic.
+* **Retry-safe yield displays:** When changing yield curve or net-yield display flows, follow the operation identity and state-preservation rules in [yield-display-duplicate-protection.md](./docs/yield-display-duplicate-protection.md).
 
 ### 🙋 How to Claim an Issue
 

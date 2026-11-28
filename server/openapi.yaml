@@ -25,6 +25,16 @@ tags:
       built. The `X-Config-Version` header carries the asset-configuration
       fingerprint so clients can detect when a held quote was priced against a
       now-stale configuration.
+
+      **Duplicate-submission protection:** clients may send an optional
+      `X-Operation-Identity` header with a stable 8-128 character token
+      (`A-Za-z0-9_-`). The identity is bound to the requested assumptions and
+      current yield feed with a SHA-256 payload fingerprint. A retry with the
+      same identity and payload replays the first net-yield result
+      (`X-Yield-Display-Replayed: true`) instead of computing and committing it
+      again; a reused identity with different assumptions is a 409 conflict.
+      Validation and execution failures leave the displayed state and balances
+      untouched and can be retried safely.
   - name: Portfolio
     description: User portfolio and PnL tracking
   - name: Leaderboard
@@ -492,9 +502,23 @@ paths:
         the `assetConfigVersion` in the quote; a mismatch means the
         configuration has changed and the quote must be refreshed before
         submission.
+
+        An optional `X-Operation-Identity` header makes a net-yield display
+        request retry-safe. The first request computes and commits the result;
+        an identical retry returns the same result with
+        `X-Yield-Display-Replayed: true`. Reusing the identity with different
+        assumptions returns 409 and does not change state.
       tags:
         - Yields
       parameters:
+        - name: X-Operation-Identity
+          in: header
+          required: false
+          description: Stable operation identity for safe retries of the same yield display request. 8-128 characters; letters, digits, underscore and hyphen only.
+          schema:
+            type: string
+            pattern: '^[A-Za-z0-9_-]{8,128}$'
+            example: ydisp_7f3a9c2e1b4d
         - name: protocolFeeBps
           in: query
           required: false
@@ -545,7 +569,17 @@ paths:
                 snapshot. Clients use this to detect when a held quote was
                 computed against a now-stale configuration; re-quote before
                 signing when this value differs from the quote's
-                `assetConfigVersion`.
+                 `assetConfigVersion`.
+            X-Operation-Identity:
+              schema:
+                type: string
+                pattern: '^[A-Za-z0-9_-]{8,128}$'
+              description: Echo of the accepted operation identity.
+            X-Yield-Display-Replayed:
+              schema:
+                type: string
+                enum: ['true']
+              description: Present when a committed result was replayed; no effect was applied twice.
           content:
             application/json:
               schema:
@@ -553,9 +587,13 @@ paths:
                 items:
                   $ref: '#/components/schemas/YieldData'
         '400':
-          description: An assumption is outside 0-10000 bps (`INVALID_ASSUMPTION`); `details.fields` names each one. No yield data is read.
+          description: An assumption is outside 0-10000 bps (`INVALID_ASSUMPTION`), or the `X-Operation-Identity` header is malformed (`INVALID_YIELD_DISPLAY_OPERATION_IDENTITY`). No yield data is read.
+        '409':
+          description: The identity was reused with different assumptions (`YIELD_DISPLAY_OPERATION_IDENTITY_CONFLICT`) or a matching request is still in flight (`DUPLICATE_YIELD_DISPLAY_IN_PROGRESS`). State is unchanged.
+        '422':
+          description: Display validation failed (`YIELD_DISPLAY_VALIDATION_FAILED`). State and balances are unchanged.
         '500':
-          description: Failed to fetch yield data (`YIELD_FETCH_FAILED`, `recoverable` true). Safe to retry.
+          description: Failed to fetch yield data (`YIELD_FETCH_FAILED`) or compute the net-yield display (`YIELD_DISPLAY_EXECUTION_FAILED`). Both are `recoverable` and safe to retry.
 
   /api/strategies/config-snapshot:
     get:

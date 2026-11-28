@@ -15,6 +15,15 @@ import {
   type RankingWeights,
 } from "../services/opportunityRankingService";
 import { getAssetConfigVersion } from "../services/zapQuote";
+import {
+  getYieldDisplayOperationId,
+  yieldDisplayOperationIdentity,
+} from "../middleware/yieldDisplayOperation";
+import {
+  createYieldDisplayOperationIdentity,
+  defaultYieldDisplayOperationManager,
+  type NetYieldDisplayPayload,
+} from "../../../shared/types/yieldDataDisplayOperation";
 import { getActiveComparisonConfig } from "./strategies";
 import {
   computeStrategyComparisonConfigFingerprint,
@@ -22,6 +31,8 @@ import {
 } from "../../../shared/types/strategyComparisonConfigFingerprint";
 
 const yieldsRouter = Router();
+
+yieldsRouter.use(yieldDisplayOperationIdentity);
 
 /** Inclusive bounds for a fee/cost assumption in basis points (0% to 100%). */
 export const MIN_ASSUMPTION_BPS = 0;
@@ -45,15 +56,15 @@ export function parseAssumptionBps(value: unknown): number | null | undefined {
   return parsed;
 }
 
-yieldsRouter.get("/", async (_req, res) => {
+yieldsRouter.get("/", async (req, res) => {
   try {
     // Strategy comparison assumptions (#1922): checked before any yield data
     // is read, so a rejected request computes and caches nothing.
     const assumptions = {
-      protocolFeeBps: parseAssumptionBps(_req.query.protocolFeeBps),
-      vaultFeeBps: parseAssumptionBps(_req.query.vaultFeeBps),
-      rebalanceCostBps: parseAssumptionBps(_req.query.rebalanceCostBps),
-      slippageBps: parseAssumptionBps(_req.query.slippageBps),
+      protocolFeeBps: parseAssumptionBps(req.query.protocolFeeBps),
+      vaultFeeBps: parseAssumptionBps(req.query.vaultFeeBps),
+      rebalanceCostBps: parseAssumptionBps(req.query.rebalanceCostBps),
+      slippageBps: parseAssumptionBps(req.query.slippageBps),
     };
     const outOfRange = (Object.entries(assumptions) as Array<[string, number | null | undefined]>)
       .filter(([, value]) => value === null)
@@ -101,8 +112,23 @@ yieldsRouter.get("/", async (_req, res) => {
       slippageBps: assumptions.slippageBps ?? undefined,
     };
     const { data: yields, cacheStatus } = await getYieldDataWithCacheStatus();
+    const configVersion = getAssetConfigVersion();
     const hasCustomAssumptions = Object.values(assumptions).some((value) => value != null);
-    const payload = await Promise.all(yields.map(async (entry) => {
+    const operationId = getYieldDisplayOperationId(req);
+    const displayPayload: NetYieldDisplayPayload = {
+      scope: "net-yield",
+      grossApy: yields.reduce(
+        (sum, entry) => sum + (Number.isFinite(entry.totalApy) ? entry.totalApy : 0),
+        0,
+      ),
+      protocols: yields.map((entry) => ({
+        protocol: entry.protocolName,
+        grossApy: entry.totalApy,
+      })),
+      assumptions: hasCustomAssumptions ? checkedAssumptions : undefined,
+      configVersion,
+    };
+    const computePayload = async () => Promise.all(yields.map(async (entry) => {
       const providerId = `${entry.protocolName.toLowerCase()}_api`;
       const score = await yieldReliabilityEngine.calculateReliabilityScore(
         providerId,
@@ -159,17 +185,48 @@ yieldsRouter.get("/", async (_req, res) => {
         configFingerprint: fpResult.fingerprint,
       };
     }));
+
+    let payload: Awaited<ReturnType<typeof computePayload>>;
+    if (operationId) {
+      const identity = createYieldDisplayOperationIdentity(displayPayload, { operationId });
+      const outcome = await defaultYieldDisplayOperationManager.executeYieldDisplay({
+        payload: displayPayload,
+        operationIdentity: identity,
+        currentState: null,
+        execute: computePayload,
+      });
+      if (!outcome.success) {
+        const statusCode =
+          outcome.errorCode === "YIELD_DISPLAY_OPERATION_IDENTITY_CONFLICT" ||
+          outcome.errorCode === "DUPLICATE_YIELD_DISPLAY_IN_PROGRESS"
+            ? 409
+            : outcome.errorCode === "YIELD_DISPLAY_VALIDATION_FAILED"
+              ? 422
+              : 500;
+        sendError(
+          res,
+          statusCode,
+          outcome.errorCode ?? "YIELD_DISPLAY_EXECUTION_FAILED",
+          outcome.error ?? "Unable to display yield data for this operation.",
+          undefined,
+          (req as unknown as { requestId?: string }).requestId,
+          outcome.isRecoverable,
+        );
+        return;
+      }
+      payload = outcome.result!;
+      if (outcome.replayed) {
+        res.setHeader("X-Yield-Display-Replayed", "true");
+      }
+    } else {
+      payload = await computePayload();
+    }
+
     res.setHeader(
       "Cache-Control",
       `public, max-age=${CURRENT_YIELDS_TTL_SECONDS}, stale-while-revalidate=30`,
     );
     res.setHeader("X-Cache-Status", cacheStatus);
-    // Immutable configuration fingerprint (#stale-config): clients use this
-    // to detect when the asset configuration snapshot has changed between
-    // the quote that was shown and the one that would be executed. When the
-    // fingerprint received with a quote no longer matches the one on the
-    // current response the client must refresh before submitting.
-    const configVersion = getAssetConfigVersion();
     res.setHeader("X-Config-Version", configVersion);
     res.json(payload);
   } catch (error) {
@@ -183,7 +240,7 @@ yieldsRouter.get("/", async (_req, res) => {
         "YIELD_FETCH_FAILED",
         "Unable to fetch yield data right now.",
         undefined,
-        (_req as unknown as { requestId?: string }).requestId,
+        (req as unknown as { requestId?: string }).requestId,
         true,
       );
     }
