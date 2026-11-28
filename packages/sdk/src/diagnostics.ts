@@ -34,7 +34,8 @@ export type SdkDiagnosticCode =
   | "VALIDATION_FAILED"
   | "ENDPOINT_UNAVAILABLE"
   | "STATE_PRESERVED"
-  | "RETRY_UNSAFE";
+  | "RETRY_UNSAFE"
+  | "CONFIG_VERSION_CONFLICT";
 
 export type SdkDiagnosticSeverity = "info" | "warning" | "critical";
 
@@ -166,6 +167,14 @@ const TEMPLATES: Record<SdkDiagnosticCode, DiagnosticTemplate> = {
     remediation:
       "Verify transaction status or endpoint state before retrying. Existing local state was preserved.",
     retryable: false,
+  },
+  CONFIG_VERSION_CONFLICT: {
+    severity: "warning",
+    summary:
+      "Endpoint configuration changed concurrently, so the conditional update was rejected before any state was persisted.",
+    remediation:
+      "Reload the current endpoint configuration version and retry the update; existing state and balances were preserved.",
+    retryable: true,
   },
 };
 

@@ -6,6 +6,11 @@ import {
   buildSdkFailureDiagnostics,
   areDiagnosticsPrivacySafe,
 } from "./diagnostics";
+import {
+  EndpointConfigVersionConflictError,
+  SdkEndpointError,
+  isEndpointConfigVersionConflictError,
+} from "./errors";
 
 /**
  * Diagnostic context optionally provided when configuring an endpoint or
@@ -157,6 +162,189 @@ export function validateEndpointConfig(config: unknown): EndpointValidationResul
   }
 
   return { valid: true, errors: [], diagnostics: [] };
+}
+
+export interface EndpointConfigSnapshot<TConfig extends object> {
+  readonly config: TConfig;
+  readonly version: number;
+}
+
+export interface EndpointConfigUpdateOptions {
+  readonly expectedVersion?: number;
+}
+
+export type EndpointConfigChange<TConfig extends object> =
+  | Partial<TConfig>
+  | ((
+      current: Readonly<TConfig>,
+      version: number
+    ) => Partial<TConfig> | Promise<Partial<TConfig>>);
+
+export interface EndpointConfigRetryEvent {
+  readonly expectedVersion: number;
+  readonly currentVersion: number;
+  readonly attempt: number;
+}
+
+export interface EndpointConfigUpdateResult<TConfig extends object>
+  extends EndpointConfigSnapshot<TConfig> {
+  readonly attempts: number;
+  readonly retries: number;
+}
+
+export interface EndpointConfigStateOptions<TConfig extends object> {
+  validate: (config: TConfig) => EndpointValidationResult;
+  normalize?: (config: TConfig) => TConfig;
+  label?: string;
+}
+
+export interface SafeEndpointConfigUpdateOptions<TConfig extends object>
+  extends EndpointConfigUpdateOptions {
+  change: EndpointConfigChange<TConfig>;
+  maxAttempts?: number;
+  onRetry?: (event: EndpointConfigRetryEvent) => void;
+}
+
+function cloneEndpointValue<T>(value: T): T {
+  if (Array.isArray(value)) {
+    return value.map((item) => cloneEndpointValue(item)) as unknown as T;
+  }
+  if (value !== null && typeof value === "object") {
+    const prototype = Object.getPrototypeOf(value);
+    const source = value as Record<string, unknown>;
+    const keys = Object.keys(source);
+    const isPlainData =
+      (prototype === Object.prototype || prototype === null) &&
+      !keys.some((key) => typeof source[key] === "function");
+    if (isPlainData) {
+      const copy: Record<string, unknown> = {};
+      for (const key of keys) {
+        copy[key] = cloneEndpointValue(source[key]);
+      }
+      return copy as T;
+    }
+  }
+  return value;
+}
+
+export class EndpointConfigState<TConfig extends object> {
+  private current: EndpointConfigSnapshot<TConfig>;
+  private readonly validateConfig: (config: TConfig) => EndpointValidationResult;
+  private readonly normalizeConfig: (config: TConfig) => TConfig;
+  private readonly label: string;
+  private queue: Promise<unknown> = Promise.resolve();
+  private inFlight = 0;
+
+  constructor(initialConfig: TConfig, options: EndpointConfigStateOptions<TConfig>) {
+    this.current = {
+      config: cloneEndpointValue(initialConfig),
+      version: 1,
+    };
+    this.validateConfig = options.validate;
+    this.normalizeConfig = options.normalize ?? ((config) => config);
+    this.label = options.label ?? "endpoint";
+  }
+
+  public read(): EndpointConfigSnapshot<TConfig> {
+    return {
+      config: cloneEndpointValue(this.current.config),
+      version: this.current.version,
+    };
+  }
+
+  public getVersion(): number {
+    return this.current.version;
+  }
+
+  public isUpdateInFlight(): boolean {
+    return this.inFlight > 0;
+  }
+
+  public commit(
+    change: Partial<TConfig> | ((current: Readonly<TConfig>, version: number) => Partial<TConfig>),
+    options: EndpointConfigUpdateOptions = {}
+  ): EndpointConfigSnapshot<TConfig> {
+    const live = this.read();
+
+    if (options.expectedVersion !== undefined && options.expectedVersion !== live.version) {
+      throw new EndpointConfigVersionConflictError({
+        expectedVersion: options.expectedVersion,
+        currentVersion: live.version,
+        currentConfig: live.config as Record<string, unknown>,
+      });
+    }
+
+    const patch =
+      typeof change === "function" ? change(live.config, live.version) : change;
+    const candidate = { ...live.config, ...patch };
+    const normalized = this.normalizeConfig(candidate);
+    const validation = this.validateConfig(normalized);
+    if (!validation.valid) {
+      throw new SdkEndpointError(
+        `Invalid ${this.label} configuration update: ${validation.errors.join("; ")}`,
+        validation.diagnostics,
+        validation.errors,
+        "simulate",
+        false
+      );
+    }
+
+    this.current = {
+      config: cloneEndpointValue(normalized),
+      version: live.version + 1,
+    };
+    return this.read();
+  }
+
+  public async updateSafely(
+    options: SafeEndpointConfigUpdateOptions<TConfig>
+  ): Promise<EndpointConfigUpdateResult<TConfig>> {
+    const maxAttempts = Math.max(1, Math.floor(options.maxAttempts ?? 3));
+    const task = async (): Promise<EndpointConfigUpdateResult<TConfig>> => {
+      this.inFlight++;
+      try {
+        for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+          const live = this.read();
+          const expectedVersion = options.expectedVersion ?? live.version;
+          const patch =
+            typeof options.change === "function"
+              ? await options.change(live.config, live.version)
+              : options.change;
+
+          try {
+            const committed = this.commit(patch, { expectedVersion });
+            return { ...committed, attempts: attempt, retries: attempt - 1 };
+          } catch (error) {
+            if (!isEndpointConfigVersionConflictError(error)) {
+              throw error;
+            }
+            if (options.expectedVersion !== undefined || attempt === maxAttempts) {
+              throw error;
+            }
+            options.onRetry?.({
+              expectedVersion: error.expectedVersion,
+              currentVersion: error.currentVersion,
+              attempt,
+            });
+          }
+        }
+        throw new EndpointConfigVersionConflictError({
+          expectedVersion: options.expectedVersion ?? this.current.version,
+          currentVersion: this.current.version,
+          currentConfig: this.read().config as Record<string, unknown>,
+        });
+      } finally {
+        this.inFlight--;
+      }
+    };
+
+    const result = this.queue.then(task, task);
+    this.queue = result.then(
+      () => undefined,
+      () => undefined
+    );
+    return result;
+  }
 }
 
 /**
