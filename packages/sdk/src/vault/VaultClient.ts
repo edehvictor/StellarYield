@@ -6,8 +6,11 @@ import {
   PreparedTransaction,
   PreparedTransactionMeta,
   SubmittedTransaction,
+  assertWalletLifecycleContext,
   createOperationId,
   needsRestore,
+  type LifecycleContextExpectation,
+  type WalletLifecycleContext,
 } from "../lifecycle";
 import {
   SpecMismatchError,
@@ -43,6 +46,13 @@ export interface OperationIdentityOptions {
   /** Explicit operation id; prefer `idempotencyKey` for normal retries. */
   operationId?: string;
 }
+
+/**
+ * Context expectation for one-shot view reads. Ledger fields are excluded:
+ * reads have no prepared ledger window, and reusing `currentLedger` with a
+ * different meaning here would conflict with the write-path window check.
+ */
+export type ReadContextExpectation = Omit<LifecycleContextExpectation, "currentLedger">;
 
 export interface PreparedMethod<TArgs, TResult> {
   (args: TArgs): Promise<PreparedTransaction<TResult>>;
@@ -367,7 +377,8 @@ export class VaultClient {
   }
 
   // Read-only view methods
-  async totalAssets(): Promise<bigint> {
+  async totalAssets(expectation: ReadContextExpectation = {}): Promise<bigint> {
+    this.assertReadContext(expectation);
     try {
       const tx = await this.generatedClient.total_assets();
       return BigInt((tx.result as any) || 0n);
@@ -376,7 +387,8 @@ export class VaultClient {
     }
   }
 
-  async totalShares(): Promise<bigint> {
+  async totalShares(expectation: ReadContextExpectation = {}): Promise<bigint> {
+    this.assertReadContext(expectation);
     try {
       const tx = await this.generatedClient.total_shares();
       return BigInt((tx.result as any) || 0n);
@@ -385,7 +397,8 @@ export class VaultClient {
     }
   }
 
-  async getShares(user: string): Promise<bigint> {
+  async getShares(user: string, expectation: ReadContextExpectation = {}): Promise<bigint> {
+    this.assertReadContext(expectation);
     try {
       const tx = await this.generatedClient.get_shares({ user });
       return BigInt((tx.result as any) || 0n);
@@ -394,7 +407,8 @@ export class VaultClient {
     }
   }
 
-  async getAdmin(): Promise<string> {
+  async getAdmin(expectation: ReadContextExpectation = {}): Promise<string> {
+    this.assertReadContext(expectation);
     try {
       const tx = await this.generatedClient.get_admin();
       return (tx.result as any)?.unwrap?.() || String(tx.result || "");
@@ -403,7 +417,8 @@ export class VaultClient {
     }
   }
 
-  async getToken(): Promise<string> {
+  async getToken(expectation: ReadContextExpectation = {}): Promise<string> {
+    this.assertReadContext(expectation);
     try {
       const tx = await this.generatedClient.get_token();
       return (tx.result as any)?.unwrap?.() || String(tx.result || "");
@@ -412,7 +427,11 @@ export class VaultClient {
     }
   }
 
-  async getFlashLoanFee(amount: TokenAmount): Promise<bigint> {
+  async getFlashLoanFee(
+    amount: TokenAmount,
+    expectation: ReadContextExpectation = {}
+  ): Promise<bigint> {
+    this.assertReadContext(expectation);
     const units = toTokenUnits(amount);
     try {
       const tx = await this.generatedClient.get_flash_loan_fee({ amount: units as any });

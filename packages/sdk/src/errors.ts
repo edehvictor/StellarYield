@@ -378,6 +378,40 @@ export class StaleSimulationError extends SorobanSdkError {
   }
 }
 
+/** Context field that failed the wallet lifecycle binding check. */
+export type LifecycleContextField = "network" | "ledger" | "version";
+
+/**
+ * Raised when a lifecycle step is invoked under a network, ledger, or version
+ * context that does not match the context captured when the operation was
+ * prepared. The check runs before signing, submitting, or polling, so the
+ * failed step leaves existing state, balances, and the duplicate-submission
+ * guard unchanged and a retry with the refreshed context is safe.
+ */
+export class LifecycleContextMismatchError extends SorobanSdkError {
+  public readonly field: LifecycleContextField;
+  public readonly expected: string | number;
+  public readonly actual: string | number;
+  public readonly statePreserved = true as const;
+
+  constructor(
+    field: LifecycleContextField,
+    expected: string | number,
+    actual: string | number,
+    phase: SdkErrorPhase = "sign"
+  ) {
+    super(
+      `Wallet lifecycle ${field} context mismatch: expected '${expected}', got '${actual}'. Existing state and balances are unchanged; refresh the context and retry.`,
+      phase,
+      true
+    );
+    this.name = "LifecycleContextMismatchError";
+    this.field = field;
+    this.expected = expected;
+    this.actual = actual;
+  }
+}
+
 export class StaleSimulationConfigError extends SorobanSdkError {
   public readonly code = "SIMULATION_CONFIG_STALE" as const;
   public readonly expectedFingerprint: string | null;
