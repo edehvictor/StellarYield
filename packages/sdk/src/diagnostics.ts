@@ -18,6 +18,7 @@
 /** SDK stage that produced (or failed to produce) a result. */
 export type SdkStage =
   | "endpoint-configuration"
+  | "contract-registry"
   | "request-validation"
   | "network-dispatch"
   | "response-decoding"
@@ -56,6 +57,7 @@ export interface SdkDiagnostic {
 
 export const SDK_STAGE_LABELS: Record<SdkStage, string> = {
   "endpoint-configuration": "Endpoint configuration",
+  "contract-registry": "Contract registry",
   "request-validation": "Request validation",
   "network-dispatch": "Network dispatch",
   "response-decoding": "Response decoding",
