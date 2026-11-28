@@ -20,6 +20,12 @@ import {
   type GovernanceDiagnosticCode,
   type GovernanceStage,
 } from "../../../shared/types/governanceDiagnostic";
+import {
+  computeGovernanceConfigFingerprint,
+  validateGovernanceConfigSnapshot,
+  verifyGovernanceConfigFingerprint,
+  type GovernanceConfigSnapshot,
+} from "../../../shared/types/governanceConfigSnapshot";
 
 const router = Router();
 
@@ -149,6 +155,23 @@ function bindGovernanceConfig(
   };
 }
 
+function sendError(
+  res: Response,
+  statusCode: number,
+  error: string,
+  message: string,
+  details?: unknown,
+  _extra?: unknown,
+  recoverable?: boolean,
+): void {
+  res.status(statusCode).json({
+    error,
+    message,
+    ...(details !== undefined ? { details } : {}),
+    ...(recoverable !== undefined ? { recoverable } : {}),
+  });
+}
+
 function sendConfigBindingError(res: Response, binding: Extract<ConfigBinding, { ok: false }>): void {
   sendError(
     res,
@@ -191,10 +214,29 @@ router.get("/forecast", (_req: Request, res: Response) => {
   res.json({ message: "Use POST /api/governance/forecast to submit forecast inputs." });
 });
 
+function isFiniteNumberRecord(value: unknown): value is Record<string, number> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return false;
+  }
+  return Object.values(value).every(
+    (entry) => typeof entry === "number" && Number.isFinite(entry),
+  );
+}
+
+function isNonEmptyStringArray(value: unknown): value is string[] {
+  return (
+    Array.isArray(value) &&
+    value.every((entry) => typeof entry === "string" && entry.trim().length > 0)
+  );
+}
+
 router.post("/forecast", forecastLimiter, (req: Request, res: Response) => {
   const body =
     req.body && typeof req.body === "object" && !Array.isArray(req.body)
-      ? (req.body as Partial<GovernanceForecastInput>)
+      ? (req.body as Partial<GovernanceForecastInput> & {
+          configSnapshot?: unknown;
+          expectedConfigFingerprint?: unknown;
+        })
       : {};
   const { proposalType, parameters, baseline } = body;
 
@@ -202,14 +244,7 @@ router.post("/forecast", forecastLimiter, (req: Request, res: Response) => {
   if (!proposalType || !VALID_PROPOSAL_TYPES.includes(proposalType)) {
     invalidFields.push("proposalType");
   }
-  if (
-    !parameters ||
-    typeof parameters !== "object" ||
-    Array.isArray(parameters) ||
-    Object.values(parameters).some(
-      (v) => typeof v !== "number" || !Number.isFinite(v),
-    )
-  ) {
+  if (!isFiniteNumberRecord(parameters)) {
     invalidFields.push("parameters");
   }
   if (
@@ -226,11 +261,14 @@ router.post("/forecast", forecastLimiter, (req: Request, res: Response) => {
     !Number.isFinite(baseline.tvlUsd) ||
     baseline.tvlUsd < 0 ||
     (baseline.riskScore !== undefined &&
-      (!Number.isFinite(baseline.riskScore) ||
+      (typeof baseline.riskScore !== "number" ||
+        !Number.isFinite(baseline.riskScore) ||
         baseline.riskScore < 0 ||
         baseline.riskScore > 100)) ||
     (baseline.vaultCount !== undefined &&
-      (!Number.isFinite(baseline.vaultCount) || baseline.vaultCount < 0))
+      (typeof baseline.vaultCount !== "number" ||
+        !Number.isInteger(baseline.vaultCount) ||
+        baseline.vaultCount < 0))
   ) {
     invalidFields.push("baseline");
   }
@@ -248,13 +286,37 @@ router.post("/forecast", forecastLimiter, (req: Request, res: Response) => {
     return;
   }
 
+  let configBinding: Extract<ConfigBinding, { ok: true }> | undefined;
+  if (
+    body.configSnapshot !== undefined ||
+    body.expectedConfigFingerprint !== undefined
+  ) {
+    const binding = bindGovernanceConfig(
+      body.configSnapshot,
+      body.expectedConfigFingerprint,
+    );
+    if (!binding.ok) {
+      sendConfigBindingError(res, binding);
+      return;
+    }
+    configBinding = binding;
+  }
+
   try {
     const result = forecastGovernanceProposal({
       proposalType,
-      parameters: parameters as Record<string, number>,
+      parameters,
       baseline,
     });
-    res.json(result);
+    res.json(
+      configBinding
+        ? {
+            ...result,
+            configFingerprint: configBinding.fingerprint,
+            configSnapshot: configBinding.snapshot,
+          }
+        : result,
+    );
   } catch {
     // Never echo the thrown error: it may contain input values or stack frames.
     sendGovernanceFailure(res, 500, "STAGE_UNAVAILABLE", "forecast", {
@@ -275,27 +337,29 @@ const MAX_ATTACHMENTS_PER_PROPOSAL = 20;
 router.post("/quorum-progress", (req: Request, res: Response) => {
   const body =
     req.body && typeof req.body === "object" && !Array.isArray(req.body)
-      ? (req.body as Partial<SignerQuorumInput>)
+      ? (req.body as Partial<SignerQuorumInput> & {
+          contractId?: unknown;
+          configSnapshot?: unknown;
+          expectedConfigFingerprint?: unknown;
+        })
       : {};
 
   const invalidFields: string[] = [];
-  if (!Array.isArray(body.signers)) invalidFields.push("signers");
-  if (!Array.isArray(body.signatures)) invalidFields.push("signatures");
+  if (!isNonEmptyStringArray(body.signers)) invalidFields.push("signers");
+  if (!isNonEmptyStringArray(body.signatures)) invalidFields.push("signatures");
   if (
     typeof body.threshold !== "number" ||
-    !Number.isFinite(body.threshold) ||
-    body.threshold < 0
+    !Number.isInteger(body.threshold) ||
+    body.threshold < 1
   ) {
     invalidFields.push("threshold");
   }
 
   if (
     invalidFields.length > 0 ||
-    !Array.isArray(body.signers) ||
-    !Array.isArray(body.signatures) ||
-    typeof body.threshold !== "number" ||
-    !Number.isFinite(body.threshold) ||
-    body.threshold < 0
+    !isNonEmptyStringArray(body.signers) ||
+    !isNonEmptyStringArray(body.signatures) ||
+    typeof body.threshold !== "number"
   ) {
     sendGovernanceFailure(res, 400, "VALIDATION_FAILED", "request-validation", {
       fields: invalidFields,
@@ -305,13 +369,43 @@ router.post("/quorum-progress", (req: Request, res: Response) => {
     return;
   }
 
+  let configBinding: Extract<ConfigBinding, { ok: true }> | undefined;
+  if (
+    body.configSnapshot !== undefined ||
+    body.expectedConfigFingerprint !== undefined
+  ) {
+    const snapshotInput =
+      body.configSnapshot ??
+      ({
+        signers: body.signers,
+        threshold: body.threshold,
+        contractId: typeof body.contractId === "string" ? body.contractId : "",
+      } satisfies GovernanceConfigSnapshot);
+    const binding = bindGovernanceConfig(
+      snapshotInput,
+      body.expectedConfigFingerprint,
+    );
+    if (!binding.ok) {
+      sendConfigBindingError(res, binding);
+      return;
+    }
+    configBinding = binding;
+  }
+
   try {
     const progress = computeSignerQuorumProgress({
-      signers: body.signers.filter((s): s is string => typeof s === "string"),
-      signatures: body.signatures.filter((s): s is string => typeof s === "string"),
+      signers: body.signers.map((s) => s.trim()),
+      signatures: body.signatures.map((s) => s.trim()),
       threshold: body.threshold,
     });
-    res.json(progress);
+    res.json(
+      configBinding
+        ? {
+            ...progress,
+            configFingerprint: configBinding.fingerprint,
+          }
+        : progress,
+    );
   } catch {
     sendGovernanceFailure(res, 500, "STAGE_UNAVAILABLE", "quorum", {
       preserveState: true,

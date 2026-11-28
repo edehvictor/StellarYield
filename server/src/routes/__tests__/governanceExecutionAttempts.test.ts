@@ -288,4 +288,42 @@ describe("POST /api/governance/execution-attempts operationId (#1896)", () => {
       expect(countExecutionAttempts()).toBe(0);
     },
   );
+
+  it("rejects malformed attemptNumber, error, failedAtPhase, and whitespace proposalId without mutating state", async () => {
+    const app = buildApp();
+    const created = await postAttempt(app, { proposalId: "proposal-1", phase: "submitting" });
+    expect(created.status).toBe(201);
+
+    const badProposal = await postAttempt(app, { proposalId: "   " });
+    expect(badProposal.status).toBe(400);
+    expect(badProposal.body.error).toBe("MISSING_PROPOSAL_ID");
+
+    const badAttemptNumber = await postAttempt(app, {
+      proposalId: "proposal-1",
+      attemptNumber: 0,
+    });
+    expect(badAttemptNumber.status).toBe(400);
+    expect(badAttemptNumber.body.error).toBe("INVALID_ATTEMPT_NUMBER");
+
+    const badFailedAtPhase = await postAttempt(app, {
+      proposalId: "proposal-1",
+      failedAtPhase: "bogus_phase",
+    });
+    expect(badFailedAtPhase.status).toBe(400);
+    expect(badFailedAtPhase.body.error).toBe("INVALID_PHASE");
+
+    const badSucceededTxHash = await request(app)
+      .post(`/api/governance/execution-attempts/${created.body.attemptId}/succeeded`)
+      .send({ txHash: "   " });
+    expect(badSucceededTxHash.status).toBe(400);
+    expect(badSucceededTxHash.body.error).toBe("INVALID_TX_HASH");
+
+    expect(countExecutionAttempts()).toBe(1);
+
+    const retrySucceeded = await request(app)
+      .post(`/api/governance/execution-attempts/${created.body.attemptId}/succeeded`)
+      .send({ txHash: "abc123" });
+    expect(retrySucceeded.status).toBe(200);
+    expect(retrySucceeded.body.status).toBe("succeeded");
+  });
 });
