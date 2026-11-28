@@ -10,6 +10,7 @@ import {
   fetchVaultStats,
   formatTvl,
   VAULT_REGISTRY,
+  InvalidYieldDataError,
 } from "./vaultData";
 
 // ── formatTvl ─────────────────────────────────────────────────────────────
@@ -135,6 +136,34 @@ describe("fetchVaultStats", () => {
     expect(result).not.toBeNull();
     expect(result?.apy).toBe(0);
     expect(result?.live).toBe(false);
+  });
+
+  it("rejects malformed external numeric data without exposing it", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => [
+        { protocol: "Blend", asset: "USDC", apy: "8.42", tvl: NaN, risk: "Low" },
+      ],
+    }));
+
+    const result = await fetchVaultStats("usdc");
+    expect(result).toEqual({ ...VAULT_REGISTRY.usdc, apy: 0, tvl: 0, live: false });
+    expect(new InvalidYieldDataError("bad")).toBeInstanceOf(Error);
+  });
+
+  it("keeps the safe fallback on retry after a malformed response", async () => {
+    const mockFetch = vi.fn()
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ apy: 9 }) })
+      .mockResolvedValueOnce({ ok: true, json: async () => [
+        { protocol: "Blend", asset: "USDC", apy: 9, tvl: 100, risk: "Low" },
+      ] });
+    vi.stubGlobal("fetch", mockFetch);
+
+    const failed = await fetchVaultStats("usdc");
+    const retried = await fetchVaultStats("usdc");
+    expect(failed?.live).toBe(false);
+    expect(failed?.apy).toBe(0);
+    expect(retried).toMatchObject({ apy: 9, tvl: 100, live: true });
   });
 
   it("returns zeroed stats when vault not found in API response", async () => {
