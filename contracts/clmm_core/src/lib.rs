@@ -4,7 +4,7 @@
 // contracts in this workspace.
 #![allow(clippy::too_many_arguments)]
 
-//! # CLMM Core — Concentrated Liquidity Market Maker Engine
+//! # CLMM Core - Concentrated Liquidity Market Maker Engine
 //!
 //! Implements Uniswap V3-style concentrated liquidity with tick-based math,
 //! custom price ranges, and NFT-style position tracking for capital efficiency.
