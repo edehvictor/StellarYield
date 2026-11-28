@@ -115,15 +115,20 @@ Source: `contracts/isolated_lending/src/lib.rs`
 | 17   | `WrongContract`          | Context names a different pair deployment address | Use the context from `get_ledger_context()` for this exact pair |
 | 18   | `WrongVersion`           | Context storage version does not match the stored version | Refresh with `get_ledger_context()` after migration |
 | 19   | `InvalidOracleQuote`     | Oracle quote has an invalid price, confidence or future ledger | Publish a valid quote from the configured oracle |
+| 20   | `LiquidationStateChanged` | The checked liquidation's id was already consumed, or the borrower's debt no longer matches the captured snapshot | Read `get_liquidation_status`, then resume with a fresh id and current debt |
 
 `isolated_lending` uses checked arithmetic and documented floor rounding for
 values, limits, interest, fees and liquidation payouts (the close-factor cap is
 the one upward rounding, capped at the debt). Every checked value is computed
 before tokens move or storage is written, so a call that fails with any code
 above leaves balances, positions, totals, pending withdrawals and configuration
-unchanged and can be retried with corrected inputs. All state-modifying entry
-points now require both a `LedgerContext` (network/version binding) and, where
-applicable, a configuration fingerprint. See
+unchanged and can be retried with corrected inputs. Token-moving entry points
+commit their state writes before the token leg, so a failed transfer reverts the
+whole call. Liquidations persist a `LiquidationState` receipt readable with
+`get_liquidation_status`; `liquidate_checked` refuses a replayed id or a stale
+debt snapshot with code 20. All state-modifying entry points now require both a
+`LedgerContext` (network/version binding) and, where applicable, a configuration
+fingerprint. See
 `docs/contracts/isolated-lending.md` for the rounding table, numeric limits,
 and context binding.
 
