@@ -713,8 +713,6 @@ export class CustomSigner implements SignerAdapter {
 }
 
 export class FreighterSigner implements SignerAdapter {
-  private publicKeyCache?: string;
-
   constructor(
     private readonly freighterApi?: {
       getPublicKey: () => Promise<string>;
@@ -744,16 +742,12 @@ export class FreighterSigner implements SignerAdapter {
   }
 
   async getPublicKey(): Promise<string> {
-    if (this.publicKeyCache) {
-      return this.publicKeyCache;
-    }
     const api = this.getApi();
     try {
       const pubKey = await api.getPublicKey();
       if (!pubKey) {
         throw new WalletRejectedError("Freighter returned empty public key");
       }
-      this.publicKeyCache = pubKey;
       return pubKey;
     } catch (err) {
       if (err instanceof WalletRejectedError) {
@@ -771,6 +765,30 @@ export class FreighterSigner implements SignerAdapter {
     unsignedXdr: string,
     opts: SignTransactionOptions
   ): Promise<string> {
+    const api = this.getApi();
+    try {
+      const before = await this.configurationFingerprint(opts.networkPassphrase);
+      const signedXdr = await api.signTransaction(unsignedXdr, {
+        networkPassphrase: opts.networkPassphrase,
+      });
+      if (!signedXdr) {
+        throw new WalletRejectedError("Freighter returned empty signed XDR string");
+      }
+      const after = await this.configurationFingerprint(opts.networkPassphrase);
+      if (before !== after) {
+        throw new WalletRejectedError(
+          "Wallet configuration changed while signing; retry with the current account and network."
+        );
+      }
+      return signedXdr;
+    } catch (err) {
+      if (err instanceof WalletRejectedError) {
+        throw err;
+      }
+      throw new WalletRejectedError(
+        err instanceof Error ? err.message : String(err)
+      );
+    }
     return handleSignerIdempotency(
       unsignedXdr,
       opts,
@@ -796,6 +814,16 @@ export class FreighterSigner implements SignerAdapter {
         }
       }
     );
+  }
+
+  /**
+   * Capture the account/network snapshot used by a signing attempt. The key is
+   * intentionally re-read instead of cached because browser wallets can switch
+   * accounts outside the application.
+   */
+  async configurationFingerprint(networkPassphrase: string): Promise<string> {
+    const publicKey = await this.getPublicKey();
+    return `${networkPassphrase}:${publicKey}`;
   }
 
   async connect(): Promise<void> {
