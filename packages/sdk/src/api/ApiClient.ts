@@ -382,6 +382,10 @@ export class ApiClient {
     const mayRetry =
       isIdempotentMethod(method) || requestOptions?.retrySafe === true;
     const externalSignal = requestOptions?.signal;
+    const headers = new Headers(options?.headers);
+    if (requestOptions?.operationId) {
+      headers.set("Idempotency-Key", requestOptions.operationId);
+    }
 
     this.throwIfCancelled(path, externalSignal);
 
@@ -395,6 +399,7 @@ export class ApiClient {
       try {
         const response = await fetch(`${this.config.baseUrl}${path}`, {
           ...options,
+          headers,
           signal: linked.signal,
         });
 
@@ -609,7 +614,11 @@ export class ApiClient {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ fromAsset, toAsset, amount }),
       },
-      { retrySafe: requestOptions?.retrySafe ?? true, signal: requestOptions?.signal }
+      {
+        retrySafe: requestOptions?.retrySafe ?? true,
+        operationId: requestOptions?.operationId,
+        signal: requestOptions?.signal,
+      }
     );
   }
 
@@ -668,7 +677,11 @@ export class ApiClient {
             token: params.token,
           }),
         },
-        { retrySafe: requestOptions?.retrySafe ?? true, signal: requestOptions?.signal }
+        {
+          retrySafe: requestOptions?.retrySafe ?? true,
+          operationId: requestOptions?.operationId,
+          signal: requestOptions?.signal,
+        }
       );
 
       // Verify the configuration hasn't drifted while the request was in flight
@@ -729,6 +742,7 @@ export class ApiClient {
     const cursorParam = options?.cursorParam ?? "cursor";
     const requestOptions: ApiRequestOptions = {
       retrySafe: options?.retrySafe,
+      operationId: options?.operationId,
       signal: options?.signal,
     };
 

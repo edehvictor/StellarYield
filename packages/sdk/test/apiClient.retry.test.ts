@@ -96,6 +96,37 @@ describe("ApiClient retry policy (#955)", () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
+  it("sends the same idempotency key on every retry of a state-changing request", async () => {
+    const fetchMock = mockFetchSequence([
+      () => new Response("fail", { status: 503, statusText: "Service Unavailable" }),
+      () =>
+        new Response(JSON.stringify({ amount: "1", txHash: "abc" }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+    ]);
+
+    const client = new ApiClient({
+      baseUrl: "https://api.test",
+      maxRetries: 1,
+      retryDelayMs: 10,
+      retryableStatuses: [503],
+    });
+
+    const promise = client.claimReferral("GABC", {
+      retrySafe: true,
+      operationId: "claim-GABC-2026-01-01",
+    });
+    await vi.runAllTimersAsync();
+    await expect(promise).resolves.toEqual({ amount: "1", txHash: "abc" });
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    for (const call of fetchMock.mock.calls) {
+      const headers = new Headers(call[1]?.headers);
+      expect(headers.get("Idempotency-Key")).toBe("claim-GABC-2026-01-01");
+    }
+  });
+
   it("normalizes abort/timeout into ApiTimeoutError", async () => {
     vi.stubGlobal(
       "fetch",
