@@ -36,7 +36,9 @@ async function getRecommendedBaseFee(): Promise<string> {
     };
     const fee = payload.fees?.average;
     if (!fee || !Number.isFinite(fee) || fee <= 0) return StellarSdk.BASE_FEE;
-    return String(Math.round(fee));
+    const rounded = Math.round(fee);
+    const boundedFee = Math.max(Number(StellarSdk.BASE_FEE), Math.min(10000000, rounded));
+    return String(boundedFee);
   } catch {
     return StellarSdk.BASE_FEE;
   }
@@ -69,6 +71,11 @@ export default function TransactionBuilder({
   async function handleBuild() {
     if (!walletAddress || !action || !contractId) return;
 
+    if (validationSummary && !validationSummary.isValid) {
+      setError(validationSummary.errors[0]?.message ?? "Validation failed");
+      return;
+    }
+
     setBuilding(true);
     setError(null);
     setShowFailedModal(false);
@@ -98,9 +105,17 @@ export default function TransactionBuilder({
         if (field.type === "address") {
           args.push(new StellarSdk.Address(value).toScVal());
         } else if (field.type === "number") {
-          args.push(
-            StellarSdk.nativeToScVal(BigInt(value), { type: "i128" }),
-          );
+          try {
+            const bigVal = BigInt(value.trim());
+            args.push(
+              StellarSdk.nativeToScVal(bigVal, { type: "i128" }),
+            );
+          } catch {
+            setError(`Invalid number format for ${field.label}`);
+            setBuilding(false);
+            setPhase("idle");
+            return;
+          }
         }
       }
 
