@@ -567,6 +567,8 @@ export interface ZapDepositParams {
   expectedAmountOut: bigint;
   /** Accept output below `expectedAmountOut` as long as it meets `minAmountOut`. */
   allowPartial: boolean;
+  /** Stable identifier to reuse on retry; omitted values are generated as random u64s. */
+  opId?: bigint;
   /**
    * Quote `expiresAt` as a Unix timestamp in seconds. The contract rejects the
    * transaction with `QuoteExpired` (4001) if the ledger closes after it.
@@ -582,6 +584,13 @@ export async function zapDeposit(
   txSettings?: TxSettings,
   hooks?: ZapSubmissionHooks,
 ): Promise<TxResult> {
+  const operationId =
+    params.opId ??
+    (() => {
+      const words = globalThis.crypto.getRandomValues(new Uint32Array(2));
+      return (BigInt(words[0]) << 32n) | BigInt(words[1]);
+    })();
+
   return executeZapContractCall(
     userAddress,
     "zap_deposit_with_deadline",
@@ -593,8 +602,20 @@ export async function zapDeposit(
       StellarSdk.nativeToScVal(params.amountIn, { type: "i128" }),
       StellarSdk.nativeToScVal(params.minAmountOut, { type: "i128" }),
       StellarSdk.nativeToScVal(params.minSharesOut, { type: "i128" }),
-      StellarSdk.nativeToScVal(params.expectedAmountOut, { type: "i128" }),
-      StellarSdk.nativeToScVal(params.allowPartial, { type: "bool" }),
+      StellarSdk.xdr.ScVal.scvMap([
+        new StellarSdk.xdr.ScMapEntry({
+          key: StellarSdk.nativeToScVal("expected_amount_out", { type: "symbol" }),
+          val: StellarSdk.nativeToScVal(params.expectedAmountOut, { type: "i128" }),
+        }),
+        new StellarSdk.xdr.ScMapEntry({
+          key: StellarSdk.nativeToScVal("allow_partial", { type: "symbol" }),
+          val: StellarSdk.nativeToScVal(params.allowPartial, { type: "bool" }),
+        }),
+        new StellarSdk.xdr.ScMapEntry({
+          key: StellarSdk.nativeToScVal("op_id", { type: "symbol" }),
+          val: StellarSdk.nativeToScVal(operationId, { type: "u64" }),
+        }),
+      ]),
       StellarSdk.nativeToScVal(params.deadlineUnixSeconds, { type: "u64" }),
     ],
     onPhase,

@@ -280,8 +280,8 @@ Source: `contracts/zap/src/lib.rs`
 | 2    | `AlreadyInitialized` | Contract already initialized | No action needed                         |
 | 3    | `ZeroAmount`         | Input amount is zero         | Pass a positive amount                   |
 | 4    | `Unauthorized`       | Caller is not admin          | Use the admin address                    |
-| 5    | `SlippageExceeded`   | Swap output below minimum    | Increase slippage tolerance              |
-| 6    | `SwapFailed`         | Underlying swap call failed  | Check pool liquidity and token approvals |
+| 5    | `SlippageExceeded`   | Swap output is below the inclusive minimum | Increase slippage tolerance              |
+| 6    | `SwapFailed`         | Router call failed or requested an input-token transfer outside the authorized amount or recipient | Check router behavior and callback arguments |
 | 7    | `OpAlreadySettled`   | `op_id` was already successfully completed | Use a new `op_id` for a new operation; check `get_op_status` first |
 | 4001 | `QuoteExpired`       | Ledger closed after the quote deadline (`zap_deposit_with_deadline`) | Refresh the quote and resubmit |
 
