@@ -131,23 +131,31 @@ and context binding.
 
 ## clmm_core — `ClmmError`
 
-Source: `contracts/clmm_core/src/lib.rs`
+Source: `contracts/clmm_core/src/lib.rs`. Position operations are journalled and
+rolled back on failure; see
+[the position accounting guide](../docs/clmm-position-accounting.md) and
+`docs/contracts/clmm-operations.md`.
 
-| Code | Name                    | Meaning                                                        | Remediation                                              |
-| ---- | ----------------------- | -------------------------------------------------------------- | -------------------------------------------------------- |
-| 1    | `NotInitialized`        | Pool has not been initialized                                  | Call `initialize()`                                      |
-| 2    | `AlreadyInitialized`    | `initialize()` called twice                                    | No action needed                                         |
-| 3    | `InvalidTick`           | Tick is not aligned to the pool's tick spacing or is out of range | Use a tick divisible by `TickSpacing` within ±887272 |
-| 4    | `InvalidTickRange`      | `tick_lower` is not below `tick_upper`                         | Order the range correctly                                |
-| 5    | `InsufficientLiquidity` | Burn or swap amount exceeds the available liquidity            | Burn no more than the position holds                     |
-| 6    | `InvalidAmount`         | Amount is zero or the required deposit exceeds a cap           | Pass a positive amount and sufficient caps               |
-| 7    | `PriceLimitExceeded`    | Swap price limit is on the wrong side of the current price     | Set the limit beyond the current price in the swap direction |
-| 8    | `Unauthorized`          | Caller is not the position owner                               | Use the position owner address                           |
-| 9    | `InvalidPosition`       | No position exists with this id                                | Check the position id                                    |
-| 10   | `DuplicateOperation`    | An operation identity was already consumed by a successful call | Reuse the identity only for a genuine retry of the same call; use a new one for a new operation |
-| 11   | `ConcurrentModification` | Position sequence does not match; position state was modified concurrently | Query current sequence via `get_position()` / `get_position_sequence()` and retry |
-
-See `docs/contracts/clmm-operations.md` for identity scoping, optimistic concurrency, and retry rules.
+| Code | Name                      | Meaning                                                          | Remediation                                                        |
+| ---- | ------------------------- | ---------------------------------------------------------------- | ------------------------------------------------------------------ |
+| 1    | `NotInitialized`          | Pool has not been initialized                                    | Call `initialize()`                                                |
+| 2    | `AlreadyInitialized`      | `initialize()` ran twice                                         | No action needed; the pool already exists                          |
+| 3    | `InvalidTick`             | Tick is not aligned to the tick spacing or is out of range       | Round the tick to a multiple of `tick_spacing` inside ±887272      |
+| 4    | `InvalidTickRange`        | `tick_lower >= tick_upper`                                       | Pass a lower tick strictly below the upper tick                    |
+| 5    | `InsufficientLiquidity`   | Burn amount is zero or exceeds the position's liquidity          | Read the position and burn at most `position.liquidity`            |
+| 6    | `InvalidAmount`           | Mint amount is zero, or the deposit exceeds `amount0_max`/`amount1_max` | Raise the maximums or lower the liquidity amount            |
+| 7    | `PriceLimitExceeded`      | Swap price limit is on the wrong side of the current price       | Pass a limit below spot for `zero_for_one`, above it otherwise     |
+| 8    | `Unauthorized`            | Caller is not the position owner                                 | Call from the position owner address                               |
+| 9    | `InvalidPosition`         | Position id does not exist                                       | Use an id returned by `mint`                                       |
+| 10   | `DuplicateOperation`      | An operation identity was already consumed by a successful call  | Reuse the identity only for a genuine retry; use a new one for a new operation |
+| 11   | `ConcurrentModification`  | Position sequence does not match the caller's `expected_sequence` | Re-read `get_position_sequence()` and retry with the new sequence |
+| 12   | `InvalidFee`              | `initialize()` fee is above `MAX_FEE_BPS` (10 000)               | Pass a fee of at most 10 000 basis points                          |
+| 13   | `InvalidTickSpacing`      | Tick spacing is zero, negative, above `MAX_TICK_SPACING`, or persisted that way | Pass a spacing in `1..=16 384`                        |
+| 14   | `MathOverflow`            | Checked arithmetic overflowed or an amount does not fit `i128`   | Reduce the amount or the position size                             |
+| 15   | `CorruptedPosition`       | Stored position record failed validation                         | Repair the record; no state was changed                            |
+| 16   | `InvalidSqrtPrice`        | `initialize()` sqrt price outside `MIN_SQRT_RATIO..=MAX_SQRT_RATIO` | Pass an in-range Q64.96 price                                   |
+| 17   | `OperationPending`        | Another journalled operation is open for this owner              | Wait for the in-flight call to finish, then retry                  |
+| 18   | `TokenTransferFailed`     | A token transfer returned an error and the journal rolled back   | Check balances and allowances; state and balances are unchanged    |
 
 ---
 
