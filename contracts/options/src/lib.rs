@@ -3,11 +3,18 @@
 
 use soroban_sdk::{
     contract, contractclient, contracterror, contractimpl, contracttype, symbol_short, token,
-    xdr::ToXdr, Address, Bytes, BytesN, Env,
+    xdr::ToXdr, Address, Bytes, BytesN, Env, Symbol,
 };
 
 /// Domain separator for the configuration fingerprint (versioned).
 const CONFIG_FINGERPRINT_DOMAIN: &[u8] = b"stellaryield_options_config_v1";
+/// Domain separator for settlement operation identities.
+const OPERATION_DOMAIN: &[u8] = b"stellaryield_options_op_v1";
+/// Refresh an operation receipt once less than ~1 day of ledgers remains.
+pub const OPERATION_TTL_THRESHOLD: u32 = 17_280;
+/// Keep consumed operation identities for ~30 days of ledgers, so a delayed
+/// retry is still rejected instead of being applied a second time.
+pub const OPERATION_TTL_EXTEND_TO: u32 = 518_400;
 
 mod events;
 mod math;
@@ -17,16 +24,16 @@ mod tests;
 
 use events::{
     emit_cancelled, emit_config_updated, emit_created, emit_exercised, emit_expired, emit_filled,
+    emit_operation,
 };
 use math::black_scholes_call;
 use storage::{
-    clear_oracle_max_age, has_admin, read_admin, read_cancelled, read_exercised_amount,
+    clear_oracle_max_age, has_admin, has_operation, read_admin, read_cancelled, read_exercised_amount,
     read_free_collateral, read_option, read_option_counter, read_oracle, read_oracle_max_age,
-    read_reserved_collateral, read_settlement_sequence, read_storage_version, release_reserved,
-    write_admin, write_cancelled, write_exercised_amount, write_free_collateral, write_option,
-    write_option_counter, write_oracle, write_oracle_max_age, write_reserved_collateral,
-    write_settlement_sequence, write_storage_version, OptionData, OptionType,
-    CURRENT_STORAGE_VERSION,
+    read_reserved_collateral, read_storage_version, release_reserved, write_admin, write_cancelled,
+    write_exercised_amount, write_free_collateral, write_operation, write_option, write_option_counter,
+    write_oracle, write_oracle_max_age, write_reserved_collateral, write_storage_version,
+    OptionData, OptionType, CURRENT_STORAGE_VERSION,
 };
 
 #[contracterror]
@@ -67,13 +74,8 @@ pub enum OptionsError {
     /// The configuration changed since the caller captured its fingerprint.
     /// Refresh with `get_config_fingerprint` and retry settlement.
     StaleConfig = 21,
-    /// The option's settlement progress no longer matches what the caller
-    /// expected, so a retried settlement was refused instead of paying twice.
-    SettlementStateChanged = 22,
-    /// The option changed after the caller read it; retry with its new sequence.
-    ConcurrentModification = 23,
-    /// A token callback attempted to re-enter settlement for the same option.
-    ReentrantSettlement = 24,
+    /// The operation identity was already consumed by a successful call.
+    DuplicateOperation = 22,
 }
 
 /// Price source consulted when the oracle guard is enabled. `get_price`
@@ -313,12 +315,22 @@ impl OptionsContract {
         Ok(counter)
     }
 
-    /// Exercises the whole option with a configuration fingerprint.
+    /// Exercises the whole option.
+    ///
+    /// `expected_config_fingerprint` is the value `get_config_fingerprint`
+    /// returned when the caller prepared the settlement. If the configuration
+    /// changed since then, the call fails with `StaleConfig` before any state
+    /// or balance is touched.
+    ///
+    /// `operation_id` is a caller-generated identity for this submission: a
+    /// retry that reuses an id already consumed by a successful call fails with
+    /// `DuplicateOperation`; a failed call does not consume it.
     pub fn exercise(
         env: Env,
         exerciser: Address,
         option_id: u32,
         expected_config_fingerprint: BytesN<32>,
+        operation_id: BytesN<32>,
     ) -> Result<(), OptionsError> {
         let expected_sequence = read_settlement_sequence(&env, option_id);
         Self::exercise_with_sequence(
@@ -348,17 +360,26 @@ impl OptionsContract {
             option,
             None,
             &expected_config_fingerprint,
+            &operation_id,
+            symbol_short!("exercise"),
         )
     }
 
-    /// Exercises `amount` of the option's collateral, validating configuration
-    /// and the settlement sequence before any collateral moves.
+    /// Exercises `amount` of the option's collateral. The matching reserve is
+    /// released; the rest stays reserved until the option is fully exercised or
+    /// expires.
+    ///
+    /// `expected_config_fingerprint` is validated exactly like it is in
+    /// `exercise`: a stale snapshot is rejected before any collateral moves.
+    ///
+    /// `operation_id` works as in `exercise`.
     pub fn exercise_partial(
         env: Env,
         exerciser: Address,
         option_id: u32,
         amount: i128,
         expected_config_fingerprint: BytesN<32>,
+        operation_id: BytesN<32>,
     ) -> Result<(), OptionsError> {
         let expected_sequence = read_settlement_sequence(&env, option_id);
         Self::exercise_partial_with_sequence(
@@ -416,30 +437,24 @@ impl OptionsContract {
             option,
             Some(amount),
             &expected_config_fingerprint,
+            &operation_id,
+            symbol_short!("partial"),
         )
     }
 
-    /// Settlement progress of an option, without mutating any state.
-    pub fn get_settlement_state(env: Env, option_id: u32) -> SettlementState {
-        let option = read_option(&env, option_id);
-        let exercised_amount = read_exercised_amount(&env, option_id);
-        let open_remaining = (option.collateral_amount - exercised_amount).max(0);
-        let (status, remaining_amount) = if read_cancelled(&env, option_id) {
-            (SettlementStatus::Cancelled, 0)
-        } else if option.expired {
-            (SettlementStatus::Expired, 0)
-        } else if option.exercised {
-            (SettlementStatus::Exercised, 0)
-        } else if exercised_amount > 0 {
-            (SettlementStatus::PartiallyExercised, open_remaining)
-        } else {
-            (SettlementStatus::Open, open_remaining)
-        };
-        SettlementState {
-            status,
-            exercised_amount,
-            remaining_amount,
-        }
+    /// Checks whether an operation identity has already been consumed by a
+    /// successful settlement (`exercise` or `exercise_partial`) call from `exerciser`.
+    /// Lets a client that lost a response determine whether its submission landed
+    /// before retrying.
+    pub fn is_operation_consumed(
+        env: Env,
+        exerciser: Address,
+        kind: Symbol,
+        option_id: u32,
+        operation_id: BytesN<32>,
+    ) -> bool {
+        let key = Self::operation_key(&env, &exerciser, kind, option_id, &operation_id);
+        has_operation(&env, &key)
     }
 
     /// Cancels an unexpired option and returns only its unexercised collateral
@@ -658,6 +673,44 @@ impl OptionsContract {
 }
 
 impl OptionsContract {
+    /// Domain-separated identity of one settlement operation. The preimage binds
+    /// the deployment, exerciser, operation kind, option ID, and caller-supplied
+    /// operation id, so the same id cannot be replayed across accounts, operations,
+    /// options, or deployments.
+    fn operation_key(
+        env: &Env,
+        exerciser: &Address,
+        kind: Symbol,
+        option_id: u32,
+        operation_id: &BytesN<32>,
+    ) -> BytesN<32> {
+        let mut preimage = Bytes::from_slice(env, OPERATION_DOMAIN);
+        preimage.append(
+            &(
+                env.current_contract_address(),
+                exerciser.clone(),
+                kind,
+                option_id,
+                operation_id.clone(),
+            )
+                .to_xdr(env),
+        );
+        env.crypto().sha256(&preimage).to_bytes()
+    }
+
+    /// Reject an identity already consumed by a successful settlement operation.
+    fn require_new_operation(env: &Env, key: &BytesN<32>) -> Result<(), OptionsError> {
+        if has_operation(env, key) {
+            return Err(OptionsError::DuplicateOperation);
+        }
+        Ok(())
+    }
+
+    /// Mark an identity consumed once the settlement effect has been durably applied.
+    fn record_operation(env: &Env, key: &BytesN<32>) {
+        write_operation(env, key);
+    }
+
     /// Shared exercise path. `amount` of `None` exercises the full remaining
     /// collateral. Exercised collateral leaves the contract, so its reserve is
     /// released; any remainder stays reserved.
@@ -669,11 +722,17 @@ impl OptionsContract {
         mut option: OptionData,
         amount: Option<i128>,
         expected_config_fingerprint: &BytesN<32>,
+        operation_id: &BytesN<32>,
+        kind: Symbol,
     ) -> Result<(), OptionsError> {
         // Reject a stale configuration snapshot before validating the position
         // or moving any collateral: the caller prepares settlement under terms
         // it has seen, and a mismatch means those terms no longer hold.
         require_config(env, expected_config_fingerprint)?;
+
+        // Deduplication: reject an operation identity that already succeeded.
+        let op_key = Self::operation_key(env, &exerciser, kind.clone(), option_id, operation_id);
+        Self::require_new_operation(env, &op_key)?;
 
         if read_cancelled(env, option_id) {
             return Err(OptionsError::AlreadyCancelled);
@@ -741,7 +800,7 @@ impl OptionsContract {
                 env,
                 option_id,
                 &option,
-                exerciser,
+                exerciser.clone(),
                 to_exercise,
                 new_exercised,
             );
@@ -750,50 +809,15 @@ impl OptionsContract {
                 env,
                 option_id,
                 &option,
-                exerciser,
+                exerciser.clone(),
                 to_exercise,
                 new_exercised,
             );
         }
 
-        Self::end_settlement(env, option_id);
+        Self::record_operation(env, &op_key);
+        emit_operation(env, &exerciser, kind, option_id, operation_id);
 
-        Ok(())
-    }
-
-    fn begin_settlement(
-        env: &Env,
-        option_id: u32,
-        expected_sequence: u64,
-    ) -> Result<(), OptionsError> {
-        if env
-            .storage()
-            .temporary()
-            .get(&storage::DataKey::SettlementLock(option_id))
-            .unwrap_or(false)
-        {
-            return Err(OptionsError::ReentrantSettlement);
-        }
-        if read_settlement_sequence(env, option_id) != expected_sequence {
-            return Err(OptionsError::ConcurrentModification);
-        }
-        env.storage()
-            .temporary()
-            .set(&storage::DataKey::SettlementLock(option_id), &true);
-        Ok(())
-    }
-
-    fn end_settlement(env: &Env, option_id: u32) {
-        env.storage()
-            .temporary()
-            .set(&storage::DataKey::SettlementLock(option_id), &false);
-    }
-
-    fn advance_settlement(env: &Env, option_id: u32) -> Result<(), OptionsError> {
-        let next = read_settlement_sequence(env, option_id)
-            .checked_add(1)
-            .ok_or(OptionsError::MathOverflow)?;
-        write_settlement_sequence(env, option_id, next);
         Ok(())
     }
 }

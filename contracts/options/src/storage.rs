@@ -1,4 +1,4 @@
-use soroban_sdk::{contracttype, Address, Env};
+use soroban_sdk::{contracttype, Address, BytesN, Env};
 
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -28,6 +28,8 @@ pub enum DataKey {
     WriterPositions(u32),
     /// Collateral remaining in a specific writer position for an option.
     PositionCollateral(u32, u32),
+    /// Marks a domain-separated settlement operation identity as consumed.
+    Operation(BytesN<32>),
 }
 
 /// The current options storage layout version. Version zero is the legacy
@@ -257,4 +259,27 @@ pub fn write_oracle_max_age(e: &Env, max_age: u64) {
 pub fn clear_oracle_max_age(e: &Env) {
     e.storage().instance().remove(&DataKey::OracleMaxAge);
     extend_instance_ttl_default(e);
+}
+
+pub fn has_operation(e: &Env, key: &BytesN<32>) -> bool {
+    let storage_key = DataKey::Operation(key.clone());
+    let has = e.storage().persistent().has(&storage_key);
+    if has {
+        e.storage().persistent().extend_ttl(
+            &storage_key,
+            crate::OPERATION_TTL_THRESHOLD,
+            crate::OPERATION_TTL_EXTEND_TO,
+        );
+    }
+    has
+}
+
+pub fn write_operation(e: &Env, key: &BytesN<32>) {
+    let storage_key = DataKey::Operation(key.clone());
+    e.storage().persistent().set(&storage_key, &true);
+    e.storage().persistent().extend_ttl(
+        &storage_key,
+        crate::OPERATION_TTL_THRESHOLD,
+        crate::OPERATION_TTL_EXTEND_TO,
+    );
 }
