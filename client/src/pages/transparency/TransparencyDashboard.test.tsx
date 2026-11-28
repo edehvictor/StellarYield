@@ -1,6 +1,7 @@
-import { render, screen, waitFor, fireEvent } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import TransparencyDashboard from "./TransparencyDashboard";
+import { buildTransparencyDiagnostic } from "../../../../shared/types/transparencyDiagnostic";
 
 vi.mock("./transparencyServiceHealth", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./transparencyServiceHealth")>();
@@ -209,6 +210,76 @@ describe("TransparencyDashboard – mixed service health (#865)", () => {
     );
   });
 
+  it("renders privacy-safe diagnostics with the failed stage and remediation path", async () => {
+    const summaryBody = {
+      ...mockTransparencyData,
+      status: "degraded" as const,
+      diagnostics: [
+        buildTransparencyDiagnostic("AGGREGATION_FAILED", { stage: "aggregation" }),
+        buildTransparencyDiagnostic("STALE_LAST_KNOWN", {
+          stage: "cache",
+          affectedStages: ["aggregation", "cache"],
+        }),
+      ],
+    };
+    const base = makeFetchMock();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation((url: string) =>
+        String(url).includes("/api/transparency/summary")
+          ? Promise.resolve({ ok: true, json: async () => summaryBody })
+          : base(url),
+      ),
+    );
+
+    render(<TransparencyDashboard />);
+
+    await waitFor(() =>
+      expect(screen.getByText("Transparency data diagnostics")).toBeInTheDocument(),
+    );
+    expect(screen.getByText(/Metric aggregation/)).toBeInTheDocument();
+    expect(screen.getByText(/Cached snapshot/)).toBeInTheDocument();
+    expect(screen.getAllByText(/^Next:/).length).toBeGreaterThanOrEqual(2);
+    const diagnosticsPanel = screen.getByRole("alert", { name: "Transparency data diagnostics" });
+    expect(within(diagnosticsPanel).getByRole("button", { name: /Retry/ })).toBeInTheDocument();
+  });
+
+  it("keeps the last known-good snapshot visible when a retry fails", async () => {
+    let summaryCalls = 0;
+    const degradedBody = {
+      ...mockTransparencyData,
+      status: "degraded" as const,
+      diagnostics: [buildTransparencyDiagnostic("AGGREGATION_FAILED", { stage: "aggregation" })],
+    };
+    const base = makeFetchMock();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation((url: string) => {
+        if (String(url).includes("/api/transparency/summary")) {
+          summaryCalls += 1;
+          return summaryCalls === 1
+            ? Promise.resolve({ ok: true, json: async () => degradedBody })
+            : Promise.resolve({ ok: false, status: 503, json: async () => ({}) });
+        }
+        return base(url);
+      }),
+    );
+
+    render(<TransparencyDashboard />);
+    await waitFor(() => expect(screen.getByText("Total Revenue (30d)")).toBeInTheDocument());
+
+    // Several panels expose Retry; use the one on the summary diagnostics panel.
+    const diagnosticsPanel = screen.getByRole("alert", { name: "Transparency data diagnostics" });
+    fireEvent.click(within(diagnosticsPanel).getByRole("button", { name: /Retry/ }));
+
+    await waitFor(() =>
+      expect(screen.getByText(/Showing the last known-good snapshot/)).toBeInTheDocument(),
+    );
+    // Metrics are preserved rather than replaced by an empty error view.
+    expect(screen.getByText("Total Revenue (30d)")).toBeInTheDocument();
+    expect(screen.getByText("Deflationary Ratio")).toBeInTheDocument();
+  });
+
   it("shows smoke test failure in the health summary", async () => {
     vi.stubGlobal("fetch", makeFetchMock());
     vi.stubGlobal("localStorage", {
@@ -230,6 +301,87 @@ describe("TransparencyDashboard – mixed service health (#865)", () => {
     render(<TransparencyDashboard />);
     await waitFor(() => expect(screen.getByText(/Critical:/)).toBeInTheDocument());
     expect(screen.getByText(/Latest run: FAIL/)).toBeInTheDocument();
+  });
+
+  it("passes the server config fingerprint into the health rollup", async () => {
+    const base = makeFetchMock();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation((url: string) => {
+        const path = String(url);
+        if (path.includes("/api/transparency/summary")) {
+          return Promise.resolve({
+            ok: true,
+            json: async () => ({
+              ...mockTransparencyData,
+              status: "healthy" as const,
+              diagnostics: [],
+              configFingerprint: "cfg1:aaaaaaaaaaaaaaaa",
+              snapshotConfigFingerprint: "cfg1:aaaaaaaaaaaaaaaa",
+            }),
+          });
+        }
+        return base(url);
+      }),
+    );
+
+    vi.stubGlobal("localStorage", {
+      getItem: vi.fn((key: string) =>
+        key === "stellar-yield.smoke-results"
+          ? JSON.stringify({
+              timestamp: "2026-05-01T10:00:00.000Z",
+              frontendUrl: "https://example.com",
+              backendUrl: "https://api.example.com",
+              status: "pass",
+              checks: [{ label: "Health", url: "/health", status: "pass", httpCode: 200 }],
+            })
+          : null,
+      ),
+      setItem: vi.fn(),
+      removeItem: vi.fn(),
+    });
+
+    render(<TransparencyDashboard />);
+
+    await waitFor(() =>
+      expect(screen.getByText(/All transparency subsystems are healthy/)).toBeInTheDocument(),
+    );
+    expect(screen.queryByText(/CONFIG_SNAPSHOT_STALE/)).not.toBeInTheDocument();
+  });
+
+  it("surfaces a stale configuration diagnostic from the summary payload", async () => {
+    const base = makeFetchMock();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation((url: string) => {
+        const path = String(url);
+        if (path.includes("/api/transparency/summary")) {
+          return Promise.resolve({
+            ok: true,
+            json: async () => ({
+              ...mockTransparencyData,
+              status: "degraded" as const,
+              diagnostics: [
+                buildTransparencyDiagnostic("CONFIG_SNAPSHOT_STALE", {
+                  stage: "configuration",
+                }),
+              ],
+              configFingerprint: "cfg1:bbbbbbbbbbbbbbbb",
+              snapshotConfigFingerprint: "cfg1:aaaaaaaaaaaaaaaa",
+            }),
+          });
+        }
+        return base(url);
+      }),
+    );
+
+    render(<TransparencyDashboard />);
+
+    await waitFor(() =>
+      expect(screen.getByText("Transparency data diagnostics")).toBeInTheDocument(),
+    );
+    expect(screen.getByText(/Configuration · CONFIG_SNAPSHOT_STALE/)).toBeInTheDocument();
+    expect(screen.getByText("Total Revenue (30d)")).toBeInTheDocument();
   });
 });
 

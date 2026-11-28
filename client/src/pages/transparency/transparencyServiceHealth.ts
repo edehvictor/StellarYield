@@ -10,7 +10,22 @@
  * rejected or normalized to "unknown" / "degraded" rather than "healthy",
  * successRate is clamped to [0, 100] and rounded only after clamping, and
  * failureCount is bounded to a finite non-negative integer.
+ *
+ * Insufficient diagnostic context (#1917): when several signals are missing we
+ * never claim "healthy". The rollup reports `contextSufficient: false`, keeps
+ * last known-good subsystem values where they exist, and attaches privacy-safe
+ * diagnostics naming the failed stage plus the remediation path.
  */
+import {
+  buildTransparencyDiagnostic,
+  isPrivacySafeDiagnosticText,
+  TRANSPARENCY_STAGE_LABELS,
+  type TransparencyDiagnostic,
+  type TransparencyDiagnosticCode,
+  type TransparencyDiagnosticSeverity,
+  type TransparencyStage,
+} from "../../../../shared/types/transparencyDiagnostic";
+import { configFingerprintsMatch, isConfigFingerprint } from "../../../../shared/types/configFingerprint";
 
 export type SubsystemState = "healthy" | "degraded" | "failed" | "unknown";
 
@@ -23,6 +38,19 @@ export interface TransparencyHealthInput {
   smokeTest: SubsystemState;
 }
 
+/**
+ * Configuration identity for a health rollup.
+ *
+ * `configFingerprint` is the fingerprint the current signals were reported
+ * under; `previousConfigFingerprint` is the one the reusable signals were
+ * reported under. When both are present and differ, the previous signals were
+ * observed against a different configuration and must not be reused.
+ */
+export interface TransparencyHealthConfig {
+  configFingerprint?: string;
+  previousConfigFingerprint?: string;
+}
+
 export interface TransparencyHealthSummary {
   overall: OverallHealthState;
   subsystems: TransparencyHealthInput;
@@ -30,6 +58,16 @@ export interface TransparencyHealthSummary {
   /** Subsystems that are not healthy, ordered by severity then name. */
   attentionSubsystems: Array<keyof TransparencyHealthInput>;
   summaryMessage: string;
+  /** True when enough independent signals were present to trust the rollup. */
+  contextSufficient: boolean;
+  /** Subsystems whose last known-good value was reused because the signal was missing. */
+  reusedSubsystems: Array<keyof TransparencyHealthInput>;
+  /** Privacy-safe diagnostics naming the failed stage and remediation path. */
+  diagnostics: TransparencyDiagnostic[];
+  /** Config fingerprint the observed signals were reported under, when known. */
+  configFingerprint?: string;
+  /** True when last known-good signals were rejected because the config changed. */
+  configStale: boolean;
 }
 
 export interface TransparencyHistoryPoint {
@@ -38,11 +76,19 @@ export interface TransparencyHistoryPoint {
   burned: number;
 }
 
+export type TransparencySummaryStatus = "healthy" | "degraded" | "unavailable";
+
 export interface TransparencySummaryPayload {
   totalRevenueLumens: number;
   totalBurnedTokens: number;
   deflationaryRatio: number;
   history: TransparencyHistoryPoint[];
+  /** Overall snapshot status reported by the API (#1917). */
+  status?: TransparencySummaryStatus;
+  /** Privacy-safe diagnostics naming the failed stage and remediation path. */
+  diagnostics?: TransparencyDiagnostic[];
+  /** Fingerprint of the server configuration that is active now (#1910). */
+  configFingerprint?: string;
 }
 
 export interface ValidatedFailoverIncident {
@@ -75,6 +121,26 @@ export class TransparencyExternalDataError extends Error {
     this.code = code;
   }
 }
+
+/**
+ * How many of the four signals must be known before the rollup is considered
+ * trustworthy. With fewer than two signals a healthy rollup would be guesswork.
+ */
+export const MIN_KNOWN_SUBSYSTEMS = 2;
+
+const SUBSYSTEM_STAGES: Record<keyof TransparencyHealthInput, TransparencyStage> = {
+  indexer: "indexer",
+  relayer: "relayer",
+  registry: "registry",
+  smokeTest: "smoke-test",
+};
+
+const SUBSYSTEM_KEYS: Array<keyof TransparencyHealthInput> = [
+  "indexer",
+  "relayer",
+  "registry",
+  "smokeTest",
+];
 
 const SEVERITY_RANK: Record<SubsystemState, number> = {
   healthy: 0,
@@ -319,12 +385,81 @@ export function validateTransparencySummaryPayload(payload: unknown): Transparen
     };
   });
 
+  const status = parseSummaryStatus(payload.status);
+  const diagnostics = parseSummaryDiagnostics(payload.diagnostics);
+  const configFingerprint = isConfigFingerprint(payload.configFingerprint)
+    ? payload.configFingerprint
+    : undefined;
+
   return {
     totalRevenueLumens,
     totalBurnedTokens,
     deflationaryRatio,
     history: validatedHistory,
+    ...(status ? { status } : {}),
+    ...(diagnostics.length > 0 ? { diagnostics } : {}),
+    ...(configFingerprint ? { configFingerprint } : {}),
   };
+}
+
+const SUMMARY_STATUSES: ReadonlyArray<TransparencySummaryStatus> = ["healthy", "degraded", "unavailable"];
+const DIAGNOSTIC_CODES: ReadonlyArray<TransparencyDiagnosticCode> = [
+  "CONTEXT_INSUFFICIENT",
+  "SUBSYSTEM_UNAVAILABLE",
+  "STALE_LAST_KNOWN",
+  "AGGREGATION_FAILED",
+  "NO_DATA_AVAILABLE",
+  "CONFIG_SNAPSHOT_STALE",
+];
+const DIAGNOSTIC_SEVERITIES: ReadonlyArray<TransparencyDiagnosticSeverity> = ["info", "warning", "critical"];
+
+function isTransparencyStage(value: unknown): value is TransparencyStage {
+  return typeof value === "string" && Object.prototype.hasOwnProperty.call(TRANSPARENCY_STAGE_LABELS, value);
+}
+
+function parseSummaryStatus(value: unknown): TransparencySummaryStatus | undefined {
+  return SUMMARY_STATUSES.find((status) => status === value);
+}
+
+/**
+ * Keep only well-formed, privacy-safe diagnostics from an untrusted payload
+ * (#1917). Malformed entries are dropped rather than rendered.
+ */
+function parseSummaryDiagnostics(value: unknown): TransparencyDiagnostic[] {
+  if (!Array.isArray(value)) return [];
+  const diagnostics: TransparencyDiagnostic[] = [];
+  for (const entry of value) {
+    if (!isPlainRecord(entry)) continue;
+    const code = DIAGNOSTIC_CODES.find((candidate) => candidate === entry.code);
+    const severity = DIAGNOSTIC_SEVERITIES.find((candidate) => candidate === entry.severity);
+    if (
+      !code ||
+      !severity ||
+      !isTransparencyStage(entry.stage) ||
+      typeof entry.summary !== "string" ||
+      typeof entry.remediation !== "string" ||
+      typeof entry.retryable !== "boolean" ||
+      entry.privacySafe !== true ||
+      !isPrivacySafeDiagnosticText(entry.summary) ||
+      !isPrivacySafeDiagnosticText(entry.remediation)
+    ) {
+      continue;
+    }
+    const affectedStages = Array.isArray(entry.affectedStages)
+      ? entry.affectedStages.filter(isTransparencyStage)
+      : undefined;
+    diagnostics.push({
+      code,
+      stage: entry.stage,
+      severity,
+      summary: entry.summary,
+      remediation: entry.remediation,
+      retryable: entry.retryable,
+      privacySafe: true,
+      ...(affectedStages && affectedStages.length > 0 ? { affectedStages } : {}),
+    });
+  }
+  return diagnostics;
 }
 
 /**
@@ -413,21 +548,61 @@ export function validateFailoverIncidentsPayload(payload: unknown): ValidatedFai
 /**
  * Summarize mixed subsystem health with deterministic prioritization:
  * failed > degraded > unknown > healthy.
+ *
+ * Pass the previous rollup input as `previous` to preserve last known-good
+ * values when a retry comes back with a missing signal. This never invents a
+ * value for a subsystem that was never observed.
+ *
+ * Pass `config` to tie the reused values to a configuration identity. A
+ * previous value is only reused when the current and previous fingerprints
+ * match; after a configuration change the old signals are rejected, the rollup
+ * cannot rely on them, and a `CONFIG_SNAPSHOT_STALE` diagnostic is reported.
  */
 export function summarizeTransparencyHealth(
   input: Partial<TransparencyHealthInput>,
+  previous?: Partial<TransparencyHealthInput>,
+  config: TransparencyHealthConfig = {},
 ): TransparencyHealthSummary {
   const safeInput = isPlainRecord(input) ? input : {};
+  const safePrevious = isPlainRecord(previous) ? previous : {};
+  const configStale = !configFingerprintsMatch(
+    config.configFingerprint,
+    config.previousConfigFingerprint,
+  );
+
+  const reusedSubsystems: Array<keyof TransparencyHealthInput> = [];
+
+  const resolve = (key: keyof TransparencyHealthInput): SubsystemState => {
+    // Sanitize both sides so a boundary payload (#1913, #1914) can never be
+    // reused as a last known-good value or flip the rollup to healthy.
+    const incoming = sanitizeSubsystemState(safeInput[key]);
+    if (incoming !== "unknown") return incoming;
+    // Signals observed under a different configuration are never reused (#1910).
+    if (configStale) return "unknown";
+    const prior = sanitizeSubsystemState(safePrevious[key]);
+    if (prior !== "unknown") {
+      reusedSubsystems.push(key);
+      return prior;
+    }
+    return "unknown";
+  };
+
   const subsystems: TransparencyHealthInput = {
-    indexer: sanitizeSubsystemState(safeInput.indexer),
-    relayer: sanitizeSubsystemState(safeInput.relayer),
-    registry: sanitizeSubsystemState(safeInput.registry),
-    smokeTest: sanitizeSubsystemState(safeInput.smokeTest),
+    indexer: resolve("indexer"),
+    relayer: resolve("relayer"),
+    registry: resolve("registry"),
+    smokeTest: resolve("smokeTest"),
   };
 
   const states = Object.values(subsystems);
   const worst = worstState(states);
-  const overall = toOverall(worst);
+  const knownSubsystems = SUBSYSTEM_KEYS.filter((key) => subsystems[key] !== "unknown");
+  const contextSufficient = knownSubsystems.length >= MIN_KNOWN_SUBSYSTEMS;
+  const overall: OverallHealthState = contextSufficient
+    ? toOverall(worst)
+    : worst === "failed"
+      ? "failed"
+      : "degraded";
 
   const attentionSubsystems = (
     Object.entries(subsystems) as Array<[keyof TransparencyHealthInput, SubsystemState]>
@@ -442,8 +617,25 @@ export function summarizeTransparencyHealth(
 
   const needsAttention = attentionSubsystems.length > 0;
 
+  const diagnostics = buildHealthDiagnostics(subsystems, {
+    contextSufficient,
+    unknownSubsystems: SUBSYSTEM_KEYS.filter((key) => subsystems[key] === "unknown"),
+    reusedSubsystems,
+    configStale,
+  });
+
   let summaryMessage = "All transparency subsystems are healthy.";
-  if (overall === "failed") {
+  if (configStale) {
+    summaryMessage =
+      "Degraded: the configuration changed since these signals were observed. " +
+      "Signals from the previous configuration were not reused; refresh once the " +
+      "new configuration has reported.";
+  } else if (!contextSufficient) {
+    summaryMessage =
+      `Degraded: insufficient diagnostic context — ${knownSubsystems.length} of ` +
+      `${SUBSYSTEM_KEYS.length} transparency subsystems reported a status. ` +
+      "Last known values were retained where available; retry once the missing signals report.";
+  } else if (overall === "failed") {
     summaryMessage = `Critical: ${attentionSubsystems
       .map((key) => SUBSYSTEM_LABELS[key])
       .join(", ")} need immediate attention.`;
@@ -459,7 +651,92 @@ export function summarizeTransparencyHealth(
     needsAttention,
     attentionSubsystems,
     summaryMessage,
+    contextSufficient,
+    reusedSubsystems,
+    diagnostics,
+    ...(config.configFingerprint ? { configFingerprint: config.configFingerprint } : {}),
+    configStale,
   };
+}
+
+interface DiagnosticContext {
+  contextSufficient: boolean;
+  unknownSubsystems: Array<keyof TransparencyHealthInput>;
+  reusedSubsystems: Array<keyof TransparencyHealthInput>;
+  configStale: boolean;
+}
+
+/**
+ * Build diagnostics in a fixed order: context, failed, degraded, unknown,
+ * stale. Only subsystem keys and stage labels are emitted — never raw error
+ * text — so the result is safe to render to any viewer.
+ */
+function buildHealthDiagnostics(
+  subsystems: TransparencyHealthInput,
+  context: DiagnosticContext,
+): TransparencyDiagnostic[] {
+  const diagnostics: TransparencyDiagnostic[] = [];
+
+  if (context.configStale) {
+    diagnostics.push(
+      buildTransparencyDiagnostic("CONFIG_SNAPSHOT_STALE", {
+        stage: "configuration",
+        affectedStages: ["configuration", "context-validation"],
+      }),
+    );
+  }
+
+  if (!context.contextSufficient) {
+    diagnostics.push(
+      buildTransparencyDiagnostic("CONTEXT_INSUFFICIENT", {
+        stage: "context-validation",
+        affectedStages: context.unknownSubsystems.map((key) => SUBSYSTEM_STAGES[key]),
+      }),
+    );
+  }
+
+  const failed = SUBSYSTEM_KEYS.filter((key) => subsystems[key] === "failed");
+  if (failed.length > 0) {
+    diagnostics.push(
+      buildTransparencyDiagnostic("SUBSYSTEM_UNAVAILABLE", {
+        stage: SUBSYSTEM_STAGES[failed[0]],
+        severity: "critical",
+        affectedStages: failed.map((key) => SUBSYSTEM_STAGES[key]),
+      }),
+    );
+  }
+
+  const degraded = SUBSYSTEM_KEYS.filter((key) => subsystems[key] === "degraded");
+  if (degraded.length > 0) {
+    diagnostics.push(
+      buildTransparencyDiagnostic("SUBSYSTEM_UNAVAILABLE", {
+        stage: SUBSYSTEM_STAGES[degraded[0]],
+        severity: "warning",
+        affectedStages: degraded.map((key) => SUBSYSTEM_STAGES[key]),
+      }),
+    );
+  }
+
+  if (context.contextSufficient && context.unknownSubsystems.length > 0) {
+    diagnostics.push(
+      buildTransparencyDiagnostic("SUBSYSTEM_UNAVAILABLE", {
+        stage: SUBSYSTEM_STAGES[context.unknownSubsystems[0]],
+        severity: "warning",
+        affectedStages: context.unknownSubsystems.map((key) => SUBSYSTEM_STAGES[key]),
+      }),
+    );
+  }
+
+  if (context.reusedSubsystems.length > 0) {
+    diagnostics.push(
+      buildTransparencyDiagnostic("STALE_LAST_KNOWN", {
+        stage: "cache",
+        affectedStages: context.reusedSubsystems.map((key) => SUBSYSTEM_STAGES[key]),
+      }),
+    );
+  }
+
+  return diagnostics;
 }
 
 export function getSubsystemLabel(key: keyof TransparencyHealthInput): string {

@@ -374,7 +374,7 @@ The following table maps each route file in `server/src/routes/` to its primary 
 | `rewards.ts` | `/` - Accumulated token rewards tracking and normalization | `rewardScheduleRegistry.ts`, `rewardScheduleHealth.ts` | `rewardNormalization.test.ts` |
 | `simulator.ts` | `/` - Simulates strategy rotations or re-allocation dry runs | `simulationService.ts` | `simulationService.test.ts` |
 | `strategies.ts` | `/` - Manage multi-protocol strategies, regime shifts, and manual/auto rebalancing | `strategyRotationService.ts`, `strategyRotationDryRun.ts`, `strategySnapshotVersioningService.ts` | `strategyRotationService.test.ts`, `strategyRotationDryRun.test.ts`, `strategySnapshotVersioning.test.ts` |
-| `transparency.ts` | `/` - cryptographic yield attribution verification | `provenance.service.ts` | `transparency.test.ts`, `services/provenance.test.ts` |
+| `transparency.ts` | `GET /summary`, `GET/POST /failover-history`, `POST /failover-history/:protocolId/resolve` - revenue/burn metrics and provider failover history, with privacy-safe diagnostics on failure | `failoverIncidentHistoryService.ts` | `transparency.test.ts` |
 | `treasury.ts` | `/` - DAO Treasury allocation backtesting and simulation | `treasurySimulationService.ts` | `treasurySimulation.test.ts` |
 | `weeklyReports.ts` | `/` - Consolidates weekly yields reports | `weeklyYieldReportService.ts` | `weeklyYieldReport.test.ts` |
 | `yields.ts` | `GET /` - Fetches baseline protocol APYs with custom fee drag calculators | `yieldService.ts`, `netYieldEngine.ts` | `netYieldEngine.test.ts`, `yieldNormalization.test.ts`, `yieldRegime.test.ts` |
@@ -388,3 +388,128 @@ Alert preferences and APY threshold creation are hardened against duplicate subm
 - **Safe Retries**: When an identical operation identity and parameter fingerprint is re-submitted, the server replays the existing state with an `X-Idempotent-Replayed: true` header without creating duplicate alerts or re-applying effects.
 - **Conflict Prevention**: Reusing an active operation identity with conflicting parameters returns a `409 Conflict` (`OPERATION_IDENTITY_CONFLICT`).
 - **State & Balance Preservation**: If validation fails or downstream storage errors occur, the transaction aborts before mutation. Existing alerts, user preferences, and quotas are strictly preserved.
+
+## 8. Transparency status diagnostics (#1917)
+
+`GET /api/transparency/summary` now reports how much diagnostic context it had, so
+consumers can tell a healthy snapshot from a degraded fallback.
+
+### Response contract
+
+| Field | Meaning |
+| :--- | :--- |
+| `status` | `"healthy"` when a fresh, validated snapshot was served; `"degraded"` when the last known-good snapshot was served because aggregation failed. A cold-start failure (HTTP 500) uses `"unavailable"`. |
+| `diagnostics` | Privacy-safe `TransparencyDiagnostic[]` (defined in `shared/types/transparencyDiagnostic.ts`). Empty on a fully healthy read. |
+| `totalRevenueLumens`, `totalBurnedTokens`, `deflationaryRatio`, `history` | Unchanged metric fields. `cachedAt` remains internal and is never returned. |
+
+Failure behaviour:
+
+1. A freshly aggregated snapshot is validated (`validateTransparencyData`) before it
+   replaces the cache. Missing history, non-finite values, or totals that disagree
+   with the history are rejected rather than cached.
+2. On aggregation or validation failure, the previous known-good snapshot is kept
+   and returned with `status: "degraded"` plus `AGGREGATION_FAILED` and
+   `STALE_LAST_KNOWN` diagnostics. No metric is overwritten by a failed read.
+3. When no snapshot has ever succeeded the route returns HTTP 500 with the typed error `code` (#1913), status
+   `"unavailable"` and a `NO_DATA_AVAILABLE` diagnostic.
+4. Retrying the same read is always safe: transparency is read-only, and a
+   successful retry rebuilds and re-validates a complete snapshot.
+
+### Privacy guarantee
+
+Diagnostics only carry a stable `code`, the failed `stage`, fixed summary and
+remediation text, a `retryable` flag, and the literal `privacySafe: true` marker.
+Logs use `redactDiagnosticText`, which removes URLs, emails, Stellar addresses,
+hashes, filesystem paths, and stack frames before anything is written or returned.
+
+### Client rollup rules
+
+`client/src/pages/transparency/transparencyServiceHealth.ts` treats the dashboard
+rollup as sufficient only when at least `MIN_KNOWN_SUBSYSTEMS` (2 of 4) signals are
+known. Below that threshold the rollup is `"degraded"` (never `"healthy"`) and emits
+a `CONTEXT_INSUFFICIENT` diagnostic naming the missing stages. When a retry comes
+back missing, callers pass the previous rollup input as the optional second
+argument; observed values are reused and a `STALE_LAST_KNOWN` diagnostic is added,
+so the dashboard keeps showing the last known state instead of blanking out.
+
+### Tests
+
+- `server/src/__tests__/transparency.test.ts` — normal read, aggregation failure
+  with no snapshot, last-known-good preservation, invalid snapshot rejection, and
+  safe retry after recovery.
+- `client/src/pages/transparency/transparencyServiceHealth.test.ts` — sufficient
+  context, insufficient context, failed stage naming, and retry state preservation.
+- `client/src/pages/transparency/TransparencyDashboard.test.tsx` — diagnostics
+  rendering and keeping the last snapshot visible when a refresh fails.
+- `shared/types/transparencyDiagnostic.test.ts` — redaction and privacy guarantees.
+
+## 8. Transparency stale configuration snapshots (#1910)
+
+Transparency metrics are only meaningful for the configuration that produced
+them. If the configuration changes (aggregation version, cache TTL, history
+window, Horizon/RPC endpoints) while a snapshot is cached, serving that snapshot
+would silently mix data from two different configurations. Both the route and the
+dashboard now detect and reject that stale context.
+
+### Fingerprint contract
+
+`shared/types/configFingerprint.ts` canonicalizes the configuration (key order is
+normalized, unsupported values and cycles are rejected) and hashes it with a
+versioned, non-cryptographic digest, e.g. `cfg1:1a2b3c4d5e6f7890`.
+
+- The fingerprint is a **change detector**, not a secret or a cryptographic
+  commitment.
+- It contains no raw configuration values, so it is safe to return to clients. RPC
+  URLs, wallet addresses and credentials are never embedded.
+- `configFingerprintsMatch(a, b)` returns `true` when either side is missing. A
+  client that does not send a fingerprint keeps working; two present fingerprints
+  must match exactly.
+
+### Response additions
+
+| Field | Meaning |
+| :--- | :--- |
+| `configFingerprint` | Fingerprint of the configuration that is active **now**. |
+| `snapshotConfigFingerprint` | Fingerprint the served metric snapshot was built under. |
+
+On a healthy read the two are equal. They differ only when a failure forced the
+route to preserve an older snapshot, which is always reported as `degraded`.
+
+### Server behaviour
+
+1. `getTransparencyConfig()` builds a frozen snapshot from the aggregation version
+   and environment, and `getTransparencyConfigFingerprint()` hashes it.
+2. Every cache entry records the fingerprint it was built under. A cached entry is
+   reused only while the fingerprint still matches; otherwise the entry is dropped
+   and the snapshot is re-aggregated.
+3. An aggregator that declares a different fingerprint has its work rejected
+   outright instead of being stamped with a fingerprint it was not produced under.
+4. On failure the last known-good snapshot and all of its metrics are preserved. If
+   that snapshot predates the active configuration, the response includes a
+   `CONFIG_SNAPSHOT_STALE` diagnostic (`stage: "configuration"`, `severity:
+   "critical"`) alongside `AGGREGATION_FAILED` and `STALE_LAST_KNOWN`.
+5. With no usable snapshot at all the route still returns HTTP 500 with
+   `NO_DATA_AVAILABLE`; no balances or cached state are modified.
+
+### Client behaviour
+
+`summarizeTransparencyHealth(input, previous, config)` accepts
+`{ configFingerprint, previousConfigFingerprint }`. When both are present and
+differ, last known-good signals are **not** reused, the rollup cannot report
+`healthy` from unobserved values, `configStale` is `true`, and a
+`CONFIG_SNAPSHOT_STALE` diagnostic is added. The dashboard tracks the fingerprint
+alongside its last known-good signals and keeps the previous fingerprint when a
+summary refresh fails, so a configuration change can never be masked by an error.
+
+### Tests
+
+- `shared/types/configFingerprint.test.ts` — canonicalization, stability, change
+  detection, missing-fingerprint handling, freezing, and no-raw-values guarantee.
+- `server/src/__tests__/transparency.test.ts` — fingerprint stamping, cache
+  rejection on configuration change, aggregator mismatch rejection, preserved
+  degraded snapshot marked stale, and safe retry after a configuration change.
+- `client/src/pages/transparency/transparencyServiceHealth.test.ts` — unchanged
+  configuration reuse, rejection after a change, partial fresh signals, and no
+  invented values.
+- `client/src/pages/transparency/TransparencyDashboard.test.tsx` — fingerprint
+  passed into the rollup and stale diagnostics rendered without hiding metrics.

@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   assessRegistryFromRecords,
+  MIN_KNOWN_SUBSYSTEMS,
   mapIndexerStatus,
   mapRelayerStatus,
   mapRegistryHealth,
@@ -14,6 +15,7 @@ import {
   validateFailoverIncidentsPayload,
   validateTransparencySummaryPayload,
 } from "./transparencyServiceHealth";
+import { areDiagnosticsPrivacySafe } from "../../../../shared/types/transparencyDiagnostic";
 
 describe("transparencyServiceHealth mappers", () => {
   it("maps indexer statuses", () => {
@@ -308,5 +310,255 @@ describe("malformed external data hardening (#1913)", () => {
     expect(mapSmokeTestStatus("invalid" as never)).toBe("unknown");
     expect(mapSmokeTestStatus("pass", [{ status: "corrupt" as never }])).toBe("unknown");
     expect(summarizeTransparencyHealth(null as never).overall).toBe("degraded");
+  });
+});
+
+describe("summarizeTransparencyHealth – insufficient diagnostic context (#1917)", () => {
+  const healthyInput = {
+    indexer: "healthy" as const,
+    relayer: "healthy" as const,
+    registry: "healthy" as const,
+    smokeTest: "healthy" as const,
+  };
+
+  it("reports sufficient context and no diagnostics during normal operation", () => {
+    const summary = summarizeTransparencyHealth(healthyInput);
+
+    expect(summary.overall).toBe("healthy");
+    expect(summary.contextSufficient).toBe(true);
+    expect(summary.reusedSubsystems).toEqual([]);
+    expect(summary.diagnostics).toEqual([]);
+  });
+
+  it("flags insufficient context instead of claiming healthy", () => {
+    const summary = summarizeTransparencyHealth({ indexer: "healthy" });
+
+    expect(summary.contextSufficient).toBe(false);
+    expect(summary.overall).toBe("degraded");
+    expect(summary.summaryMessage).toMatch(/insufficient diagnostic context/i);
+    expect(summary.summaryMessage).toMatch(/Degraded/);
+
+    const [diagnostic] = summary.diagnostics.filter(
+      (entry) => entry.code === "CONTEXT_INSUFFICIENT",
+    );
+    expect(diagnostic).toBeDefined();
+    expect(diagnostic.stage).toBe("context-validation");
+    expect(diagnostic.retryable).toBe(true);
+    expect(diagnostic.privacySafe).toBe(true);
+    expect(diagnostic.remediation.length).toBeGreaterThan(0);
+    expect(areDiagnosticsPrivacySafe(summary.diagnostics)).toBe(true);
+  });
+
+  it("names the failed stage and severity when a subsystem fails", () => {
+    const summary = summarizeTransparencyHealth({
+      ...healthyInput,
+      relayer: "failed",
+    });
+
+    expect(summary.overall).toBe("failed");
+    const diagnostic = summary.diagnostics.find((entry) => entry.severity === "critical");
+    expect(diagnostic).toBeDefined();
+    expect(diagnostic?.code).toBe("SUBSYSTEM_UNAVAILABLE");
+    expect(diagnostic?.stage).toBe("relayer");
+    expect(diagnostic?.affectedStages).toEqual(["relayer"]);
+    expect(areDiagnosticsPrivacySafe(summary.diagnostics)).toBe(true);
+  });
+
+  it("preserves last known-good signals on a safe retry with missing context", () => {
+    const first = summarizeTransparencyHealth(healthyInput);
+    const retried = summarizeTransparencyHealth({}, first.subsystems);
+
+    expect(retried.subsystems).toEqual(healthyInput);
+    expect(retried.reusedSubsystems).toHaveLength(4);
+    expect(retried.contextSufficient).toBe(true);
+    expect(retried.overall).toBe("healthy");
+
+    const stale = retried.diagnostics.find((entry) => entry.code === "STALE_LAST_KNOWN");
+    expect(stale).toBeDefined();
+    expect(stale?.stage).toBe("cache");
+    expect(stale?.retryable).toBe(true);
+    expect(areDiagnosticsPrivacySafe(retried.diagnostics)).toBe(true);
+  });
+
+  it("does not invent previous values that were never observed", () => {
+    const retried = summarizeTransparencyHealth({}, { indexer: "unknown" });
+
+    expect(retried.reusedSubsystems).toEqual([]);
+    expect(retried.contextSufficient).toBe(false);
+    expect(retried.subsystems.indexer).toBe("unknown");
+    expect(MIN_KNOWN_SUBSYSTEMS).toBeGreaterThan(1);
+  });
+});
+
+describe("validateTransparencySummaryPayload – status and diagnostics (#1917)", () => {
+  const base = {
+    totalRevenueLumens: 100,
+    totalBurnedTokens: 50,
+    deflationaryRatio: 20,
+    history: [{ date: "2026-04-01", revenue: 100, burned: 50 }],
+  };
+
+  it("passes through a known status and well-formed privacy-safe diagnostics", () => {
+    const diagnostic = {
+      code: "AGGREGATION_FAILED",
+      stage: "aggregation",
+      severity: "warning",
+      summary: "Metric aggregation did not complete.",
+      remediation: "Retry shortly.",
+      retryable: true,
+      privacySafe: true,
+      affectedStages: ["aggregation", "not-a-stage"],
+    };
+    const result = validateTransparencySummaryPayload({
+      ...base,
+      status: "degraded",
+      diagnostics: [diagnostic],
+    });
+
+    expect(result.status).toBe("degraded");
+    expect(result.diagnostics).toEqual([{ ...diagnostic, affectedStages: ["aggregation"] }]);
+  });
+
+  it("drops unknown statuses and malformed or unsafe diagnostics", () => {
+    const result = validateTransparencySummaryPayload({
+      ...base,
+      status: "totally-fine",
+      diagnostics: [
+        null,
+        { code: "AGGREGATION_FAILED", stage: "aggregation", severity: "warning" },
+        {
+          code: "NOT_A_CODE",
+          stage: "aggregation",
+          severity: "warning",
+          summary: "x",
+          remediation: "y",
+          retryable: true,
+          privacySafe: true,
+        },
+        {
+          code: "AGGREGATION_FAILED",
+          stage: "aggregation",
+          severity: "warning",
+          summary: "x",
+          remediation: "y",
+          retryable: true,
+          privacySafe: false,
+        },
+      ],
+    });
+
+    expect(result.status).toBeUndefined();
+    expect(result.diagnostics).toBeUndefined();
+    expect(result).toEqual(base);
+  });
+});
+
+describe("summarizeTransparencyHealth – stale configuration snapshots (#1910)", () => {
+  const healthyInput = {
+    indexer: "healthy" as const,
+    relayer: "healthy" as const,
+    registry: "healthy" as const,
+    smokeTest: "healthy" as const,
+  };
+
+  it("reports healthy with no stale signal when the configuration is unchanged", () => {
+    const first = summarizeTransparencyHealth(healthyInput, undefined, {
+      configFingerprint: "cfg1:aaaaaaaaaaaaaaaa",
+    });
+    expect(first.overall).toBe("healthy");
+    expect(first.configStale).toBe(false);
+    expect(first.diagnostics).toEqual([]);
+
+    const retried = summarizeTransparencyHealth({}, first.subsystems, {
+      configFingerprint: "cfg1:aaaaaaaaaaaaaaaa",
+      previousConfigFingerprint: first.configFingerprint,
+    });
+
+    // Unchanged configuration: last known-good signals are safely reusable.
+    expect(retried.configStale).toBe(false);
+    expect(retried.subsystems).toEqual(healthyInput);
+    expect(retried.reusedSubsystems).toHaveLength(4);
+    expect(retried.overall).toBe("healthy");
+  });
+
+  it("rejects signals from a previous configuration and never reports healthy", () => {
+    const first = summarizeTransparencyHealth(healthyInput, undefined, {
+      configFingerprint: "cfg1:aaaaaaaaaaaaaaaa",
+    });
+
+    const afterChange = summarizeTransparencyHealth({}, first.subsystems, {
+      configFingerprint: "cfg1:bbbbbbbbbbbbbbbb",
+      previousConfigFingerprint: first.configFingerprint,
+    });
+
+    expect(afterChange.configStale).toBe(true);
+    expect(afterChange.reusedSubsystems).toEqual([]);
+    expect(afterChange.subsystems).toEqual({
+      indexer: "unknown",
+      relayer: "unknown",
+      registry: "unknown",
+      smokeTest: "unknown",
+    });
+    expect(afterChange.contextSufficient).toBe(false);
+    expect(afterChange.overall).toBe("degraded");
+    expect(afterChange.summaryMessage).toMatch(/configuration changed/i);
+
+    const stale = afterChange.diagnostics.find(
+      (entry) => entry.code === "CONFIG_SNAPSHOT_STALE",
+    );
+    expect(stale).toBeDefined();
+    expect(stale?.stage).toBe("configuration");
+    expect(stale?.severity).toBe("critical");
+    expect(stale?.retryable).toBe(true);
+    expect(areDiagnosticsPrivacySafe(afterChange.diagnostics)).toBe(true);
+  });
+
+  it("keeps fresh signals reported under the new configuration", () => {
+    const first = summarizeTransparencyHealth(healthyInput, undefined, {
+      configFingerprint: "cfg1:aaaaaaaaaaaaaaaa",
+    });
+
+    const afterChange = summarizeTransparencyHealth(
+      { indexer: "healthy", relayer: "healthy" },
+      first.subsystems,
+      {
+        configFingerprint: "cfg1:bbbbbbbbbbbbbbbb",
+        previousConfigFingerprint: first.configFingerprint,
+      },
+    );
+
+    // The two fresh signals are kept; the two from the old config are dropped.
+    expect(afterChange.subsystems.indexer).toBe("healthy");
+    expect(afterChange.subsystems.relayer).toBe("healthy");
+    expect(afterChange.subsystems.registry).toBe("unknown");
+    expect(afterChange.subsystems.smokeTest).toBe("unknown");
+    expect(afterChange.reusedSubsystems).toEqual([]);
+    expect(afterChange.configStale).toBe(true);
+    expect(afterChange.contextSufficient).toBe(true);
+    // The two dropped signals are unknown, so the rollup is degraded rather
+    // than healthy even though the fresh signals are healthy.
+    expect(afterChange.overall).toBe("degraded");
+    expect(afterChange.attentionSubsystems).toEqual(["registry", "smokeTest"]);
+  });
+
+  it("treats a missing previous fingerprint as unknown, not as a mismatch", () => {
+    const summary = summarizeTransparencyHealth({}, healthyInput, {
+      configFingerprint: "cfg1:bbbbbbbbbbbbbbbb",
+    });
+
+    expect(summary.configStale).toBe(false);
+    expect(summary.reusedSubsystems).toHaveLength(4);
+    expect(summary.overall).toBe("healthy");
+  });
+
+  it("does not invent values that were never observed after a config change", () => {
+    const summary = summarizeTransparencyHealth({}, { indexer: "unknown" }, {
+      configFingerprint: "cfg1:bbbbbbbbbbbbbbbb",
+      previousConfigFingerprint: "cfg1:aaaaaaaaaaaaaaaa",
+    });
+
+    expect(summary.reusedSubsystems).toEqual([]);
+    expect(summary.contextSufficient).toBe(false);
+    expect(summary.subsystems.indexer).toBe("unknown");
   });
 });
