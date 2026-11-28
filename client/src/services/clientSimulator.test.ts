@@ -6,7 +6,10 @@
  */
 
 import { describe, it, expect, beforeAll } from "vitest";
-import { simulateDeposit as clientSimulate } from "./clientSimulator";
+import {
+  simulateDeposit as clientSimulate,
+  validateSimulatorResult,
+} from "./clientSimulator";
 import {
   SIMULATOR_FIXTURES,
   SIMULATOR_EDGE_CASES,
@@ -156,6 +159,43 @@ describe("Client-Side Simulator Consistency Tests", () => {
   });
 
   describe("Warning triggers", () => {
+    it.each([
+      Number.NaN,
+      Number.POSITIVE_INFINITY,
+      Number.NEGATIVE_INFINITY,
+      Number.MAX_SAFE_INTEGER + 1,
+    ])("rejects unsafe amount %s before populating valuation state", (amount) => {
+      const result = clientSimulate({
+        strategyId: "blend-stable",
+        amount,
+        token: "USDC",
+      });
+
+      expect(result.allocations).toEqual([]);
+      expect(result.fees).toEqual([]);
+      expect(result.expectedShares).toBe(0);
+      expect(result.routing.expectedOutput).toBe(0);
+      expect(result.warnings).toHaveLength(1);
+    });
+
+    it("validates expected shares against allocated net amount", () => {
+      const result = clientSimulate({
+        strategyId: "blend-stable",
+        amount: 50000,
+        token: "USDC",
+      });
+
+      expect(validateSimulatorResult(result)).toMatchObject({ valid: true });
+      const allocatedAmount = result.allocations.reduce(
+        (sum, allocation) => sum + allocation.amount,
+        0,
+      );
+      expect(
+        validateSimulatorResult({ ...result, expectedShares: allocatedAmount })
+          .valid,
+      ).toBe(false);
+    });
+
     it("should warn about high slippage for deposits > 100k", () => {
       const result = clientSimulate({
         strategyId: "blend-stable",
