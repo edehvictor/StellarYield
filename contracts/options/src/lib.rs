@@ -67,6 +67,8 @@ pub enum OptionsError {
     /// The configuration changed since the caller captured its fingerprint.
     /// Refresh with `get_config_fingerprint` and retry settlement.
     StaleConfig = 21,
+    /// The option strike must be positive.
+    InvalidStrike = 22,
     /// The option's settlement progress no longer matches what the caller
     /// expected, so a retried settlement was refused instead of paying twice.
     SettlementStateChanged = 22,
@@ -251,10 +253,14 @@ impl OptionsContract {
         if collateral_amount <= 0 {
             return Err(OptionsError::ZeroAmount);
         }
+        if strike_price <= 0 {
+            return Err(OptionsError::InvalidStrike);
+        }
         // opening_time must be strictly before expiration_time
         if opening_time >= expiration_time {
             return Err(OptionsError::InvalidExerciseWindow);
         }
+        let option_id = next_option_id(read_option_counter(&env))?;
 
         let collateral_asset = match option_type {
             OptionType::Call => underlying_asset.clone(),
@@ -288,9 +294,6 @@ impl OptionsContract {
             .ok_or(OptionsError::MathOverflow)?;
         write_reserved_collateral(&env, &minter, &collateral_asset, new_reserved);
 
-        let mut counter = read_option_counter(&env);
-        counter += 1;
-
         let option_data = OptionData {
             minter: minter.clone(),
             option_type,
@@ -304,13 +307,15 @@ impl OptionsContract {
             expired: false,
         };
 
+        write_option(&env, option_id, &option_data);
+        write_option_counter(&env, option_id);
         write_option(&env, counter, &option_data);
         write_option_counter(&env, counter);
         write_settlement_sequence(&env, counter, 1);
 
-        emit_created(&env, counter, &option_data);
+        emit_created(&env, option_id, &option_data);
 
-        Ok(counter)
+        Ok(option_id)
     }
 
     /// Exercises the whole option with a configuration fingerprint.
@@ -481,7 +486,7 @@ impl OptionsContract {
             OptionType::Put => option.quote_asset.clone(),
         };
         let exercised_amount = read_exercised_amount(&env, option_id);
-        let remaining = option.collateral_amount - exercised_amount;
+        let remaining = remaining_collateral(option.collateral_amount, exercised_amount)?;
 
         // Commit state before the token leg; a failed transfer reverts all of it.
         release_reserved(&env, &minter, &collateral_asset, remaining);
@@ -532,7 +537,7 @@ impl OptionsContract {
 
         // Only what partial exercises have not already paid out is still held.
         let exercised_amount = read_exercised_amount(&env, option_id);
-        let remaining = option.collateral_amount - exercised_amount;
+        let remaining = remaining_collateral(option.collateral_amount, exercised_amount)?;
 
         // Commit state before the token leg; a failed transfer reverts all of it.
         release_reserved(&env, &option.minter, &collateral_asset, remaining);
@@ -622,10 +627,8 @@ impl OptionsContract {
     pub fn get_option_collateral_health(env: Env, option_id: u32) -> CollateralHealth {
         let option = read_option(&env, option_id);
         let exercised = read_exercised_amount(&env, option_id);
-        let mut remaining_obligation = option.collateral_amount - exercised;
-        if remaining_obligation < 0 {
-            remaining_obligation = 0;
-        }
+        let remaining_obligation =
+            remaining_collateral(option.collateral_amount, exercised).unwrap_or(0);
 
         // Once exercised or expired, the position is closed and no collateral
         // remains reserved behind it.
@@ -697,7 +700,7 @@ impl OptionsContract {
         }
 
         let already_exercised = read_exercised_amount(env, option_id);
-        let remaining = option.collateral_amount - already_exercised;
+        let remaining = remaining_collateral(option.collateral_amount, already_exercised)?;
         let to_exercise = match amount {
             None => remaining,
             Some(a) => a,
@@ -708,12 +711,22 @@ impl OptionsContract {
         if to_exercise > remaining {
             return Err(OptionsError::ExceedsCollateral);
         }
+        let new_exercised = cumulative_exercised(already_exercised, to_exercise)?;
 
         let collateral_asset = match option.option_type {
             OptionType::Call => option.underlying_asset.clone(),
             OptionType::Put => option.quote_asset.clone(),
         };
 
+        // Pay out the exercised collateral to the exerciser and release its reserve.
+        token::Client::new(env, &collateral_asset).transfer(
+            &env.current_contract_address(),
+            &exerciser,
+            &to_exercise,
+        );
+        release_reserved(env, &option.minter, &collateral_asset, to_exercise);
+
+        write_exercised_amount(env, option_id, new_exercised);
         // Validate arithmetic before touching any state or moving funds.
         let new_exercised = already_exercised
             .checked_add(to_exercise)
@@ -796,6 +809,32 @@ impl OptionsContract {
         write_settlement_sequence(env, option_id, next);
         Ok(())
     }
+}
+
+fn remaining_collateral(
+    collateral_amount: i128,
+    exercised_amount: i128,
+) -> Result<i128, OptionsError> {
+    if exercised_amount < 0 {
+        return Err(OptionsError::MathOverflow);
+    }
+    let remaining = collateral_amount
+        .checked_sub(exercised_amount)
+        .ok_or(OptionsError::MathOverflow)?;
+    if remaining < 0 {
+        return Err(OptionsError::MathOverflow);
+    }
+    Ok(remaining)
+}
+
+fn cumulative_exercised(exercised_amount: i128, amount: i128) -> Result<i128, OptionsError> {
+    exercised_amount
+        .checked_add(amount)
+        .ok_or(OptionsError::MathOverflow)
+}
+
+fn next_option_id(counter: u32) -> Result<u32, OptionsError> {
+    counter.checked_add(1).ok_or(OptionsError::MathOverflow)
 }
 
 /// Read the configuration settlement depends on, applying the same defaults

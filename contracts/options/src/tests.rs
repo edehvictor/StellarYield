@@ -1236,6 +1236,197 @@ fn test_oracle_max_age_requires_initialization() {
     );
 }
 
+#[test]
+fn test_settlement_checked_subtraction_preserves_state_on_inconsistent_exercised_amount() {
+    let (env, client, _, _, underlying, quote) = setup_env();
+    let (option_id, minter) = mint_call_option(&env, &client, &underlying, &quote);
+    let exerciser = Address::generate(&env);
+    let token = soroban_sdk::token::Client::new(&env, &underlying);
+
+    env.as_contract(&client.address, || {
+        crate::storage::write_exercised_amount(&env, option_id, 10_000_001);
+    });
+
+    env.ledger().set_timestamp(750);
+    assert_eq!(
+        client.try_exercise(&exerciser, &option_id, &client.get_config_fingerprint()),
+        Err(Ok(crate::OptionsError::MathOverflow))
+    );
+    assert_eq!(
+        client.try_exercise_partial(&exerciser, &option_id, &1, &client.get_config_fingerprint()),
+        Err(Ok(crate::OptionsError::MathOverflow))
+    );
+    assert_eq!(
+        client.try_cancel(&minter, &option_id),
+        Err(Ok(crate::OptionsError::MathOverflow))
+    );
+
+    assert_eq!(token.balance(&minter), 10_000_000);
+    assert_eq!(token.balance(&client.address), 10_000_000);
+    assert_eq!(token.balance(&exerciser), 0);
+    assert_eq!(
+        client.get_reserved_collateral(&minter, &underlying),
+        10_000_000
+    );
+
+    env.ledger().set_timestamp(1001);
+    assert_eq!(
+        client.try_expire(&option_id),
+        Err(Ok(crate::OptionsError::MathOverflow))
+    );
+
+    let (exercised, option, cancelled) = env.as_contract(&client.address, || {
+        (
+            crate::storage::read_exercised_amount(&env, option_id),
+            crate::storage::read_option(&env, option_id),
+            crate::storage::read_cancelled(&env, option_id),
+        )
+    });
+    assert_eq!(exercised, 10_000_001);
+    assert!(!option.exercised);
+    assert!(!option.expired);
+    assert!(!cancelled);
+    assert_eq!(token.balance(&client.address), 10_000_000);
+}
+
+#[test]
+fn test_mint_rejects_non_positive_strike_before_escrow() {
+    let (env, client, _, _, underlying, quote) = setup_env();
+    let minter = Address::generate(&env);
+    mint_tokens(&env, &underlying, &minter, 20_000_000);
+    let token = soroban_sdk::token::Client::new(&env, &underlying);
+
+    for strike in [0i128, -1, i128::MIN] {
+        assert_eq!(
+            client.try_mint(
+                &minter,
+                &OptionType::Call,
+                &underlying,
+                &quote,
+                &strike,
+                &500u64,
+                &1000u64,
+                &10_000_000i128,
+            ),
+            Err(Ok(crate::OptionsError::InvalidStrike))
+        );
+    }
+
+    assert_eq!(token.balance(&minter), 20_000_000);
+    assert_eq!(token.balance(&client.address), 0);
+    let counter = env.as_contract(&client.address, || {
+        crate::storage::read_option_counter(&env)
+    });
+    assert_eq!(counter, 0);
+
+    let option_id = client.mint(
+        &minter,
+        &OptionType::Call,
+        &underlying,
+        &quote,
+        &1i128,
+        &500u64,
+        &1000u64,
+        &10_000_000i128,
+    );
+    assert_eq!(option_id, 1);
+}
+
+#[test]
+fn test_mint_rejects_option_counter_exhaustion_before_escrow() {
+    let (env, client, _, _, underlying, quote) = setup_env();
+    let minter = Address::generate(&env);
+    mint_tokens(&env, &underlying, &minter, 20_000_000);
+    let token = soroban_sdk::token::Client::new(&env, &underlying);
+
+    env.as_contract(&client.address, || {
+        crate::storage::write_option_counter(&env, u32::MAX);
+    });
+
+    assert_eq!(
+        client.try_mint(
+            &minter,
+            &OptionType::Call,
+            &underlying,
+            &quote,
+            &100_000_000i128,
+            &500u64,
+            &1000u64,
+            &10_000_000i128,
+        ),
+        Err(Ok(crate::OptionsError::MathOverflow))
+    );
+
+    assert_eq!(token.balance(&minter), 20_000_000);
+    assert_eq!(token.balance(&client.address), 0);
+    assert_eq!(client.get_reserved_collateral(&minter, &underlying), 0);
+    let counter = env.as_contract(&client.address, || {
+        crate::storage::read_option_counter(&env)
+    });
+    assert_eq!(counter, u32::MAX);
+}
+
+#[test]
+fn test_near_limit_exercise_amounts_fail_cleanly_and_retry_settles() {
+    let (env, client, _, _, underlying, quote) = setup_env();
+    let (option_id, minter) = mint_call_option(&env, &client, &underlying, &quote);
+    let exerciser = Address::generate(&env);
+    let token = soroban_sdk::token::Client::new(&env, &underlying);
+    let fingerprint = client.get_config_fingerprint();
+
+    env.ledger().set_timestamp(750);
+    assert_eq!(
+        client.try_exercise_partial(&exerciser, &option_id, &i128::MIN, &fingerprint),
+        Err(Ok(crate::OptionsError::ZeroAmount))
+    );
+    assert_eq!(
+        client.try_exercise_partial(&exerciser, &option_id, &i128::MAX, &fingerprint),
+        Err(Ok(crate::OptionsError::ExceedsCollateral))
+    );
+    assert_eq!(
+        client.try_exercise_partial(&exerciser, &option_id, &10_000_001, &fingerprint),
+        Err(Ok(crate::OptionsError::ExceedsCollateral))
+    );
+
+    assert_eq!(token.balance(&exerciser), 0);
+    assert_eq!(token.balance(&client.address), 10_000_000);
+    assert_eq!(
+        client.get_reserved_collateral(&minter, &underlying),
+        10_000_000
+    );
+
+    client.exercise_partial(&exerciser, &option_id, &1, &fingerprint);
+    assert_eq!(
+        client.try_exercise_partial(&exerciser, &option_id, &10_000_000, &fingerprint),
+        Err(Ok(crate::OptionsError::ExceedsCollateral))
+    );
+    client.exercise(&exerciser, &option_id, &fingerprint);
+
+    assert_eq!(token.balance(&exerciser), 10_000_000);
+    assert_eq!(token.balance(&minter), 10_000_000);
+    assert_eq!(token.balance(&client.address), 0);
+    assert_eq!(client.get_reserved_collateral(&minter, &underlying), 0);
+}
+
+#[test]
+fn test_collateral_health_clamps_inconsistent_exercised_amount() {
+    let (env, client, _, _, underlying, quote) = setup_env();
+    let (option_id, minter) = mint_call_option(&env, &client, &underlying, &quote);
+
+    env.as_contract(&client.address, || {
+        crate::storage::write_exercised_amount(&env, option_id, i128::MAX);
+    });
+
+    let health = client.get_option_collateral_health(&option_id);
+    assert_eq!(health.remaining_obligation, 0);
+    assert_eq!(health.reserved, 0);
+    assert!(health.active);
+    assert_eq!(
+        client.get_reserved_collateral(&minter, &underlying),
+        10_000_000
+    );
+}
+
 // ── Property tests: payout conservation ──────────────────────────────────
 
 mod payout_conservation {
