@@ -11,7 +11,18 @@ import {
   type PortfolioValuationSummary,
   type ValuationPriceStatus,
 } from "../../../shared/types/portfolioValuation";
-import { readConcentrationThresholdOverrides } from "../config/concentrationThresholds";
+import {
+  assertValuationConfigCurrent,
+  captureValuationConfig,
+  computeValuationConfigFingerprint,
+  type PortfolioValuationConfig,
+  type ValuationConfigFingerprint,
+  type ValuationConfigSnapshot,
+} from "../../../shared/types/portfolioValuationConfig";
+import {
+  getConcentrationThresholds,
+  readConcentrationThresholdOverrides,
+} from "../config/concentrationThresholds";
 import {
   computeFreshnessStatus,
   type FreshnessResult,
@@ -47,8 +58,84 @@ export interface ExposureMap {
   concentration: ConcentrationAnalysis;
 }
 
+/** Valuation summary tagged with the configuration fingerprint that produced it (#1862). */
+export interface FingerprintedPortfolioValuationSummary extends PortfolioValuationSummary {
+  configFingerprint: ValuationConfigFingerprint;
+}
+
+export interface ComputeValuationSummaryOptions {
+  /**
+   * Configuration (or a previously captured snapshot) to value against.
+   * Defaults to the live deployment configuration from `getValuationConfig()`.
+   */
+  config?: PortfolioValuationConfig | ValuationConfigSnapshot;
+  /**
+   * Fingerprint the caller started its work with. When it no longer matches the
+   * configuration, a retryable `VALUATION_CONFIG_STALE` error is thrown before
+   * anything is computed.
+   */
+  expectedConfigFingerprint?: ValuationConfigFingerprint;
+}
+
+function isConfigSnapshot(
+  value: PortfolioValuationConfig | ValuationConfigSnapshot,
+): value is ValuationConfigSnapshot {
+  return (
+    typeof (value as ValuationConfigSnapshot).fingerprint === "string" &&
+    typeof (value as ValuationConfigSnapshot).config === "object" &&
+    (value as ValuationConfigSnapshot).config !== null
+  );
+}
+
+const STRATEGY_BY_PROTOCOL: Readonly<Record<string, string>> = Object.freeze({
+  Blend: "Lending",
+  Soroswap: "Liquidity Provision",
+  DeFindex: "Yield Aggregation",
+});
+
 export class PortfolioService {
   public static readonly SUPPORTED_ASSET_CLASSES = ["stablecoin", "crypto"];
+
+  /** Bumped whenever valuation semantics change in a way callers must not mix. */
+  public static readonly VALUATION_CONFIG_VERSION = 1;
+
+  /**
+   * The configuration that determines how portfolios are valued and graded on
+   * this deployment (#1862). Its fingerprint identifies valuation results so
+   * stale ones can be rejected or refreshed.
+   */
+  public static getValuationConfig(
+    env: NodeJS.ProcessEnv = process.env,
+  ): PortfolioValuationConfig {
+    const thresholds = getConcentrationThresholds(env);
+    return {
+      version: this.VALUATION_CONFIG_VERSION,
+      supportedAssetClasses: [...this.SUPPORTED_ASSET_CLASSES],
+      strategyByProtocol: { ...STRATEGY_BY_PROTOCOL },
+      concentrationThresholds: {
+        asset: { ...thresholds.asset },
+        protocol: { ...thresholds.protocol },
+      },
+    };
+  }
+
+  /** Fingerprint of the live valuation configuration (#1862). */
+  public static getValuationConfigFingerprint(
+    env: NodeJS.ProcessEnv = process.env,
+  ): ValuationConfigFingerprint {
+    return computeValuationConfigFingerprint(this.getValuationConfig(env));
+  }
+
+  /**
+   * True when a previously computed summary was produced under the live
+   * configuration and may be reused; false means it must be recomputed (#1862).
+   */
+  public static isValuationSummaryCurrent(
+    summary: Pick<FingerprintedPortfolioValuationSummary, "configFingerprint">,
+    env: NodeJS.ProcessEnv = process.env,
+  ): boolean {
+    return summary.configFingerprint === this.getValuationConfigFingerprint(env);
+  }
 
   /**
    * Aggregates positions by asset, protocol, and strategy, then grades the
@@ -200,12 +287,29 @@ export class PortfolioService {
   }
 
   /**
-   * Computes valuation completeness, unpriced holdings count, and fair yield metrics (#1660).
+   * Computes valuation completeness, unpriced holdings count, and fair yield metrics (#1660),
+   * tagged with the fingerprint of the configuration it was computed under (#1862).
+   *
+   * Pure: inputs are never mutated. When `expectedConfigFingerprint` is supplied and
+   * no longer matches, a `ValuationConfigError` (`VALUATION_CONFIG_STALE`,
+   * retryable) is thrown before any work is done, so callers keep their prior state.
    */
   public static computeValuationSummary(
     positions: VaultPosition[],
-  ): PortfolioValuationSummary {
-    return computePortfolioValuationSummary(
+    options: ComputeValuationSummaryOptions = {},
+  ): FingerprintedPortfolioValuationSummary {
+    // Always re-derive the fingerprint from the configuration itself so a
+    // tampered or hand-built snapshot cannot vouch for a different config.
+    const source = options.config ?? this.getValuationConfig();
+    const snapshot = captureValuationConfig(
+      isConfigSnapshot(source) ? source.config : source,
+    );
+
+    if (options.expectedConfigFingerprint !== undefined) {
+      assertValuationConfigCurrent(options.expectedConfigFingerprint, snapshot);
+    }
+
+    const summary = computePortfolioValuationSummary(
       positions.map((p) => ({
         protocol: p.protocol,
         asset: p.asset,
@@ -216,15 +320,12 @@ export class PortfolioService {
         priceStatus: p.priceStatus,
       })),
     );
+
+    return { ...summary, configFingerprint: snapshot.fingerprint };
   }
 
   private static getStrategyForProtocol(protocol: string): string {
-    const mapping: Record<string, string> = {
-      Blend: "Lending",
-      Soroswap: "Liquidity Provision",
-      DeFindex: "Yield Aggregation",
-    };
-    return mapping[protocol] || "Other";
+    return STRATEGY_BY_PROTOCOL[protocol] || "Other";
   }
 }
 
@@ -237,3 +338,4 @@ function escapeCsvField(value: string): string {
 }
 
 export type { ConcentrationAnalysis, ConcentrationWarning };
+export type { PortfolioValuationConfig, ValuationConfigFingerprint, ValuationConfigSnapshot };
