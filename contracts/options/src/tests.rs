@@ -1942,7 +1942,7 @@ mod settlement_retry {
 
     /// Simulates a failing token leg by draining the contract's escrow so the
     /// next payout transfer cannot succeed. Returns the amount drained.
-    fn drain_escrow(
+    pub fn drain_escrow(
         env: &Env,
         client: &OptionsContractClient,
         asset: &Address,
@@ -1956,7 +1956,7 @@ mod settlement_retry {
         balance
     }
 
-    fn restore_escrow(
+    pub fn restore_escrow(
         env: &Env,
         client: &OptionsContractClient,
         asset: &Address,
@@ -2311,5 +2311,547 @@ mod settlement_retry {
             ),
             Err(Ok(OptionsError::AlreadyCancelled))
         );
+    }
+}
+
+// ── Settlement diagnostics (#1751) ────────────────────────────────────────
+//
+// Privacy-safe diagnostics map a settlement error to the stage that failed
+// and a remediation path, without leaking addresses, amounts, or asset ids.
+// These tests verify:
+//   * normal operation produces the expected settlement state
+//   * failure at each stage preserves state and balances
+//   * safe retry after a failure succeeds with no double-payment
+//   * diagnostics correctly identify the stage and contain no private data
+
+mod settlement_diagnostics {
+    extern crate std;
+    use std::string::ToString;
+
+    use super::*;
+    use crate::{OptionsError, SettlementStage, SettlementStatus};
+    use soroban_sdk::token;
+
+    // ── Normal operation ──────────────────────────────────────────────────
+
+    #[test]
+    fn diagnostic_for_normal_full_exercise() {
+        let (env, client, _, _, underlying, quote) = setup_env();
+        let (option_id, _) = mint_call_option(&env, &client, &underlying, &quote);
+        let exerciser = Address::generate(&env);
+
+        env.ledger().set_timestamp(750);
+        client.exercise(&exerciser, &option_id, &client.get_config_fingerprint());
+
+        // After a successful full exercise, state is Exercised.
+        let state = client.get_settlement_state(&option_id);
+        assert_eq!(state.status, SettlementStatus::Exercised);
+        assert_eq!(state.exercised_amount, 10_000_000);
+        assert_eq!(state.remaining_amount, 0);
+    }
+
+    #[test]
+    fn diagnostic_for_normal_partial_then_expire() {
+        let (env, client, _, _, underlying, quote) = setup_env();
+        let (option_id, minter) = mint_call_option(&env, &client, &underlying, &quote);
+        let exerciser = Address::generate(&env);
+        let token_u = token::Client::new(&env, &underlying);
+
+        env.ledger().set_timestamp(750);
+        client.exercise_partial(
+            &exerciser,
+            &option_id,
+            &4_000_000,
+            &client.get_config_fingerprint(),
+        );
+
+        let state = client.get_settlement_state(&option_id);
+        assert_eq!(state.status, SettlementStatus::PartiallyExercised);
+        assert_eq!(state.exercised_amount, 4_000_000);
+        assert_eq!(state.remaining_amount, 6_000_000);
+
+        env.ledger().set_timestamp(1001);
+        client.expire(&option_id);
+        assert_eq!(token_u.balance(&minter), 16_000_000);
+        let state = client.get_settlement_state(&option_id);
+        assert_eq!(state.status, SettlementStatus::Expired);
+    }
+
+    // ── Failure diagnostics: each stage ───────────────────────────────────
+
+    #[test]
+    fn diagnostic_identifies_stale_config_stage() {
+        let (env, client, admin, _, underlying, quote) = setup_env();
+        let (option_id, _) = mint_call_option(&env, &client, &underlying, &quote);
+        let exerciser = Address::generate(&env);
+
+        env.ledger().set_timestamp(750);
+        let stale_fp = client.get_config_fingerprint();
+
+        // Change config to invalidate the fingerprint.
+        client.set_oracle_max_age(&60);
+
+        let result = client.try_exercise(&exerciser, &option_id, &stale_fp);
+        assert_eq!(result, Err(Ok(OptionsError::StaleConfig)));
+
+        let diag = client.get_settlement_diagnostic(&option_id, &OptionsError::StaleConfig);
+        assert_eq!(diag.option_id, option_id);
+        assert_eq!(diag.stage, SettlementStage::ConfigValidation);
+        assert_eq!(diag.error_code, OptionsError::StaleConfig as u32);
+        // Remediation must mention refreshing the fingerprint.
+        assert!(diag.remediation.to_string().contains("fingerprint"));
+        // Must not contain any addresses.
+        let remediation = diag.remediation.to_string();
+        assert!(!remediation.contains(&std::format!("{:?}", admin)));
+        assert!(!remediation.contains(&std::format!("{:?}", exerciser)));
+
+        // State and balances preserved.
+        assert_eq!(
+            client.get_settlement_state(&option_id).status,
+            SettlementStatus::Open
+        );
+    }
+
+    #[test]
+    fn diagnostic_identifies_status_check_stage() {
+        let (env, client, _, _, underlying, quote) = setup_env();
+        let (option_id, _) = mint_call_option(&env, &client, &underlying, &quote);
+        let exerciser = Address::generate(&env);
+
+        env.ledger().set_timestamp(750);
+        client.exercise(&exerciser, &option_id, &client.get_config_fingerprint());
+
+        // Second exercise should fail with AlreadyExercised.
+        let result = client.try_exercise(&exerciser, &option_id, &client.get_config_fingerprint());
+        assert_eq!(result, Err(Ok(OptionsError::AlreadyExercised)));
+
+        let diag = client.get_settlement_diagnostic(&option_id, &OptionsError::AlreadyExercised);
+        assert_eq!(diag.stage, SettlementStage::StatusCheck);
+        assert_eq!(diag.error_code, OptionsError::AlreadyExercised as u32);
+    }
+
+    #[test]
+    fn diagnostic_identifies_concurrency_check_stage() {
+        let (env, client, _, _, underlying, quote) = setup_env();
+        let (option_id, _) = mint_call_option(&env, &client, &underlying, &quote);
+        let exerciser = Address::generate(&env);
+
+        env.ledger().set_timestamp(750);
+        // Use a stale sequence (0 when the real one is 1).
+        let result = client.try_exercise_partial_with_sequence(
+            &exerciser,
+            &option_id,
+            &4_000_000,
+            &999, // wrong sequence
+            &client.get_config_fingerprint(),
+        );
+        assert_eq!(result, Err(Ok(OptionsError::ConcurrentModification)));
+
+        let diag =
+            client.get_settlement_diagnostic(&option_id, &OptionsError::ConcurrentModification);
+        assert_eq!(diag.stage, SettlementStage::ConcurrencyCheck);
+        assert_eq!(diag.error_code, OptionsError::ConcurrentModification as u32);
+        assert!(diag.remediation.to_string().contains("sequence"));
+    }
+
+    #[test]
+    fn diagnostic_identifies_time_window_stage() {
+        let (env, client, _, _, underlying, quote) = setup_env();
+        let (option_id, _) = mint_call_option(&env, &client, &underlying, &quote);
+        let exerciser = Address::generate(&env);
+
+        // Ledger is at 0 — before opening_time of 500.
+        let result = client.try_exercise(&exerciser, &option_id, &client.get_config_fingerprint());
+        assert_eq!(result, Err(Ok(OptionsError::TooEarly)));
+
+        let diag = client.get_settlement_diagnostic(&option_id, &OptionsError::TooEarly);
+        assert_eq!(diag.stage, SettlementStage::TimeWindowCheck);
+        assert_eq!(diag.error_code, OptionsError::TooEarly as u32);
+        assert!(diag.remediation.to_string().contains("opening_time"));
+    }
+
+    #[test]
+    fn diagnostic_identifies_amount_validation_stage() {
+        let (env, client, _, _, underlying, quote) = setup_env();
+        let (option_id, _) = mint_call_option(&env, &client, &underlying, &quote);
+        let exerciser = Address::generate(&env);
+
+        env.ledger().set_timestamp(750);
+        let result = client.try_exercise_partial(
+            &exerciser,
+            &option_id,
+            &10_000_001, // exceeds collateral
+            &client.get_config_fingerprint(),
+        );
+        assert_eq!(result, Err(Ok(OptionsError::ExceedsCollateral)));
+
+        let diag = client.get_settlement_diagnostic(&option_id, &OptionsError::ExceedsCollateral);
+        assert_eq!(diag.stage, SettlementStage::AmountValidation);
+        assert_eq!(diag.error_code, OptionsError::ExceedsCollateral as u32);
+        assert!(diag.remediation.to_string().contains("remaining"));
+    }
+
+    #[test]
+    fn diagnostic_identifies_settlement_state_changed() {
+        let (env, client, _, _, underlying, quote) = setup_env();
+        let (option_id, _) = mint_call_option(&env, &client, &underlying, &quote);
+        let exerciser = Address::generate(&env);
+
+        env.ledger().set_timestamp(750);
+        // First exercise succeeds.
+        client.exercise_partial_checked(
+            &exerciser,
+            &option_id,
+            &4_000_000,
+            &0, // expected_exercised = 0
+            &1,
+            &client.get_config_fingerprint(),
+        );
+
+        // Retry with stale expected_exercised = 0 should fail.
+        let result = client.try_exercise_partial_checked(
+            &exerciser,
+            &option_id,
+            &4_000_000,
+            &0, // stale
+            &2,
+            &client.get_config_fingerprint(),
+        );
+        assert_eq!(result, Err(Ok(OptionsError::SettlementStateChanged)));
+
+        let diag =
+            client.get_settlement_diagnostic(&option_id, &OptionsError::SettlementStateChanged);
+        assert_eq!(diag.stage, SettlementStage::ConcurrencyCheck);
+        assert_eq!(diag.error_code, OptionsError::SettlementStateChanged as u32);
+        assert!(diag.remediation.to_string().contains("exercised_amount"));
+    }
+
+    // ── State preservation on failure ─────────────────────────────────────
+
+    #[test]
+    fn validation_failure_preserves_state_and_balances() {
+        let (env, client, _, _, underlying, quote) = setup_env();
+        let (option_id, minter) = mint_call_option(&env, &client, &underlying, &quote);
+        let exerciser = Address::generate(&env);
+        let token_u = token::Client::new(&env, &underlying);
+
+        env.ledger().set_timestamp(750);
+        let escrow_before = token_u.balance(&client.address);
+        let exerciser_before = token_u.balance(&exerciser);
+        let reserve_before = client.get_reserved_collateral(&minter, &underlying);
+        let state_before = client.get_settlement_state(&option_id);
+
+        // Trigger ExceedsCollateral.
+        assert_eq!(
+            client.try_exercise_partial(
+                &exerciser,
+                &option_id,
+                &10_000_001,
+                &client.get_config_fingerprint()
+            ),
+            Err(Ok(OptionsError::ExceedsCollateral))
+        );
+
+        // Trigger ZeroAmount.
+        assert_eq!(
+            client.try_exercise_partial(
+                &exerciser,
+                &option_id,
+                &0,
+                &client.get_config_fingerprint()
+            ),
+            Err(Ok(OptionsError::ZeroAmount))
+        );
+
+        // Nothing moved.
+        assert_eq!(token_u.balance(&client.address), escrow_before);
+        assert_eq!(token_u.balance(&exerciser), exerciser_before);
+        assert_eq!(
+            client.get_reserved_collateral(&minter, &underlying),
+            reserve_before
+        );
+        assert_eq!(client.get_settlement_state(&option_id), state_before);
+    }
+
+    #[test]
+    fn stale_config_failure_preserves_state_and_balances() {
+        let (env, client, _, _, underlying, quote) = setup_env();
+        let (option_id, minter) = mint_call_option(&env, &client, &underlying, &quote);
+        let exerciser = Address::generate(&env);
+        let token_u = token::Client::new(&env, &underlying);
+
+        env.ledger().set_timestamp(750);
+        let stale_fp = client.get_config_fingerprint();
+        client.set_oracle_max_age(&60);
+
+        let escrow_before = token_u.balance(&client.address);
+        let reserve_before = client.get_reserved_collateral(&minter, &underlying);
+        let state_before = client.get_settlement_state(&option_id);
+
+        assert_eq!(
+            client.try_exercise(&exerciser, &option_id, &stale_fp),
+            Err(Ok(OptionsError::StaleConfig))
+        );
+
+        assert_eq!(token_u.balance(&client.address), escrow_before);
+        assert_eq!(
+            client.get_reserved_collateral(&minter, &underlying),
+            reserve_before
+        );
+        assert_eq!(client.get_settlement_state(&option_id), state_before);
+    }
+
+    // ── Safe retry after failure ──────────────────────────────────────────
+
+    #[test]
+    fn safe_retry_after_stale_config_succeeds() {
+        let (env, client, _, _, underlying, quote) = setup_env();
+        let (option_id, _) = mint_call_option(&env, &client, &underlying, &quote);
+        let exerciser = Address::generate(&env);
+        let token_u = token::Client::new(&env, &underlying);
+
+        env.ledger().set_timestamp(750);
+        let stale_fp = client.get_config_fingerprint();
+        client.set_oracle_max_age(&60);
+
+        // Fails with stale config.
+        assert_eq!(
+            client.try_exercise(&exerciser, &option_id, &stale_fp),
+            Err(Ok(OptionsError::StaleConfig))
+        );
+        assert_eq!(token_u.balance(&exerciser), 0);
+
+        // Refresh and retry — succeeds.
+        let fresh_fp = client.get_config_fingerprint();
+        client.exercise(&exerciser, &option_id, &fresh_fp);
+        assert_eq!(token_u.balance(&exerciser), 10_000_000);
+        assert_eq!(
+            client.get_settlement_state(&option_id).status,
+            SettlementStatus::Exercised
+        );
+    }
+
+    #[test]
+    fn safe_retry_after_concurrent_modification_succeeds() {
+        let (env, client, _, _, underlying, quote) = setup_env();
+        let (option_id, _) = mint_call_option(&env, &client, &underlying, &quote);
+        let exerciser = Address::generate(&env);
+        let token_u = token::Client::new(&env, &underlying);
+
+        env.ledger().set_timestamp(750);
+
+        // First partial exercise succeeds, advancing sequence to 2.
+        client.exercise_partial_with_sequence(
+            &exerciser,
+            &option_id,
+            &4_000_000,
+            &1,
+            &client.get_config_fingerprint(),
+        );
+        let balance_after_first = token_u.balance(&exerciser);
+        assert_eq!(balance_after_first, 4_000_000);
+
+        // Retry with stale sequence 1 — fails, nothing moves.
+        assert_eq!(
+            client.try_exercise_partial_with_sequence(
+                &exerciser,
+                &option_id,
+                &3_000_000,
+                &1, // stale
+                &client.get_config_fingerprint()
+            ),
+            Err(Ok(OptionsError::ConcurrentModification))
+        );
+        assert_eq!(token_u.balance(&exerciser), balance_after_first);
+
+        // Retry with correct sequence 2 — succeeds.
+        client.exercise_partial_with_sequence(
+            &exerciser,
+            &option_id,
+            &3_000_000,
+            &2,
+            &client.get_config_fingerprint(),
+        );
+        assert_eq!(token_u.balance(&exerciser), balance_after_first + 3_000_000);
+        assert_eq!(
+            client.get_settlement_state(&option_id).exercised_amount,
+            7_000_000
+        );
+    }
+
+    #[test]
+    fn safe_retry_checked_exercise_prevents_double_payment() {
+        let (env, client, _, _, underlying, quote) = setup_env();
+        let (option_id, _) = mint_call_option(&env, &client, &underlying, &quote);
+        let exerciser = Address::generate(&env);
+        let token_u = token::Client::new(&env, &underlying);
+
+        env.ledger().set_timestamp(750);
+
+        // First exercise succeeds (exercised goes from 0 to 4M).
+        client.exercise_partial_checked(
+            &exerciser,
+            &option_id,
+            &4_000_000,
+            &0,
+            &1,
+            &client.get_config_fingerprint(),
+        );
+        assert_eq!(token_u.balance(&exerciser), 4_000_000);
+
+        // Blind retry with same expected_exercised=0 — refused.
+        assert_eq!(
+            client.try_exercise_partial_checked(
+                &exerciser,
+                &option_id,
+                &4_000_000,
+                &0, // stale expected_exercised
+                &2,
+                &client.get_config_fingerprint()
+            ),
+            Err(Ok(OptionsError::SettlementStateChanged))
+        );
+        assert_eq!(token_u.balance(&exerciser), 4_000_000);
+
+        // Read actual state and resume correctly.
+        let state = client.get_settlement_state(&option_id);
+        assert_eq!(state.exercised_amount, 4_000_000);
+
+        client.exercise_partial_checked(
+            &exerciser,
+            &option_id,
+            &6_000_000,
+            &4_000_000, // correct expected_exercised
+            &2,
+            &client.get_config_fingerprint(),
+        );
+        assert_eq!(token_u.balance(&exerciser), 10_000_000);
+        assert_eq!(
+            client.get_settlement_state(&option_id).status,
+            SettlementStatus::Exercised
+        );
+    }
+
+    #[test]
+    fn safe_retry_after_transfer_failure_preserves_state() {
+        let (env, client, _, _, underlying, quote) = setup_env();
+        let (option_id, minter) = mint_call_option(&env, &client, &underlying, &quote);
+        let exerciser = Address::generate(&env);
+        let sink = Address::generate(&env);
+        let token_u = token::Client::new(&env, &underlying);
+
+        env.ledger().set_timestamp(750);
+
+        // Drain escrow so the transfer leg fails.
+        let drained = super::settlement_retry::drain_escrow(&env, &client, &underlying, &sink);
+        assert!(client
+            .try_exercise_partial(
+                &exerciser,
+                &option_id,
+                &4_000_000,
+                &client.get_config_fingerprint()
+            )
+            .is_err());
+
+        // State is fully preserved — nothing moved.
+        assert_eq!(client.get_settlement_state(&option_id).exercised_amount, 0);
+        assert_eq!(token_u.balance(&exerciser), 0);
+        assert_eq!(
+            client.get_reserved_collateral(&minter, &underlying),
+            10_000_000
+        );
+
+        // Restore escrow and retry — succeeds.
+        super::settlement_retry::restore_escrow(&env, &client, &underlying, &sink, drained);
+        client.exercise_partial(
+            &exerciser,
+            &option_id,
+            &4_000_000,
+            &client.get_config_fingerprint(),
+        );
+        assert_eq!(token_u.balance(&exerciser), 4_000_000);
+        assert_eq!(
+            client.get_settlement_state(&option_id).exercised_amount,
+            4_000_000
+        );
+    }
+
+    // ── Diagnostic privacy safety ─────────────────────────────────────────
+
+    #[test]
+    fn diagnostic_contains_no_addresses_or_amounts() {
+        let (env, client, admin, _, underlying, quote) = setup_env();
+        let (option_id, minter) = mint_call_option(&env, &client, &underlying, &quote);
+        let exerciser = Address::generate(&env);
+
+        env.ledger().set_timestamp(750);
+        let stale_fp = client.get_config_fingerprint();
+        client.set_oracle_max_age(&60);
+        assert_eq!(
+            client.try_exercise(&exerciser, &option_id, &stale_fp),
+            Err(Ok(OptionsError::StaleConfig))
+        );
+
+        let diag = client.get_settlement_diagnostic(&option_id, &OptionsError::StaleConfig);
+        let remediation = diag.remediation.to_string();
+
+        // No private data leaked in the remediation text.
+        assert!(!remediation.contains(&std::format!("{:?}", admin)));
+        assert!(!remediation.contains(&std::format!("{:?}", minter)));
+        assert!(!remediation.contains(&std::format!("{:?}", exerciser)));
+        assert!(!remediation.contains(&std::format!("{:?}", underlying)));
+        assert!(!remediation.contains(&std::format!("{:?}", quote)));
+        // No amounts.
+        assert!(!remediation.contains("10_000_000"));
+        assert!(!remediation.contains("4_000_000"));
+    }
+
+    #[test]
+    fn diagnostic_for_all_settlement_errors() {
+        let (env, client, _, _, underlying, quote) = setup_env();
+        let (option_id, _) = mint_call_option(&env, &client, &underlying, &quote);
+
+        // Verify diagnostics for a representative error from each stage.
+        let cases = [
+            (OptionsError::StaleConfig, SettlementStage::ConfigValidation),
+            (OptionsError::AlreadyExercised, SettlementStage::StatusCheck),
+            (OptionsError::AlreadyCancelled, SettlementStage::StatusCheck),
+            (
+                OptionsError::ConcurrentModification,
+                SettlementStage::ConcurrencyCheck,
+            ),
+            (
+                OptionsError::SettlementStateChanged,
+                SettlementStage::ConcurrencyCheck,
+            ),
+            (
+                OptionsError::ReentrantSettlement,
+                SettlementStage::ConcurrencyCheck,
+            ),
+            (OptionsError::TooEarly, SettlementStage::TimeWindowCheck),
+            (
+                OptionsError::ExerciseWindowClosed,
+                SettlementStage::TimeWindowCheck,
+            ),
+            (OptionsError::NotExpired, SettlementStage::TimeWindowCheck),
+            (OptionsError::ZeroAmount, SettlementStage::AmountValidation),
+            (
+                OptionsError::ExceedsCollateral,
+                SettlementStage::AmountValidation,
+            ),
+            (
+                OptionsError::MathOverflow,
+                SettlementStage::AmountValidation,
+            ),
+        ];
+
+        for (error, expected_stage) in cases {
+            let diag = client.get_settlement_diagnostic(&option_id, &error);
+            assert_eq!(diag.option_id, option_id);
+            assert_eq!(diag.stage, expected_stage);
+            assert_eq!(diag.error_code, error as u32);
+            // Remediation must be non-empty.
+            assert!(!diag.remediation.to_string().is_empty());
+        }
     }
 }
