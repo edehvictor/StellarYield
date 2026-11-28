@@ -69,6 +69,7 @@ Notes:
 | `Initialized`, `Admin`, `CollateralToken`, `DebtToken`, `CollateralFactorBps`, `ReserveBps`, `CloseFactorBps`, `CollateralPriceBps`, `InterestRatePerLedger`, `ProtocolFeeBps`, `Oracle`, `OraclePolicy`, `BorrowIndex`, `LastAccrualLedger`, `TotalSupplied`, `TotalDebt`, `ProtocolFees`, `PendingWithdrawals`, `BadDebt` | instance | contract lifetime | No |
 | `Supply(user)`, `Collateral(user)`, `Debt(user)`, `DebtIndex(user)`, `PendingWithdrawal(user)` | persistent | while the user has a position or queued withdrawal | Yes (recommended) |
 | `Liquidation(borrower, liquidation_id)` | persistent | operation receipt; must outlive retries | Yes (recommended) |
+| `Operation(account, operation_id)` | persistent | idempotent-operation receipt (#1754); must outlive retries | Yes (implemented: extended to 518 400 ledgers on write) |
 
 Notes:
 - Configuration snapshots and fingerprints (#1752) are derived from instance

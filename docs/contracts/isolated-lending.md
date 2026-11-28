@@ -208,3 +208,128 @@ current ledger. A malformed stored quote fails with `InvalidOracleQuote` before
 borrow accrual or transfers; the oracle can publish a corrected quote and the
 borrow can be retried safely. The push entry point rejects invalid price or
 confidence with `InvalidConfig` and leaves the previous quote intact.
+
+## Operation identity and safe retries
+
+A wallet that times out waiting for a transaction cannot tell whether it
+landed. Re-submitting a plain `supply`, `withdraw`, `post_collateral`,
+`borrow`, `withdraw_collateral`, `repay`, `repay_for` or `queue_withdrawal`
+applies the effect again, because each call is an independent operation. The
+contract therefore offers an **idempotent variant** of each of these entry
+points that takes a caller-chosen `operation_id: BytesN<32>` (#1754).
+
+| Plain entry point | Idempotent variant | Receipt `kind` |
+|---|---|---|
+| `supply(user, amount, ctx)` | `supply_with_id(user, amount, ctx, operation_id)` | `supply` |
+| `withdraw(user, amount, ctx)` | `withdraw_with_id(user, amount, ctx, operation_id)` | `withdraw` |
+| `post_collateral(user, amount, ctx)` | `post_collateral_with_id(user, amount, ctx, operation_id)` | `post_col` |
+| `borrow(user, amount, ctx, fp)` | `borrow_with_id(user, amount, ctx, fp, operation_id)` | `borrow` |
+| `withdraw_collateral(user, amount, ctx, fp)` | `withdraw_collateral_with_id(user, amount, ctx, fp, operation_id)` | `wd_col` |
+| `repay(user, amount, ctx)` | `repay_with_id(user, amount, ctx, operation_id)` | `repay` |
+| `repay_for(payer, borrower, amount, ctx)` | `repay_for_with_id(payer, borrower, amount, ctx, operation_id)` | `repay_for` |
+| `queue_withdrawal(user, amount, ctx)` | `queue_withdrawal_with_id(user, amount, ctx, operation_id)` | `queue_wd` |
+
+Each variant returns an `OperationReceipt`:
+
+| Field | Meaning |
+|---|---|
+| `operation_id` | The id the operation was applied under |
+| `kind` | Operation kind (table above) |
+| `account` | Account that authorized the call and scopes the id (`payer` for `repay_for_with_id`) |
+| `beneficiary` | Account whose position changed (the borrower for `repay_for_with_id`, otherwise `account`) |
+| `amount` | Requested amount |
+| `ledger` | Ledger sequence at which the effect was applied |
+
+`get_operation(account, operation_id) -> Option<OperationReceipt>` reads a
+receipt without changing anything.
+
+`ctx` is the `LedgerContext` from `get_ledger_context()`, exactly as for the
+plain entry points. It is validated **before** the receipt lookup: a
+submission with the wrong network, contract or version is rejected
+(`WrongNetwork` / `WrongContract` / `WrongVersion`) even if its id was already
+applied, and it does not consume a fresh id.
+
+### Identity rules
+
+- **Scope.** An id is scoped to the pair contract and to the authorizing
+  account: storage key `Operation(account, operation_id)`. Two accounts can use
+  the same id independently, and no account can consume, replay or block
+  another account's id.
+- **Authorization.** `operation_id` is an argument of the authorized call, so a
+  relayer or front-end cannot change it after the user signed.
+- **Generation.** Generate 32 random bytes (or a hash of a client-side
+  request id) once per *logical* operation and keep it with the pending
+  request until the outcome is known. Do not derive ids from timestamps or
+  counters that can repeat. The all-zero id is reserved and rejected with
+  `InvalidOperationId` (20).
+- **One id, one request.** An id identifies a single request: its kind,
+  beneficiary and amount. The configuration fingerprint passed to
+  `borrow_with_id` and `withdraw_collateral_with_id` is a precondition, not part
+  of the identity.
+
+### What happens on each submission
+
+| Situation | Result | State change |
+|---|---|---|
+| First successful submission | Effect applied, receipt stored, `("op",)` emitted, receipt returned | Yes, once |
+| Same id, same kind, beneficiary and amount (a duplicate or safe retry) | The stored receipt is returned unchanged; `("op_replay",)` emitted | **None**: no token transfer, no interest accrual, no storage write |
+| Same id, different kind, beneficiary or amount | `OperationConflict` (21) | None |
+| Submission fails (any typed error, e.g. `InsufficientCollateral`, `StaleConfig`, `InsufficientLiquidity`) | Error returned, **id not consumed** | None |
+| All-zero id | `InvalidOperationId` (20) | None |
+| Wrong ledger context | `WrongNetwork` / `WrongContract` / `WrongVersion` | None; id not consumed |
+
+A replay returns the original receipt even when re-executing the request now
+would fail (for example a withdrawal after the market's cash has been
+borrowed) or when configuration has changed since it was applied. A
+duplicate can therefore never double-credit or double-debit an account.
+
+### Atomicity
+
+The idempotent variants validate the amount, initialization and id, then look
+up the receipt, and only then run the same code as the plain entry point. That
+code computes and validates every value before it moves tokens or writes
+state. The receipt is written **after** the operation succeeded, never before.
+In addition, Soroban reverts every storage write and token transfer of an
+invocation that returns an error (covered by the regression tests), so a
+receipt can never exist for an effect that was not applied, and a failed
+attempt leaves balances, positions, totals, the borrow index, accrual markers
+and the id itself unchanged.
+
+### How to retry safely
+
+1. Generate `operation_id` and submit the `*_with_id` call.
+2. If the outcome is unknown (timeout, dropped connection), either call
+   `get_operation(account, operation_id)` or simply re-submit **the same
+   request with the same id**. Both are safe.
+3. On a typed error the id is still free: fix the input (or refresh the
+   configuration fingerprint) and retry with the same id, or use a new one.
+4. Use a **new** id for every new logical operation, including a second
+   deposit of the same amount.
+
+Liquidations already carry an identity: `liquidate` takes a `liquidation_id`
+that is consumed only by a successful liquidation and rejects a reused id with
+`AlreadyLiquidated` (11). It is unchanged.
+
+### Events
+
+| Topic | Data | When |
+|---|---|---|
+| `("op",)` | `(account, kind, operation_id, beneficiary, amount)` | First successful application of an idempotent operation |
+| `("op_replay",)` | `(account, kind, operation_id)` | A duplicate submission returned an existing receipt |
+
+### Storage
+
+`Operation(account, operation_id)` is a persistent key holding the
+`OperationReceipt`. Its TTL is extended to ~30 days (518 400 ledgers) when it is
+written, so a delayed retry is still recognised. An id whose receipt has
+expired is treated as unused; clients must not retry a request older than that
+window with the same id.
+
+### Compatibility
+
+This is an **additive** change. The plain entry points keep their signatures
+and semantics (every call applies its effect and consumes no id), so existing
+callers are unaffected. `IsolatedLendingError` gains codes 20 and 21,
+`PairDataKey` gains `Operation`, and the contract exports the new
+`OperationReceipt` type. Clients that need retry safety should move to the
+`*_with_id` variants.

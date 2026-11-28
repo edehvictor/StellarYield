@@ -46,7 +46,7 @@
 
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, symbol_short, token, xdr::ToXdr, Address,
-    Bytes, BytesN, Env,
+    Bytes, BytesN, Env, Symbol,
 };
 
 const BPS_DENOMINATOR: i128 = 10_000;
@@ -59,6 +59,10 @@ const RATE_SCALE: i128 = 1_000_000_000;
 /// Current storage layout version. Version 0 = pair existed before context
 /// binding; it keeps working and is bound on `migrate`.
 const CURRENT_STORAGE_VERSION: u32 = 1;
+/// Operation receipts are bumped when their TTL falls below ~1 day of ledgers…
+const OPERATION_TTL_THRESHOLD: u32 = 17_280;
+/// …to ~30 days, so a delayed retry is still recognised as a duplicate.
+const OPERATION_TTL_EXTEND_TO: u32 = 518_400;
 
 #[contracttype]
 #[derive(Clone)]
@@ -158,6 +162,27 @@ pub struct HealthFactor {
     pub config_fingerprint: BytesN<32>,
 }
 
+/// Record of an operation applied under a caller-chosen identity (#1754).
+///
+/// Stored once the operation's effect is committed and returned unchanged to
+/// every later submission of the same request with the same id.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OperationReceipt {
+    pub operation_id: BytesN<32>,
+    /// `supply`, `withdraw`, `post_col`, `borrow`, `wd_col`, `repay`,
+    /// `repay_for` or `queue_wd`.
+    pub kind: Symbol,
+    /// Account that authorized the operation and scopes the id.
+    pub account: Address,
+    /// Account whose position changed: `account` itself, or the borrower for
+    /// `repay_for`.
+    pub beneficiary: Address,
+    pub amount: i128,
+    /// Ledger sequence at which the effect was applied.
+    pub ledger: u32,
+}
+
 #[contracttype]
 #[derive(Clone)]
 pub enum PairDataKey {
@@ -202,6 +227,9 @@ pub enum PairDataKey {
     NetworkId,
     /// Storage layout version of the stored state.
     StorageVersion,
+    /// Receipt of an operation applied under a caller-chosen identity,
+    /// scoped to the authorizing account (#1754).
+    Operation(Address, BytesN<32>),
 }
 
 #[contracterror]
@@ -233,6 +261,11 @@ pub enum IsolatedLendingError {
     WrongVersion = 18,
     /// The configured oracle supplied a quote with malformed boundary fields.
     InvalidOracleQuote = 19,
+    /// The operation id is all zeroes, which is reserved as "no id".
+    InvalidOperationId = 20,
+    /// The operation id was already used by this account for a different
+    /// request (another kind, beneficiary or amount).
+    OperationConflict = 21,
 }
 
 #[contract]
@@ -385,13 +418,13 @@ impl IsolatedLendingPair {
         Ok(())
     }
 
-    pub fn supply(
+    /// Body of `supply`; the caller has already required `user` auth.
+    fn supply_impl(
         env: Env,
         user: Address,
         amount: i128,
         expected_context: LedgerContext,
     ) -> Result<(), IsolatedLendingError> {
-        user.require_auth();
         if amount <= 0 {
             return Err(IsolatedLendingError::InvalidAmount);
         }
@@ -430,13 +463,13 @@ impl IsolatedLendingPair {
         Ok(())
     }
 
-    pub fn withdraw(
+    /// Body of `withdraw`; the caller has already required `user` auth.
+    fn withdraw_impl(
         env: Env,
         user: Address,
         amount: i128,
         expected_context: LedgerContext,
     ) -> Result<(), IsolatedLendingError> {
-        user.require_auth();
         if amount <= 0 {
             return Err(IsolatedLendingError::InvalidAmount);
         }
@@ -485,13 +518,13 @@ impl IsolatedLendingPair {
         Ok(())
     }
 
-    pub fn post_collateral(
+    /// Body of `post_collateral`; the caller has already required `user` auth.
+    fn post_collateral_impl(
         env: Env,
         user: Address,
         amount: i128,
         expected_context: LedgerContext,
     ) -> Result<(), IsolatedLendingError> {
-        user.require_auth();
         if amount <= 0 {
             return Err(IsolatedLendingError::InvalidAmount);
         }
@@ -518,20 +551,14 @@ impl IsolatedLendingPair {
         Ok(())
     }
 
-    /// Borrow against posted collateral.
-    ///
-    /// `expected_config_fingerprint` must equal `get_config_fingerprint`; a
-    /// mismatch fails with `StaleConfig` before interest accrues or funds move.
-    /// `expected_context` must equal `get_ledger_context`; a mismatch fails
-    /// with `WrongNetwork`, `WrongContract`, or `WrongVersion` before accrual.
-    pub fn borrow(
+    /// Body of `borrow`; the caller has already required `user` auth.
+    fn borrow_impl(
         env: Env,
         user: Address,
         amount: i128,
         expected_context: LedgerContext,
         expected_config_fingerprint: BytesN<32>,
     ) -> Result<(), IsolatedLendingError> {
-        user.require_auth();
         if amount <= 0 {
             return Err(IsolatedLendingError::InvalidAmount);
         }
@@ -596,6 +623,94 @@ impl IsolatedLendingPair {
         Ok(())
     }
 
+    pub fn supply(
+        env: Env,
+        user: Address,
+        amount: i128,
+        expected_context: LedgerContext,
+    ) -> Result<(), IsolatedLendingError> {
+        user.require_auth();
+        Self::supply_impl(env, user, amount, expected_context)
+    }
+
+    pub fn withdraw(
+        env: Env,
+        user: Address,
+        amount: i128,
+        expected_context: LedgerContext,
+    ) -> Result<(), IsolatedLendingError> {
+        user.require_auth();
+        Self::withdraw_impl(env, user, amount, expected_context)
+    }
+
+    pub fn post_collateral(
+        env: Env,
+        user: Address,
+        amount: i128,
+        expected_context: LedgerContext,
+    ) -> Result<(), IsolatedLendingError> {
+        user.require_auth();
+        Self::post_collateral_impl(env, user, amount, expected_context)
+    }
+
+    /// Borrow against posted collateral.
+    ///
+    /// `expected_config_fingerprint` must equal `get_config_fingerprint`; a
+    /// mismatch fails with `StaleConfig` before interest accrues or funds move.
+    /// `expected_context` must equal `get_ledger_context`; a mismatch fails
+    /// with `WrongNetwork`, `WrongContract`, or `WrongVersion` before accrual.
+    pub fn borrow(
+        env: Env,
+        user: Address,
+        amount: i128,
+        expected_context: LedgerContext,
+        expected_config_fingerprint: BytesN<32>,
+    ) -> Result<(), IsolatedLendingError> {
+        user.require_auth();
+        Self::borrow_impl(
+            env,
+            user,
+            amount,
+            expected_context,
+            expected_config_fingerprint,
+        )
+    }
+
+    /// Withdraw posted collateral.
+    ///
+    /// `expected_config_fingerprint` must equal `get_config_fingerprint`; a
+    /// mismatch fails with `StaleConfig` before interest accrues or funds move.
+    /// `expected_context` must equal `get_ledger_context`; a mismatch fails
+    /// with `WrongNetwork`, `WrongContract`, or `WrongVersion` before accrual.
+    pub fn withdraw_collateral(
+        env: Env,
+        user: Address,
+        amount: i128,
+        expected_context: LedgerContext,
+        expected_config_fingerprint: BytesN<32>,
+    ) -> Result<(), IsolatedLendingError> {
+        user.require_auth();
+        Self::withdraw_collateral_impl(
+            env,
+            user,
+            amount,
+            expected_context,
+            expected_config_fingerprint,
+        )
+    }
+
+    /// Queue a withdrawal. Queued amounts are excluded from borrowable liquidity
+    /// until the supplier calls `withdraw`.
+    pub fn queue_withdrawal(
+        env: Env,
+        user: Address,
+        amount: i128,
+        expected_context: LedgerContext,
+    ) -> Result<(), IsolatedLendingError> {
+        user.require_auth();
+        Self::queue_withdrawal_impl(env, user, amount, expected_context)
+    }
+
     pub fn repay(
         env: Env,
         user: Address,
@@ -624,20 +739,258 @@ impl IsolatedLendingPair {
         Self::repay_debt(&env, &payer, &borrower, amount)
     }
 
-    /// Withdraw posted collateral.
+    // ── Idempotent entry points (#1754) ─────────────────────────────
+    //
+    // Each `*_with_id` entry point applies the same operation as its plain
+    // counterpart, but under a caller-chosen `operation_id`. The ledger
+    // context is validated first, exactly as for the plain entry point. The
+    // first successful call then applies the effect and stores an
+    // `OperationReceipt` under `(account, operation_id)`. Re-submitting the
+    // same request with the same id returns that receipt without moving
+    // tokens, accruing interest or writing any state. Re-using an id for a
+    // different request fails with `OperationConflict`. A call that fails does
+    // not consume its id.
+    // See `docs/contracts/isolated-lending.md#operation-identity-and-safe-retries`.
+
+    /// Idempotent `supply`. See the section comment above.
+    pub fn supply_with_id(
+        env: Env,
+        user: Address,
+        amount: i128,
+        expected_context: LedgerContext,
+        operation_id: BytesN<32>,
+    ) -> Result<OperationReceipt, IsolatedLendingError> {
+        user.require_auth();
+        Self::require_init(&env)?;
+        Self::require_context(&env, &expected_context)?;
+        Self::run_once(
+            &env,
+            &user,
+            &operation_id,
+            symbol_short!("supply"),
+            &user,
+            amount,
+            || Self::supply_impl(env.clone(), user.clone(), amount, expected_context.clone()),
+        )
+    }
+
+    /// Idempotent `withdraw`.
+    pub fn withdraw_with_id(
+        env: Env,
+        user: Address,
+        amount: i128,
+        expected_context: LedgerContext,
+        operation_id: BytesN<32>,
+    ) -> Result<OperationReceipt, IsolatedLendingError> {
+        user.require_auth();
+        Self::require_init(&env)?;
+        Self::require_context(&env, &expected_context)?;
+        Self::run_once(
+            &env,
+            &user,
+            &operation_id,
+            symbol_short!("withdraw"),
+            &user,
+            amount,
+            || Self::withdraw_impl(env.clone(), user.clone(), amount, expected_context.clone()),
+        )
+    }
+
+    /// Idempotent `post_collateral`.
+    pub fn post_collateral_with_id(
+        env: Env,
+        user: Address,
+        amount: i128,
+        expected_context: LedgerContext,
+        operation_id: BytesN<32>,
+    ) -> Result<OperationReceipt, IsolatedLendingError> {
+        user.require_auth();
+        Self::require_init(&env)?;
+        Self::require_context(&env, &expected_context)?;
+        Self::run_once(
+            &env,
+            &user,
+            &operation_id,
+            symbol_short!("post_col"),
+            &user,
+            amount,
+            || {
+                Self::post_collateral_impl(
+                    env.clone(),
+                    user.clone(),
+                    amount,
+                    expected_context.clone(),
+                )
+            },
+        )
+    }
+
+    /// Idempotent `borrow`.
     ///
-    /// `expected_config_fingerprint` must equal `get_config_fingerprint`; a
-    /// mismatch fails with `StaleConfig` before interest accrues or funds move.
-    /// `expected_context` must equal `get_ledger_context`; a mismatch fails
-    /// with `WrongNetwork`, `WrongContract`, or `WrongVersion` before accrual.
-    pub fn withdraw_collateral(
+    /// The configuration fingerprint is a precondition, not part of the
+    /// operation's identity: a replay of an already-applied operation returns
+    /// its receipt even if the configuration changed after it was applied.
+    pub fn borrow_with_id(
+        env: Env,
+        user: Address,
+        amount: i128,
+        expected_context: LedgerContext,
+        expected_config_fingerprint: BytesN<32>,
+        operation_id: BytesN<32>,
+    ) -> Result<OperationReceipt, IsolatedLendingError> {
+        user.require_auth();
+        Self::require_init(&env)?;
+        Self::require_context(&env, &expected_context)?;
+        Self::run_once(
+            &env,
+            &user,
+            &operation_id,
+            symbol_short!("borrow"),
+            &user,
+            amount,
+            || {
+                Self::borrow_impl(
+                    env.clone(),
+                    user.clone(),
+                    amount,
+                    expected_context.clone(),
+                    expected_config_fingerprint.clone(),
+                )
+            },
+        )
+    }
+
+    /// Idempotent `withdraw_collateral`.
+    ///
+    /// The configuration fingerprint is a precondition, not part of the
+    /// operation's identity: a replay of an already-applied operation returns
+    /// its receipt even if the configuration changed after it was applied.
+    pub fn withdraw_collateral_with_id(
+        env: Env,
+        user: Address,
+        amount: i128,
+        expected_context: LedgerContext,
+        expected_config_fingerprint: BytesN<32>,
+        operation_id: BytesN<32>,
+    ) -> Result<OperationReceipt, IsolatedLendingError> {
+        user.require_auth();
+        Self::require_init(&env)?;
+        Self::require_context(&env, &expected_context)?;
+        Self::run_once(
+            &env,
+            &user,
+            &operation_id,
+            symbol_short!("wd_col"),
+            &user,
+            amount,
+            || {
+                Self::withdraw_collateral_impl(
+                    env.clone(),
+                    user.clone(),
+                    amount,
+                    expected_context.clone(),
+                    expected_config_fingerprint.clone(),
+                )
+            },
+        )
+    }
+
+    /// Idempotent `queue_withdrawal`.
+    pub fn queue_withdrawal_with_id(
+        env: Env,
+        user: Address,
+        amount: i128,
+        expected_context: LedgerContext,
+        operation_id: BytesN<32>,
+    ) -> Result<OperationReceipt, IsolatedLendingError> {
+        user.require_auth();
+        Self::require_init(&env)?;
+        Self::require_context(&env, &expected_context)?;
+        Self::run_once(
+            &env,
+            &user,
+            &operation_id,
+            symbol_short!("queue_wd"),
+            &user,
+            amount,
+            || {
+                Self::queue_withdrawal_impl(
+                    env.clone(),
+                    user.clone(),
+                    amount,
+                    expected_context.clone(),
+                )
+            },
+        )
+    }
+
+    /// Idempotent `repay`.
+    pub fn repay_with_id(
+        env: Env,
+        user: Address,
+        amount: i128,
+        expected_context: LedgerContext,
+        operation_id: BytesN<32>,
+    ) -> Result<OperationReceipt, IsolatedLendingError> {
+        user.require_auth();
+        Self::require_init(&env)?;
+        Self::require_context(&env, &expected_context)?;
+        Self::run_once(
+            &env,
+            &user,
+            &operation_id,
+            symbol_short!("repay"),
+            &user,
+            amount,
+            || Self::repay_debt(&env, &user, &user, amount),
+        )
+    }
+
+    /// Idempotent `repay_for`. The identity is scoped to the `payer`, who
+    /// authorizes and funds the repayment; the receipt records the borrower.
+    pub fn repay_for_with_id(
+        env: Env,
+        payer: Address,
+        borrower: Address,
+        amount: i128,
+        expected_context: LedgerContext,
+        operation_id: BytesN<32>,
+    ) -> Result<OperationReceipt, IsolatedLendingError> {
+        payer.require_auth();
+        Self::require_init(&env)?;
+        Self::require_context(&env, &expected_context)?;
+        Self::run_once(
+            &env,
+            &payer,
+            &operation_id,
+            symbol_short!("repay_for"),
+            &borrower,
+            amount,
+            || Self::repay_debt(&env, &payer, &borrower, amount),
+        )
+    }
+
+    /// Receipt of the operation `account` applied under `operation_id`, or
+    /// `None` if that id has not been consumed. Read-only: clients can call it
+    /// to decide whether a timed-out submission landed before retrying.
+    pub fn get_operation(
+        env: Env,
+        account: Address,
+        operation_id: BytesN<32>,
+    ) -> Option<OperationReceipt> {
+        env.storage()
+            .persistent()
+            .get(&PairDataKey::Operation(account, operation_id))
+    }
+
+    /// Body of `withdraw_collateral`; the caller has already required `user` auth.
+    fn withdraw_collateral_impl(
         env: Env,
         user: Address,
         amount: i128,
         expected_context: LedgerContext,
         expected_config_fingerprint: BytesN<32>,
     ) -> Result<(), IsolatedLendingError> {
-        user.require_auth();
         if amount <= 0 {
             return Err(IsolatedLendingError::InvalidAmount);
         }
@@ -685,15 +1038,13 @@ impl IsolatedLendingPair {
         Ok(())
     }
 
-    /// Queue a withdrawal. Queued amounts are excluded from borrowable liquidity
-    /// until the supplier calls `withdraw`.
-    pub fn queue_withdrawal(
+    /// Body of `queue_withdrawal`; the caller has already required `user` auth.
+    fn queue_withdrawal_impl(
         env: Env,
         user: Address,
         amount: i128,
         expected_context: LedgerContext,
     ) -> Result<(), IsolatedLendingError> {
-        user.require_auth();
         if amount <= 0 {
             return Err(IsolatedLendingError::InvalidAmount);
         }
@@ -1223,16 +1574,14 @@ impl IsolatedLendingPair {
     /// `version = 0` and no network check is enforced. Run `migrate` to
     /// stamp the live network and upgrade to `version = 1`.
     pub fn get_ledger_context(env: Env) -> LedgerContext {
-        let network_id: Option<BytesN<32>> =
-            env.storage().instance().get(&PairDataKey::NetworkId);
+        let network_id: Option<BytesN<32>> = env.storage().instance().get(&PairDataKey::NetworkId);
         let version: u32 = env
             .storage()
             .instance()
             .get(&PairDataKey::StorageVersion)
             .unwrap_or(0);
         LedgerContext {
-            network_id: network_id
-                .unwrap_or_else(|| Self::live_network_id(&env)),
+            network_id: network_id.unwrap_or_else(|| Self::live_network_id(&env)),
             contract: env.current_contract_address(),
             version,
         }
@@ -1248,8 +1597,7 @@ impl IsolatedLendingPair {
     pub fn migrate(env: Env, admin: Address) -> Result<(), IsolatedLendingError> {
         Self::require_admin(&env, &admin)?;
         let live = Self::live_network_id(&env);
-        let stored: Option<BytesN<32>> =
-            env.storage().instance().get(&PairDataKey::NetworkId);
+        let stored: Option<BytesN<32>> = env.storage().instance().get(&PairDataKey::NetworkId);
         if let Some(ref s) = stored {
             if *s != live {
                 return Err(IsolatedLendingError::WrongNetwork);
@@ -1652,6 +2000,87 @@ impl IsolatedLendingPair {
         Ok(())
     }
 
+    /// Apply `apply` at most once per `(account, operation_id)`.
+    ///
+    /// Order matters for atomicity:
+    /// 1. validate the amount and the id, and require initialization (the
+    ///    caller has already validated its ledger context);
+    /// 2. if a receipt exists, return it when it describes the same request
+    ///    (no transfer, accrual or write), otherwise fail with
+    ///    `OperationConflict`;
+    /// 3. run the operation, which validates everything before moving tokens
+    ///    or writing state and returns `Err` without side effects;
+    /// 4. only after it succeeded, persist the receipt and emit `("op",)`.
+    ///
+    /// The receipt is therefore never written for an operation whose effect
+    /// was not applied, and a failed call leaves the id unconsumed. Soroban
+    /// also reverts every storage write and transfer of an invocation that
+    /// returns an error, so step 4 can never survive a failure of step 3.
+    #[allow(clippy::too_many_arguments)]
+    fn run_once<F>(
+        env: &Env,
+        account: &Address,
+        operation_id: &BytesN<32>,
+        kind: Symbol,
+        beneficiary: &Address,
+        amount: i128,
+        apply: F,
+    ) -> Result<OperationReceipt, IsolatedLendingError>
+    where
+        F: FnOnce() -> Result<(), IsolatedLendingError>,
+    {
+        if amount <= 0 {
+            return Err(IsolatedLendingError::InvalidAmount);
+        }
+        Self::require_init(env)?;
+        if operation_id.to_array() == [0u8; 32] {
+            return Err(IsolatedLendingError::InvalidOperationId);
+        }
+
+        let key = PairDataKey::Operation(account.clone(), operation_id.clone());
+        if let Some(receipt) = env.storage().persistent().get::<_, OperationReceipt>(&key) {
+            if receipt.kind == kind
+                && receipt.beneficiary == *beneficiary
+                && receipt.amount == amount
+            {
+                env.events().publish(
+                    (symbol_short!("op_replay"),),
+                    (account.clone(), kind, operation_id.clone()),
+                );
+                return Ok(receipt);
+            }
+            return Err(IsolatedLendingError::OperationConflict);
+        }
+
+        apply()?;
+
+        let receipt = OperationReceipt {
+            operation_id: operation_id.clone(),
+            kind: kind.clone(),
+            account: account.clone(),
+            beneficiary: beneficiary.clone(),
+            amount,
+            ledger: env.ledger().sequence(),
+        };
+        env.storage().persistent().set(&key, &receipt);
+        env.storage().persistent().extend_ttl(
+            &key,
+            OPERATION_TTL_THRESHOLD,
+            OPERATION_TTL_EXTEND_TO,
+        );
+        env.events().publish(
+            (symbol_short!("op"),),
+            (
+                account.clone(),
+                kind,
+                operation_id.clone(),
+                beneficiary.clone(),
+                amount,
+            ),
+        );
+        Ok(receipt)
+    }
+
     fn require_init(env: &Env) -> Result<(), IsolatedLendingError> {
         if !env.storage().instance().has(&PairDataKey::Initialized) {
             return Err(IsolatedLendingError::NotInitialized);
@@ -1661,9 +2090,8 @@ impl IsolatedLendingPair {
 
     /// SHA-256 of the live network passphrase.
     fn live_network_id(env: &Env) -> BytesN<32> {
-        env.crypto()
-            .sha256(&env.ledger().network_passphrase())
-            .to_bytes()
+        // The host's network id is already SHA-256(network passphrase).
+        env.ledger().network_id()
     }
 
     /// Validate a caller's `expected_context` against the live network, the
@@ -1671,10 +2099,7 @@ impl IsolatedLendingPair {
     ///
     /// A legacy pair with no stored `NetworkId` (version 0) passes silently:
     /// it was initialized before context binding and keeps working unchanged.
-    fn require_context(
-        env: &Env,
-        expected: &LedgerContext,
-    ) -> Result<(), IsolatedLendingError> {
+    fn require_context(env: &Env, expected: &LedgerContext) -> Result<(), IsolatedLendingError> {
         let live = Self::live_network_id(env);
 
         // The caller's snapshot must name the live network.
@@ -1686,8 +2111,7 @@ impl IsolatedLendingPair {
             return Err(IsolatedLendingError::WrongContract);
         }
 
-        let stored_net: Option<BytesN<32>> =
-            env.storage().instance().get(&PairDataKey::NetworkId);
+        let stored_net: Option<BytesN<32>> = env.storage().instance().get(&PairDataKey::NetworkId);
         let stored_ver: u32 = env
             .storage()
             .instance()
@@ -1715,7 +2139,7 @@ impl IsolatedLendingPair {
 #[cfg(test)]
 mod test {
     use super::*;
-    use soroban_sdk::testutils::{Address as _, Ledger as _};
+    use soroban_sdk::testutils::{storage::Persistent as _, Address as _, Ledger as _};
     use soroban_sdk::token::{Client as TokenClient, StellarAssetClient};
 
     struct Setup {
@@ -1772,7 +2196,12 @@ mod test {
         mint(&env, &collateral_token, &borrower, 100);
         pair.supply(&lender, &1_000, &pair.get_ledger_context());
         pair.post_collateral(&borrower, &100, &pair.get_ledger_context());
-        pair.borrow(&borrower, &80, &pair.get_ledger_context(), &pair.get_config_fingerprint());
+        pair.borrow(
+            &borrower,
+            &80,
+            &pair.get_ledger_context(),
+            &pair.get_config_fingerprint(),
+        );
 
         Setup {
             env,
@@ -1912,7 +2341,9 @@ mod test {
         let liquidator = Address::generate(&s.env);
         mint(&s.env, &s.debt_token, &liquidator, 80);
 
-        let seized = s.pair.liquidate(&liquidator, &s.borrower, &1, &80, &s.ctx(), &s.fp());
+        let seized = s
+            .pair
+            .liquidate(&liquidator, &s.borrower, &1, &80, &s.ctx(), &s.fp());
 
         assert_eq!(seized, 80);
         assert_eq!(s.pair.get_position(&s.borrower), (20, 0));
@@ -1929,7 +2360,8 @@ mod test {
         let liquidator = Address::generate(&s.env);
         mint(&s.env, &s.debt_token, &liquidator, 80);
 
-        s.pair.liquidate(&liquidator, &s.borrower, &7, &40, &s.ctx(), &s.fp());
+        s.pair
+            .liquidate(&liquidator, &s.borrower, &7, &40, &s.ctx(), &s.fp());
         let after_first = s.pair.get_position(&s.borrower);
         let res = s
             .pair
@@ -1955,7 +2387,8 @@ mod test {
 
         mint(&s.env, &s.debt_token, &liquidator, 40);
         assert_eq!(
-            s.pair.liquidate(&liquidator, &s.borrower, &3, &40, &s.ctx(), &s.fp()),
+            s.pair
+                .liquidate(&liquidator, &s.borrower, &3, &40, &s.ctx(), &s.fp()),
             40
         );
         assert_eq!(s.pair.get_position(&s.borrower), (60, 40));
@@ -1969,7 +2402,9 @@ mod test {
         let liquidator = Address::generate(&s.env);
         mint(&s.env, &s.debt_token, &liquidator, 80);
 
-        let seized = s.pair.liquidate(&liquidator, &s.borrower, &1, &80, &s.ctx(), &s.fp());
+        let seized = s
+            .pair
+            .liquidate(&liquidator, &s.borrower, &1, &80, &s.ctx(), &s.fp());
 
         assert_eq!(seized, 100);
         assert_eq!(s.pair.get_position(&s.borrower), (0, 0));
@@ -2003,7 +2438,8 @@ mod test {
         let liquidator = unhealthy_with_close_factor(&s);
 
         assert_eq!(
-            s.pair.liquidate(&liquidator, &s.borrower, &1, &20, &s.ctx(), &s.fp()),
+            s.pair
+                .liquidate(&liquidator, &s.borrower, &1, &20, &s.ctx(), &s.fp()),
             20
         );
         assert_eq!(s.pair.get_position(&s.borrower), (80, 60));
@@ -2015,7 +2451,8 @@ mod test {
         let liquidator = unhealthy_with_close_factor(&s);
 
         assert_eq!(
-            s.pair.liquidate(&liquidator, &s.borrower, &1, &40, &s.ctx(), &s.fp()),
+            s.pair
+                .liquidate(&liquidator, &s.borrower, &1, &40, &s.ctx(), &s.fp()),
             40
         );
         assert_eq!(s.pair.get_position(&s.borrower), (60, 40));
@@ -2028,7 +2465,8 @@ mod test {
 
         // Asked for 80 of 80, but only half the debt may be repaid at once.
         assert_eq!(
-            s.pair.liquidate(&liquidator, &s.borrower, &1, &80, &s.ctx(), &s.fp()),
+            s.pair
+                .liquidate(&liquidator, &s.borrower, &1, &80, &s.ctx(), &s.fp()),
             40
         );
         assert_eq!(s.pair.get_position(&s.borrower), (60, 40));
@@ -2261,7 +2699,8 @@ mod test {
                 &OracleQuoteData {
                     price_bps: 10_000,
                     confidence_bps: 9_000,
-                    ledger: old_ledger + 1,
+                    // One ledger ahead of the ledger the borrow runs in.
+                    ledger: old_ledger + 3,
                 },
             );
         });
@@ -2272,8 +2711,14 @@ mod test {
             Err(Ok(IsolatedLendingError::InvalidOracleQuote))
         );
         assert_eq!(s.pair.get_totals(), totals);
-        assert_eq!(balance(&s.env, &s.debt_token, &s.borrower), borrower_balance);
-        assert_eq!(balance(&s.env, &s.debt_token, &s.pair.address), pair_balance);
+        assert_eq!(
+            balance(&s.env, &s.debt_token, &s.borrower),
+            borrower_balance
+        );
+        assert_eq!(
+            balance(&s.env, &s.debt_token, &s.pair.address),
+            pair_balance
+        );
 
         s.pair.push_oracle_quote(&oracle, &10_000, &9_000);
         s.pair.borrow(&s.borrower, &10, &s.ctx(), &s.fp());
@@ -2335,9 +2780,14 @@ mod test {
         pair.initialize(admin, collateral_token, debt_token, &8_000);
         mint(env, debt_token, lender, 1_000);
         mint(env, collateral_token, borrower, 100);
-        pair.supply(lender, &1_000);
-        pair.post_collateral(borrower, &100);
-        pair.borrow(borrower, &80, &pair.get_ledger_context(), &pair.get_config_fingerprint());
+        pair.supply(lender, &1_000, &pair.get_ledger_context());
+        pair.post_collateral(borrower, &100, &pair.get_ledger_context());
+        pair.borrow(
+            borrower,
+            &80,
+            &pair.get_ledger_context(),
+            &pair.get_config_fingerprint(),
+        );
         pair
     }
 
@@ -2760,7 +3210,8 @@ mod test {
         let health = s.pair.get_health_factor(&s.borrower);
         assert_eq!((health.debt_value, health.collateral_value), (80, 90));
         assert_eq!(
-            s.pair.liquidate(&liquidator, &s.borrower, &1, &80, &s.ctx(), &s.fp()),
+            s.pair
+                .liquidate(&liquidator, &s.borrower, &1, &80, &s.ctx(), &s.fp()),
             88
         );
     }
@@ -2968,13 +3419,15 @@ mod test {
         s.pair.set_reserve_bps(&s.admin, &100);
 
         assert_eq!(
-            s.pair.try_withdraw_collateral(&s.borrower, &10, &s.ctx(), &stale),
+            s.pair
+                .try_withdraw_collateral(&s.borrower, &10, &s.ctx(), &stale),
             Err(Ok(IsolatedLendingError::StaleConfig))
         );
         assert_eq!(s.pair.get_position(&s.borrower), (110, 80));
         assert_eq!(balance(&s.env, &s.collateral_token, &s.borrower), 0);
 
-        s.pair.withdraw_collateral(&s.borrower, &10, &s.ctx(), &s.fp());
+        s.pair
+            .withdraw_collateral(&s.borrower, &10, &s.ctx(), &s.fp());
         assert_eq!(s.pair.get_position(&s.borrower), (100, 80));
         assert_eq!(balance(&s.env, &s.collateral_token, &s.borrower), 10);
     }
@@ -3003,7 +3456,8 @@ mod test {
         // Refresh and retry with the same liquidation id: the rejected attempt
         // consumed neither funds nor the id.
         assert_eq!(
-            s.pair.liquidate(&liquidator, &s.borrower, &5, &40, &s.ctx(), &s.fp()),
+            s.pair
+                .liquidate(&liquidator, &s.borrower, &5, &40, &s.ctx(), &s.fp()),
             44
         );
         assert_eq!(s.pair.get_position(&s.borrower), (56, 40));
@@ -3093,7 +3547,7 @@ mod test {
         let user_balance = balance(&s.env, &s.debt_token, &user);
         let pair_balance = balance(&s.env, &s.debt_token, &s.pair.address);
         assert_eq!(
-            s.pair.try_supply(&user, &1),
+            s.pair.try_supply(&user, &1, &s.ctx()),
             Err(Ok(IsolatedLendingError::MathOverflow))
         );
 
@@ -3192,7 +3646,7 @@ mod test {
         let totals = s.pair.get_totals();
 
         assert_eq!(
-            s.pair.try_supply(&s.lender, &0),
+            s.pair.try_supply(&s.lender, &0, &s.ctx()),
             Err(Ok(IsolatedLendingError::InvalidAmount))
         );
         assert_eq!(
@@ -3204,7 +3658,8 @@ mod test {
             Err(Ok(IsolatedLendingError::InvalidAmount))
         );
         assert_eq!(
-            s.pair.try_withdraw_collateral(&s.borrower, &0, &s.ctx(), &s.fp()),
+            s.pair
+                .try_withdraw_collateral(&s.borrower, &0, &s.ctx(), &s.fp()),
             Err(Ok(IsolatedLendingError::InvalidAmount))
         );
         assert_eq!(
@@ -3365,8 +3820,14 @@ mod test {
         mint(&s.env, &s.debt_token, &liquidator, 10);
 
         assert_eq!(
-            s.pair
-                .try_liquidate(&liquidator, &s.borrower, &9, &(i128::MAX / 4), &s.ctx(), &s.fp()),
+            s.pair.try_liquidate(
+                &liquidator,
+                &s.borrower,
+                &9,
+                &(i128::MAX / 4),
+                &s.ctx(),
+                &s.fp()
+            ),
             Err(Ok(IsolatedLendingError::MathOverflow))
         );
 
@@ -3565,8 +4026,12 @@ mod test {
         let env = Env::default();
         env.mock_all_auths();
         let admin = Address::generate(&env);
-        let col = env.register_stellar_asset_contract_v2(Address::generate(&env)).address();
-        let debt = env.register_stellar_asset_contract_v2(Address::generate(&env)).address();
+        let col = env
+            .register_stellar_asset_contract_v2(Address::generate(&env))
+            .address();
+        let debt = env
+            .register_stellar_asset_contract_v2(Address::generate(&env))
+            .address();
         let pair_id = env.register(IsolatedLendingPair, ());
         let pair = IsolatedLendingPairClient::new(&env, &pair_id);
         pair.initialize(&admin, &col, &debt, &8_000);
@@ -3589,7 +4054,10 @@ mod test {
             raw[0] = 0xde;
             raw[1] = 0xad;
             let fake: BytesN<32> = BytesN::from_array(&s.env, &raw);
-            s.env.storage().instance().set(&PairDataKey::NetworkId, &fake);
+            s.env
+                .storage()
+                .instance()
+                .set(&PairDataKey::NetworkId, &fake);
         });
 
         let result = s.pair.try_migrate(&s.admin);
@@ -3601,5 +4069,455 @@ mod test {
         assert_eq!(IsolatedLendingError::WrongNetwork as u32, 16);
         assert_eq!(IsolatedLendingError::WrongContract as u32, 17);
         assert_eq!(IsolatedLendingError::WrongVersion as u32, 18);
+    }
+
+    // ── Operation identity and duplicate submissions (#1754) ─────────
+
+    fn op_id(env: &Env, seed: u8) -> BytesN<32> {
+        let mut bytes = [0u8; 32];
+        bytes[0] = seed;
+        bytes[31] = 0xA5;
+        BytesN::from_array(env, &bytes)
+    }
+
+    /// Every balance and piece of market state a lending operation can touch.
+    #[derive(Debug, PartialEq, Eq)]
+    struct MarketState {
+        totals: (i128, i128),
+        liquidity: i128,
+        pair_debt_cash: i128,
+        pair_collateral_cash: i128,
+        lender_position: (i128, i128),
+        borrower_position: (i128, i128),
+        lender_cash: i128,
+        borrower_debt_cash: i128,
+        borrower_collateral_cash: i128,
+        pending: i128,
+        lender_supply: i128,
+    }
+
+    fn market_state(s: &Setup) -> MarketState {
+        let pair = s.pair.address.clone();
+        let (pending, lender_supply) = s.env.as_contract(&pair, || {
+            let pending: i128 = s
+                .env
+                .storage()
+                .instance()
+                .get(&PairDataKey::PendingWithdrawals)
+                .unwrap_or(0);
+            let supply: i128 = s
+                .env
+                .storage()
+                .persistent()
+                .get(&PairDataKey::Supply(s.lender.clone()))
+                .unwrap_or(0);
+            (pending, supply)
+        });
+        MarketState {
+            totals: s.pair.get_totals(),
+            liquidity: s.pair.get_available_liquidity(),
+            pair_debt_cash: balance(&s.env, &s.debt_token, &pair),
+            pair_collateral_cash: balance(&s.env, &s.collateral_token, &pair),
+            lender_position: s.pair.get_position(&s.lender),
+            borrower_position: s.pair.get_position(&s.borrower),
+            lender_cash: balance(&s.env, &s.debt_token, &s.lender),
+            borrower_debt_cash: balance(&s.env, &s.debt_token, &s.borrower),
+            borrower_collateral_cash: balance(&s.env, &s.collateral_token, &s.borrower),
+            pending,
+            lender_supply,
+        }
+    }
+
+    #[test]
+    fn supply_with_id_applies_once_and_records_a_receipt() {
+        let s = setup();
+        mint(&s.env, &s.debt_token, &s.lender, 500);
+        let id = op_id(&s.env, 1);
+        assert_eq!(s.pair.get_operation(&s.lender, &id), None);
+
+        let receipt = s.pair.supply_with_id(&s.lender, &500, &s.ctx(), &id);
+
+        assert_eq!(receipt.operation_id, id);
+        assert_eq!(receipt.kind, symbol_short!("supply"));
+        assert_eq!(receipt.account, s.lender);
+        assert_eq!(receipt.beneficiary, s.lender);
+        assert_eq!(receipt.amount, 500);
+        assert_eq!(receipt.ledger, s.env.ledger().sequence());
+        assert_eq!(s.pair.get_operation(&s.lender, &id), Some(receipt));
+        assert_eq!(s.pair.get_totals(), (1_500, 80));
+        assert_eq!(balance(&s.env, &s.debt_token, &s.lender), 0);
+        assert_eq!(balance(&s.env, &s.debt_token, &s.pair.address), 1_500 - 80);
+    }
+
+    #[test]
+    fn duplicate_supply_returns_the_receipt_without_moving_funds() {
+        let s = setup();
+        mint(&s.env, &s.debt_token, &s.lender, 1_000);
+        let id = op_id(&s.env, 2);
+        let first = s.pair.supply_with_id(&s.lender, &400, &s.ctx(), &id);
+        let after_first = market_state(&s);
+
+        // Same request, same id, several times and in a later ledger.
+        s.env.ledger().with_mut(|l| l.sequence_number += 10);
+        for _ in 0..3 {
+            assert_eq!(s.pair.supply_with_id(&s.lender, &400, &s.ctx(), &id), first);
+        }
+
+        assert_eq!(market_state(&s), after_first);
+        assert_eq!(after_first.lender_supply, 1_400);
+        assert_eq!(after_first.lender_cash, 600);
+    }
+
+    #[test]
+    fn distinct_ids_are_independent_operations() {
+        let s = setup();
+        mint(&s.env, &s.debt_token, &s.lender, 300);
+
+        s.pair
+            .supply_with_id(&s.lender, &100, &s.ctx(), &op_id(&s.env, 3));
+        s.pair
+            .supply_with_id(&s.lender, &100, &s.ctx(), &op_id(&s.env, 4));
+        // Same amount, same account, new id: a legitimate second deposit.
+        s.pair
+            .supply_with_id(&s.lender, &100, &s.ctx(), &op_id(&s.env, 5));
+
+        assert_eq!(s.pair.get_totals(), (1_300, 80));
+        assert_eq!(balance(&s.env, &s.debt_token, &s.lender), 0);
+    }
+
+    #[test]
+    fn ids_are_scoped_to_the_authorizing_account() {
+        let s = setup();
+        let other = Address::generate(&s.env);
+        mint(&s.env, &s.debt_token, &s.lender, 100);
+        mint(&s.env, &s.debt_token, &other, 100);
+        let id = op_id(&s.env, 6);
+
+        s.pair.supply_with_id(&s.lender, &100, &s.ctx(), &id);
+        // Another account cannot consume, replay or collide with the lender's id.
+        let receipt = s.pair.supply_with_id(&other, &100, &s.ctx(), &id);
+
+        assert_eq!(receipt.account, other);
+        assert_eq!(s.pair.get_totals(), (1_200, 80));
+        assert_eq!(s.pair.get_position(&other), (0, 0));
+        assert_eq!(balance(&s.env, &s.debt_token, &other), 0);
+    }
+
+    #[test]
+    fn reusing_an_id_for_a_different_request_is_a_conflict() {
+        let s = setup();
+        mint(&s.env, &s.debt_token, &s.lender, 500);
+        let id = op_id(&s.env, 7);
+        s.pair.supply_with_id(&s.lender, &200, &s.ctx(), &id);
+        let before = market_state(&s);
+
+        // Different amount.
+        assert_eq!(
+            s.pair.try_supply_with_id(&s.lender, &201, &s.ctx(), &id),
+            Err(Ok(IsolatedLendingError::OperationConflict))
+        );
+        // Different kind.
+        assert_eq!(
+            s.pair.try_withdraw_with_id(&s.lender, &200, &s.ctx(), &id),
+            Err(Ok(IsolatedLendingError::OperationConflict))
+        );
+        assert_eq!(
+            s.pair
+                .try_queue_withdrawal_with_id(&s.lender, &200, &s.ctx(), &id),
+            Err(Ok(IsolatedLendingError::OperationConflict))
+        );
+
+        assert_eq!(market_state(&s), before);
+        assert_eq!(s.pair.get_operation(&s.lender, &id).unwrap().amount, 200);
+    }
+
+    #[test]
+    fn invalid_operation_input_is_rejected_without_state_change() {
+        let s = setup();
+        mint(&s.env, &s.debt_token, &s.lender, 500);
+        let before = market_state(&s);
+        let zero = BytesN::from_array(&s.env, &[0u8; 32]);
+
+        assert_eq!(
+            s.pair.try_supply_with_id(&s.lender, &100, &s.ctx(), &zero),
+            Err(Ok(IsolatedLendingError::InvalidOperationId))
+        );
+        assert_eq!(
+            s.pair
+                .try_supply_with_id(&s.lender, &0, &s.ctx(), &op_id(&s.env, 8)),
+            Err(Ok(IsolatedLendingError::InvalidAmount))
+        );
+        assert_eq!(
+            s.pair
+                .try_supply_with_id(&s.lender, &-5, &s.ctx(), &op_id(&s.env, 8)),
+            Err(Ok(IsolatedLendingError::InvalidAmount))
+        );
+
+        assert_eq!(market_state(&s), before);
+        assert_eq!(s.pair.get_operation(&s.lender, &zero), None);
+        assert_eq!(s.pair.get_operation(&s.lender, &op_id(&s.env, 8)), None);
+    }
+
+    #[test]
+    fn uninitialized_pair_rejects_idempotent_calls() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let pair = IsolatedLendingPairClient::new(&env, &env.register(IsolatedLendingPair, ()));
+        let user = Address::generate(&env);
+        assert_eq!(
+            pair.try_supply_with_id(&user, &1, &pair.get_ledger_context(), &op_id(&env, 1)),
+            Err(Ok(IsolatedLendingError::NotInitialized))
+        );
+    }
+
+    #[test]
+    fn failed_execution_leaves_state_and_the_id_untouched() {
+        let s = setup();
+        let id = op_id(&s.env, 9);
+        let before = market_state(&s);
+
+        // Borrow limit is 80 and the borrower already owes 80.
+        assert_eq!(
+            s.pair
+                .try_borrow_with_id(&s.borrower, &1, &s.ctx(), &s.fp(), &id),
+            Err(Ok(IsolatedLendingError::InsufficientCollateral))
+        );
+        // Withdrawing more than redeemable cash fails late, after validation
+        // of the amount and supply.
+        assert_eq!(
+            s.pair
+                .try_withdraw_with_id(&s.lender, &1_000, &s.ctx(), &op_id(&s.env, 10)),
+            Err(Ok(IsolatedLendingError::InsufficientLiquidity))
+        );
+
+        assert_eq!(market_state(&s), before);
+        assert_eq!(s.pair.get_operation(&s.borrower, &id), None);
+        assert_eq!(s.pair.get_operation(&s.lender, &op_id(&s.env, 10)), None);
+
+        // The failed id was not consumed: the corrected request can use it.
+        mint(&s.env, &s.collateral_token, &s.borrower, 10);
+        s.pair.post_collateral(&s.borrower, &10, &s.ctx());
+        let receipt = s
+            .pair
+            .borrow_with_id(&s.borrower, &8, &s.ctx(), &s.fp(), &id);
+        assert_eq!(receipt.amount, 8);
+        assert_eq!(s.pair.get_position(&s.borrower), (110, 88));
+    }
+
+    #[test]
+    fn stale_fingerprint_does_not_consume_the_id() {
+        let s = setup();
+        mint(&s.env, &s.collateral_token, &s.borrower, 50);
+        s.pair.post_collateral(&s.borrower, &50, &s.ctx());
+        let stale = s.fp();
+        s.pair.set_reserve_bps(&s.admin, &100);
+        let id = op_id(&s.env, 11);
+        let before = market_state(&s);
+
+        assert_eq!(
+            s.pair
+                .try_borrow_with_id(&s.borrower, &10, &s.ctx(), &stale, &id),
+            Err(Ok(IsolatedLendingError::StaleConfig))
+        );
+        assert_eq!(market_state(&s), before);
+        assert_eq!(s.pair.get_operation(&s.borrower, &id), None);
+
+        s.pair
+            .borrow_with_id(&s.borrower, &10, &s.ctx(), &s.fp(), &id);
+        assert_eq!(s.pair.get_position(&s.borrower), (150, 90));
+    }
+
+    #[test]
+    fn duplicate_borrow_cannot_double_debit_even_after_config_and_ledger_change() {
+        let s = setup();
+        mint(&s.env, &s.collateral_token, &s.borrower, 100);
+        s.pair.post_collateral(&s.borrower, &100, &s.ctx());
+        let fp = s.fp();
+        let id = op_id(&s.env, 12);
+        let first = s.pair.borrow_with_id(&s.borrower, &40, &s.ctx(), &fp, &id);
+        assert_eq!(s.pair.get_position(&s.borrower), (200, 120));
+        assert_eq!(balance(&s.env, &s.debt_token, &s.borrower), 120);
+
+        // The admin changes configuration and time passes before the wallet
+        // retries with the fingerprint it originally used.
+        s.pair.set_interest_rate(&s.admin, &1_000);
+        s.env.ledger().with_mut(|l| l.sequence_number += 50);
+        let accrual_marker = |s: &Setup| {
+            s.env.as_contract(&s.pair.address, || {
+                s.env
+                    .storage()
+                    .instance()
+                    .get::<_, u32>(&PairDataKey::LastAccrualLedger)
+            })
+        };
+        let marker_before = accrual_marker(&s);
+        let before = market_state(&s);
+
+        assert_eq!(
+            s.pair.borrow_with_id(&s.borrower, &40, &s.ctx(), &fp, &id),
+            first
+        );
+
+        // No funds moved, no debt was added, and the replay did not even
+        // advance interest accrual.
+        assert_eq!(market_state(&s), before);
+        assert_eq!(accrual_marker(&s), marker_before);
+        assert_eq!(balance(&s.env, &s.debt_token, &s.borrower), 120);
+        // A *new* borrow with the old fingerprint is still rejected.
+        assert_eq!(
+            s.pair
+                .try_borrow_with_id(&s.borrower, &1, &s.ctx(), &fp, &op_id(&s.env, 13)),
+            Err(Ok(IsolatedLendingError::StaleConfig))
+        );
+    }
+
+    #[test]
+    fn duplicate_withdraw_is_replayed_even_when_a_fresh_one_would_fail() {
+        let s = setup();
+        let id = op_id(&s.env, 14);
+        let first = s.pair.withdraw_with_id(&s.lender, &900, &s.ctx(), &id);
+        assert_eq!(balance(&s.env, &s.debt_token, &s.lender), 900);
+        let before = market_state(&s);
+
+        // Only 20 units of cash remain, so re-executing would fail; the
+        // replay deterministically returns the original receipt instead.
+        assert_eq!(
+            s.pair.withdraw_with_id(&s.lender, &900, &s.ctx(), &id),
+            first
+        );
+        assert_eq!(market_state(&s), before);
+        assert_eq!(before.lender_supply, 100);
+        assert_eq!(before.pair_debt_cash, 20);
+    }
+
+    #[test]
+    fn duplicate_collateral_operations_apply_once() {
+        let s = setup();
+        mint(&s.env, &s.collateral_token, &s.borrower, 60);
+        let post = op_id(&s.env, 15);
+        s.pair
+            .post_collateral_with_id(&s.borrower, &60, &s.ctx(), &post);
+        s.pair
+            .post_collateral_with_id(&s.borrower, &60, &s.ctx(), &post);
+        assert_eq!(s.pair.get_position(&s.borrower), (160, 80));
+        assert_eq!(balance(&s.env, &s.collateral_token, &s.borrower), 0);
+
+        let wd = op_id(&s.env, 16);
+        let fp = s.fp();
+        s.pair
+            .withdraw_collateral_with_id(&s.borrower, &50, &s.ctx(), &fp, &wd);
+        s.pair
+            .withdraw_collateral_with_id(&s.borrower, &50, &s.ctx(), &fp, &wd);
+        assert_eq!(s.pair.get_position(&s.borrower), (110, 80));
+        assert_eq!(balance(&s.env, &s.collateral_token, &s.borrower), 50);
+        assert_eq!(balance(&s.env, &s.collateral_token, &s.pair.address), 110);
+    }
+
+    #[test]
+    fn duplicate_repayments_apply_once() {
+        let s = setup();
+        let id = op_id(&s.env, 17);
+        let receipt = s.pair.repay_with_id(&s.borrower, &30, &s.ctx(), &id);
+        assert_eq!(receipt.kind, symbol_short!("repay"));
+        s.pair.repay_with_id(&s.borrower, &30, &s.ctx(), &id);
+        assert_eq!(s.pair.get_position(&s.borrower), (100, 50));
+        assert_eq!(s.pair.get_totals(), (1_000, 50));
+        assert_eq!(balance(&s.env, &s.debt_token, &s.borrower), 50);
+
+        let payer = Address::generate(&s.env);
+        mint(&s.env, &s.debt_token, &payer, 100);
+        let pid = op_id(&s.env, 18);
+        let receipt = s
+            .pair
+            .repay_for_with_id(&payer, &s.borrower, &20, &s.ctx(), &pid);
+        assert_eq!(receipt.account, payer);
+        assert_eq!(receipt.beneficiary, s.borrower);
+        s.pair
+            .repay_for_with_id(&payer, &s.borrower, &20, &s.ctx(), &pid);
+        assert_eq!(s.pair.get_position(&s.borrower), (100, 30));
+        assert_eq!(balance(&s.env, &s.debt_token, &payer), 80);
+        assert_eq!(s.pair.get_position(&payer), (0, 0));
+
+        // Same payer id for a different borrower is a conflict, not a repayment.
+        let other = Address::generate(&s.env);
+        assert_eq!(
+            s.pair
+                .try_repay_for_with_id(&payer, &other, &20, &s.ctx(), &pid),
+            Err(Ok(IsolatedLendingError::OperationConflict))
+        );
+        assert_eq!(balance(&s.env, &s.debt_token, &payer), 80);
+    }
+
+    #[test]
+    fn duplicate_queue_withdrawal_does_not_double_reserve_liquidity() {
+        let s = setup();
+        let id = op_id(&s.env, 19);
+        s.pair
+            .queue_withdrawal_with_id(&s.lender, &300, &s.ctx(), &id);
+        let after_first = market_state(&s);
+        s.pair
+            .queue_withdrawal_with_id(&s.lender, &300, &s.ctx(), &id);
+
+        assert_eq!(market_state(&s), after_first);
+        assert_eq!(after_first.pending, 300);
+        assert_eq!(after_first.liquidity, 1_000 - 80 - 300);
+    }
+
+    #[test]
+    fn plain_entry_points_remain_compatible_and_consume_no_ids() {
+        let s = setup();
+        mint(&s.env, &s.debt_token, &s.lender, 200);
+        let id = op_id(&s.env, 20);
+        s.pair.supply(&s.lender, &100, &s.ctx());
+        s.pair.supply(&s.lender, &100, &s.ctx());
+        // Plain calls keep their accumulate-on-every-call semantics.
+        assert_eq!(s.pair.get_totals(), (1_200, 80));
+        assert_eq!(s.pair.get_operation(&s.lender, &id), None);
+        s.pair.repay(&s.borrower, &10, &s.ctx());
+        s.pair.repay(&s.borrower, &10, &s.ctx());
+        assert_eq!(s.pair.get_position(&s.borrower), (100, 60));
+    }
+
+    #[test]
+    fn ledger_context_is_validated_before_any_replay_or_new_operation() {
+        let s = setup();
+        mint(&s.env, &s.debt_token, &s.lender, 200);
+        let id = op_id(&s.env, 22);
+        s.pair.supply_with_id(&s.lender, &100, &s.ctx(), &id);
+        let before = market_state(&s);
+        let mut wrong = s.ctx();
+        wrong.contract = Address::generate(&s.env);
+
+        // A replay through the wrong deployment context is rejected, not served.
+        assert_eq!(
+            s.pair.try_supply_with_id(&s.lender, &100, &wrong, &id),
+            Err(Ok(IsolatedLendingError::WrongContract))
+        );
+        // A new operation with the wrong context neither applies nor consumes its id.
+        let fresh = op_id(&s.env, 23);
+        assert_eq!(
+            s.pair.try_supply_with_id(&s.lender, &100, &wrong, &fresh),
+            Err(Ok(IsolatedLendingError::WrongContract))
+        );
+        assert_eq!(market_state(&s), before);
+        assert_eq!(s.pair.get_operation(&s.lender, &fresh), None);
+
+        s.pair.supply_with_id(&s.lender, &100, &s.ctx(), &fresh);
+        assert_eq!(s.pair.get_totals(), (1_200, 80));
+    }
+
+    #[test]
+    fn receipts_outlive_a_long_retry_window() {
+        let s = setup();
+        mint(&s.env, &s.debt_token, &s.lender, 100);
+        let id = op_id(&s.env, 21);
+        s.pair.supply_with_id(&s.lender, &100, &s.ctx(), &id);
+        let ttl = s.env.as_contract(&s.pair.address, || {
+            s.env
+                .storage()
+                .persistent()
+                .get_ttl(&PairDataKey::Operation(s.lender.clone(), id.clone()))
+        });
+        assert!(ttl >= OPERATION_TTL_EXTEND_TO);
     }
 }

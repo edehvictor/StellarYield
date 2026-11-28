@@ -115,6 +115,8 @@ Source: `contracts/isolated_lending/src/lib.rs`
 | 17   | `WrongContract`          | Context names a different pair deployment address | Use the context from `get_ledger_context()` for this exact pair |
 | 18   | `WrongVersion`           | Context storage version does not match the stored version | Refresh with `get_ledger_context()` after migration |
 | 19   | `InvalidOracleQuote`     | Oracle quote has an invalid price, confidence or future ledger | Publish a valid quote from the configured oracle |
+| 20   | `InvalidOperationId`     | The all-zero operation id was passed to a `*_with_id` entry point | Generate a random 32-byte id per logical operation |
+| 21   | `OperationConflict`      | The operation id was already used by this account for a different request (kind, beneficiary or amount) | Use a new id for a new operation; retry only the identical request with the same id |
 
 `isolated_lending` uses checked arithmetic and documented floor rounding for
 values, limits, interest, fees and liquidation payouts (the close-factor cap is
@@ -126,6 +128,9 @@ points now require both a `LedgerContext` (network/version binding) and, where
 applicable, a configuration fingerprint. See
 `docs/contracts/isolated-lending.md` for the rounding table, numeric limits,
 and context binding.
+A failed `*_with_id` call does not consume its operation id; a duplicate of
+an applied request returns the stored receipt without changing state. See the
+"Operation identity and safe retries" section of the same document.
 
 ---
 
