@@ -1,4 +1,4 @@
-import { calculatePnL, calculateTWR } from '../pnl_engine/pnlCalculator';
+import { calculatePnL, calculateTWR, PortfolioValuationError } from '../pnl_engine/pnlCalculator';
 import type { UserTransaction, SharePriceSnapshot } from '../pnl_engine/pnlCalculator';
 
 function makeDate(iso: string): Date {
@@ -6,6 +6,44 @@ function makeDate(iso: string): Date {
 }
 
 describe('PnL Engine — Historical Valuation Cache', () => {
+  describe('diagnostic context for invalid valuation inputs', () => {
+    it('identifies the failed stage without exposing transaction data', () => {
+      const bad = {
+        action: 'DEPOSIT' as const,
+        amount: 100,
+        shares: 10,
+        sharePriceAtTx: 0,
+        timestamp: makeDate('2024-01-01'),
+      };
+
+      expect(() => calculatePnL([bad], [], 10)).toThrow(PortfolioValuationError);
+      try {
+        calculatePnL([bad], [], 10);
+      } catch (error) {
+        expect(error).toMatchObject({ stage: 'transaction_validation' });
+        expect((error as Error).message).not.toContain('2024-01-01');
+      }
+    });
+
+    it('reports an impossible replay and leaves input arrays unchanged for retry', () => {
+      const transactions: UserTransaction[] = [
+        {
+          action: 'WITHDRAW',
+          amount: 100,
+          shares: -10,
+          sharePriceAtTx: 10,
+          timestamp: makeDate('2024-01-01'),
+        },
+      ];
+      const before = JSON.stringify(transactions);
+
+      expect(() => calculatePnL(transactions, [], 10)).toThrow(
+        expect.objectContaining({ stage: 'transaction_replay' }),
+      );
+      expect(JSON.stringify(transactions)).toBe(before);
+    });
+  });
+
   // #894: Reject stale valuations from PnL by default
   describe('stale price quarantine', () => {
     const transactions: UserTransaction[] = [
