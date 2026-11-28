@@ -90,6 +90,25 @@ and context binding.
 
 ---
 
+## stablecoin_manager — `Error`
+
+Source: `contracts/stablecoin_manager/src/lib.rs`. Oracle clock rules: [`docs/contracts/stablecoin-manager-price-clock.md`](../docs/contracts/stablecoin-manager-price-clock.md).
+
+| Code | Name                     | Meaning                                                          | Remediation                                                   |
+| ---- | ------------------------ | ---------------------------------------------------------------- | ------------------------------------------------------------- |
+| 1    | `NotInitialized`         | Contract not initialized                                         | Call `initialize()` first                                     |
+| 2    | `AlreadyInitialized`     | `initialize()` called twice                                      | No action needed                                              |
+| 3    | `Unauthorized`           | Caller not allowed (e.g. liquidating a healthy CDP)              | Use the correct caller; check the CDP's collateral ratio      |
+| 4    | `ZeroAmount`             | Amount is zero                                                   | Pass a positive amount                                        |
+| 5    | `InsufficientCollateral` | Collateral ratio would fall below the required ratio             | Add collateral or reduce the amount                           |
+| 6    | `PositionUnderMcr`       | Position is below the maintenance ratio                          | Add collateral or repay debt                                  |
+| 7    | `NoCdpFound`             | Account has no CDP                                               | Open a position with `mint_s_usd`                             |
+| 8    | `InvalidRatio`           | Collateral ratio parameters are invalid                          | Check the ratios passed to `initialize()`                     |
+| 9    | `PriceStale`             | Oracle quote is older than 3600 s, or missing                    | Refresh the oracle                                            |
+| 10   | `PriceFromFuture`        | Oracle quote is stamped later than the ledger time allows        | Fix the oracle's clock or timestamping; quote is never used   |
+
+---
+
 ## isolated_lending — `IsolatedLendingError`
 
 Source: `contracts/isolated_lending/src/lib.rs`
