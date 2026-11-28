@@ -72,6 +72,7 @@ Source: `contracts/stableswap/src/lib.rs`
 | 13   | `WrongContract`         | The caller's context names a different pool deployment | Use the context from the pool you are calling |
 | 14   | `WrongVersion`          | Stored state or the caller's context is not at the pool context version this code understands | Refresh with `get_pool_context()`; upgrade the contract if the stored version is newer |
 | 15   | `DuplicateOperation`    | `operation_id` was already consumed by a successful call of the same kind from the same sender | Treat the earlier submission as landed (check `is_operation_consumed`); use a fresh id for a new intent |
+| 16   | `ConfigurationMismatch` | Stored token, amplification, or fee settings differ from the immutable fingerprint, or the caller's fingerprint is stale | Restore the initialized configuration, then refresh with `get_pool_context()` |
 
 Use `preview_swap` / `preview_add_liquidity` / `preview_remove_liquidity` to get a
 privacy-safe `Diagnostic` (failed stage, error code, remediation path) without
@@ -83,7 +84,8 @@ invariant, fee, deposit and withdrawal calculation. Boundary values (zero,
 minimum one-unit reserves, maximum `i128` inputs) either produce a defined
 result or a typed error above; a rejected call never changes reserves, LP supply,
 LP balances or token balances. `add_liquidity`, `remove_liquidity` and `swap`
-validate the caller's `PoolContext` (network, deployment, version) before any
+validate the caller's `PoolContext` (network, deployment, version, configuration
+fingerprint) before any
 reserve math, transfer or storage write. See
 `docs/contracts/stableswap-invariant.md` for the rounding table, numeric limits
 and context binding.
