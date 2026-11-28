@@ -44,6 +44,21 @@ export interface OperationIdentityOptions {
   operationId?: string;
 }
 
+/**
+ * Options that give one logical operation a stable identity across retries.
+ *
+ * Supply an `idempotencyKey` when a retry may rebuild and re-sign the
+ * transaction (for example after a timeout): the same key and arguments
+ * produce the same `operationId`, so submit() reuses the first transaction
+ * hash instead of applying the effect twice. The key never goes on-chain.
+ */
+export interface OperationIdentityOptions {
+  /** Stable caller-supplied key for safe retries of this operation. */
+  idempotencyKey?: string;
+  /** Explicit operation id; prefer `idempotencyKey` for normal retries. */
+  operationId?: string;
+}
+
 export interface PreparedMethod<TArgs, TResult> {
   (args: TArgs): Promise<PreparedTransaction<TResult>>;
   prepare(args: TArgs): Promise<PreparedTransaction<TResult>>;

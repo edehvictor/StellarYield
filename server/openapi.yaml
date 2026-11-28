@@ -50,15 +50,14 @@ tags:
       | Error code | HTTP status | Description |
       |---|---|---|
       | `MISSING_FIELDS` | 400 | Required request fields are missing. |
-      | `INVALID_AMOUNT` | 400 | `amountInStroops` is not a plain non-negative integer string, is zero, or exceeds the maximum (2^127 - 1). |
-      | `INVALID_SLIPPAGE` | 400 | `slippageTolerance` is present but not a finite number. |
+      | `INVALID_AMOUNT` | 400 | `amountInStroops` is not a valid integer string. |
       | `STALE_QUOTE` | 400 / 422 | The provided quote is past its `expiresAt` (TTL configured via `ZAP_QUOTE_TTL_MS`, default 60s) and must be refreshed. Responses carry `recoverable: true`. |
       | `UNSUPPORTED_ASSET` | 400 / 422 | One or more assets in the quote path are no longer in the supported asset set. |
       | `SLIPPAGE_EXCEEDED` | 400 / 422 | The applied slippage exceeds the maximum allowed threshold (15%). |
       | `ROUTE_MISMATCH` | 400 | The route hash in the quote does not match the current computed path. |
-      | `CONFIG_DRIFT` | 400 | The immutable asset-configuration snapshot fingerprint (`assetConfigVersion`) is missing or no longer matches the current snapshot. Rejected without mutating state; refresh/re-quote and retry. Responses carry `recoverable: true`. |
-      | `ASSUMPTION_DRIFT` | 400 | The cryptographic assumption fingerprint no longer matches the quoted review snapshot/assumptions. Rejected without mutating state; refresh/re-quote and retry. Responses carry `recoverable: true`. |
-      | `INVALID_FINGERPRINT` | 400 | The assumption fingerprint is missing or malformed, so the review snapshot cannot be trusted. Rejected without mutating state; refresh/re-quote and retry. Responses carry `recoverable: true`. |
+      | `CONFIG_DRIFT` | 400 | The asset configuration version has changed since the quote was issued. |
+      | `ASSUMPTION_DRIFT` | 400 | The cryptographic fingerprint no longer matches the quote assumptions — assumptions were modified after quoting. Re-quote to proceed. Responses carry `recoverable: true`. |
+      | `INVALID_FINGERPRINT` | 400 | The assumption fingerprint is missing or malformed. |
       | `QUOTE_FAILED` | 500 | Quote generation failed due to an internal error. |
       | `VERIFY_FAILED` | 500 | Quote verification failed due to an internal error. |
       | `CONFIG_UNAVAILABLE` | 503 | The supported assets configuration could not be loaded. |
@@ -553,77 +552,23 @@ paths:
                 items:
                   $ref: '#/components/schemas/YieldData'
         '400':
-          description: An assumption is outside 0-10000 bps (`INVALID_ASSUMPTION`); `details.fields` names each one. No yield data is read.
+          description: >-
+            A fee assumption parameter was present but invalid. Carries a
+            `YieldDiagnostic` with stage `input_validation` (see
+            docs/yield-diagnostics.md).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/YieldErrorResponse'
         '500':
-          description: Failed to fetch yield data (`YIELD_FETCH_FAILED`, `recoverable` true). Safe to retry.
-
-  /api/strategies/config-snapshot:
-    get:
-      summary: Get strategy comparison configuration snapshot
-      description: Returns the active immutable configuration snapshot and its SHA-256 fingerprint (#1918)
-      tags:
-        - Strategies
-      responses:
-        '200':
-          description: Strategy comparison configuration snapshot
-          headers:
-            X-Strategy-Config-Fingerprint:
-              schema:
-                type: string
-              description: SHA-256 configuration fingerprint
+          description: >-
+            Failed to fetch yield data. `diagnostic.stage` names the failed
+            processing stage, or `unknown` when it cannot be determined (see
+            docs/yield-diagnostics.md).
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/StrategyComparisonConfigSnapshotResponse'
-
-  /api/strategies/compare:
-    post:
-      summary: Compare strategies against configuration snapshot
-      description: Compares strategies while enforcing snapshot fingerprint validity (#1918)
-      tags:
-        - Strategies
-      requestBody:
-        required: false
-        content:
-          application/json:
-            schema:
-              type: object
-              properties:
-                expectedConfigFingerprint:
-                  type: string
-                  description: Expected SHA-256 configuration snapshot fingerprint
-                strategyIds:
-                  type: array
-                  items:
-                    type: string
-                  description: Optional list of strategy identifiers to compare
-      responses:
-        '200':
-          description: Comparison completed successfully
-          headers:
-            X-Strategy-Config-Fingerprint:
-              schema:
-                type: string
-              description: Active configuration fingerprint
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  strategies:
-                    type: array
-                    items:
-                      type: object
-                  configFingerprint:
-                    type: string
-                  comparedAt:
-                    type: string
-        '409':
-          description: Stale strategy configuration snapshot detected
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/StrategyComparisonStaleErrorResponse'
+                $ref: '#/components/schemas/YieldErrorResponse'
 
   /api/yields/history:
     get:
@@ -640,302 +585,6 @@ paths:
                 type: array
                 items:
                   $ref: '#/components/schemas/HistoricalApyPoint'
-
-  /api/strategies/comparison/state/{walletAddress}:
-    get:
-      summary: Get strategy comparison workspace state
-      description: Returns the current strategy comparison workspace state and its version for optimistic concurrency control.
-      tags:
-        - Strategies
-      parameters:
-        - name: walletAddress
-          in: path
-          required: true
-          schema:
-            type: string
-          description: Stellar wallet address
-      responses:
-        '200':
-          description: Strategy comparison workspace state retrieved successfully
-          headers:
-            ETag:
-              description: Current workspace version quoted, e.g. "3"
-              schema:
-                type: string
-            X-Comparison-Version:
-              description: Current workspace version as an integer
-              schema:
-                type: integer
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  state:
-                    $ref: '#/components/schemas/StrategyComparisonState'
-                  version:
-                    type: integer
-
-  /api/strategies/comparison/state:
-    put:
-      summary: Update strategy comparison workspace state
-      description: >-
-        Updates comparison workspace state with optimistic concurrency control and idempotency deduplication.
-        Send expectedVersion via If-Match header or JSON body. If another write committed first, returns 409 conflict.
-      tags:
-        - Strategies
-      parameters:
-        - name: If-Match
-          in: header
-          required: false
-          description: Expected workspace version, e.g. "3". "0" means create only.
-          schema:
-            type: string
-        - name: X-Operation-Identity
-          in: header
-          required: false
-          schema:
-            type: string
-        - name: Idempotency-Key
-          in: header
-          required: false
-          schema:
-            type: string
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required:
-                - walletAddress
-              properties:
-                walletAddress:
-                  type: string
-                selectedStrategyId:
-                  type: string
-                  nullable: true
-                pinnedStrategyIds:
-                  type: array
-                  items:
-                    type: string
-                customAssumptions:
-                  $ref: '#/components/schemas/StrategyComparisonAssumptions'
-                allocatedBalances:
-                  type: object
-                  additionalProperties:
-                    type: number
-                expectedVersion:
-                  type: integer
-                  minimum: 0
-                operationIdentity:
-                  type: string
-      responses:
-        '200':
-          description: Strategy comparison workspace updated or replayed
-          headers:
-            ETag:
-              schema:
-                type: string
-            X-Comparison-Version:
-              schema:
-                type: integer
-            X-Idempotent-Replayed:
-              schema:
-                type: string
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  state:
-                    $ref: '#/components/schemas/StrategyComparisonState'
-                  version:
-                    type: integer
-                  isReplay:
-                    type: boolean
-        '400':
-          description: Invalid strategy comparison state (e.g. fee > 10000 bps or negative balance)
-        '409':
-          description: Concurrent write conflict (STRATEGY_COMPARISON_VERSION_CONFLICT)
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/StrategyComparisonVersionConflict'
-        '422':
-          description: >-
-            STRATEGY_COMPARISON_IDEMPOTENCY_MISMATCH. The operation identity was
-            already used for a different request (#1923). Nothing is written.
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  code:
-                    type: string
-                    enum: [STRATEGY_COMPARISON_IDEMPOTENCY_MISMATCH]
-                  error:
-                    type: string
-                  operationIdentity:
-                    type: string
-
-  /api/strategies/comparison/select:
-    post:
-      summary: Select strategy and allocate balance
-      description: >-
-        Atomically selects a strategy and allocates balance under optimistic concurrency control.
-      tags:
-        - Strategies
-      parameters:
-        - name: If-Match
-          in: header
-          required: false
-          schema:
-            type: string
-        - name: X-Operation-Identity
-          in: header
-          required: false
-          schema:
-            type: string
-        - name: Idempotency-Key
-          in: header
-          required: false
-          schema:
-            type: string
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required:
-                - walletAddress
-                - strategyId
-                - allocationUsd
-              properties:
-                walletAddress:
-                  type: string
-                strategyId:
-                  type: string
-                allocationUsd:
-                  type: number
-                  minimum: 0
-                expectedVersion:
-                  type: integer
-                  minimum: 0
-                operationIdentity:
-                  type: string
-      responses:
-        '200':
-          description: Strategy selected and balance allocated
-          headers:
-            ETag:
-              schema:
-                type: string
-            X-Comparison-Version:
-              schema:
-                type: integer
-            X-Idempotent-Replayed:
-              schema:
-                type: string
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  state:
-                    $ref: '#/components/schemas/StrategyComparisonState'
-                  version:
-                    type: integer
-                  isReplay:
-                    type: boolean
-        '400':
-          description: Invalid request parameters
-        '409':
-          description: Concurrent write conflict (STRATEGY_COMPARISON_VERSION_CONFLICT)
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/StrategyComparisonVersionConflict'
-        '422':
-          description: >-
-            STRATEGY_COMPARISON_IDEMPOTENCY_MISMATCH. The operation identity was
-            already used for a different request (#1923). Nothing is written.
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  code:
-                    type: string
-                    enum: [STRATEGY_COMPARISON_IDEMPOTENCY_MISMATCH]
-                  error:
-                    type: string
-                  operationIdentity:
-                    type: string
-
-
-  /api/strategies/comparison/operations/{walletAddress}/{operationIdentity}:
-    get:
-      summary: Look up the outcome of a keyed comparison write
-      description: >-
-        For a client that lost the response to a keyed comparison write (#1923).
-        `committed` means the change is kept and resending the same identity
-        replays it. `failed` means nothing was kept (the store is at
-        `baseVersion`) and the same identity may be retried. 404 means the
-        server never recorded it, so retrying is safe.
-      tags:
-        - Strategies
-      parameters:
-        - name: walletAddress
-          in: path
-          required: true
-          schema:
-            type: string
-        - name: operationIdentity
-          in: path
-          required: true
-          schema:
-            type: string
-        - name: kind
-          in: query
-          required: false
-          schema:
-            type: string
-            enum: [update, select]
-      responses:
-        '200':
-          description: Recorded outcome
-          content:
-            application/json:
-              schema:
-                type: object
-                required: [status, operationIdentity, kind, baseVersion, attempts]
-                properties:
-                  status:
-                    type: string
-                    enum: [committed, failed]
-                  operationIdentity:
-                    type: string
-                  kind:
-                    type: string
-                    enum: [update, select]
-                  baseVersion:
-                    type: integer
-                  version:
-                    type: integer
-                    description: Present when committed.
-                  state:
-                    $ref: '#/components/schemas/StrategyComparisonState'
-                  errorCode:
-                    type: string
-                    description: Present when failed.
-                  attempts:
-                    type: integer
-        '400':
-          description: kind is not update or select
-        '404':
-          description: STRATEGY_COMPARISON_OPERATION_NOT_FOUND. Never recorded; retrying is safe.
 
   /api/users/{walletAddress}/pnl:
     get:
@@ -960,12 +609,8 @@ paths:
                 $ref: '#/components/schemas/PnLData'
         '404':
           description: User not found
-        '422':
-          description: Persisted transaction or price history is incomplete or invalid; correct the source records and retry
-        '503':
-          description: Current share-price data is unavailable; retry after a new snapshot is recorded
         '500':
-          description: Valuation failed; the persisted transaction history and balances remain unchanged and the request can be retried
+          description: Failed to fetch PnL data
 
   /api/users/{walletAddress}/export/csv:
     get:
@@ -1343,146 +988,6 @@ paths:
               example:
                 error: "QUOTE_FAILED"
                 message: "Quote failed"
-
-  /api/zap/review-operations:
-    post:
-      summary: Start or resume a reviewed deposit operation
-      description: >-
-        Registers a reviewed zap deposit before it is signed (#1891). The same
-        operationId with the same request resumes it (200). A new operation is
-        refused with 409 REVIEW_OPERATION_IN_FLIGHT while another deposit from
-        the wallet is signed, unsettled and before its contract deadline.
-      tags:
-        - Zap
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required: [operationId, walletAddress, routeHash, amountInStroops, minAmountOutStroops, deadlineUnixSeconds]
-              properties:
-                operationId:
-                  type: string
-                  pattern: '^[A-Za-z0-9._:-]{8,128}$'
-                walletAddress:
-                  type: string
-                routeHash:
-                  type: string
-                amountInStroops:
-                  type: string
-                  pattern: '^[0-9]+$'
-                minAmountOutStroops:
-                  type: string
-                  pattern: '^[0-9]+$'
-                deadlineUnixSeconds:
-                  type: integer
-                  minimum: 1
-      responses:
-        '200':
-          description: Existing operation resumed
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ZapReviewOperationEnvelope'
-        '201':
-          description: Operation started
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ZapReviewOperationEnvelope'
-        '400':
-          description: INVALID_REVIEW_OPERATION
-        '409':
-          description: >-
-            REVIEW_OPERATION_IN_FLIGHT (recoverable; details.operation names the
-            in-flight deposit) or REVIEW_OPERATION_MISMATCH (operationId reused
-            for a different deposit).
-
-  /api/zap/review-operations/{operationId}/events:
-    post:
-      summary: Record a reviewed deposit's stage change
-      description: >-
-        Stages move reviewed → signed → submitted → confirmed, or to failed
-        (#1891). Replaying an event is a no-op. A confirmation is accepted after
-        a reported failure, because the ledger is the authority.
-      tags:
-        - Zap
-      parameters:
-        - name: operationId
-          in: path
-          required: true
-          schema:
-            type: string
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required: [walletAddress, type]
-              properties:
-                walletAddress:
-                  type: string
-                type:
-                  type: string
-                  enum: [signed, submitted, confirmed, failed]
-                txHash:
-                  type: string
-                  pattern: '^[0-9a-f]{64}$'
-                  description: Required for signed, submitted and confirmed.
-                code:
-                  type: string
-                  description: >-
-                    Required for failed. TX_FAILED_ONCHAIN marks a ledger-recorded
-                    failure, which moved no funds.
-      responses:
-        '200':
-          description: Updated operation
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  operation:
-                    $ref: '#/components/schemas/ZapReviewOperation'
-        '400':
-          description: INVALID_REVIEW_OPERATION
-        '404':
-          description: REVIEW_OPERATION_NOT_FOUND
-        '409':
-          description: REVIEW_OPERATION_INVALID_TRANSITION or REVIEW_OPERATION_TX_HASH_MISMATCH
-
-  /api/zap/review-operations/{operationId}:
-    get:
-      summary: Read a reviewed deposit operation
-      tags:
-        - Zap
-      parameters:
-        - name: operationId
-          in: path
-          required: true
-          schema:
-            type: string
-        - name: walletAddress
-          in: query
-          required: true
-          schema:
-            type: string
-      responses:
-        '200':
-          description: The operation
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  operation:
-                    $ref: '#/components/schemas/ZapReviewOperation'
-        '400':
-          description: INVALID_REVIEW_OPERATION
-        '404':
-          description: REVIEW_OPERATION_NOT_FOUND
 
   /api/zap/verify:
     post:
@@ -2989,9 +2494,8 @@ paths:
                 $ref: '#/components/schemas/AlertPreferences'
         '400':
           description: >-
-            Invalid preference fields (`INVALID_ALERT_PREFERENCES`), a malformed
-            If-Match / expectedVersion (`INVALID_EXPECTED_VERSION`), or a malformed
-            context (`INVALID_ALERT_CONTEXT`). Invalid writes leave the stored record unchanged.
+            Invalid preference parameters, a malformed If-Match / expectedVersion
+            (`INVALID_EXPECTED_VERSION`), or a malformed context (`INVALID_ALERT_CONTEXT`)
         '409':
           description: >-
             `OPERATION_IDENTITY_CONFLICT` (identity reused with different parameters),
@@ -3264,9 +2768,7 @@ paths:
   /api/auth/challenge:
     post:
       summary: Request authentication challenge
-      description: >-
-        Generates a wallet authentication challenge bound to the current immutable
-        wallet auth configuration snapshot fingerprint.
+      description: Generates a challenge for wallet signing
       tags:
         - Auth
       requestBody:
@@ -3279,13 +2781,6 @@ paths:
                 walletAddress:
                   type: string
                   description: User's Stellar wallet address
-                sessionKeyAddress:
-                  type: string
-                  description: Ephemeral session signer public key
-                providerId:
-                  type: string
-                loginHint:
-                  type: string
       responses:
         '200':
           description: Challenge generated successfully
@@ -3296,84 +2791,9 @@ paths:
                 properties:
                   challenge:
                     type: string
-                  expiresAt:
-                    type: string
-                    format: date-time
-                  authConfigFingerprint:
-                    type: string
-                    description: Immutable wallet auth configuration snapshot fingerprint
                   walletAddressType:
                     type: string
                     enum: [account, contract]
-                  acceptedSignerTypes:
-                    type: array
-                    items:
-                      type: string
-        '400':
-          description: Invalid auth challenge request
-
-  /api/auth/verify:
-    post:
-      summary: Verify authentication challenge
-      description: >-
-        Verifies a signed wallet authentication challenge. Challenges bound to a
-        stale or missing wallet auth configuration snapshot are rejected so the
-        client can refresh and retry safely without consuming replay state.
-      tags:
-        - Auth
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required: [walletAddress, sessionKeyAddress, challenge, signature]
-              properties:
-                walletAddress:
-                  type: string
-                sessionKeyAddress:
-                  type: string
-                challenge:
-                  type: string
-                signature:
-                  type: string
-      responses:
-        '200':
-          description: Verification completed
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  verified:
-                    type: boolean
-                  walletAddressType:
-                    type: string
-                    enum: [account, contract]
-                  authConfigFingerprint:
-                    type: string
-                  acceptedSignerTypes:
-                    type: array
-                    items:
-                      type: string
-        '400':
-          description: Invalid, expired, replayed, or malformed verification request
-        '409':
-          description: Stale wallet auth configuration snapshot; refresh challenge and retry
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  error:
-                    type: string
-                  code:
-                    type: string
-                    enum: [STALE_WALLET_AUTH_CONFIG]
-                  currentAuthConfigFingerprint:
-                    type: string
-                  requestId:
-                    type: string
 
     /metrics:
       get:
@@ -5353,166 +4773,13 @@ paths:
         '500':
           description: Failed to compute recommendation
 
-  /api/governance/config-snapshot:
-    post:
-      summary: Compute a governance configuration snapshot fingerprint
-      description: |
-        Returns the canonical signer/threshold/contract snapshot and its
-        immutable, domain-separated SHA-256 fingerprint (#1894). Use the
-        fingerprint to bind forecasts and quorum checks, and call this endpoint
-        again to refresh work after a configuration change. Read-only.
-      tags:
-        - Governance
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/GovernanceConfigSnapshot'
-      responses:
-        '200':
-          description: Canonical snapshot and fingerprint
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  snapshot:
-                    $ref: '#/components/schemas/GovernanceConfigSnapshot'
-                  fingerprint:
-                    type: string
-                    pattern: '^[0-9a-f]{64}$'
-                  shortFingerprint:
-                    type: string
-                  canonicalPayload:
-                    type: string
-        '400':
-          description: INVALID_GOVERNANCE_CONFIG — the snapshot is malformed
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/GovernanceConfigError'
-
-  /api/governance/forecast:
-    post:
-      summary: Forecast the impact of a governance proposal
-      description: |
-        Estimates the impact of a governance parameter change on yield,
-        exposure, and fees. Read-only. When `configSnapshot` and
-        `expectedConfigFingerprint` are supplied together, the request is bound
-        to that exact configuration: a stale or malformed fingerprint returns
-        HTTP 409/400 before any forecast is computed (#1894).
-
-        Boundary & Rounding Invariants:
-        - Yield and exposure deltas are rounded half-up to 4 decimal places.
-        - Fee revenue delta is rounded half-up to 2 decimal places (cents).
-        - Risk score delta is rounded half-up to 2 decimal places.
-        - Non-finite, out-of-range, or negative inputs are rejected with 400 VALIDATION_FAILED.
-        - Existing balances and state are preserved on validation failure.
-      tags:
-        - Governance
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required:
-                - proposalType
-                - parameters
-                - baseline
-              properties:
-                proposalType:
-                  type: string
-                  enum: [fee_change, allocation_limit, strategy_param, reward_change]
-                parameters:
-                  type: object
-                  additionalProperties:
-                    type: number
-                baseline:
-                  type: object
-                  required: [yieldPct, exposurePct, feeRatePct, tvlUsd]
-                  properties:
-                    yieldPct:
-                      type: number
-                    exposurePct:
-                      type: number
-                    feeRatePct:
-                      type: number
-                    tvlUsd:
-                      type: number
-                    riskScore:
-                      type: number
-                    vaultCount:
-                      type: number
-                configSnapshot:
-                  $ref: '#/components/schemas/GovernanceConfigSnapshot'
-                expectedConfigFingerprint:
-                  type: string
-                  pattern: '^[0-9a-f]{64}$'
-      responses:
-        '200':
-          description: Forecast result, optionally bound with configFingerprint
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  proposalType:
-                    type: string
-                  parameters:
-                    type: object
-                  baseline:
-                    type: object
-                  forecast:
-                    type: object
-                  impactSummary:
-                    type: object
-                  warnings:
-                    type: array
-                    items:
-                      type: string
-                  disclaimer:
-                    type: string
-                  configSnapshot:
-                    $ref: '#/components/schemas/GovernanceConfigSnapshot'
-                  configFingerprint:
-                    type: string
-                    pattern: '^[0-9a-f]{64}$'
-        '400':
-          description: Invalid request or INVALID_GOVERNANCE_CONFIG
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/GovernanceConfigError'
-        '409':
-          description: STALE_GOVERNANCE_CONFIG — refresh the snapshot and retry
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/GovernanceConfigError'
-
   /api/governance/quorum-progress:
     post:
       summary: Compute multi-sig signer quorum progress
       description: |
         Deterministic quorum progress for a multi-sig operation: signed count,
         required threshold, remaining signatures, progress percentage, met flag,
-        and per-signer status. Read-only (#1310, #1898).
-
-        Optionally bind the calculation to an immutable governance configuration
-        fingerprint (#1894). A stale or malformed `expectedConfigFingerprint`
-        returns HTTP 409/400 without producing a quorum result.
-
-        Boundary & Rounding Invariants:
-        - Progress percentage is rounded to the nearest integer using standard half-up rounding.
-        - Critical boundary: `progressPct` is capped at 99% until quorum is strictly met
-          (e.g., 999/1000 signatures produces 99%, never premature 100%).
-        - `progressPct` reaches 100% if and only if `met` is true.
-        - Negative thresholds are rejected with 400 VALIDATION_FAILED.
-        - Thresholds exceeding signer count are clamped safely to total signers.
-        - A threshold of 0 is immediately satisfied (`met: true`, `progressPct: 100`).
-        - Preserves existing proposal and balance state on any error.
+        and per-signer status. Read-only (#1310).
       tags:
         - Governance
       requestBody:
@@ -5538,15 +4805,7 @@ paths:
                   description: Public keys that have signed so far
                 threshold:
                   type: number
-                  minimum: 0
-                  description: Required signature threshold (non-negative integer or number)
-                contractId:
-                  type: string
-                  description: Governance/vault contract the signer set applies to
-                expectedConfigFingerprint:
-                  type: string
-                  pattern: '^[0-9a-f]{64}$'
-                  description: Fingerprint captured when the work was prepared
+                  description: Required signature threshold
       responses:
         '200':
           description: Quorum progress
@@ -5563,13 +4822,8 @@ paths:
                     type: integer
                   progressPct:
                     type: integer
-                    minimum: 0
-                    maximum: 100
                   met:
                     type: boolean
-                  configFingerprint:
-                    type: string
-                    pattern: '^[0-9a-f]{64}$'
                   perSigner:
                     type: array
                     items:
@@ -5580,35 +4834,7 @@ paths:
                         signed:
                           type: boolean
         '400':
-          description: Validation failed (negative threshold, malformed arrays). Preserves state.
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  error:
-                    type: string
-                    example: VALIDATION_FAILED
-                  message:
-                    type: string
-                  stage:
-                    type: string
-                  retryable:
-                    type: boolean
-                  fields:
-                    type: array
-                    items:
-                      type: string
-                  diagnostics:
-                    type: array
-                    items:
-                      type: object
-        '409':
-          description: STALE_GOVERNANCE_CONFIG — refresh the snapshot and retry
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/GovernanceConfigError'
+          description: Invalid request body
 
   /api/preferences/audit/{walletAddress}:
     get:
@@ -5892,90 +5118,67 @@ components:
         type: string
         pattern: '^[A-Za-z0-9._:-]{1,255}$'
   schemas:
-    ZapReviewOperation:
+    YieldDiagnostic:
       type: object
-      description: Reviewed deposit journal entry (#1891).
+      description: Privacy-safe failure diagnostic for the yield data flow (#1877).
+      required: [code, stage, stageKnown, summary, remediation, retryable]
       properties:
-        operationId:
+        code:
           type: string
-        request:
-          type: object
-          properties:
-            walletAddress:
-              type: string
-            routeHash:
-              type: string
-            amountInStroops:
-              type: string
-            minAmountOutStroops:
-              type: string
-            deadlineUnixSeconds:
-              type: integer
+          enum:
+            - YIELD_INPUT_INVALID
+            - YIELD_SOURCE_UNAVAILABLE
+            - YIELD_RELIABILITY_UNAVAILABLE
+            - YIELD_ENRICHMENT_FAILED
+            - YIELD_SERIALIZATION_FAILED
+            - YIELD_NETWORK_UNREACHABLE
+            - YIELD_RESPONSE_MALFORMED
+            - YIELD_STAGE_UNKNOWN
         stage:
           type: string
-          enum: [reviewed, signed, submitted, confirmed, failed]
-        txHash:
-          type: string
-        failure:
-          type: object
-          properties:
-            stage:
-              type: string
-            code:
-              type: string
-            fundsMayHaveMoved:
-              type: boolean
-        createdAt:
-          type: integer
-        updatedAt:
-          type: integer
-    ZapReviewOperationEnvelope:
-      type: object
-      properties:
-        operation:
-          $ref: '#/components/schemas/ZapReviewOperation'
-        resumed:
+          enum:
+            - input_validation
+            - source_retrieval
+            - reliability_scoring
+            - yield_enrichment
+            - response_serialization
+            - network
+            - response_parsing
+            - unknown
+        stageKnown:
           type: boolean
-    StrategyComparisonConfigSnapshotResponse:
+        summary:
+          type: string
+        remediation:
+          type: string
+          nullable: true
+          description: Null when there is not enough evidence to suggest a fix.
+        retryable:
+          type: boolean
+        requestId:
+          type: string
+          pattern: '^[A-Za-z0-9._:-]{1,64}$'
+    YieldErrorResponse:
       type: object
-      required:
-        - config
-        - configFingerprint
-        - shortFingerprint
-        - generatedAt
-      properties:
-        config:
-          type: object
-          description: Canonical configuration parameters
-        configFingerprint:
-          type: string
-          description: 64-character SHA-256 hex digest
-        shortFingerprint:
-          type: string
-          description: Human-readable short fingerprint
-        generatedAt:
-          type: string
-          format: date-time
-
-    StrategyComparisonStaleErrorResponse:
-      type: object
-      required:
-        - error
-        - code
-        - isRecoverable
-        - currentFingerprint
+      required: [error, message, diagnostic]
       properties:
         error:
           type: string
-        code:
+          example: YIELD_FETCH_FAILED
+        message:
           type: string
-          enum: [STALE_STRATEGY_CONFIG, INVALID_FINGERPRINT]
-        isRecoverable:
+        requestId:
+          type: string
+        recoverable:
           type: boolean
-        currentFingerprint:
-          type: string
-        currentConfig:
+        details:
           type: object
+          properties:
+            invalidParameters:
+              type: array
+              items: { type: string }
+        diagnostic:
+          $ref: '#/components/schemas/YieldDiagnostic'
     ExposureHeatmapAxisEntry:
       type: object
       properties:
@@ -6676,10 +5879,7 @@ Incident:
           example: "CDVAULTXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
         amountInStroops:
           type: string
-          description: |
-            Amount of input token to swap, in stroops (smallest unit), as a plain integer string.
-            Valid range is 1 to 2^127 - 1 (Soroban i128 maximum). Zero, negative, decimal,
-            exponent, signed or whitespace-padded values are rejected with `INVALID_AMOUNT`.
+          description: Amount of input token to swap, in stroops (smallest unit, integer string)
           example: "10000000"
         inputDecimals:
           type: integer
@@ -6700,11 +5900,7 @@ Incident:
           minimum: 0.001
           maximum: 0.15
           default: 0.005
-          description: |
-            User-defined slippage tolerance as a decimal fraction (e.g. 0.01 = 1%). Clamped to [0.001, 0.15];
-            non-finite values are rejected with `INVALID_SLIPPAGE`. The slippage actually applied is rounded to
-            the nearest 1e-6 and `minAmountOutStroops` is `floor(expectedAmountOut * (1 - slippage))`
-            (integer math, rounded down so the guaranteed minimum is never overstated).
+          description: User-defined slippage tolerance as a decimal fraction (e.g. 0.01 = 1%). Clamped to [0.001, 0.15].
           example: 0.01
       example:
         inputTokenContract: "CDXLMXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
@@ -6852,57 +6048,13 @@ Incident:
           type: boolean
           description: >
             When true, the client can recover by requesting a fresh quote or
-            retrying (e.g. STALE_QUOTE, CONFIG_DRIFT, ASSUMPTION_DRIFT,
-            INVALID_FINGERPRINT, ROUTE_MISMATCH, UNSUPPORTED_ASSET, transient
-            QUOTE_FAILED). Absent or false for validation failures that require
-            changing inputs.
-        diagnostics:
-          type: array
-          description: >
-            Privacy-safe stage diagnostics for transaction review failures
-            (#1893). The first entry names the failed stage and the remediation
-            path; a trailing `STATE_PRESERVED` entry confirms balances and
-            quotes were not modified. Text comes from fixed templates and never
-            contains raw error output, addresses, URLs or stack traces. See
-            docs/transaction-review-diagnostics.md.
-          items:
-            type: object
-            required: [code, stage, severity, summary, remediation, retryable, privacySafe]
-            properties:
-              code:
-                type: string
-                enum: [CONTEXT_INSUFFICIENT, VALIDATION_FAILED, STAGE_UNAVAILABLE, QUOTE_REFRESH_REQUIRED, STATE_PRESERVED, RETRY_UNSAFE]
-              stage:
-                type: string
-                enum: [request-validation, quote, quote-verification, wallet-signing, submission, confirmation, state-persistence, unknown]
-              severity:
-                type: string
-                enum: [info, warning, critical]
-              summary:
-                type: string
-              remediation:
-                type: string
-              retryable:
-                type: boolean
-              privacySafe:
-                type: boolean
-                enum: [true]
-              affectedStages:
-                type: array
-                items:
-                  type: string
+            retrying (e.g. STALE_QUOTE, CONFIG_DRIFT, ROUTE_MISMATCH,
+            UNSUPPORTED_ASSET, transient QUOTE_FAILED). Absent or false for
+            validation failures that require changing inputs.
       example:
         error: "STALE_QUOTE"
         message: "Quote has expired"
         recoverable: true
-        diagnostics:
-          - code: "QUOTE_REFRESH_REQUIRED"
-            stage: "quote-verification"
-            severity: "warning"
-            summary: "The quote no longer matches current conditions and was not accepted."
-            remediation: "Request a fresh quote and review it again; the old quote cannot be reused."
-            retryable: true
-            privacySafe: true
 
     ZapSupportedAssetsResponse:
       type: object
@@ -7504,76 +6656,3 @@ Incident:
           cpuUsagePct: 12.5
           memoryUsageMb: 512
         exportUrl: "/api/audit-monitoring/export"
-
-    StrategyComparisonAssumptions:
-      type: object
-      properties:
-        protocolFeeBps:
-          type: number
-          minimum: 0
-          maximum: 10000
-        vaultFeeBps:
-          type: number
-          minimum: 0
-          maximum: 10000
-        rebalanceCostBps:
-          type: number
-          minimum: 0
-          maximum: 10000
-        slippageBps:
-          type: number
-          minimum: 0
-          maximum: 10000
-
-    StrategyComparisonState:
-      type: object
-      required:
-        - walletAddress
-        - pinnedStrategyIds
-        - customAssumptions
-        - allocatedBalances
-        - updatedAt
-        - version
-      properties:
-        walletAddress:
-          type: string
-        selectedStrategyId:
-          type: string
-          nullable: true
-        pinnedStrategyIds:
-          type: array
-          items:
-            type: string
-        customAssumptions:
-          $ref: '#/components/schemas/StrategyComparisonAssumptions'
-        allocatedBalances:
-          type: object
-          additionalProperties:
-            type: number
-        updatedAt:
-          type: string
-          format: date-time
-        version:
-          type: integer
-          minimum: 0
-
-    StrategyComparisonVersionConflict:
-      type: object
-      required:
-        - code
-        - error
-        - expectedVersion
-        - currentVersion
-        - state
-      properties:
-        code:
-          type: string
-          example: STRATEGY_COMPARISON_VERSION_CONFLICT
-        error:
-          type: string
-        expectedVersion:
-          type: integer
-        currentVersion:
-          type: integer
-        state:
-          $ref: '#/components/schemas/StrategyComparisonState'

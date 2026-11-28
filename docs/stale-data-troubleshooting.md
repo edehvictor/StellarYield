@@ -2,6 +2,8 @@
 
 This guide explains how to identify, understand, and troubleshoot stale data states in StellarYield's yield cards and dashboard components.
 
+> When yield data fails to load entirely (rather than being stale), the dashboard shows a diagnostic naming the failed stage and a remediation path. See [Yield data diagnostics](./yield-diagnostics.md) for the stages, codes and fallback behaviour.
+
 ## What is Stale Data?
 
 Stale data refers to yield information that is outdated beyond acceptable freshness thresholds. The UI uses a confidence-based system to determine data freshness and automatically filters out unusable stale data.

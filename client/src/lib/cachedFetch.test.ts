@@ -205,3 +205,54 @@ describe("cachedFetch", () => {
     ).toBeNull();
   });
 });
+
+describe("cachedFetch — error diagnostics passthrough (#1877)", () => {
+  it("exposes the status, parsed error body and request id of an HTTP error", async () => {
+    const body = { error: "YIELD_FETCH_FAILED", diagnostic: { stage: "source_retrieval" } };
+    const fetchImpl = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify(body), {
+        status: 500,
+        headers: { "Content-Type": "application/json", "X-Request-Id": "req-1" },
+      }),
+    );
+
+    const result = await cachedFetch("/api/yields", { store: createMemoryCacheStore(), fetchImpl });
+
+    expect(result).toMatchObject({
+      data: null,
+      error: "HTTP 500",
+      status: 500,
+      requestId: "req-1",
+      errorBody: body,
+    });
+  });
+
+  it("sets errorBody to null when the error body is not JSON", async () => {
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValue(new Response("<html>Bad Gateway</html>", { status: 502 }));
+
+    const result = await cachedFetch("/api/yields", { store: createMemoryCacheStore(), fetchImpl });
+
+    expect(result.status).toBe(502);
+    expect(result.errorBody).toBeNull();
+    expect(result.data).toBeNull();
+  });
+
+  it("reports no status for a network failure and none of the error fields on success", async () => {
+    const failing = vi.fn().mockRejectedValue(new TypeError("Failed to fetch"));
+    const failed = await cachedFetch("/api/yields", {
+      store: createMemoryCacheStore(),
+      fetchImpl: failing,
+    });
+    expect(failed.status).toBeUndefined();
+    expect(failed.errorBody).toBeUndefined();
+
+    const ok = await cachedFetch("/api/yields", {
+      store: createMemoryCacheStore(),
+      fetchImpl: vi.fn().mockResolvedValue(okJson([1])),
+    });
+    expect(ok.status).toBe(200);
+    expect(ok.errorBody).toBeUndefined();
+  });
+});
