@@ -116,6 +116,25 @@ describe("SDK Simulation API Configuration Hardening (#1851)", () => {
   });
 
   describe("Failure, rejection & state preservation", () => {
+    it("#1843 keeps the captured endpoint snapshot immutable during a concurrent update", async () => {
+      let liveConfig = { ...baseConfig, endpoint: { region: "primary" } };
+      const balances = { usdc: 50_000n, shares: 2_500n };
+      const snapshot = captureSimulationConfig(liveConfig);
+
+      liveConfig = { ...liveConfig, endpoint: { region: "secondary" } };
+
+      expect(snapshot.config.endpoint).toEqual({ region: "primary" });
+      await expect(
+        runWithSimulationConfig({
+          readConfig: () => liveConfig,
+          stateSnapshot: balances,
+          run: async () => snapshot.fingerprint,
+          onStale: "reject",
+        })
+      ).rejects.toThrow(StaleSimulationConfigError);
+      expect(balances).toEqual({ usdc: 50_000n, shares: 2_500n });
+    });
+
     it("assertSimulationConfigCurrent throws StaleSimulationConfigError on mismatch", () => {
       const snapshot = captureSimulationConfig(baseConfig);
       const changedConfig: SimulationConfig = { ...baseConfig, protocolFeeBps: 50 };
