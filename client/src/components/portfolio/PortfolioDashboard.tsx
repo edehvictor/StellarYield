@@ -241,6 +241,8 @@ export default function PortfolioDashboard({
   );
   const heatmapPositions = useMemo(
     () =>
+      positions
+        .filter((p): p is typeof p & { currentValue: number } => p.currentValue !== null)
       // Unpriced positions have no USD value to plot; they stay in the table
       // and exposure summary but cannot contribute to the heatmap.
       positions

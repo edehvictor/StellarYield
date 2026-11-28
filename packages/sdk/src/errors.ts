@@ -56,6 +56,7 @@ export abstract class SorobanSdkError extends Error {
    * Endpoint/lifecycle errors carry `SdkDiagnostic`s, simulation-path errors
    * carry `SimulationDiagnostic`s.
    */
+  public diagnostics?: readonly SdkDiagnostic[] | SimulationDiagnostic[];
   public diagnostics?: readonly SdkDiagnostic[] | readonly SimulationDiagnostic[];
 
   constructor(

@@ -15,9 +15,9 @@ const SPEC_PATH = path.join(__dirname, "../../openapi.yaml");
 
 // Update these when a PR intentionally changes the OpenAPI schema.
 const EXPECTED_COMPONENTS_SCHEMA_HASH =
-    "113a1ebc07067b511e81c528f9b4e5614c386718a4a7ff59c11d41606c3ec264";
+    "ea75d995afb98011205199c1fec0f387f14c662260a87ba07ef16907c88825e4";
 const EXPECTED_PATHS_SCHEMA_HASH =
-    "eda8709afcad1116d3900e770f20e23d4ecb8fa19e70447918d4b01b45c6723c";
+    "a5956f52b194c945dcdd16fcf4d728dda0a1b000f9d0447cf385c18f73ec902e";
 
 function readSection(spec: string, startMarker: string, endMarker?: string): string {
     const startIdx = spec.indexOf(startMarker);

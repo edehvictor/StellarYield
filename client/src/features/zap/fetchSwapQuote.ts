@@ -10,6 +10,7 @@ interface ZapQuoteErrorBody {
   error?: unknown;
   message?: unknown;
   requestId?: unknown;
+  operationId?: unknown;
   recoverable?: unknown;
   diagnostics?: unknown;
 }
@@ -26,6 +27,8 @@ export class ZapQuoteError extends Error {
   readonly status: number;
   /** Server request id for log correlation when provided. */
   readonly requestId?: string;
+  /** Review operation id echoed by the server, when supplied by the client. */
+  readonly operationId?: string;
   /** Whether recovery actions should be offered for this failure. */
   readonly recoverable: boolean;
   /** Privacy-safe stage diagnostics from the server, validated client-side. */
@@ -37,6 +40,7 @@ export class ZapQuoteError extends Error {
       code: string;
       status: number;
       requestId?: string;
+      operationId?: string;
       recoverable?: boolean;
       diagnostics?: TransactionReviewDiagnostic[];
     },
@@ -46,6 +50,7 @@ export class ZapQuoteError extends Error {
     this.code = options.code;
     this.status = options.status;
     this.requestId = options.requestId;
+    this.operationId = options.operationId;
     this.recoverable = options.recoverable ?? false;
     this.diagnostics = options.diagnostics ?? [];
   }
@@ -79,6 +84,7 @@ async function toZapQuoteError(res: Response): Promise<ZapQuoteError> {
     code: asString(body.error) ?? "QUOTE_FAILED",
     status: res.status,
     requestId: asString(body.requestId),
+    operationId: asString(body.operationId),
     recoverable: body.recoverable === true,
     diagnostics: parseTransactionReviewDiagnostics(body.diagnostics),
   });
@@ -86,6 +92,15 @@ async function toZapQuoteError(res: Response): Promise<ZapQuoteError> {
 
 export interface FetchSwapQuoteOptions {
   signal?: AbortSignal;
+  /** Stable review operation id propagated to the server for correlation. */
+  operationId?: string;
+}
+
+function reviewHeaders(operationId?: string): Record<string, string> {
+  return {
+    "Content-Type": "application/json",
+    ...(operationId ? { "X-Operation-Identity": operationId } : {}),
+  };
 }
 
 /** Typed cancellation for quote/verify fetches aborted by the caller. */
@@ -131,7 +146,7 @@ export async function fetchSwapQuote(
   try {
     res = await fetch(apiUrl("/api/zap/quote"), {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: reviewHeaders(options?.operationId),
       body: JSON.stringify(req),
       signal: options?.signal,
     });
@@ -163,7 +178,7 @@ export async function verifySwapQuote(
   try {
     res = await fetch(apiUrl("/api/zap/verify"), {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: reviewHeaders(options?.operationId),
       body: JSON.stringify(quote),
       signal: options?.signal,
     });

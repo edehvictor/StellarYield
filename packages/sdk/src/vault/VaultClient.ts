@@ -11,6 +11,10 @@ import {
 } from "../lifecycle";
 import {
   SpecMismatchError,
+  parseContractError,
+  RestoreRequiredError,
+  SdkEndpointError,
+  SimulationDiagnosticsError,
   SimulationDiagnosticsError,
   parseContractError,
   RestoreRequiredError,

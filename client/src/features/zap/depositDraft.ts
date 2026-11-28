@@ -53,6 +53,14 @@ export interface DepositDraft {
    *  returns a hash (e.g. saved right before signing) may have this unset;
    *  such a draft reconciles to "none" since there is nothing to look up. */
   txHash?: string;
+  /** Review operation identity bound to this draft (#1888). Reused on retry
+   *  so the zap contract cannot apply the same deposit effect twice. */
+  reviewOperation?: {
+    operationId: string;
+    payloadFingerprint: string;
+    contractOpId: string;
+    createdAt: string;
+  };
   /** epoch ms when the draft was saved (at submission time). */
   submittedAt: number;
   /** Review operation id shared with the server journal (#1891). */

@@ -20,6 +20,7 @@ import {
   ApiRateLimitError,
   ApiServerError,
   SdkEndpointError,
+  StaleSimulationConfigError,
 } from "../errors";
 import {
   validateEndpointConfig,

@@ -28,6 +28,12 @@ import {
   type GovernanceExecutionState,
 } from "./governanceOperation";
 import type { GovernanceDiagnostic } from "../../../../shared/types/governanceDiagnostic";
+import {
+  canRollbackExecution,
+  executionPhaseFor,
+  isExecutionInterrupted,
+  type GovernanceExecutionState,
+} from "./governanceOperation";
 
 const NETWORK_PASSPHRASE = getNetworkPassphrase();
 
@@ -80,6 +86,7 @@ export default function PendingTransactionCard({
     persistedOperation?.failedAtPhase ??
       (persistedOperation?.txHash ? "polling" : "submitting"),
   );
+  const [execDiagnostics, setExecDiagnostics] = useState<GovernanceDiagnostic[]>([]);
 
   const hasSigned = transaction.signatures.some(
     (s) => s.publicKey === walletAddress,
@@ -204,6 +211,7 @@ export default function PendingTransactionCard({
         onExecute(transaction.id, result.hash);
       } else {
         const msg = result.error ?? "Transaction failed";
+        const failedAtPhase = lastExecPhaseRef.current;
         const recordedPhase = lastExecPhaseRef.current as TxPhase;
         const failedAtPhase = recordedPhase === "idle" ? "submitting" : recordedPhase;
         setExecError(msg);
@@ -217,6 +225,7 @@ export default function PendingTransactionCard({
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
+      const failedAtPhase = lastExecPhaseRef.current;
       const recordedPhase = lastExecPhaseRef.current as TxPhase;
       const failedAtPhase = recordedPhase === "idle" ? "submitting" : recordedPhase;
       setExecError(msg);

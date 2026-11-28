@@ -36,6 +36,30 @@ export function sendError(
   res.status(statusCode).json(errorResponse);
 }
 
+/**
+ * Error helper for transaction review routes. Carries the correlated request
+ * id and the validated review operation id so a failed review can be traced
+ * back to the exact logical deposit without echoing raw error text.
+ */
+export function sendReviewError(
+  req: Request,
+  res: Response,
+  statusCode: number,
+  error: string,
+  message: string,
+  recoverable?: boolean,
+  diagnostics?: unknown[],
+): void {
+  const body: ErrorResponse & { operationId?: string } = { error, message };
+  if (diagnostics !== undefined) body.diagnostics = diagnostics;
+  const requestId = getRequestId(req);
+  if (requestId !== undefined) body.requestId = requestId;
+  const operationId = (req as Request & { reviewOperationId?: string }).reviewOperationId;
+  if (operationId !== undefined) body.operationId = operationId;
+  if (recoverable !== undefined) body.recoverable = recoverable;
+  res.status(statusCode).json(body);
+}
+
 export function sendErrorWithRequest(
   req: Request,
   res: Response,

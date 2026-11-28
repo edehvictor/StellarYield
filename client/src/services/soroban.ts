@@ -568,6 +568,12 @@ export interface ZapDepositParams {
   /** Accept output below `expectedAmountOut` as long as it meets `minAmountOut`. */
   allowPartial: boolean;
   /**
+   * Stable `u64` operation identity from the transaction review. Reusing it on
+   * a retry lets the zap contract reject an already-settled effect or resume a
+   * pending one instead of applying the deposit twice.
+   */
+  opId: bigint;
+  /**
    * Quote `expiresAt` as a Unix timestamp in seconds. The contract rejects the
    * transaction with `QuoteExpired` (4001) if the ledger closes after it.
    */
@@ -595,6 +601,7 @@ export async function zapDeposit(
       StellarSdk.nativeToScVal(params.minSharesOut, { type: "i128" }),
       StellarSdk.nativeToScVal(params.expectedAmountOut, { type: "i128" }),
       StellarSdk.nativeToScVal(params.allowPartial, { type: "bool" }),
+      StellarSdk.nativeToScVal(params.opId, { type: "u64" }),
       StellarSdk.nativeToScVal(params.deadlineUnixSeconds, { type: "u64" }),
     ],
     onPhase,
