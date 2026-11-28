@@ -46,6 +46,10 @@ Read-only entry points do not require one.
 
 ## Configuration fingerprints
 
+It also exposes a dynamic **state fingerprint** for optimistic concurrency.
+The state snapshot includes market totals, accrual markers, fees, bad debt, and
+the selected user's supply, pending withdrawal, collateral, and debt values.
+
 ## Snapshot contents
 
 `get_config_snapshot() -> ConfigSnapshot` returns the admin-controlled
@@ -116,6 +120,26 @@ configuration and cannot be executed on terms the caller did not see:
 `queue_withdrawal`, `claim_protocol_fees`, `push_oracle_quote`, and the
 admin setters.
 
+## Optimistic state handshake
+
+Use `get_state_fingerprint(subject)` immediately before preparing a mutation,
+then pass the result to the corresponding `*_with_state` entry point. These
+guarded entry points reject with `StaleState` (16) before authorization,
+accrual, token transfers, or writes when another transaction changed the
+market or subject position. Refresh the fingerprint and retry. The original
+entry points remain available for backwards compatibility; new integrations
+should use the guarded forms whenever a preview is involved.
+
+| Guarded entry point | Subject used in the fingerprint |
+|---|---|
+| `supply_with_state`, `withdraw_with_state`, `post_collateral_with_state`, `queue_withdrawal_with_state`, `repay_with_state` | `user` |
+| `repay_for_with_state`, `liquidate_with_state` | `borrower` |
+| `borrow_with_state`, `withdraw_collateral_with_state` | `user` |
+
+```
+state_fingerprint = SHA-256("stellaryield_il_state_v1" || XDR(StateSnapshot))
+```
+
 ## Failure and retry guarantees
 
 - The fingerprint is validated immediately after initialization and **before
@@ -146,8 +170,8 @@ invalidate cached previews.
 | `BorrowIndex`, `LastAccrualLedger`, `ProtocolFees`, `TotalSupplied`, `TotalDebt` | instance | Market totals/accrual, not part of the snapshot |
 | `Supply(user)`, `Collateral(user)`, `Debt(user)`, `DebtIndex(user)`, `PendingWithdrawal(user)`, `Liquidation(borrower, id)` | persistent | Per-user state |
 
-No new storage key is introduced: the snapshot and fingerprint are derived from
-existing configuration. See [storage-ttl-strategy.md](./storage-ttl-strategy.md).
+No new storage key is introduced: both snapshots and fingerprints are derived
+from existing state. See [storage-ttl-strategy.md](./storage-ttl-strategy.md).
 
 ## Breaking API changes
 
@@ -166,6 +190,7 @@ invocations and decode the new `HealthFactor` shape.
 | 17 | `WrongContract` | Context names a different deployment address |
 | 18 | `WrongVersion` | Context storage version does not match the stored version |
 | 19 | `InvalidOracleQuote` | Oracle quote has an invalid price, confidence or future ledger |
+| 20 | `StaleState` | Dynamic market or subject state changed; refresh and retry |
 
 See `contracts/ERROR_CODES.md` for the full table.
 

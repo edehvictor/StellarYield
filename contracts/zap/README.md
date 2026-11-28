@@ -9,7 +9,7 @@
 - `initialize(admin, dex_router)`
 - `zap_deposit(user, input_token, vault_token, vault, amount_in, min_amount_out, min_shares_out, expected_amount_out, allow_partial)`
 - `zap_deposit(user, input_token, vault_token, vault, amount_in, min_amount_out, min_shares_out, expected_amount_out, allow_partial, op_id)`
-- `zap_deposit_with_deadline(user, input_token, vault_token, vault, amount_in, min_amount_out, min_shares_out, expected_amount_out, allow_partial, op_id, deadline)`
+- `zap_deposit_with_deadline(user, input_token, vault_token, vault, amount_in, min_amount_out, min_shares_out, expected_amount_out, allow_partial, { deadline, op_id })`
 - `get_op_status(user, op_id) -> Option<ZapStatus>`
 - `set_dex_router(admin, new_router)`
 
@@ -48,6 +48,11 @@ See [Zap event reference](../../docs/contracts/zap-events.md) for indexer field 
 | 6 | `SwapFailed` | Router dry-run returned zero output |
 | 7 | `OpAlreadySettled` | `op_id` was already successfully completed; use a new op_id |
 | 4001 | `QuoteExpired` | Ledger timestamp is past `deadline` |
+
+Clients can call `get_error_diagnostic(error_code)` after a failed
+simulation. It returns a privacy-safe stage (`Validation`, `Router`, or
+`Vault`), a short remediation symbol, and whether retrying is appropriate. It
+never includes addresses, balances, quotes, or other route context.
 
 ## Storage Model
 

@@ -567,6 +567,8 @@ export interface ZapDepositParams {
   expectedAmountOut: bigint;
   /** Accept output below `expectedAmountOut` as long as it meets `minAmountOut`. */
   allowPartial: boolean;
+  /** Stable ID for retries of this quote; defaults to the quote deadline. */
+  opId?: bigint;
   /**
    * Quote `expiresAt` as a Unix timestamp in seconds. The contract rejects the
    * transaction with `QuoteExpired` (4001) if the ledger closes after it.
@@ -595,7 +597,18 @@ export async function zapDeposit(
       StellarSdk.nativeToScVal(params.minSharesOut, { type: "i128" }),
       StellarSdk.nativeToScVal(params.expectedAmountOut, { type: "i128" }),
       StellarSdk.nativeToScVal(params.allowPartial, { type: "bool" }),
-      StellarSdk.nativeToScVal(params.deadlineUnixSeconds, { type: "u64" }),
+      StellarSdk.xdr.ScVal.scvMap([
+        new StellarSdk.xdr.ScMapEntry({
+          key: StellarSdk.xdr.ScVal.scvSymbol("deadline"),
+          val: StellarSdk.nativeToScVal(params.deadlineUnixSeconds, { type: "u64" }),
+        }),
+        new StellarSdk.xdr.ScMapEntry({
+          key: StellarSdk.xdr.ScVal.scvSymbol("op_id"),
+          val: StellarSdk.nativeToScVal(params.opId ?? params.deadlineUnixSeconds, {
+            type: "u64",
+          }),
+        }),
+      ]),
     ],
     onPhase,
     useFeeBump,

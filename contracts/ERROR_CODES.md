@@ -115,6 +115,7 @@ Source: `contracts/isolated_lending/src/lib.rs`
 | 17   | `WrongContract`          | Context names a different pair deployment address | Use the context from `get_ledger_context()` for this exact pair |
 | 18   | `WrongVersion`           | Context storage version does not match the stored version | Refresh with `get_ledger_context()` after migration |
 | 19   | `InvalidOracleQuote`     | Oracle quote has an invalid price, confidence or future ledger | Publish a valid quote from the configured oracle |
+| 20   | `StaleState`             | Market or subject state changed since the caller captured its state fingerprint | Refresh with `get_state_fingerprint` and retry |
 
 `isolated_lending` uses checked arithmetic and documented floor rounding for
 values, limits, interest, fees and liquidation payouts (the close-factor cap is
