@@ -1,7 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { getAdapter } from "./walletAdapters";
 import {
+  clearStoredSession,
   connectWalletSession,
+  recoverSession,
   WalletLifecycleError,
 } from "./session";
 import type { WalletAdapter } from "./walletAdapters";
@@ -105,6 +107,68 @@ describe("wallet session lifecycle", () => {
     expect(session.walletAddress).toBe(walletAddress);
     expect(JSON.parse(localStorage.getItem(STORAGE_KEY) ?? "null").walletAddress)
       .toBe(walletAddress);
+  });
+
+  it("rejects a stale concurrent connection and allows a fresh retry", async () => {
+    let finishFirstConnection!: (address: string) => void;
+    let markFirstConnectionStarted!: () => void;
+    const firstConnectionStarted = new Promise<void>((resolve) => {
+      markFirstConnectionStarted = resolve;
+    });
+    vi.mocked(adapter.getPublicKey)
+      .mockImplementationOnce(
+        () =>
+          new Promise<string>((resolve) => {
+            finishFirstConnection = resolve;
+            markFirstConnectionStarted();
+          }),
+      )
+      .mockResolvedValueOnce(previousWalletAddress);
+
+    const firstConnection = connectWalletSession({ providerId: "freighter" });
+    await firstConnectionStarted;
+    const winningConnection = await connectWalletSession({ providerId: "freighter" });
+    finishFirstConnection(walletAddress);
+
+    await expect(firstConnection).rejects.toMatchObject({
+      name: "WalletLifecycleError",
+      stage: "session_conflict",
+    });
+    expect(winningConnection.walletAddress).toBe(previousWalletAddress);
+    expect(JSON.parse(localStorage.getItem(STORAGE_KEY) ?? "null").walletAddress)
+      .toBe(previousWalletAddress);
+
+    const retry = await connectWalletSession({ providerId: "freighter" });
+    expect(retry.walletAddress).toBe(walletAddress);
+    expect(JSON.parse(localStorage.getItem(STORAGE_KEY) ?? "null").walletAddress)
+      .toBe(walletAddress);
+  });
+
+  it("does not restore a stale session after a concurrent disconnect", async () => {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(storedSession(previousWalletAddress)));
+    let finishAvailabilityCheck!: (available: boolean) => void;
+    let markAvailabilityCheckStarted!: () => void;
+    const availabilityCheckStarted = new Promise<void>((resolve) => {
+      markAvailabilityCheckStarted = resolve;
+    });
+    vi.mocked(adapter.isAvailable).mockImplementationOnce(
+      () =>
+        new Promise<boolean>((resolve) => {
+          finishAvailabilityCheck = resolve;
+          markAvailabilityCheckStarted();
+        }),
+    );
+
+    const recovery = recoverSession();
+    await availabilityCheckStarted;
+    await clearStoredSession();
+    finishAvailabilityCheck(true);
+
+    await expect(recovery).resolves.toMatchObject({
+      status: "superseded",
+      session: null,
+    });
+    expect(localStorage.getItem(STORAGE_KEY)).toBeNull();
   });
 
   it("preserves the prior session when persistence fails", async () => {

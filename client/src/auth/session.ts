@@ -13,7 +13,11 @@ import { getAdapter } from "./walletAdapters";
 import { getApiBaseUrl } from "../lib/api";
 
 const STORAGE_KEY = "stellar-yield.wallet-session";
+const STORAGE_REVISION_KEY = `${STORAGE_KEY}.revision`;
 const BROADCAST_CHANNEL_NAME = "stellar-yield-wallet-session";
+const SESSION_MUTATION_LOCK = "stellar-yield-wallet-session-mutation";
+
+let sessionMutationQueue: Promise<void> = Promise.resolve();
 
 export const SESSION_TTL_MS = 24 * 60 * 60 * 1000;
 export const STALE_THRESHOLD_MS = 30 * 60 * 1000;
@@ -29,6 +33,7 @@ export type WalletLifecycleStage =
   | "backend_verification"
   | "session_restore"
   | "session_persistence"
+  | "session_conflict"
   | "transaction_signing";
 
 const WALLET_LIFECYCLE_DIAGNOSTICS: Record<
@@ -66,6 +71,10 @@ const WALLET_LIFECYCLE_DIAGNOSTICS: Record<
   session_persistence: {
     label: "session persistence",
     remediation: "Enable browser storage and retry; the previous wallet session was kept.",
+  },
+  session_conflict: {
+    label: "concurrent session update",
+    remediation: "The wallet session changed during this operation. Review the current session and retry.",
   },
   transaction_signing: {
     label: "transaction signing",
@@ -221,6 +230,7 @@ export type SessionRecoveryStatus =
   | "recovered"        // Session is valid and provider is available
   | "degraded"         // Session loaded but provider unavailable or re-verification failed
   | "expired"          // Session exceeded TTL — cleared
+  | "superseded"       // A newer session mutation won while recovery was in flight
   | "no_session";      // Nothing in storage
 
 export interface SessionRecoveryResult {
@@ -241,18 +251,22 @@ export interface SessionRecoveryResult {
  *     than clearing the session so the user can still read data.
  *  5. Persist the updated session and broadcast `session-update` to other tabs.
  *
- * Never throws — all errors are captured as `degraded` status so the caller
- * can choose whether to prompt the user to reconnect.
+ * Provider and verification errors become `degraded`; persistence errors still
+ * throw so callers do not mistake an unsaved recovery for a successful one.
  */
 export async function recoverSession(): Promise<SessionRecoveryResult> {
-  const session = loadStoredSession();
+  const snapshot = await readSessionSnapshot();
+  const session = snapshot.session;
 
   if (!session) {
     return { status: "no_session", session: null };
   }
 
   if (isSessionExpired(session)) {
-    clearStoredSession();
+    const cleared = await clearStoredSession(snapshot.revision);
+    if (!cleared) {
+      return getSupersededRecoveryResult();
+    }
     return { status: "expired", session: null };
   }
 
@@ -275,7 +289,9 @@ export async function recoverSession(): Promise<SessionRecoveryResult> {
     recovered.providerAvailable = available;
 
     if (!available) {
-      saveSession(recovered);
+      if (!(await saveSession(recovered, snapshot.revision))) {
+        return getSupersededRecoveryResult();
+      }
       return { status: "degraded", session: recovered };
     }
   } else {
@@ -293,13 +309,17 @@ export async function recoverSession(): Promise<SessionRecoveryResult> {
     } else {
       recovered.providerAvailable = false;
       recovered.lastActivityAt = new Date().toISOString();
-      saveSession(recovered);
+      if (!(await saveSession(recovered, snapshot.revision))) {
+        return getSupersededRecoveryResult();
+      }
       return { status: "degraded", session: recovered };
     }
   }
 
   recovered.lastActivityAt = new Date().toISOString();
-  saveSession(recovered);
+  if (!(await saveSession(recovered, snapshot.revision))) {
+    return getSupersededRecoveryResult();
+  }
   return { status: "recovered", session: recovered };
 }
 
@@ -341,25 +361,106 @@ export function isSessionStale(session: WalletSession): boolean {
   return idle > STALE_THRESHOLD_MS;
 }
 
-export function clearStoredSession() {
-  window.localStorage.removeItem(STORAGE_KEY);
-  broadcastSessionEvent({ type: "disconnect", payload: null });
+export async function clearStoredSession(expectedRevision?: string): Promise<boolean> {
+  return withSessionMutationLock(() => {
+    if (expectedRevision !== undefined && readSessionRevision() !== expectedRevision) {
+      return false;
+    }
+
+    writeSessionRevision(createSessionRevision());
+    try {
+      window.localStorage.removeItem(STORAGE_KEY);
+    } catch {
+      throw new WalletLifecycleError("session_persistence");
+    }
+    broadcastSessionEvent({ type: "disconnect", payload: null });
+    return true;
+  });
 }
 
-function saveSession(session: WalletSession) {
+interface StoredSessionSnapshot {
+  revision: string;
+  session: WalletSession | null;
+}
+
+async function readSessionSnapshot(): Promise<StoredSessionSnapshot> {
+  return withSessionMutationLock(() => ({
+    revision: readSessionRevision(),
+    session: loadStoredSession(),
+  }));
+}
+
+async function saveSession(
+  session: WalletSession,
+  expectedRevision: string,
+): Promise<boolean> {
+  return withSessionMutationLock(() => {
+    if (readSessionRevision() !== expectedRevision) {
+      return false;
+    }
+
+    try {
+      writeSessionRevision(createSessionRevision());
+      window.localStorage.setItem(STORAGE_KEY, JSON.stringify(session));
+    } catch {
+      throw new WalletLifecycleError("session_persistence");
+    }
+
+    try {
+      broadcastSessionEvent({ type: "session-update", payload: session });
+    } catch {
+      console.warn("[wallet] lifecycle diagnostic", {
+        stage: "session_persistence",
+        remediation: "Session was saved, but other tabs may need to reload.",
+      });
+    }
+    return true;
+  });
+}
+
+async function getSupersededRecoveryResult(): Promise<SessionRecoveryResult> {
+  const snapshot = await readSessionSnapshot();
+  return {
+    status: "superseded",
+    session: snapshot.session,
+  };
+}
+
+function readSessionRevision(): string {
   try {
-    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(session));
+    return window.localStorage.getItem(STORAGE_REVISION_KEY) ?? "";
   } catch {
-    throw new WalletLifecycleError("session_persistence");
+    throw new WalletLifecycleError("session_restore");
+  }
+}
+
+function writeSessionRevision(revision: string): void {
+  window.localStorage.setItem(STORAGE_REVISION_KEY, revision);
+}
+
+function createSessionRevision(): string {
+  const cryptoObj = globalThis.crypto as Crypto & { randomUUID?: () => string };
+  if (typeof cryptoObj?.randomUUID === "function") {
+    return cryptoObj.randomUUID();
+  }
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+}
+
+async function withSessionMutationLock<T>(operation: () => T | Promise<T>): Promise<T> {
+  if (typeof navigator !== "undefined" && navigator.locks) {
+    return navigator.locks.request(SESSION_MUTATION_LOCK, operation);
   }
 
+  const previous = sessionMutationQueue;
+  let release!: () => void;
+  sessionMutationQueue = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  await previous;
   try {
-    broadcastSessionEvent({ type: "session-update", payload: session });
-  } catch {
-    console.warn("[wallet] lifecycle diagnostic", {
-      stage: "session_persistence",
-      remediation: "Session was saved, but other tabs may need to reload.",
-    });
+    return await operation();
+  } finally {
+    release();
   }
 }
 
@@ -527,6 +628,7 @@ function isExtensionProvider(
 export async function connectWalletSession(
   options: ConnectWalletOptions = {},
 ): Promise<WalletSession> {
+  const { revision } = await readSessionSnapshot();
   const providerId = options.providerId ?? "freighter";
   const origin = createSessionOrigin();
 
@@ -570,7 +672,9 @@ export async function connectWalletSession(
       origin,
       providerAvailable: true,
     };
-    saveSession(session);
+    if (!(await saveSession(session, revision))) {
+      throw new WalletLifecycleError("session_conflict");
+    }
     return session;
   }
 
@@ -613,6 +717,8 @@ export async function connectWalletSession(
   // Persist the session snapshot only after verification/refresh completes.
   // Stale wallet-auth config responses trigger a fresh challenge retry above and
   // never mutate previously persisted wallet sessions during this connect flow.
-  saveSession(session);
+  if (!(await saveSession(session, revision))) {
+    throw new WalletLifecycleError("session_conflict");
+  }
   return session;
 }

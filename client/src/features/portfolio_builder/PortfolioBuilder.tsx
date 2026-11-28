@@ -311,7 +311,7 @@ export default function PortfolioBuilder({
   };
 
   const handleSwitchWallet = async () => {
-    disconnectWallet();
+    await disconnectWallet();
     const connected = await connectWallet();
     if (connected && recovery.rejection) {
       // Keep the partial-batch cursor: the main execute button resumes after

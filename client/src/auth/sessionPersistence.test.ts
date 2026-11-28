@@ -127,20 +127,20 @@ describe("clearStoredSession", () => {
     localStorage.clear();
   });
 
-  it("removes the session from localStorage", () => {
+  it("removes the session from localStorage", async () => {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(makeSession()));
-    clearStoredSession();
+    await clearStoredSession();
     expect(localStorage.getItem(STORAGE_KEY)).toBeNull();
   });
 
-  it("is a no-op when no session is stored", () => {
-    expect(() => clearStoredSession()).not.toThrow();
+  it("is a no-op when no session is stored", async () => {
+    await expect(clearStoredSession()).resolves.toBe(true);
     expect(localStorage.getItem(STORAGE_KEY)).toBeNull();
   });
 
-  it("causes loadStoredSession to return null after clearing", () => {
+  it("causes loadStoredSession to return null after clearing", async () => {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(makeSession()));
-    clearStoredSession();
+    await clearStoredSession();
     expect(loadStoredSession()).toBeNull();
   });
 });

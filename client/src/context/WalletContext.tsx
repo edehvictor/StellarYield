@@ -36,9 +36,7 @@ export function WalletProvider({ children }: { children: ReactNode }) {
 
     recoverSession().then((result) => {
       if (cancelled) return;
-      if (result.session) {
-        setSession(result.session);
-      }
+      setSession(result.session);
     }).catch(() => {
       // Fallback: load without recovery so the user is not silently logged out
       if (!cancelled) setSession(loadStoredSession());
@@ -96,8 +94,8 @@ export function WalletProvider({ children }: { children: ReactNode }) {
     }
   }
 
-  function disconnectWallet() {
-    clearStoredSession();
+  async function disconnectWallet() {
+    await clearStoredSession();
     clearSensitiveWalletState();
     setSession(null);
     setErrorMessage(null);
