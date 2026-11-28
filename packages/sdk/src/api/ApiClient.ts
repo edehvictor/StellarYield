@@ -40,6 +40,7 @@ import {
   runWithSimulationConfig,
 } from "../simulationConfig";
 import { buildSdkFailureDiagnostics } from "../diagnostics";
+import { assertDepositSimulationParams } from "../simulationMath";
 
 export interface ApiRegisteredEndpoint {
   method: "GET" | "POST" | "PUT" | "DELETE" | "PATCH";
@@ -617,6 +618,7 @@ export class ApiClient {
     params: DepositSimulationParams,
     requestOptions?: ApiRequestOptions
   ): Promise<any> {
+    assertDepositSimulationParams(params);
     validateDepositSimulationParams(params);
     let expectedFingerprint =
       params.expectedConfigFingerprint ??

@@ -24,6 +24,7 @@ export default function GovernanceDashboard() {
     failExecution,
     completeExecution,
     rollbackExecution,
+    refreshTransactionConfig,
     updateConfig,
   } = useGovernanceStore();
 

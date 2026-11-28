@@ -228,13 +228,14 @@ export function validateTransactionReview(
   let cleanMinAmount: string | undefined;
   if (rawVaultToken.minAmount !== undefined && rawVaultToken.minAmount !== null && String(rawVaultToken.minAmount).trim() !== "") {
     const rawMinAmountStr = String(rawVaultToken.minAmount).trim();
-    if (!POSITIVE_NUMBER_REGEX.test(rawMinAmountStr) || parseFloat(rawMinAmountStr) <= 0) {
+    // A zero minimum is valid: it guarantees nothing beyond the simulated amount.
+    if (!POSITIVE_NUMBER_REGEX.test(rawMinAmountStr)) {
       return {
         valid: false,
         error: {
           code: "INVALID_MIN_AMOUNT",
           field: "vaultToken.minAmount",
-          message: "Minimum output amount must be a positive number.",
+          message: "Minimum output amount must be a non-negative decimal.",
         },
       };
     }

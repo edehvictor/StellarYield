@@ -35,6 +35,7 @@ import {
   describeValuationFailure,
   type PortfolioValuationFailure,
 } from "../../portfolio/portfolioValuationErrors";
+import { parseRefreshedPositions } from "../../portfolio/portfolioValuation";
 
 // ── Types ───────────────────────────────────────────────────────────────
 
@@ -260,7 +261,7 @@ export default function PortfolioDashboard({
     setIsRefreshing(true);
     try {
       if (onRefresh) {
-        const updated = await onRefresh();
+        const updated = parseRefreshedPositions(await onRefresh());
         setPositions(updated);
         setRefreshError(null);
       } else {

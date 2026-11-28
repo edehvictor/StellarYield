@@ -49,6 +49,8 @@ export interface TransactionReviewModalProps {
    * the user still gets a remediation path and a state-preserved statement.
    */
   diagnostics?: readonly TransactionReviewDiagnostic[] | null;
+  /** Called when boundary validation rejects the reviewed parameters. */
+  onValidationError?: (error: TransactionReviewValidationError) => void;
 }
 
 export function TransactionReviewModal({
@@ -67,6 +69,7 @@ export function TransactionReviewModal({
   onRefreshQuote,
   error = null,
   diagnostics = null,
+  onValidationError,
 }: TransactionReviewModalProps) {
   // Boundary validation against malformed external data (#1889)
   const validationResult = useMemo(() => {
@@ -103,7 +106,11 @@ export function TransactionReviewModal({
     }
   }, [isOpen, handleKeyDown]);
 
-  const canConfirm = !isSubmitting && !isStale && !error && validationResult.valid;
+  const amountCheck = validateReviewAmounts({ inputToken, vaultToken, slippageTolerance });
+  const amountError = amountCheck.valid ? null : amountCheck.reason;
+  const displayError = error ?? amountError;
+  const canConfirm =
+    !isSubmitting && !isStale && !displayError && validationResult.valid;
 
   const handleConfirm = useCallback(() => {
     if (!canConfirm || !validationResult.valid) {
@@ -114,10 +121,24 @@ export function TransactionReviewModal({
 
   if (!isOpen) return null;
 
-  const amountCheck = validateReviewAmounts({ inputToken, vaultToken, slippageTolerance });
-  const amountError = amountCheck.valid ? null : amountCheck.reason;
-  const displayError = error ?? amountError;
-  const canConfirm = !isSubmitting && !isStale && !displayError;
+  // Amounts are already validated above; render them verbatim so the reviewed
+  // value always equals the signed value.
+  const displayInputAmount = inputToken.amount;
+  const displayInputSymbol = inputToken.symbol;
+  const displayVaultAmount = vaultToken.amount;
+  const displayVaultSymbol = vaultToken.symbol;
+  const displayMinAmount = vaultToken.minAmount;
+
+  const validationError = validationResult.valid ? null : validationResult.error;
+  // One alert at a time: a caller-supplied / amount failure is more specific
+  // than the generic boundary-validation message, so it wins.
+  const alertTitle = displayError
+    ? "Submission blocked"
+    : validationError
+      ? `Review blocked (${validationError.code})`
+      : null;
+  const alertMessage = displayError ?? validationError?.message ?? null;
+
   const shownDiagnostics: readonly TransactionReviewDiagnostic[] =
     diagnostics && diagnostics.length > 0
       ? diagnostics
@@ -213,8 +234,8 @@ export function TransactionReviewModal({
             />
           </div>
 
-          {/* Boundary Validation Failure Alert (#1889) */}
-          {!validationResult.valid && (
+          {/* Boundary validation / amount failure alert (#1889, #1890) */}
+          {alertMessage && (
             <div
               data-testid="transaction-review-validation-error"
               className="flex items-start gap-2 rounded-xl border border-red-500/30 bg-red-500/10 p-3 text-xs text-red-200"
@@ -222,24 +243,8 @@ export function TransactionReviewModal({
             >
               <AlertTriangle className="h-4 w-4 shrink-0 text-red-400 mt-0.5" />
               <div>
-                <p className="font-semibold text-red-300">
-                  Review blocked ({validationResult.error.code})
-                </p>
-                <p>{validationResult.error.message}</p>
-              </div>
-            </div>
-          )}
-
-          {/* Error Message if Present */}
-          {displayError && (
-            <div
-              className="flex items-start gap-2 rounded-xl border border-red-500/30 bg-red-500/10 p-3 text-xs text-red-200"
-              role="alert"
-            >
-              <AlertTriangle className="h-4 w-4 shrink-0 text-red-400 mt-0.5" />
-              <div>
-                <p className="font-semibold text-red-300">Submission blocked</p>
-                <p>{displayError}</p>
+                <p className="font-semibold text-red-300">{alertTitle}</p>
+                <p>{alertMessage}</p>
               </div>
             </div>
           )}

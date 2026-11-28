@@ -88,7 +88,7 @@ export interface SaveComparisonOptions {
  * new identity for a new change.
  */
 export class StrategyComparisonIdempotencyMismatchError extends Error {
-  readonly code = "STRATEGY_COMPARISON_IDEMPOTENCY_MISMATCH";
+  readonly code: string = "STRATEGY_COMPARISON_IDEMPOTENCY_MISMATCH";
   constructor(message: string, readonly operationIdentity: string) {
     super(message);
     this.name = "StrategyComparisonIdempotencyMismatchError";
