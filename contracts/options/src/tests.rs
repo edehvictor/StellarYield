@@ -41,6 +41,12 @@ fn mint_tokens(env: &Env, token_addr: &Address, to: &Address, amount: i128) {
     admin_client.mint(to, &amount);
 }
 
+fn settlement_state(client: &OptionsContractClient, option_id: u32) -> crate::SettlementState {
+    client
+        .get_settlement_state(&option_id, &client.get_config_fingerprint())
+        .unwrap()
+}
+
 /// Mint a standard call option with opening_time=500, expiration_time=1000.
 /// Returns (option_id, minter).
 fn mint_call_option(
@@ -386,8 +392,16 @@ fn test_storage_migration_preserves_open_and_exercised_positions() {
     env.ledger().set_timestamp(1000);
     client.exercise(&exerciser, &exercised_id, &client.get_config_fingerprint());
 
-    // A pre-migration deployment has no version marker, but live positions are
-    // already persisted under Option(id) and must remain addressable.
+    // Simulate a pre-context deployment: live positions remain under Option(id)
+    // and migration pins its network and current layout without rewriting them.
+    env.as_contract(&client.address, || {
+        env.storage()
+            .instance()
+            .remove(&crate::storage::DataKey::StorageVersion);
+        env.storage()
+            .instance()
+            .remove(&crate::storage::DataKey::NetworkId);
+    });
     assert_eq!(
         env.as_contract(&client.address, || crate::storage::read_storage_version(
             &env
@@ -400,6 +414,10 @@ fn test_storage_migration_preserves_open_and_exercised_positions() {
             &env
         )),
         crate::storage::CURRENT_STORAGE_VERSION
+    );
+    assert_eq!(
+        env.as_contract(&client.address, || crate::storage::read_network_id(&env)),
+        Some(env.ledger().network_id())
     );
 
     let (open, exercised) = env.as_contract(&client.address, || {
@@ -1777,10 +1795,15 @@ mod settlement_config_fingerprint {
     fn fingerprint_matches_the_configuration_snapshot() {
         let (env, client, admin, oracle, _, _) = setup_env();
         let snapshot = client.get_config_snapshot();
+        assert_eq!(snapshot.network_id, env.ledger().network_id());
+        assert_eq!(snapshot.contract, client.address);
         assert_eq!(snapshot.admin, admin);
         assert_eq!(snapshot.oracle, oracle);
         assert_eq!(snapshot.oracle_max_age, None);
-        assert_eq!(snapshot.storage_version, 0);
+        assert_eq!(
+            snapshot.storage_version,
+            crate::storage::CURRENT_STORAGE_VERSION
+        );
 
         // Any configuration change produces a different fingerprint; reverting
         // the change restores it, so the fingerprint is a pure function of the
@@ -1795,8 +1818,11 @@ mod settlement_config_fingerprint {
         assert_eq!(client.get_config_fingerprint(), initial);
 
         client.migrate();
-        assert_eq!(client.get_config_snapshot().storage_version, 1);
-        assert_ne!(client.get_config_fingerprint(), initial);
+        assert_eq!(
+            client.get_config_snapshot().storage_version,
+            crate::storage::CURRENT_STORAGE_VERSION
+        );
+        assert_eq!(client.get_config_fingerprint(), initial);
         let _ = env;
     }
 
@@ -1873,6 +1899,12 @@ mod settlement_config_fingerprint {
         let token = soroban_sdk::token::Client::new(&env, &underlying);
 
         let captured = client.get_config_fingerprint();
+        // Model an approved context migration between preparation and execution.
+        env.as_contract(&client.address, || {
+            env.storage()
+                .instance()
+                .set(&crate::storage::DataKey::StorageVersion, &1_u32);
+        });
         client.migrate();
 
         env.ledger().set_timestamp(750);
@@ -1898,6 +1930,46 @@ mod settlement_config_fingerprint {
         assert_eq!(
             client.get_reserved_collateral(&minter, &underlying),
             6_000_000
+        );
+    }
+
+    #[test]
+    fn network_mismatch_rejects_reads_and_settlement_then_retry_is_safe() {
+        let (env, client, _, _, underlying, quote) = setup_env();
+        let (option_id, minter) = mint_call_option(&env, &client, &underlying, &quote);
+        let exerciser = Address::generate(&env);
+        let token = soroban_sdk::token::Client::new(&env, &underlying);
+        let fingerprint = client.get_config_fingerprint();
+        let original_network = env.ledger().network_id();
+
+        env.ledger().set_network_id([7; 32]);
+        assert_eq!(
+            client.try_get_config_fingerprint(),
+            Err(Ok(crate::OptionsError::WrongNetwork))
+        );
+        assert_eq!(
+            client.try_get_settlement_state(&option_id, &fingerprint),
+            Err(Ok(crate::OptionsError::WrongNetwork))
+        );
+        env.ledger().set_timestamp(750);
+        assert_eq!(
+            client.try_exercise(&exerciser, &option_id, &fingerprint),
+            Err(Ok(crate::OptionsError::WrongNetwork))
+        );
+
+        assert_eq!(token.balance(&exerciser), 0);
+        assert_eq!(token.balance(&client.address), 10_000_000);
+        assert_eq!(
+            client.get_reserved_collateral(&minter, &underlying),
+            10_000_000
+        );
+
+        env.ledger().set_network_id(original_network.to_array());
+        client.exercise(&exerciser, &option_id, &fingerprint);
+        assert_eq!(token.balance(&exerciser), 10_000_000);
+        assert_eq!(
+            settlement_state(&client, option_id).status,
+            crate::SettlementStatus::Exercised
         );
     }
 
@@ -1973,7 +2045,7 @@ mod settlement_retry {
         let exerciser = Address::generate(&env);
 
         assert_eq!(
-            client.get_settlement_state(&option_id),
+            settlement_state(&client, option_id),
             SettlementState {
                 status: SettlementStatus::Open,
                 exercised_amount: 0,
@@ -1989,7 +2061,7 @@ mod settlement_retry {
             &client.get_config_fingerprint(),
         );
         assert_eq!(
-            client.get_settlement_state(&option_id),
+            settlement_state(&client, option_id),
             SettlementState {
                 status: SettlementStatus::PartiallyExercised,
                 exercised_amount: 4_000_000,
@@ -1999,7 +2071,7 @@ mod settlement_retry {
 
         client.exercise(&exerciser, &option_id, &client.get_config_fingerprint());
         assert_eq!(
-            client.get_settlement_state(&option_id),
+            settlement_state(&client, option_id),
             SettlementState {
                 status: SettlementStatus::Exercised,
                 exercised_amount: 10_000_000,
@@ -2016,13 +2088,13 @@ mod settlement_retry {
 
         client.cancel(&minter, &cancelled);
         assert_eq!(
-            client.get_settlement_state(&cancelled).status,
+            settlement_state(&client, cancelled).status,
             SettlementStatus::Cancelled
         );
 
         env.ledger().set_timestamp(1001);
         client.expire(&expiring);
-        let state = client.get_settlement_state(&expiring);
+        let state = settlement_state(&client, expiring);
         assert_eq!(state.status, SettlementStatus::Expired);
         assert_eq!(state.remaining_amount, 0);
     }
@@ -2037,7 +2109,7 @@ mod settlement_retry {
 
         env.ledger().set_timestamp(750);
         let drained = drain_escrow(&env, &client, &underlying, &sink);
-        let before = client.get_settlement_state(&option_id);
+        let before = settlement_state(&client, option_id);
 
         assert!(client
             .try_exercise_partial(
@@ -2049,7 +2121,7 @@ mod settlement_retry {
             .is_err());
 
         // Nothing moved, no progress recorded, reserve intact.
-        assert_eq!(client.get_settlement_state(&option_id), before);
+        assert_eq!(settlement_state(&client, option_id), before);
         assert_eq!(token_u.balance(&exerciser), 0);
         assert_eq!(
             client.get_reserved_collateral(&minter, &underlying),
@@ -2066,7 +2138,7 @@ mod settlement_retry {
         );
         assert_eq!(token_u.balance(&exerciser), 4_000_000);
         assert_eq!(
-            client.get_settlement_state(&option_id).exercised_amount,
+            settlement_state(&client, option_id).exercised_amount,
             4_000_000
         );
         assert_eq!(
@@ -2088,14 +2160,14 @@ mod settlement_retry {
             .try_exercise(&exerciser, &option_id, &client.get_config_fingerprint())
             .is_err());
         assert_eq!(
-            client.get_settlement_state(&option_id).status,
+            settlement_state(&client, option_id).status,
             SettlementStatus::Open
         );
 
         restore_escrow(&env, &client, &underlying, &sink, drained);
         client.exercise(&exerciser, &option_id, &client.get_config_fingerprint());
         assert_eq!(
-            client.get_settlement_state(&option_id).status,
+            settlement_state(&client, option_id).status,
             SettlementStatus::Exercised
         );
     }
@@ -2113,7 +2185,7 @@ mod settlement_retry {
 
         // Not marked expired, reserve not released, minter not paid.
         assert_eq!(
-            client.get_settlement_state(&option_id).status,
+            settlement_state(&client, option_id).status,
             SettlementStatus::Open
         );
         assert_eq!(
@@ -2142,7 +2214,7 @@ mod settlement_retry {
         let drained = drain_escrow(&env, &client, &underlying, &sink);
         assert!(client.try_cancel(&minter, &option_id).is_err());
         assert_eq!(
-            client.get_settlement_state(&option_id).status,
+            settlement_state(&client, option_id).status,
             SettlementStatus::Open
         );
         assert_eq!(
@@ -2186,7 +2258,7 @@ mod settlement_retry {
             Err(Ok(OptionsError::ZeroAmount))
         );
 
-        assert_eq!(client.get_settlement_state(&option_id).exercised_amount, 0);
+        assert_eq!(settlement_state(&client, option_id).exercised_amount, 0);
         assert_eq!(token_u.balance(&client.address), 10_000_000);
         assert_eq!(
             client.get_reserved_collateral(&minter, &underlying),
@@ -2226,7 +2298,7 @@ mod settlement_retry {
 
         assert_eq!(token_u.balance(&exerciser), 4_000_000);
         assert_eq!(
-            client.get_settlement_state(&option_id).exercised_amount,
+            settlement_state(&client, option_id).exercised_amount,
             4_000_000
         );
         assert_eq!(
@@ -2244,7 +2316,7 @@ mod settlement_retry {
             &client.get_config_fingerprint(),
         );
         assert_eq!(
-            client.get_settlement_state(&option_id).status,
+            settlement_state(&client, option_id).status,
             SettlementStatus::Exercised
         );
         assert_eq!(token_u.balance(&exerciser), 10_000_000);

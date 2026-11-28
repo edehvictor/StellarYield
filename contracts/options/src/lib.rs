@@ -7,7 +7,7 @@ use soroban_sdk::{
 };
 
 /// Domain separator for the configuration fingerprint (versioned).
-const CONFIG_FINGERPRINT_DOMAIN: &[u8] = b"stellaryield_options_config_v1";
+const CONFIG_FINGERPRINT_DOMAIN: &[u8] = b"stellaryield_options_config_v2";
 
 mod events;
 mod math;
@@ -21,6 +21,11 @@ use events::{
 use math::black_scholes_call;
 use storage::{
     clear_oracle_max_age, has_admin, read_admin, read_cancelled, read_exercised_amount,
+    read_free_collateral, read_network_id, read_option, read_option_counter, read_oracle,
+    read_oracle_max_age, read_reserved_collateral, read_storage_version, release_reserved,
+    write_admin, write_cancelled, write_exercised_amount, write_free_collateral, write_network_id,
+    write_option, write_option_counter, write_oracle, write_oracle_max_age,
+    write_reserved_collateral, write_storage_version, OptionData, OptionType,
     read_free_collateral, read_option, read_option_counter, read_oracle, read_oracle_max_age,
     read_reserved_collateral, read_settlement_sequence, read_storage_version, release_reserved,
     write_admin, write_cancelled, write_exercised_amount, write_free_collateral, write_option,
@@ -70,6 +75,10 @@ pub enum OptionsError {
     /// The option's settlement progress no longer matches what the caller
     /// expected, so a retried settlement was refused instead of paying twice.
     SettlementStateChanged = 22,
+    /// The live network does not match the network this options state is bound to.
+    WrongNetwork = 23,
+    /// The stored options context uses a version this code cannot safely interpret.
+    WrongVersion = 24,
     /// The option changed after the caller read it; retry with its new sequence.
     ConcurrentModification = 23,
     /// A token callback attempted to re-enter settlement for the same option.
@@ -85,16 +94,19 @@ pub trait OracleInterface {
     fn get_price(env: Env, asset: Address) -> Option<(i128, u64)>;
 }
 
-/// Immutable snapshot of the admin-controlled configuration that shapes
-/// settlement.
+/// Immutable deployment and configuration context that settlement depends on.
 ///
-/// Only configuration is included: option records, balances and oracle quotes
-/// change continuously and must not invalidate a caller's snapshot. Two
-/// deployments with identical configuration produce identical snapshots, and
-/// any admin change produces a different one.
+/// Option records, balances and oracle quotes change continuously and do not
+/// invalidate a caller's snapshot. The network, contract, layout version, and
+/// admin configuration are included so a captured fingerprint cannot be reused
+/// across deployments or context migrations.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ConfigSnapshot {
+    /// SHA-256 of the network passphrase this options state is bound to.
+    pub network_id: BytesN<32>,
+    /// Address of this options deployment.
+    pub contract: Address,
     pub admin: Address,
     pub oracle: Address,
     /// Oracle freshness guard in seconds, or `None` when the guard is off.
@@ -158,11 +170,13 @@ impl OptionsContract {
         }
         write_admin(&env, &admin);
         write_oracle(&env, &oracle);
+        write_network_id(&env, &env.ledger().network_id());
+        write_storage_version(&env, CURRENT_STORAGE_VERSION);
         Ok(())
     }
 
-    /// Marks the current storage layout version. Existing option records stay
-    /// under the same persistent keys and remain readable without rewriting.
+    /// Binds a legacy deployment to the live network and marks its storage
+    /// context version. Existing option records remain under the same keys.
     pub fn migrate(env: Env) -> Result<(), OptionsError> {
         if !has_admin(&env) {
             return Err(OptionsError::NotInitialized);
@@ -170,8 +184,25 @@ impl OptionsContract {
         let admin = read_admin(&env);
         admin.require_auth();
 
-        if read_storage_version(&env) < CURRENT_STORAGE_VERSION {
+        let live_network = env.ledger().network_id();
+        let network_is_unbound = read_network_id(&env).is_none();
+        if let Some(bound_network) = read_network_id(&env) {
+            if bound_network != live_network {
+                return Err(OptionsError::WrongNetwork);
+            }
+        }
+        let version = read_storage_version(&env);
+        if version > CURRENT_STORAGE_VERSION {
+            return Err(OptionsError::WrongVersion);
+        }
+
+        if network_is_unbound {
+            write_network_id(&env, &live_network);
+        }
+        if version < CURRENT_STORAGE_VERSION {
             write_storage_version(&env, CURRENT_STORAGE_VERSION);
+        }
+        if network_is_unbound || version < CURRENT_STORAGE_VERSION {
             publish_config_update(&env, &admin);
         }
         Ok(())
@@ -184,6 +215,7 @@ impl OptionsContract {
         if !has_admin(&env) {
             return Err(OptionsError::NotInitialized);
         }
+        require_live_context(&env)?;
         read_admin(&env).require_auth();
         if max_age == 0 {
             return Err(OptionsError::InvalidMaxAge);
@@ -199,6 +231,7 @@ impl OptionsContract {
         if !has_admin(&env) {
             return Err(OptionsError::NotInitialized);
         }
+        require_live_context(&env)?;
         let admin = read_admin(&env);
         admin.require_auth();
         clear_oracle_max_age(&env);
@@ -216,6 +249,7 @@ impl OptionsContract {
         if !has_admin(&env) {
             return Err(OptionsError::NotInitialized);
         }
+        require_live_context(&env)?;
         Ok(config_snapshot(&env))
     }
 
@@ -230,6 +264,7 @@ impl OptionsContract {
         if !has_admin(&env) {
             return Err(OptionsError::NotInitialized);
         }
+        require_live_context(&env)?;
         Ok(config_fingerprint(&env))
     }
 
@@ -248,6 +283,7 @@ impl OptionsContract {
         if !has_admin(&env) {
             return Err(OptionsError::NotInitialized);
         }
+        require_live_context(&env)?;
         if collateral_amount <= 0 {
             return Err(OptionsError::ZeroAmount);
         }
@@ -339,7 +375,9 @@ impl OptionsContract {
         expected_config_fingerprint: BytesN<32>,
     ) -> Result<(), OptionsError> {
         exerciser.require_auth();
+        require_config(&env, &expected_config_fingerprint)?;
         let option = read_option(&env, option_id);
+        Self::settle(&env, exerciser, option_id, option, None)
         Self::settle(
             &env,
             exerciser,
@@ -380,7 +418,9 @@ impl OptionsContract {
         expected_config_fingerprint: BytesN<32>,
     ) -> Result<(), OptionsError> {
         exerciser.require_auth();
+        require_config(&env, &expected_config_fingerprint)?;
         let option = read_option(&env, option_id);
+        Self::settle(&env, exerciser, option_id, option, Some(amount))
         Self::settle(
             &env,
             exerciser,
@@ -404,10 +444,22 @@ impl OptionsContract {
         expected_config_fingerprint: BytesN<32>,
     ) -> Result<(), OptionsError> {
         exerciser.require_auth();
+        require_config(&env, &expected_config_fingerprint)?;
         let option = read_option(&env, option_id);
         if read_exercised_amount(&env, option_id) != expected_exercised {
             return Err(OptionsError::SettlementStateChanged);
         }
+        Self::settle(&env, exerciser, option_id, option, Some(amount))
+    }
+
+    /// Settlement progress of an option, without mutating any state. Use it to
+    /// decide whether to resume, retry, or stop after a failed settlement.
+    pub fn get_settlement_state(
+        env: Env,
+        option_id: u32,
+        expected_config_fingerprint: BytesN<32>,
+    ) -> Result<SettlementState, OptionsError> {
+        require_config(&env, &expected_config_fingerprint)?;
         Self::settle(
             &env,
             exerciser,
@@ -435,11 +487,11 @@ impl OptionsContract {
         } else {
             (SettlementStatus::Open, open_remaining)
         };
-        SettlementState {
+        Ok(SettlementState {
             status,
             exercised_amount,
             remaining_amount,
-        }
+        })
     }
 
     /// Cancels an unexpired option and returns only its unexercised collateral
@@ -457,6 +509,7 @@ impl OptionsContract {
         expected_sequence: u64,
     ) -> Result<(), OptionsError> {
         minter.require_auth();
+        require_live_context(&env)?;
         let option = read_option(&env, option_id);
 
         if option.minter != minter {
@@ -500,6 +553,7 @@ impl OptionsContract {
 
     /// Compatibility wrapper. New callers should use `expire_with_sequence`.
     pub fn expire(env: Env, option_id: u32) -> Result<(), OptionsError> {
+        require_live_context(&env)?;
         let expected_sequence = read_settlement_sequence(&env, option_id);
         Self::expire_with_sequence(env, option_id, expected_sequence)
     }
@@ -561,6 +615,7 @@ impl OptionsContract {
         if !has_admin(&env) {
             return Err(OptionsError::NotInitialized);
         }
+        require_live_context(&env)?;
         if amount <= 0 {
             return Err(OptionsError::ZeroAmount);
         }
@@ -585,6 +640,7 @@ impl OptionsContract {
         amount: i128,
     ) -> Result<(), OptionsError> {
         owner.require_auth();
+        require_live_context(&env)?;
         if !has_admin(&env) {
             return Err(OptionsError::NotInitialized);
         }
@@ -668,13 +724,7 @@ impl OptionsContract {
         expected_sequence: u64,
         mut option: OptionData,
         amount: Option<i128>,
-        expected_config_fingerprint: &BytesN<32>,
     ) -> Result<(), OptionsError> {
-        // Reject a stale configuration snapshot before validating the position
-        // or moving any collateral: the caller prepares settlement under terms
-        // it has seen, and a mismatch means those terms no longer hold.
-        require_config(env, expected_config_fingerprint)?;
-
         if read_cancelled(env, option_id) {
             return Err(OptionsError::AlreadyCancelled);
         }
@@ -802,6 +852,8 @@ impl OptionsContract {
 /// the execution paths use.
 fn config_snapshot(env: &Env) -> ConfigSnapshot {
     ConfigSnapshot {
+        network_id: bound_network(env),
+        contract: env.current_contract_address(),
         admin: read_admin(env),
         oracle: read_oracle(env),
         oracle_max_age: read_oracle_max_age(env),
@@ -818,10 +870,29 @@ fn config_fingerprint(env: &Env) -> BytesN<32> {
 
 /// Reject settlement whose caller observed a different configuration.
 fn require_config(env: &Env, expected: &BytesN<32>) -> Result<(), OptionsError> {
+    require_live_context(env)?;
     if config_fingerprint(env) != *expected {
         return Err(OptionsError::StaleConfig);
     }
     Ok(())
+}
+
+/// Reject state access when the live network or storage layout is incompatible.
+fn require_live_context(env: &Env) -> Result<(), OptionsError> {
+    let network_id = read_network_id(env).ok_or(OptionsError::WrongVersion)?;
+    if network_id != env.ledger().network_id() {
+        return Err(OptionsError::WrongNetwork);
+    }
+    if read_storage_version(env) != CURRENT_STORAGE_VERSION {
+        return Err(OptionsError::WrongVersion);
+    }
+    Ok(())
+}
+
+/// The stored network id. Callers validate that the binding exists before
+/// constructing a snapshot; migration writes it for legacy deployments.
+fn bound_network(env: &Env) -> BytesN<32> {
+    read_network_id(env).unwrap()
 }
 
 /// Announce the new configuration fingerprint after an admin change.
