@@ -93,6 +93,99 @@ function consumeChallenge(challenge: string): void {
   usedChallenges.set(challenge, Date.now() + CHALLENGE_TTL_MS);
 }
 
+// ── Operation identity (#1880) ─────────────────────────────────────────────
+//
+// A verify request may carry a client-generated `operationId`. The first
+// successful verification for that id records the outcome together with a
+// fingerprint of the request. A safe retry (same id, same payload) returns the
+// recorded outcome with `replayed: true` instead of failing as a challenge
+// replay, so a dropped response never forces the client to start over. The
+// challenge is still consumed exactly once. Reusing an id with a different
+// payload is rejected with WalletOperationConflictError.
+
+/** Allowed operationId shape: 8-128 URL-safe characters. */
+const OPERATION_ID_PATTERN = /^[A-Za-z0-9._:-]{8,128}$/;
+
+interface CompletedWalletOperation {
+  requestFingerprint: string;
+  expiresAt: number;
+  result: WalletVerificationResult;
+}
+
+export interface WalletVerificationResult {
+  verified: boolean;
+  walletAddressType: WalletAddressType;
+  authConfigFingerprint: string;
+  acceptedSignerTypes: string[];
+  operationId?: string;
+  replayed?: boolean;
+}
+
+const completedOperations = new Map<string, CompletedWalletOperation>();
+
+function pruneExpiredOperations(): void {
+  const now = Date.now();
+  for (const [operationId, entry] of completedOperations) {
+    if (now > entry.expiresAt) {
+      completedOperations.delete(operationId);
+    }
+  }
+}
+
+function fingerprintVerifyRequest(input: {
+  walletAddress: string;
+  sessionKeyAddress: string;
+  challenge: string;
+  signature: string;
+}): string {
+  return createHash("sha256")
+    .update(
+      JSON.stringify([
+        input.walletAddress,
+        input.sessionKeyAddress,
+        input.challenge,
+        input.signature.trim(),
+      ]),
+    )
+    .digest("hex");
+}
+
+export class InvalidWalletOperationIdError extends Error {
+  readonly code = "INVALID_WALLET_OPERATION_ID";
+
+  constructor(
+    message = "operationId must be 8-128 characters of letters, digits, '.', '_', ':' or '-'.",
+  ) {
+    super(message);
+    this.name = "InvalidWalletOperationIdError";
+  }
+}
+
+export class WalletOperationConflictError extends Error {
+  readonly code = "WALLET_OPERATION_CONFLICT";
+
+  constructor(
+    message = "operationId was already used for a different verification request.",
+  ) {
+    super(message);
+    this.name = "WalletOperationConflictError";
+  }
+}
+
+/**
+ * Normalise an optional operation identity. Returns `undefined` when absent
+ * and throws InvalidWalletOperationIdError when present but malformed.
+ */
+export function normalizeWalletOperationId(value: unknown): string | undefined {
+  if (value === undefined || value === null || value === "") {
+    return undefined;
+  }
+  if (typeof value !== "string" || !OPERATION_ID_PATTERN.test(value.trim())) {
+    throw new InvalidWalletOperationIdError();
+  }
+  return value.trim();
+}
+
 /** Returns true if the challenge has already been consumed. */
 function isChallengeReplayed(challenge: string): boolean {
   pruneExpiredChallenges();
@@ -195,13 +288,20 @@ function parseAuthChallenge(challenge: string): {
  * 3. The embedded expiry timestamp is checked; stale challenges are rejected.
  * 4. Each challenge is consumed on first successful verify; replayed
  *    submissions are rejected even within the TTL window.
+ * 5. When an `operationId` is supplied, a retry of an already-completed
+ *    verification with an identical payload returns the recorded outcome
+ *    (`replayed: true`) without consuming anything again. Reusing the id with a
+ *    different payload throws WalletOperationConflictError. Failed or rejected
+ *    verifications are never recorded, so they can be retried freely.
  */
 export function verifyAuthChallenge(input: {
   walletAddress: string;
   sessionKeyAddress: string;
   challenge: string;
   signature: string;
-}) {
+  operationId?: string;
+}): WalletVerificationResult {
+  const operationId = normalizeWalletOperationId(input.operationId);
   const walletAddressType = getWalletAddressType(input.walletAddress);
 
   if (!walletAddressType) {
@@ -237,6 +337,24 @@ export function verifyAuthChallenge(input: {
     throw new StaleWalletAuthConfigError();
   }
 
+  // ── Operation identity: safe retry of a completed verification ───────────
+  // Runs before the expiry/replay checks so a retry of a verification that
+  // already succeeded is answered from the recorded outcome even if the
+  // original response was lost close to the challenge's expiry.
+  const requestFingerprint = operationId
+    ? fingerprintVerifyRequest(input)
+    : undefined;
+  if (operationId) {
+    pruneExpiredOperations();
+    const completed = completedOperations.get(operationId);
+    if (completed) {
+      if (completed.requestFingerprint !== requestFingerprint) {
+        throw new WalletOperationConflictError();
+      }
+      return { ...completed.result, operationId, replayed: true };
+    }
+  }
+
   // ── Expiry check ─────────────────────────────────────────────────────────
   const expiryMs = new Date(parsed.expiresAt).getTime();
   if (!Number.isFinite(expiryMs) || Date.now() > expiryMs) {
@@ -260,11 +378,7 @@ export function verifyAuthChallenge(input: {
     Buffer.from(input.signature, "base64"),
   );
 
-  if (verified) {
-    consumeChallenge(input.challenge);
-  }
-
-  return {
+  const result: WalletVerificationResult = {
     verified,
     walletAddressType,
     authConfigFingerprint: currentAuthConfigFingerprint,
@@ -273,11 +387,27 @@ export function verifyAuthChallenge(input: {
         ? ["session-key", "contract-wallet"]
         : ["freighter", "ed25519"],
   };
+
+  if (verified) {
+    consumeChallenge(input.challenge);
+    if (operationId && requestFingerprint) {
+      completedOperations.set(operationId, {
+        requestFingerprint,
+        expiresAt: Date.now() + CHALLENGE_TTL_MS,
+        result,
+      });
+    }
+  }
+
+  return operationId
+    ? { ...result, operationId, replayed: false }
+    : result;
 }
 
 /** Exported for tests only — reset replay cache between test cases. */
 export function _resetReplayCacheForTesting(): void {
   usedChallenges.clear();
+  completedOperations.clear();
 }
 
 /**

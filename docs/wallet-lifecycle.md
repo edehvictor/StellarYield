@@ -48,3 +48,47 @@ subsequent lifecycle operations.
 
 - Client: a session whose age equals `SESSION_TTL_MS` is still valid and expires 1ms later. Idle time equal to `STALE_THRESHOLD_MS` is still fresh. Future timestamps (clock skew) are clamped to zero age. An unparseable `connectedAt` or `lastActivityAt` fails closed (expired / stale). Checks are pure and never mutate the session, so retrying is safe.
 - Server: an auth challenge is valid through its expiry instant (inclusive) and is rejected if its expiry is more than the 5 minute challenge TTL in the future ("Challenge expiry is outside the allowed window."). Rejected challenges are not consumed by the replay cache.
+
+## Duplicate submissions and safe retries (#1880)
+
+Every wallet lifecycle operation that has an effect carries an operation
+identity so a duplicate submission cannot apply that effect twice.
+
+**Server: `POST /api/auth/verify`**
+
+- Accepts an optional operation identity as the `operationId` body field or the
+  `Idempotency-Key` header (8–128 characters of `A-Z a-z 0-9 . _ : -`). If both
+  are sent they must match, otherwise the request is rejected with
+  `400 INVALID_WALLET_OPERATION_ID` before any side effect.
+- On the first successful verification the outcome is recorded against the
+  identity, together with a fingerprint of the request (wallet, session key,
+  challenge, signature). Records are kept for the 5 minute challenge TTL.
+- A retry with the same identity and identical payload returns the recorded
+  outcome with `replayed: true`. The challenge is consumed only once, and
+  this check runs before the expiry and replay checks, so a retry after a lost
+  response still succeeds.
+- Reusing an identity for a different payload is rejected with
+  `409 WALLET_OPERATION_CONFLICT` and applies nothing.
+- Validation errors, stale-config rejections and bad signatures are never
+  recorded and consume nothing, so the same operation can simply be retried.
+- Without an operation identity the behaviour is unchanged: a second
+  submission of a consumed challenge is rejected with
+  "Challenge has already been used."
+
+**Client: `client/src/auth/session.ts`**
+
+- Each challenge verification gets a fresh `operationId`
+  (`createWalletOperationId()`), which is sent in the body and as
+  `Idempotency-Key`. Network failures and `5xx` responses are retried once with
+  the exact same body and identity (`VERIFY_SAFE_RETRY_ATTEMPTS`). `4xx`
+  responses are not retried.
+- `connectWalletSession()` is single-flight per connect operation key
+  (provider + normalised identifier, see `getConnectOperationKey()`). Duplicate
+  submissions such as double clicks share one in-flight operation: the wallet is
+  prompted once, one session key is generated, one verification runs, the
+  session is persisted once, and every caller receives the same session. Once
+  the operation settles, the next call starts a fresh attempt.
+- `recoverSession()` is single-flight too, so a double-mounted effect probes
+  the provider and re-verifies only once.
+- A failed connect, including one shared by duplicate submissions, never
+  replaces the previously persisted session.
