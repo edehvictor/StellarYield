@@ -2869,7 +2869,10 @@ paths:
               schema:
                 $ref: '#/components/schemas/Alert'
         '400':
-          description: Invalid alert parameters
+          description: >-
+            Invalid alert parameters (boundary violation, malformed preferences,
+            negative values). Malformed initial preferences return
+            `INVALID_ALERT_PREFERENCES` and do not create an alert.
         '409':
           description: >-
             `OPERATION_IDENTITY_CONFLICT` (identity reused with different parameters) or
@@ -2986,8 +2989,9 @@ paths:
                 $ref: '#/components/schemas/AlertPreferences'
         '400':
           description: >-
-            Invalid preference parameters, a malformed If-Match / expectedVersion
-            (`INVALID_EXPECTED_VERSION`), or a malformed context (`INVALID_ALERT_CONTEXT`)
+            Invalid preference fields (`INVALID_ALERT_PREFERENCES`), a malformed
+            If-Match / expectedVersion (`INVALID_EXPECTED_VERSION`), or a malformed
+            context (`INVALID_ALERT_CONTEXT`). Invalid writes leave the stored record unchanged.
         '409':
           description: >-
             `OPERATION_IDENTITY_CONFLICT` (identity reused with different parameters),
@@ -5398,6 +5402,13 @@ paths:
         `expectedConfigFingerprint` are supplied together, the request is bound
         to that exact configuration: a stale or malformed fingerprint returns
         HTTP 409/400 before any forecast is computed (#1894).
+
+        Boundary & Rounding Invariants:
+        - Yield and exposure deltas are rounded half-up to 4 decimal places.
+        - Fee revenue delta is rounded half-up to 2 decimal places (cents).
+        - Risk score delta is rounded half-up to 2 decimal places.
+        - Non-finite, out-of-range, or negative inputs are rejected with 400 VALIDATION_FAILED.
+        - Existing balances and state are preserved on validation failure.
       tags:
         - Governance
       requestBody:
@@ -5487,11 +5498,21 @@ paths:
       description: |
         Deterministic quorum progress for a multi-sig operation: signed count,
         required threshold, remaining signatures, progress percentage, met flag,
-        and per-signer status. Read-only (#1310).
+        and per-signer status. Read-only (#1310, #1898).
 
         Optionally bind the calculation to an immutable governance configuration
         fingerprint (#1894). A stale or malformed `expectedConfigFingerprint`
         returns HTTP 409/400 without producing a quorum result.
+
+        Boundary & Rounding Invariants:
+        - Progress percentage is rounded to the nearest integer using standard half-up rounding.
+        - Critical boundary: `progressPct` is capped at 99% until quorum is strictly met
+          (e.g., 999/1000 signatures produces 99%, never premature 100%).
+        - `progressPct` reaches 100% if and only if `met` is true.
+        - Negative thresholds are rejected with 400 VALIDATION_FAILED.
+        - Thresholds exceeding signer count are clamped safely to total signers.
+        - A threshold of 0 is immediately satisfied (`met: true`, `progressPct: 100`).
+        - Preserves existing proposal and balance state on any error.
       tags:
         - Governance
       requestBody:
@@ -5517,7 +5538,8 @@ paths:
                   description: Public keys that have signed so far
                 threshold:
                   type: number
-                  description: Required signature threshold
+                  minimum: 0
+                  description: Required signature threshold (non-negative integer or number)
                 contractId:
                   type: string
                   description: Governance/vault contract the signer set applies to
@@ -5541,6 +5563,8 @@ paths:
                     type: integer
                   progressPct:
                     type: integer
+                    minimum: 0
+                    maximum: 100
                   met:
                     type: boolean
                   configFingerprint:
@@ -5556,11 +5580,29 @@ paths:
                         signed:
                           type: boolean
         '400':
-          description: Invalid request body or INVALID_GOVERNANCE_CONFIG
+          description: Validation failed (negative threshold, malformed arrays). Preserves state.
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/GovernanceConfigError'
+                type: object
+                properties:
+                  error:
+                    type: string
+                    example: VALIDATION_FAILED
+                  message:
+                    type: string
+                  stage:
+                    type: string
+                  retryable:
+                    type: boolean
+                  fields:
+                    type: array
+                    items:
+                      type: string
+                  diagnostics:
+                    type: array
+                    items:
+                      type: object
         '409':
           description: STALE_GOVERNANCE_CONFIG — refresh the snapshot and retry
           content:
@@ -7272,6 +7314,12 @@ Incident:
 
      AlertPreferences:
       type: object
+      description: >-
+        Boundary-validated alert preferences. Writes validate cooldownMinutes
+        (integer 0-1440), severityThreshold (0-1000, half-up rounded to 2
+        decimals), and quietHoursStart/quietHoursEnd (integers 0-23); on
+        invalid input the request fails with HTTP 400 and existing state is
+        preserved.
       properties:
         channel:
           type: string

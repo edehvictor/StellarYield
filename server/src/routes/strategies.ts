@@ -26,6 +26,7 @@ import {
   StrategyComparisonVersionConflictError,
   StrategyComparisonValidationError,
   StrategyComparisonIdempotencyMismatchError,
+  StrategyComparisonOperationIdentityConflictError,
   getStrategyComparisonOperation,
   STRATEGY_COMPARISON_VERSION_CONFLICT,
   INVALID_STRATEGY_COMPARISON_STATE,

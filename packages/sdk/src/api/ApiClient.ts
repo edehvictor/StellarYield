@@ -39,6 +39,7 @@ import {
   type SimulationConfigRunResult,
   runWithSimulationConfig,
 } from "../simulationConfig";
+import { buildSdkFailureDiagnostics } from "../diagnostics";
 
 export interface ApiRegisteredEndpoint {
   method: "GET" | "POST" | "PUT" | "DELETE" | "PATCH";
@@ -135,6 +136,47 @@ function createAbortError(): Error {
   const err = new Error("The operation was aborted");
   err.name = "AbortError";
   return err;
+}
+
+function validateDepositSimulationParams(params: DepositSimulationParams): void {
+  const errors: string[] = [];
+  if (!params || typeof params !== "object") {
+    errors.push("params must be an object");
+  } else {
+    if (typeof params.strategyId !== "string" || params.strategyId.trim() === "") {
+      errors.push("strategyId must be a non-empty string");
+    }
+    if (typeof params.token !== "string" || params.token.trim() === "") {
+      errors.push("token must be a non-empty string");
+    }
+    if (typeof params.amount !== "number" || !Number.isFinite(params.amount) || params.amount <= 0) {
+      errors.push("amount must be a positive finite number");
+    }
+    if (
+      params.maxAttempts !== undefined &&
+      (typeof params.maxAttempts !== "number" ||
+        !Number.isFinite(params.maxAttempts) ||
+        !Number.isInteger(params.maxAttempts) ||
+        params.maxAttempts < 1)
+    ) {
+      errors.push("maxAttempts must be a positive integer");
+    }
+  }
+
+  if (errors.length > 0) {
+    throw new SdkEndpointError(
+      "Invalid simulation parameters.",
+      buildSdkFailureDiagnostics("VALIDATION_FAILED", {
+        stage: "request-validation",
+        summary: "Simulation input was rejected before any request or state change.",
+        remediation: "Provide valid simulation parameters and retry; existing state and balances were preserved.",
+        retryable: false,
+      }),
+      errors,
+      "simulate",
+      false,
+    );
+  }
 }
 
 function withQueryParam(path: string, key: string, value: string): string {
@@ -583,6 +625,7 @@ export class ApiClient {
     params: DepositSimulationParams,
     requestOptions?: ApiRequestOptions
   ): Promise<any> {
+    validateDepositSimulationParams(params);
     let expectedFingerprint =
       params.expectedConfigFingerprint ??
       (params.configSnapshot ? params.configSnapshot.fingerprint : undefined);

@@ -82,6 +82,15 @@ export class StrategyComparisonIdempotencyMismatchError extends Error {
   }
 }
 
+export const STRATEGY_COMPARISON_OPERATION_IDENTITY_CONFLICT =
+  "STRATEGY_COMPARISON_OPERATION_IDENTITY_CONFLICT";
+
+/**
+ * Backward-compatible alias for the original #1920 typed conflict.
+ * Instances of this alias are instances of the journal mismatch error too.
+ */
+export { StrategyComparisonIdempotencyMismatchError as StrategyComparisonOperationIdentityConflictError };
+
 /**
  * Thrown when an update specifies an expectedVersion that does not match the
  * stored record, indicating that another concurrent writer committed first.
